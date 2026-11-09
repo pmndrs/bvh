@@ -21,7 +21,15 @@ import {
     GPU_LAYOUT_NODE_BYTES,
     GPU_LAYOUT_NODE_WORD,
     GPU_LAYOUT_TRIANGLE_BYTES,
-} from '@pmndrs/bvh/gpu-layout';
+} from '@pmndrs/bvh';
+
+/**
+ * The version of `@pmndrs/bvh`'s GPU layout (`GPU_LAYOUT_VERSION`) that this
+ * file's WGSL structs and the walk in wgsl.ts were written against. A test
+ * fails when the package's version moves, so a layout change can't reach the
+ * tracer without someone reviewing the walk.
+ */
+export const TRACER_GPU_LAYOUT_VERSION = 1;
 
 /** One BVH node: two child boxes (Aila-Laine layout), 16 words. */
 export const BVH_NODE_BYTES = GPU_LAYOUT_NODE_BYTES;
@@ -37,7 +45,7 @@ export const BVH_NODE_WORDS = BVH_NODE_BYTES / 4;
  *
  * A child with `count > 0` is a leaf holding `count` primitives starting at
  * `index`. A child with `count == 0` is an inner node at `index`. Defined in
- * `@pmndrs/bvh/gpu-layout`, whose GPU refit writes the same words.
+ * `@pmndrs/bvh` (its gpu-layout.ts), whose GPU refit writes the same words.
  */
 export const NODE_WORD = GPU_LAYOUT_NODE_WORD;
 

@@ -5,8 +5,7 @@
  * GPU buffers (interleaved vertices; 16-bit indices at an odd offset).
  */
 
-import type { GpuLbvhGeometry } from '../../../../packages/bvh/src/gpu-lbvh.ts';
-import type { TinyBvhInput } from '../../../../packages/bvh/src/tinybvh.ts';
+import type { GpuMeshGeometry, MeshInput } from '../../../../packages/bvh/src/mesh-input.ts';
 
 /** Deterministic random numbers in [0, 1). */
 export function randomSource(seed: number): () => number {
@@ -33,7 +32,7 @@ export function randomSoup(count: number, seed: number, spread = 20): Float32Arr
 }
 
 /** A wavy grid of `size` x `size` quads, indexed with 16-bit indices when they fit. */
-export function grid(size: number): TinyBvhInput {
+export function grid(size: number): MeshInput {
     const positions = new Float32Array((size + 1) * (size + 1) * 3);
     for (let z = 0; z <= size; z++) {
         for (let x = 0; x <= size; x++) positions.set([x * 0.1, Math.sin(x * 0.3) * Math.cos(z * 0.2), z * 0.1], (z * (size + 1) + x) * 3);
@@ -59,9 +58,9 @@ export function storageBuffer(device: GPUDevice, label: string, data: Uint32Arra
 export interface TreeCase {
     name: string;
     /** What the checker compares with (CPU arrays). */
-    geometry: TinyBvhInput;
+    geometry: MeshInput;
     /** What the GPU builds from; the CPU arrays unless the case puts the mesh on the GPU first. */
-    input?: GpuLbvhGeometry;
+    input?: GpuMeshGeometry;
 }
 
 export function treeCases(device: GPUDevice): { cases: TreeCase[]; owned: GPUBuffer[] } {

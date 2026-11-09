@@ -10,6 +10,15 @@
  * WASM's bytes equal the JavaScript conversion's.
  */
 
+/**
+ * Version of the GPU layout below. The layout is part of the package's API:
+ * a WGSL walk written against it reads every word position here. Any change
+ * to a size, a word position or a meaning bumps this number, and that is a
+ * breaking change. Code with its own walk checks it at startup; serialized
+ * trees (serialize.ts) carry it and are refused when it differs.
+ */
+export const GPU_LAYOUT_VERSION = 1;
+
 /** One node: two child boxes (Aila-Laine layout), 64 bytes. */
 export const GPU_LAYOUT_NODE_BYTES = 64;
 export const GPU_LAYOUT_NODE_WORDS = GPU_LAYOUT_NODE_BYTES / 4;

@@ -1,20 +1,85 @@
-// Engine-free BVH builders (docs/design/bvh-framework.md). A builder produces a
-// MeshTreeTopology (the tree's shape), or, for tinybvh, the tracer's GPU layout
-// written inside the WASM (GpuLayoutMeshBvh). The GPU refit (B1a) keeps a
-// built tree's shape and recomputes its boxes on the GPU. The GPU LBVH (B1)
-// builds mesh trees on the GPU in the same layout; createMeshLayoutBuilder
-// picks it when the device has subgroups and tinybvh otherwise. The GPU H-PLOC
-// (B2) builds better trees behind the same contract; hploc-cpu.ts is its CPU twin.
-export * from './topology.ts';
-export * from './gpu-layout.ts';
-export * from './tinybvh.ts';
-export * from './refit-cpu.ts';
-export * from './gpu-refit.ts';
-export * from './gpu-instance-box.ts';
-export * from './gpu-lbvh.ts';
-export * from './gpu-hploc.ts';
+// @pmndrs/bvh: engine-free BVH builders and refits for WebGPU, writing one
+// shared GPU layout (docs/design/bvh-framework.md). This file is the public
+// API: everything a user needs, and nothing that is only there for a builder's
+// own plumbing. Each name is listed on purpose; the package has no other entry
+// point, so a new export here is an API decision.
+
+// The builder contract: what goes in, what comes out.
+export {
+    isGpuMeshBuffers,
+    meshTriangleCount,
+    type GpuBuildOptions,
+    type GpuMeshBuffers,
+    type GpuMeshGeometry,
+    type GpuMeshTreeRange,
+    type GpuTreeBuffers,
+    type MeshInput,
+} from './mesh-input.ts';
+
+// The GPU layout every builder writes and every walk reads. It is part of the
+// API: changing it bumps GPU_LAYOUT_VERSION.
+export {
+    GPU_LAYOUT_CHILD_STRIDE_WORDS,
+    GPU_LAYOUT_EMPTY_CHILD,
+    GPU_LAYOUT_MAX_LEAF_PRIMITIVES,
+    GPU_LAYOUT_MAX_TRIANGLES,
+    GPU_LAYOUT_NO_PARENT,
+    GPU_LAYOUT_NODE_BYTES,
+    GPU_LAYOUT_NODE_WORD,
+    GPU_LAYOUT_NODE_WORDS,
+    GPU_LAYOUT_TRIANGLE_BYTES,
+    GPU_LAYOUT_TRIANGLE_WORD,
+    GPU_LAYOUT_VERSION,
+    type GpuLayoutMeshBvh,
+} from './gpu-layout.ts';
+export { deserializeLayout, SERIALIZED_FORMAT_VERSION, serializedLayoutBytes, serializeLayout } from './serialize.ts';
+
+// A tree's shape alone, before it is written in the GPU layout.
+export { singleLeafTopology, TOPOLOGY_EMPTY_CHILD, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from './topology.ts';
+
+// Builders. createMeshLayoutBuilder picks one for you.
+export { createMeshLayoutBuilder, type MeshLayoutBuilder, type MeshLayoutBuilderKind, type MeshLayoutResult } from './mesh-builder.ts';
+export {
+    createTinyBvhBuilder,
+    topologyFromTinyBvhNodes,
+    type TinyBvhBuild,
+    type TinyBvhBuilder,
+    type TinyBvhBuildOptions,
+    type TinyBvhLayoutBuild,
+    type TinyBvhLayoutOptions,
+} from './tinybvh.ts';
+export { GpuHplocBatch, GpuHplocBuilder, HPLOC_STAGES, planGpuHplocBatches, type HplocStage } from './gpu-hploc.ts';
 export { HPLOC_STAT } from './gpu-hploc-wgsl.ts';
+export { GpuLbvhBatch, GpuLbvhBuilder, LBVH_STAGES, planGpuLbvhBatches, type LbvhStage } from './gpu-lbvh.ts';
 export { LBVH_STAT } from './gpu-lbvh-wgsl.ts';
-export * from './mesh-builder.ts';
-export * from './layout-check.ts';
-export * from './gpu-mesh-refit.ts';
+
+// CPU twins of the GPU builders: the same trees, built in plain TypeScript, as references.
+export { buildHplocOnCpu, type HplocMortonCodes, type HplocOptions, type HplocTieBreak } from './hploc-cpu.ts';
+export { buildLbvhOnCpu } from './lbvh-cpu.ts';
+
+// Refits: keep a tree's shape, recompute its boxes.
+export {
+    BVH_REFIT_STAT,
+    BVH_REFIT_STATS_BYTES,
+    BVH_REFIT_WORKGROUP_SIZE,
+    GpuBvhRefit,
+    type BvhRefitShape,
+    type BvhRefitStats,
+    type GpuBvhRefitOptions,
+} from './gpu-refit.ts';
+export { GpuMeshRefit, type MeshRefitTarget, type MeshRefitVertices } from './gpu-mesh-refit.ts';
+export { BVH_INSTANCE_BOX_PADDING, BVH_INSTANCE_BOX_WGSL } from './gpu-instance-box.ts';
+export {
+    BVH_FLOAT_MAX,
+    halfArea,
+    leafSlotsOf,
+    levelOrderOf,
+    parentSlotsOf,
+    PRIMITIVE_BOX_FLOATS,
+    refitOnCpu,
+    relativeSahCost,
+    type CpuRefitResult,
+} from './refit-cpu.ts';
+
+// Checks on any tree.
+export { checkGpuLayout, treeSahCost, type LayoutCheckOptions } from './layout-check.ts';

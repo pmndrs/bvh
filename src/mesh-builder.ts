@@ -16,8 +16,9 @@
 
 import { GpuHplocBuilder, planGpuHplocBatches } from './gpu-hploc.ts';
 import type { GpuLayoutMeshBvh } from './gpu-layout.ts';
-import { GpuLbvhBuilder, planGpuLbvhBatches, type GpuLbvhGeometry, type GpuLbvhOptions } from './gpu-lbvh.ts';
-import { createTinyBvhBuilder, type TinyBvhBuilder, type TinyBvhInput } from './tinybvh.ts';
+import { GpuLbvhBuilder, planGpuLbvhBatches } from './gpu-lbvh.ts';
+import type { GpuBuildOptions, GpuMeshGeometry, MeshInput } from './mesh-input.ts';
+import { createTinyBvhBuilder, type TinyBvhBuilder } from './tinybvh.ts';
 
 export type MeshLayoutBuilderKind = 'gpu-hploc' | 'gpu-lbvh' | 'tinybvh';
 
@@ -34,7 +35,7 @@ export interface MeshLayoutBuilder {
     /** Why the GPU builder is not in use, or null when it is. */
     readonly fallbackReason: string | null;
     /** Builds every mesh's tree. With the GPU builder, meshes go in as few batches as the device's buffers allow. */
-    buildLayouts(geometries: readonly TinyBvhInput[], options?: GpuLbvhOptions): Promise<MeshLayoutResult[]>;
+    buildLayouts(geometries: readonly MeshInput[], options?: GpuBuildOptions): Promise<MeshLayoutResult[]>;
 }
 
 /**
@@ -55,7 +56,7 @@ export async function createMeshLayoutBuilder(
     else if (!GpuLbvhBuilder.isSupported(device)) fallbackReason = 'the device has no "subgroups" feature';
 
     let tinyBvh: Promise<TinyBvhBuilder> | null = null;
-    const buildOnCpu = async (geometry: TinyBvhInput, gpuOptions: GpuLbvhOptions): Promise<GpuLayoutMeshBvh> => {
+    const buildOnCpu = async (geometry: MeshInput, gpuOptions: GpuBuildOptions): Promise<GpuLayoutMeshBvh> => {
         tinyBvh ??= createTinyBvhBuilder();
         return (await tinyBvh).buildLayout(geometry, { maxLeafPrimitives: gpuOptions.maxLeafPrimitives }).layout;
     };
@@ -74,7 +75,7 @@ export async function createMeshLayoutBuilder(
 
     const kind = options.prefer === 'gpu-lbvh' ? 'gpu-lbvh' : 'gpu-hploc';
     const gpu = kind === 'gpu-lbvh' ? new GpuLbvhBuilder(device, { label: options.label }) : new GpuHplocBuilder(device, { label: options.label });
-    const plan = (geometries: readonly GpuLbvhGeometry[]) => (kind === 'gpu-lbvh' ? planGpuLbvhBatches : planGpuHplocBatches)(device, geometries);
+    const plan = (geometries: readonly GpuMeshGeometry[]) => (kind === 'gpu-lbvh' ? planGpuLbvhBatches : planGpuHplocBatches)(device, geometries);
     await gpu.prepare();
     return {
         kind,

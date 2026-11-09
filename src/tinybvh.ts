@@ -28,6 +28,7 @@ import {
 } from './gpu-layout.ts';
 import { singleLeafTopology, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from './topology.ts';
 import { TINYBVH_WASM_BASE64 } from './tinybvh-wasm.ts';
+import type { MeshInput } from './mesh-input.ts';
 
 /** tinybvh's node: aabbMin (3 floats), leftFirst, aabbMax (3 floats), triCount. 32 bytes. */
 const TINYBVH_NODE_WORDS = 8;
@@ -91,19 +92,6 @@ interface TinyBvhExports {
     tbvh_release(): void;
 }
 
-/** Triangle geometry in object space; the same shape as the tracer's `MeshGeometry`. */
-export interface TinyBvhInput {
-    /** `x, y, z` per vertex. */
-    readonly positions: Float32Array;
-    /** Three vertex indices per triangle; omit for a plain triangle list. */
-    readonly indices?: Uint16Array | Uint32Array | null;
-    /**
-     * Per-triangle bit flags, indexed by the original triangle number. Only the
-     * GPU layout stores them (`buildLayout`); they default to 0.
-     */
-    readonly triangleFlags?: Uint32Array | null;
-}
-
 export interface TinyBvhBuild {
     readonly topology: MeshTreeTopology;
     /** Everything: the copies in and out of WASM memory, tinybvh's `Build`, and reading its tree, in ms. */
@@ -138,14 +126,14 @@ export interface TinyBvhLayoutBuild {
 
 export interface TinyBvhBuilder {
     /** Builds one mesh's tree and returns its shape. Synchronous; one at a time. */
-    build(geometry: TinyBvhInput, options?: TinyBvhBuildOptions): TinyBvhBuild;
+    build(geometry: MeshInput, options?: TinyBvhBuildOptions): TinyBvhBuild;
     /**
      * Builds one mesh's tree and returns it in the tracer's GPU layout, written
      * inside the WASM. Byte for byte what ddgi-core's `buildMeshBvhFromTopology`
      * makes from `build`'s topology of the same mesh: the boxes are recomputed
      * from the triangles, not taken from tinybvh. Synchronous; one at a time.
      */
-    buildLayout(geometry: TinyBvhInput, options?: TinyBvhLayoutOptions): TinyBvhLayoutBuild;
+    buildLayout(geometry: MeshInput, options?: TinyBvhLayoutOptions): TinyBvhLayoutBuild;
 }
 
 let compiled: Promise<WebAssembly.Module> | null = null;
@@ -206,7 +194,7 @@ export async function createTinyBvhBuilder(): Promise<TinyBvhBuilder> {
 }
 
 /** Counts, after checking that the arrays describe whole vertices and triangles. */
-function countInput(geometry: TinyBvhInput): { vertexCount: number; triangleCount: number } {
+function countInput(geometry: MeshInput): { vertexCount: number; triangleCount: number } {
     const { positions, indices } = geometry;
     const vertexCount = positions.length / 3;
     const triangleCount = indices ? indices.length / 3 : vertexCount / 3;
@@ -218,7 +206,7 @@ function countInput(geometry: TinyBvhInput): { vertexCount: number; triangleCoun
 }
 
 /** Turns a failed WASM status into an exception. */
-function throwOnStatus(wasm: TinyBvhExports, status: number, geometry: TinyBvhInput, vertexCount: number): void {
+function throwOnStatus(wasm: TinyBvhExports, status: number, geometry: MeshInput, vertexCount: number): void {
     if (status === BUILD_STATUS.ok) return;
     const detail = wasm.tbvh_error_detail();
     switch (status) {
@@ -251,7 +239,7 @@ function allocateInput(wasm: TinyBvhExports, bytes: number, what: string): numbe
  * typed-array `set`s; the WASM checks the indices and widens the vertices to
  * the 16 bytes tinybvh reads.
  */
-function withTinyBvhTree<T>(wasm: TinyBvhExports, geometry: TinyBvhInput, options: TinyBvhBuildOptions, read: (wasmBuildMs: number) => T): T {
+function withTinyBvhTree<T>(wasm: TinyBvhExports, geometry: MeshInput, options: TinyBvhBuildOptions, read: (wasmBuildMs: number) => T): T {
     const builder = BUILDER[options.builder ?? 'default'];
     if (builder === undefined) throw new RangeError(`unknown tinybvh builder: ${String(options.builder)}`);
     const { positions, indices } = geometry;
@@ -276,7 +264,7 @@ function withTinyBvhTree<T>(wasm: TinyBvhExports, geometry: TinyBvhInput, option
     }
 }
 
-function buildTopology(wasm: TinyBvhExports, geometry: TinyBvhInput, options: TinyBvhBuildOptions): TinyBvhBuild {
+function buildTopology(wasm: TinyBvhExports, geometry: MeshInput, options: TinyBvhBuildOptions): TinyBvhBuild {
     const start = performance.now();
     const { triangleCount } = countInput(geometry);
     return withTinyBvhTree(wasm, geometry, options, (wasmBuildMs) => {
@@ -291,7 +279,7 @@ function buildTopology(wasm: TinyBvhExports, geometry: TinyBvhInput, options: Ti
     });
 }
 
-function buildGpuLayout(wasm: TinyBvhExports, geometry: TinyBvhInput, options: TinyBvhLayoutOptions): TinyBvhLayoutBuild {
+function buildGpuLayout(wasm: TinyBvhExports, geometry: MeshInput, options: TinyBvhLayoutOptions): TinyBvhLayoutBuild {
     const start = performance.now();
     const maxLeaf = options.maxLeafPrimitives ?? GPU_LAYOUT_MAX_LEAF_PRIMITIVES;
     if (!Number.isInteger(maxLeaf) || maxLeaf < 1 || maxLeaf > GPU_LAYOUT_MAX_LEAF_PRIMITIVES) {

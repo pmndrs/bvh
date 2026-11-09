@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { checkGpuLayout, treeSahCost } from './layout-check.ts';
 import { buildLbvhOnCpu, mortonCode, mortonCodes, stableSortByKey, triangleBoxes } from './lbvh-cpu.ts';
 import { createTinyBvhBuilder } from './tinybvh.ts';
-import type { TinyBvhInput } from './tinybvh.ts';
+import type { MeshInput } from './mesh-input.ts';
 
 /** A random triangle soup, `x, y, z` per vertex, three vertices per triangle (deterministic). */
 function randomSoup(count: number, seed: number): Float32Array {
@@ -19,7 +19,7 @@ function randomSoup(count: number, seed: number): Float32Array {
 }
 
 /** A flat grid of `size` x `size` quads in the xz plane, indexed (shared vertices). */
-function grid(size: number): TinyBvhInput {
+function grid(size: number): MeshInput {
     const positions = new Float32Array((size + 1) * (size + 1) * 3);
     for (let z = 0; z <= size; z++) {
         for (let x = 0; x <= size; x++) positions.set([x, 0, z], (z * (size + 1) + x) * 3);
@@ -50,7 +50,7 @@ describe('LBVH on the CPU (the GPU builder written plainly)', () => {
     });
 
     it('builds valid trees: edge cases, soups, a grid, duplicates, flat meshes', () => {
-        const cases: [string, TinyBvhInput][] = [
+        const cases: [string, MeshInput][] = [
             ['one triangle', { positions: randomSoup(1, 1) }],
             ['two triangles', { positions: randomSoup(2, 2) }],
             ['three triangles', { positions: randomSoup(3, 3) }],

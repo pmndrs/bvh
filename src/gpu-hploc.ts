@@ -59,10 +59,9 @@ import {
     uploadBatchGeometry,
     USAGE,
     align4,
-    type GpuLbvhGeometry,
-    type GpuLbvhTrees,
     type MeshPlacement,
 } from './gpu-lbvh.ts';
+import type { GpuMeshGeometry, GpuTreeBuffers } from './mesh-input.ts';
 import { LBVH_FIRST_ROUND_TRIANGLES, LBVH_PARAMS_BYTES, LBVH_STATS_BYTES, LBVH_STATS_WORDS, LBVH_WORKGROUP_SIZE } from './gpu-lbvh-wgsl.ts';
 import {
     HPLOC_CLIMB_WORDS,
@@ -96,7 +95,7 @@ const SORT_BITS = { 'cubic-30': [30], 'tinybvh-63': [32, 31] } as const satisfie
  * Splits meshes into batches whose buffers this device can bind, in order. A
  * mesh too big for any batch, or for H-PLOC, comes back in `tooBig`.
  */
-export function planGpuHplocBatches(device: GPUDevice, geometries: readonly GpuLbvhGeometry[]): { batches: number[][]; tooBig: number[] } {
+export function planGpuHplocBatches(device: GPUDevice, geometries: readonly GpuMeshGeometry[]): { batches: number[][]; tooBig: number[] } {
     return planMeshBatches(device, geometries, LARGEST_BYTES_PER_TRIANGLE, HPLOC_MAX_MESH_TRIANGLES);
 }
 
@@ -227,7 +226,7 @@ export class GpuHplocBuilder {
     }
 
     /** Builds every mesh's tree in one batch and one submit. A refused mesh has `problem` set; the others are fine. */
-    async buildMany(geometries: readonly GpuLbvhGeometry[], options: HplocOptions = {}): Promise<GpuLbvhTrees> {
+    async buildMany(geometries: readonly GpuMeshGeometry[], options: HplocOptions = {}): Promise<GpuTreeBuffers> {
         const batch = this.createBatch(geometries, options);
         try {
             const encoder = this.device.createCommandEncoder({ label: this.label });
@@ -240,7 +239,7 @@ export class GpuHplocBuilder {
     }
 
     /** Builds one mesh's tree. Throws if the build was refused. */
-    async build(geometry: GpuLbvhGeometry, options: HplocOptions = {}): Promise<GpuLbvhTrees> {
+    async build(geometry: GpuMeshGeometry, options: HplocOptions = {}): Promise<GpuTreeBuffers> {
         const trees = await this.buildMany([geometry], options);
         const problem = trees.meshes[0].problem;
         if (problem) {
@@ -256,7 +255,7 @@ export class GpuHplocBuilder {
      * rebuilds the same trees) and read with `finish`. Throws if the batch is
      * too big for the device (see {@link planGpuHplocBatches}).
      */
-    createBatch(geometries: readonly GpuLbvhGeometry[], options: HplocOptions = {}): GpuHplocBatch {
+    createBatch(geometries: readonly GpuMeshGeometry[], options: HplocOptions = {}): GpuHplocBatch {
         if (!this.pipelines || !this.sortPipelines) throw new Error('@pmndrs/bvh: call prepare() before building');
         if (geometries.length === 0) throw new RangeError('a batch needs at least one mesh');
         const settings = checkHplocOptions(options);
@@ -272,7 +271,7 @@ export class GpuHplocBuilder {
     }
 
     /** Copies every usable tree of a batch back into CPU memory (one readback). */
-    readLayouts(trees: GpuLbvhTrees): Promise<(GpuLayoutMeshBvh | null)[]> {
+    readLayouts(trees: GpuTreeBuffers): Promise<(GpuLayoutMeshBvh | null)[]> {
         return readTreeLayouts(this.device, trees, this.label);
     }
 }
@@ -307,7 +306,7 @@ export class GpuHplocBatch {
         label: string,
         pipelines: Record<HplocKernel, GPUComputePipeline>,
         sortPipelines: RadixSortPipelines,
-        geometries: readonly GpuLbvhGeometry[],
+        geometries: readonly GpuMeshGeometry[],
         options: Required<HplocOptions>,
     ) {
         this.device = device;
@@ -571,7 +570,7 @@ export class GpuHplocBatch {
      * returns the trees. Call after submitting an `encode`. Frees the batch's
      * scratch; the trees stay until the caller destroys them.
      */
-    async finish(): Promise<GpuLbvhTrees> {
+    async finish(): Promise<GpuTreeBuffers> {
         if (this.finished || this.destroyed) throw new Error('@pmndrs/bvh: the batch was already finished');
         const device = this.device;
         const bytes = this.meshCount * LBVH_STATS_BYTES;

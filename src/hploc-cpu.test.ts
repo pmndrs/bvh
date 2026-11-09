@@ -3,7 +3,8 @@ import { hplocSlotsFor, hplocWgsl, HPLOC_MAX_LEVEL, HPLOC_MAX_MESH_TRIANGLES } f
 import { buildHplocOnCpu, hplocMortonKeys, hplocPairRank, hplocSortedOrder, HPLOC_MAX_CLUSTERS } from './hploc-cpu.ts';
 import { checkGpuLayout, treeSahCost } from './layout-check.ts';
 import { triangleBoxes } from './lbvh-cpu.ts';
-import { createTinyBvhBuilder, type TinyBvhInput } from './tinybvh.ts';
+import { createTinyBvhBuilder } from './tinybvh.ts';
+import type { MeshInput } from './mesh-input.ts';
 import { wgslNameProblems } from './wgsl-names.ts';
 
 /** A random triangle soup, `x, y, z` per vertex, three vertices per triangle (deterministic). */
@@ -21,7 +22,7 @@ function randomSoup(count: number, seed: number, spread = 20): Float32Array {
 }
 
 /** A wavy grid of `size` x `size` quads, indexed (shared vertices). */
-function grid(size: number): TinyBvhInput {
+function grid(size: number): MeshInput {
     const positions = new Float32Array((size + 1) * (size + 1) * 3);
     for (let z = 0; z <= size; z++) {
         for (let x = 0; x <= size; x++) positions.set([x * 0.1, Math.sin(x * 0.3) * Math.cos(z * 0.2), z * 0.1], (z * (size + 1) + x) * 3);
@@ -36,7 +37,7 @@ function grid(size: number): TinyBvhInput {
     return { positions, indices };
 }
 
-const meshes: Record<string, TinyBvhInput> = {
+const meshes: Record<string, MeshInput> = {
     'one triangle': { positions: randomSoup(1, 1) },
     'two triangles': { positions: randomSoup(2, 2) },
     'seventeen triangles': { positions: randomSoup(17, 3) },

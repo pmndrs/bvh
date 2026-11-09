@@ -23,8 +23,7 @@ import {
     GPU_LAYOUT_TRIANGLE_WORD,
     type GpuLayoutMeshBvh,
 } from './gpu-layout.ts';
-import type { GpuLbvhOptions } from './gpu-lbvh.ts';
-import type { TinyBvhInput } from './tinybvh.ts';
+import type { GpuBuildOptions, MeshInput } from './mesh-input.ts';
 
 const f = Math.fround;
 const FLOAT_MAX = 3.4028234663852886e38;
@@ -44,7 +43,7 @@ export function mortonCode(x: number, y: number, z: number): number {
 }
 
 /** Each triangle's box (min xyz, max xyz) and the box around their centroids. */
-export function triangleBoxes(geometry: TinyBvhInput): { boxes: Float32Array; centroidBounds: Float32Array } {
+export function triangleBoxes(geometry: MeshInput): { boxes: Float32Array; centroidBounds: Float32Array } {
     const { positions, indices } = geometry;
     const count = indices ? indices.length / 3 : positions.length / 9;
     const boxes = new Float32Array(count * 6);
@@ -107,10 +106,10 @@ interface RadixNode {
 
 /** Builds the tree from sorted keys and the triangles at each sorted position, as the GPU does after its sort. */
 export function buildLbvhFromSorted(
-    geometry: TinyBvhInput,
+    geometry: MeshInput,
     boxes: Float32Array,
     sorted: { keys: Uint32Array; values: Uint32Array },
-    options: GpuLbvhOptions = {},
+    options: GpuBuildOptions = {},
 ): GpuLayoutMeshBvh & { rootSplit: number } {
     const maxLeaf = options.maxLeafPrimitives ?? GPU_LAYOUT_MAX_LEAF_PRIMITIVES;
     const traversalCost = f(options.traversalCost ?? 1);
@@ -279,14 +278,14 @@ export function buildLbvhFromSorted(
 }
 
 /** The whole CPU twin: boxes, Morton codes, sort, build. */
-export function buildLbvhOnCpu(geometry: TinyBvhInput, options: GpuLbvhOptions = {}): GpuLayoutMeshBvh {
+export function buildLbvhOnCpu(geometry: MeshInput, options: GpuBuildOptions = {}): GpuLayoutMeshBvh {
     const { boxes, centroidBounds } = triangleBoxes(geometry);
     const sorted = stableSortByKey(mortonCodes(boxes, centroidBounds));
     return buildLbvhFromSorted(geometry, boxes, sorted, options);
 }
 
 /** The layout of a one-triangle mesh: a root holding the triangle on the left and nothing on the right. */
-export function singleTriangleLayout(geometry: TinyBvhInput, box: Float32Array): GpuLayoutMeshBvh {
+export function singleTriangleLayout(geometry: MeshInput, box: Float32Array): GpuLayoutMeshBvh {
     const nodes = new ArrayBuffer(GPU_LAYOUT_NODE_BYTES);
     const words = new Uint32Array(nodes);
     const floats = new Float32Array(nodes);
@@ -312,7 +311,7 @@ export function singleTriangleLayout(geometry: TinyBvhInput, box: Float32Array):
 }
 
 /** Triangles in tree order (`order[position]` is the triangle there), 48 bytes each, corners as they are. */
-export function packTrianglesInOrder(geometry: TinyBvhInput, order: Uint32Array): ArrayBuffer {
+export function packTrianglesInOrder(geometry: MeshInput, order: Uint32Array): ArrayBuffer {
     const { positions, indices, triangleFlags } = geometry;
     const buffer = new ArrayBuffer(order.length * GPU_LAYOUT_TRIANGLE_BYTES);
     const words = new Uint32Array(buffer);

@@ -26,7 +26,7 @@ import {
     GPU_LAYOUT_TRIANGLE_WORD,
     type GpuLayoutMeshBvh,
 } from './gpu-layout.ts';
-import type { TinyBvhInput } from './tinybvh.ts';
+import type { MeshInput } from './mesh-input.ts';
 
 const TRIANGLE_WORDS = GPU_LAYOUT_TRIANGLE_BYTES / 4;
 const CHILD_INDEX = [GPU_LAYOUT_NODE_WORD.leftIndex, GPU_LAYOUT_NODE_WORD.rightIndex] as const;
@@ -39,7 +39,7 @@ export interface LayoutCheckOptions {
     readonly maxProblems?: number;
 }
 
-export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: TinyBvhInput, options: LayoutCheckOptions = {}): string[] {
+export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, options: LayoutCheckOptions = {}): string[] {
     const maxLeaf = options.maxLeafPrimitives ?? GPU_LAYOUT_MAX_LEAF_PRIMITIVES;
     const maxProblems = options.maxProblems ?? 20;
     const problems: string[] = [];

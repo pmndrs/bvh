@@ -19,7 +19,8 @@ import { GpuLbvhBuilder } from '../../../../packages/bvh/src/gpu-lbvh.ts';
 import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, type GpuLayoutMeshBvh } from '../../../../packages/bvh/src/gpu-layout.ts';
 import { GpuMeshRefit } from '../../../../packages/bvh/src/gpu-mesh-refit.ts';
 import { checkGpuLayout } from '../../../../packages/bvh/src/layout-check.ts';
-import { createTinyBvhBuilder, type TinyBvhInput } from '../../../../packages/bvh/src/tinybvh.ts';
+import { createTinyBvhBuilder } from '../../../../packages/bvh/src/tinybvh.ts';
+import type { MeshInput } from '../../../../packages/bvh/src/mesh-input.ts';
 import { assert, runGpuTest } from '../../client.ts';
 
 /** Nodes and triangles in front of the mesh in the shared buffers, and words of marker after. */
@@ -32,7 +33,7 @@ const MARKER_TAIL_WORDS = 64;
 const VERTEX_STRIDE = 6;
 const VERTEX_OFFSET = 2;
 
-function grid(size: number): TinyBvhInput {
+function grid(size: number): MeshInput {
     const positions = new Float32Array((size + 1) * (size + 1) * 3);
     for (let z = 0; z <= size; z++) {
         for (let x = 0; x <= size; x++) positions.set([x * 0.1 - 5, 0, z * 0.1 - 5], (z * (size + 1) + x) * 3);
@@ -47,7 +48,7 @@ function grid(size: number): TinyBvhInput {
     return { positions, indices };
 }
 
-function soup(count: number): TinyBvhInput {
+function soup(count: number): MeshInput {
     let state = 12345;
     const random = () => ((state = (state * 1664525 + 1013904223) >>> 0) / 2 ** 32);
     const positions = new Float32Array(count * 9);
@@ -118,7 +119,7 @@ function markersIntact(words: Uint32Array, offsetBytes: number, payloadBytes: nu
     return true;
 }
 
-async function refitAcrossFrames(device: GPUDevice, name: string, geometry: TinyBvhInput, layout: GpuLayoutMeshBvh, log: (message: string) => void): Promise<string[]> {
+async function refitAcrossFrames(device: GPUDevice, name: string, geometry: MeshInput, layout: GpuLayoutMeshBvh, log: (message: string) => void): Promise<string[]> {
     const failures: string[] = [];
     const nodeOffsetBytes = NODES_BEFORE * GPU_LAYOUT_NODE_BYTES;
     const triangleOffsetBytes = TRIANGLES_BEFORE * GPU_LAYOUT_TRIANGLE_BYTES;

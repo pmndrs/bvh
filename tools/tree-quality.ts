@@ -19,12 +19,12 @@
 import { treeSahCost } from '../../packages/bvh/src/layout-check.ts';
 import { buildHplocOnCpu } from '../../packages/bvh/src/hploc-cpu.ts';
 import { buildLbvhOnCpu } from '../../packages/bvh/src/lbvh-cpu.ts';
-import { createTinyBvhBuilder, type GpuLayoutMeshBvh, type TinyBvhBuilder, type TinyBvhInput } from '../../packages/bvh/src/index.ts';
+import { createTinyBvhBuilder, type GpuLayoutMeshBvh, type TinyBvhBuilder, type MeshInput } from '../../packages/bvh/src/index.ts';
 import { readSceneMeshes } from './scene-meshes.ts';
 
 interface Builder {
     readonly name: string;
-    build(geometry: TinyBvhInput): GpuLayoutMeshBvh;
+    build(geometry: MeshInput): GpuLayoutMeshBvh;
 }
 
 function builders(tinyBvh: TinyBvhBuilder): Builder[] {

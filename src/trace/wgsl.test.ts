@@ -1,4 +1,6 @@
+import { GPU_LAYOUT_VERSION } from '@pmndrs/bvh';
 import { describe, expect, it } from 'vitest';
+import { TRACER_GPU_LAYOUT_VERSION } from './layout.ts';
 import { batchEntryWgsl, HIT_RECORD_BYTES, HIT_RECORD_WORD } from './wgsl.ts';
 
 /** Size and alignment of the WGSL types a hit record uses (WGSL spec, "Alignment and size"). */
@@ -39,5 +41,12 @@ describe('GiHitRecord', () => {
             frontFace: HIT_RECORD_WORD.frontFace * 4,
             barycentrics: HIT_RECORD_WORD.barycentrics * 4,
         });
+    });
+});
+
+describe('the GPU layout version', () => {
+    it("is the one the tracer's WGSL was written against", () => {
+        // If this fails, @pmndrs/bvh changed its layout: review layout.ts and the walk in wgsl.ts, then bump TRACER_GPU_LAYOUT_VERSION.
+        expect(GPU_LAYOUT_VERSION).toBe(TRACER_GPU_LAYOUT_VERSION);
     });
 });

@@ -87,7 +87,7 @@ The tracer's top level (ddgi-core `trace/top-level-gpu.ts`) uses all three: a ga
 
 **Batches.** It builds every mesh of a batch with the same dispatches (a mesh table and a tile table say which workgroup works on which mesh), so a scene of many small meshes doesn't pay per mesh.
 
-- The trees come back in three shared GPU buffers with an offset per mesh (`GpuLbvhTrees`).
+- The trees come back in three shared GPU buffers with an offset per mesh (`GpuTreeBuffers`).
 - `readLayouts` copies them into CPU memory.
 - `planGpuLbvhBatches` splits a scene into batches that fit the device's buffer limits.
 
@@ -108,7 +108,7 @@ GPU pages: `bvh-lbvh` (scan, sort, trees), `bvh-blas-refit`, `bvh-lbvh-fallback`
 
 ## GPU H-PLOC (stage B2)
 
-`src/gpu-hploc.ts` (`GpuHplocBuilder`) is the target GPU builder: H-PLOC (Benthin et al., HPG 2024), behind the same contract as the LBVH and with the same output (`GpuLbvhTrees`, the tracer's layout).
+`src/gpu-hploc.ts` (`GpuHplocBuilder`) is the target GPU builder: H-PLOC (Benthin et al., HPG 2024), behind the same contract as the LBVH and with the same output (`GpuTreeBuffers`, the tracer's layout).
 
 - It reuses the LBVH's batches, triangle boxes, Morton codes, sort, scans and readback, and climbs the same radix tree.
 - On the way up it merges clusters with PLOC, so its trees are close to a full SAH build's.

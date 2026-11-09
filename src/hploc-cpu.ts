@@ -52,9 +52,9 @@ import {
     GPU_LAYOUT_NODE_WORDS,
     type GpuLayoutMeshBvh,
 } from './gpu-layout.ts';
-import type { GpuLbvhOptions } from './gpu-lbvh.ts';
+import type { GpuBuildOptions } from './mesh-input.ts';
 import { mortonCodes, packTrianglesInOrder, singleTriangleLayout, triangleBoxes } from './lbvh-cpu.ts';
-import type { TinyBvhInput } from './tinybvh.ts';
+import type { MeshInput } from './mesh-input.ts';
 
 const f = Math.fround;
 const FLOAT_MAX = 3.4028234663852886e38;
@@ -85,7 +85,7 @@ export type HplocMortonCodes = 'cubic-30' | 'tinybvh-63';
  */
 export type HplocTieBreak = 'pairs' | 'tinybvh';
 
-export interface HplocOptions extends GpuLbvhOptions {
+export interface HplocOptions extends GpuBuildOptions {
     /** Default `'cubic-30'`. */
     readonly mortonCodes?: HplocMortonCodes;
     /** Default `'pairs'`. */
@@ -300,7 +300,7 @@ export function buildHplocClusters(
  * triangles are neighbours in the triangle order. Nodes are numbered depth
  * first; the GPU numbers them differently, so compare costs and counts, not bytes.
  */
-export function hplocLayout(geometry: TinyBvhInput, tree: HplocClusterTree, options: GpuLbvhOptions = {}): GpuLayoutMeshBvh {
+export function hplocLayout(geometry: MeshInput, tree: HplocClusterTree, options: GpuBuildOptions = {}): GpuLayoutMeshBvh {
     const maxLeaf = options.maxLeafPrimitives ?? GPU_LAYOUT_MAX_LEAF_PRIMITIVES;
     const traversalCost = f(options.traversalCost ?? 1);
     const intersectionCost = f(options.intersectionCost ?? 1);
@@ -414,7 +414,7 @@ export function hplocLayout(geometry: TinyBvhInput, tree: HplocClusterTree, opti
 }
 
 /** The whole CPU H-PLOC: boxes, Morton codes, sort, clusters, layout. */
-export function buildHplocOnCpu(geometry: TinyBvhInput, options: HplocOptions = {}): GpuLayoutMeshBvh {
+export function buildHplocOnCpu(geometry: MeshInput, options: HplocOptions = {}): GpuLayoutMeshBvh {
     const { boxes, centroidBounds } = triangleBoxes(geometry);
     const { high, low } = hplocMortonKeys(boxes, centroidBounds, options.mortonCodes ?? 'cubic-30');
     const order = hplocSortedOrder(high, low);

@@ -27,7 +27,8 @@
 import { GpuHplocBuilder, type HplocOptions } from '../../../../packages/bvh/src/gpu-hploc.ts';
 import { buildHplocOnCpu } from '../../../../packages/bvh/src/hploc-cpu.ts';
 import { checkGpuLayout, treeSahCost } from '../../../../packages/bvh/src/layout-check.ts';
-import { createTinyBvhBuilder, type TinyBvhBuilder, type TinyBvhInput } from '../../../../packages/bvh/src/tinybvh.ts';
+import { createTinyBvhBuilder, type TinyBvhBuilder } from '../../../../packages/bvh/src/tinybvh.ts';
+import type { MeshInput } from '../../../../packages/bvh/src/mesh-input.ts';
 import { assert, runGpuTest } from '../../client.ts';
 import { randomSoup, treeCases, type TreeCase } from '../bvh-shared/tree-cases.ts';
 
@@ -40,7 +41,7 @@ interface Variant {
     name: string;
     options: HplocOptions;
     /** The tree the GPU's must match, and what it is called. */
-    reference: { name: string; tolerance: number; build(geometry: TinyBvhInput): ReturnType<typeof buildHplocOnCpu> };
+    reference: { name: string; tolerance: number; build(geometry: MeshInput): ReturnType<typeof buildHplocOnCpu> };
     /** Cases the GPU must refuse with these options. */
     refused?: readonly string[];
 }

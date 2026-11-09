@@ -1,0 +1,135 @@
+/**
+ * Saving a built tree and loading it again: build once (in Node, a worker, or
+ * at build time), store the bytes, and load them later with no build at all.
+ *
+ * The bytes are a 64-byte header followed by the layout's three arrays as they
+ * are uploaded to the GPU:
+ *
+ *     header (16 words, little-endian)
+ *         0  magic 'PBVH'
+ *         1  format version (SERIALIZED_FORMAT_VERSION)
+ *         2  GPU layout version (GPU_LAYOUT_VERSION)
+ *         3  nodeCount
+ *         4  triangleCount
+ *         5  maxDepth
+ *         6  leafCount
+ *         7  unused (0)
+ *         8-13  bounds: minX, minY, minZ, maxX, maxY, maxZ (f32)
+ *         14-15 unused (0)
+ *     nodes      nodeCount × 64 bytes
+ *     triangles  triangleCount × 48 bytes
+ *     parents    nodeCount × 4 bytes
+ *
+ * The arrays are copied byte for byte, so they keep the machine's byte order.
+ * WebGPU buffers are little-endian, as is every machine that runs WebGPU, so
+ * the header is written little-endian to match.
+ *
+ * Bytes from another layout version are refused, not converted: a tree is
+ * cheap to rebuild, and a wrong word position would only show up as rays
+ * missing.
+ */
+
+import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, GPU_LAYOUT_VERSION, type GpuLayoutMeshBvh } from './gpu-layout.ts';
+
+/** 'PBVH' read as a little-endian u32. */
+const MAGIC = 0x48564250;
+
+/** Version of the byte format above (the header and the order of the arrays), apart from the GPU layout's own version. */
+export const SERIALIZED_FORMAT_VERSION = 1;
+
+const HEADER_WORDS = 16;
+const HEADER_BYTES = HEADER_WORDS * 4;
+
+const HEADER_WORD = {
+    magic: 0,
+    formatVersion: 1,
+    layoutVersion: 2,
+    nodeCount: 3,
+    triangleCount: 4,
+    maxDepth: 5,
+    leafCount: 6,
+    bounds: 8,
+} as const;
+
+/** Bytes `serializeLayout` writes for this tree. */
+export function serializedLayoutBytes(layout: Pick<GpuLayoutMeshBvh, 'nodeCount' | 'triangleCount'>): number {
+    return HEADER_BYTES + layout.nodeCount * (GPU_LAYOUT_NODE_BYTES + 4) + layout.triangleCount * GPU_LAYOUT_TRIANGLE_BYTES;
+}
+
+/** Writes a tree as one `ArrayBuffer` (see the file comment for the format). */
+export function serializeLayout(layout: GpuLayoutMeshBvh): ArrayBuffer {
+    const nodeBytes = layout.nodeCount * GPU_LAYOUT_NODE_BYTES;
+    const triangleBytes = layout.triangleCount * GPU_LAYOUT_TRIANGLE_BYTES;
+    if (layout.nodes.byteLength !== nodeBytes) throw new RangeError(`serializeLayout: ${layout.nodeCount} nodes need ${nodeBytes} bytes, got ${layout.nodes.byteLength}`);
+    if (layout.triangles.byteLength !== triangleBytes) {
+        throw new RangeError(`serializeLayout: ${layout.triangleCount} triangles need ${triangleBytes} bytes, got ${layout.triangles.byteLength}`);
+    }
+    if (layout.parents.length !== layout.nodeCount) throw new RangeError(`serializeLayout: needs one parent per node (${layout.nodeCount}), got ${layout.parents.length}`);
+    if (layout.bounds.length !== 6) throw new RangeError('serializeLayout: bounds must hold 6 floats');
+
+    const out = new ArrayBuffer(serializedLayoutBytes(layout));
+    const header = new DataView(out, 0, HEADER_BYTES);
+    header.setUint32(HEADER_WORD.magic * 4, MAGIC, true);
+    header.setUint32(HEADER_WORD.formatVersion * 4, SERIALIZED_FORMAT_VERSION, true);
+    header.setUint32(HEADER_WORD.layoutVersion * 4, GPU_LAYOUT_VERSION, true);
+    header.setUint32(HEADER_WORD.nodeCount * 4, layout.nodeCount, true);
+    header.setUint32(HEADER_WORD.triangleCount * 4, layout.triangleCount, true);
+    header.setUint32(HEADER_WORD.maxDepth * 4, layout.maxDepth, true);
+    header.setUint32(HEADER_WORD.leafCount * 4, layout.leafCount, true);
+    for (let i = 0; i < 6; i++) header.setFloat32((HEADER_WORD.bounds + i) * 4, layout.bounds[i], true);
+
+    const bytes = new Uint8Array(out);
+    let offset = HEADER_BYTES;
+    bytes.set(new Uint8Array(layout.nodes), offset);
+    offset += nodeBytes;
+    bytes.set(new Uint8Array(layout.triangles), offset);
+    offset += triangleBytes;
+    bytes.set(new Uint8Array(layout.parents.buffer, layout.parents.byteOffset, layout.parents.byteLength), offset);
+    return out;
+}
+
+/**
+ * Reads bytes written by {@link serializeLayout}. The returned arrays are
+ * copies, so `bytes` may be reused. Throws on anything that isn't a whole tree
+ * of this package's layout version.
+ */
+export function deserializeLayout(bytes: ArrayBuffer | ArrayBufferView): GpuLayoutMeshBvh {
+    const view = ArrayBuffer.isView(bytes) ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength) : new Uint8Array(bytes);
+    if (view.byteLength < HEADER_BYTES) throw new RangeError(`deserializeLayout: ${view.byteLength} bytes is shorter than the ${HEADER_BYTES}-byte header`);
+    const header = new DataView(view.buffer, view.byteOffset, HEADER_BYTES);
+    const word = (index: number) => header.getUint32(index * 4, true);
+
+    if (word(HEADER_WORD.magic) !== MAGIC) throw new Error('deserializeLayout: not a serialized @pmndrs/bvh tree (bad magic)');
+    const formatVersion = word(HEADER_WORD.formatVersion);
+    if (formatVersion !== SERIALIZED_FORMAT_VERSION) throw new Error(`deserializeLayout: byte format ${formatVersion}, this package reads ${SERIALIZED_FORMAT_VERSION}`);
+    const layoutVersion = word(HEADER_WORD.layoutVersion);
+    if (layoutVersion !== GPU_LAYOUT_VERSION) throw new Error(`deserializeLayout: GPU layout version ${layoutVersion}, this package uses ${GPU_LAYOUT_VERSION}; rebuild the tree`);
+
+    const nodeCount = word(HEADER_WORD.nodeCount);
+    const triangleCount = word(HEADER_WORD.triangleCount);
+    const expected = serializedLayoutBytes({ nodeCount, triangleCount });
+    if (view.byteLength !== expected) throw new RangeError(`deserializeLayout: ${nodeCount} nodes and ${triangleCount} triangles need ${expected} bytes, got ${view.byteLength}`);
+
+    const bounds = new Float32Array(6);
+    for (let i = 0; i < 6; i++) bounds[i] = header.getFloat32((HEADER_WORD.bounds + i) * 4, true);
+
+    const nodeBytes = nodeCount * GPU_LAYOUT_NODE_BYTES;
+    const triangleBytes = triangleCount * GPU_LAYOUT_TRIANGLE_BYTES;
+    let offset = view.byteOffset + HEADER_BYTES;
+    const nodes = view.buffer.slice(offset, offset + nodeBytes) as ArrayBuffer;
+    offset += nodeBytes;
+    const triangles = view.buffer.slice(offset, offset + triangleBytes) as ArrayBuffer;
+    offset += triangleBytes;
+    const parents = new Uint32Array(view.buffer.slice(offset, offset + nodeCount * 4) as ArrayBuffer);
+
+    return {
+        nodes,
+        triangles,
+        parents,
+        nodeCount,
+        triangleCount,
+        maxDepth: word(HEADER_WORD.maxDepth),
+        leafCount: word(HEADER_WORD.leafCount),
+        bounds,
+    };
+}

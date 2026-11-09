@@ -14,7 +14,8 @@
  */
 
 import { GpuHplocBuilder, HPLOC_STAGES } from '../../../../packages/bvh/src/gpu-hploc.ts';
-import { GpuLbvhBuilder, LBVH_STAGES, type GpuLbvhGeometry } from '../../../../packages/bvh/src/gpu-lbvh.ts';
+import { GpuLbvhBuilder, LBVH_STAGES } from '../../../../packages/bvh/src/gpu-lbvh.ts';
+import type { GpuMeshGeometry } from '../../../../packages/bvh/src/mesh-input.ts';
 import { loadBenchScene } from '../trace-bench/scene-source.ts';
 import { median } from '../trace-bench/statistics.ts';
 import { assert, runGpuTest } from '../../client.ts';
@@ -29,7 +30,7 @@ interface ProfiledBatch {
 interface ProfiledBuilder {
     readonly stages: readonly string[];
     prepare(): Promise<void>;
-    createBatch(geometries: readonly GpuLbvhGeometry[]): ProfiledBatch;
+    createBatch(geometries: readonly GpuMeshGeometry[]): ProfiledBatch;
 }
 
 function profiledBuilder(device: GPUDevice, kind: 'lbvh' | 'hploc'): ProfiledBuilder {

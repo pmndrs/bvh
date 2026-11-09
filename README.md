@@ -4,7 +4,7 @@ BVH builders for WebGPU that don't depend on any engine. You give it triangles, 
 
 DDGI (`@pmndrs/ddgi`) is its first user. The package imports nothing from DDGI, from GI code or from any engine, so picking, a path tracer or another GI technique can use it too.
 
-**Status.** For now it lives in this repo and ships bundled inside `@pmndrs/ddgi`; it is planned as a standalone package later ([docs/design/bvh-package-split.md](../../docs/design/bvh-package-split.md)). ddgi-core uses the CPU builder, the GPU refit, and, since M2's "fast first GI" (T2.12), the GPU H-PLOC for the first trees of a scene as it loads: one batch for all meshes, its trees copied into the tracer's buffers after a small stats readback, then replaced mesh by mesh by tinybvh's from a worker (ddgi-core's `trace/gpu-mesh-trees.ts` and `trace/ray-queries.ts`). The LBVH isn't used by ddgi-core.
+**Status.** For now it lives in this repo and ships bundled inside `@pmndrs/ddgi`; it is being split out into its own repo, [pmndrs/bvh](https://github.com/pmndrs/bvh) (the plan: [docs/design/bvh-package-split.md](../../docs/design/bvh-package-split.md)). Import it only from its root, `@pmndrs/bvh`: `src/index.ts` is the whole public API. ddgi-core uses the CPU builder, the GPU refit, and, since M2's "fast first GI" (T2.12), the GPU H-PLOC for the first trees of a scene as it loads: one batch for all meshes, its trees copied into the tracer's buffers after a small stats readback, then replaced mesh by mesh by tinybvh's from a worker (ddgi-core's `trace/gpu-mesh-trees.ts` and `trace/ray-queries.ts`). The LBVH isn't used by ddgi-core.
 
 How the builders work inside: [docs/design/bvh-builders.md](../../docs/design/bvh-builders.md). The plan and its stages: [docs/design/bvh-framework.md](../../docs/design/bvh-framework.md).
 
@@ -12,15 +12,15 @@ How the builders work inside: [docs/design/bvh-builders.md](../../docs/design/bv
 
 Every builder follows the same contract, so one can replace another without changing the code that traces rays.
 
-- **In:** one mesh, or many: vertex positions (`x, y, z` floats) and, optionally, three indices per triangle and a flags word per triangle. CPU arrays (`TinyBvhInput`) work for every builder. The GPU builders also take buffers already on the GPU (`GpuLbvhBufferGeometry`), for example the output of a skinning pass.
+- **In:** one mesh, or many: vertex positions (`x, y, z` floats) and, optionally, three indices per triangle and a flags word per triangle. CPU arrays (`MeshInput`) work for every builder. The GPU builders also take buffers already on the GPU (`GpuMeshBuffers`), for example the output of a skinning pass.
 - **Options:** the largest leaf (1 to 8 triangles, default 8) and, for the GPU builders, the SAH costs. H-PLOC has two more (see [bvh-builders.md](../../docs/design/bvh-builders.md#gpu-h-ploc-stage-b2)).
-- **Out:** the tree in the shared GPU layout (`GpuLayoutMeshBvh` on the CPU, `GpuLbvhTrees` on the GPU):
+- **Out:** the tree in the shared GPU layout (`GpuLayoutMeshBvh` on the CPU, `GpuTreeBuffers` on the GPU):
   - 64-byte nodes with two child boxes each (the Aila–Laine layout), node 0 the root;
   - 48-byte triangles in tree order, each with its original index and flags;
   - one parent index per node, for refits;
   - the mesh's box, its depth and its counts.
 
-  The word positions are in `src/gpu-layout.ts`.
+  The word positions are in `src/gpu-layout.ts`. The layout is part of the API: `GPU_LAYOUT_VERSION` (now 1) goes up with any change to it, and that is a breaking change. If you write your own WGSL walk, check that number at startup.
 - **Rule:** every builder must pass the same ray oracle (the `trace-oracle` GPU page, on the RTX 3060 and the Intel UHD) before it is used. `checkGpuLayout` also checks any tree against its mesh: every triangle bit for bit, every box exactly the box below it, parents, depth and counts.
 
 ## Which builder to use
@@ -145,6 +145,17 @@ meshRefit.encode(
 ```
 
 Both refits can report the tree's quality (`latestStats.relativeCost`, with `diagnostics: true`), so you know when to rebuild. Stats are read back a frame or two late; nothing else needs a readback.
+
+**One read-back for GPU-built trees.** Both refits take the tree's shape from a CPU copy of it: `setTree` (and `setShape`) order the nodes by level on the CPU. A tree from tinybvh is already on the CPU. A tree from H-PLOC or the LBVH has to be read back once with the builder's `readLayouts(trees)`, after the build and before the first refit. The shape doesn't change while the mesh deforms, so this happens once per build, never per frame. Working out the levels on the GPU would remove it; that hasn't been done yet.
+
+**Save and load a tree** (build once, for example in Node, and load it later with no build at all):
+
+```ts
+import { deserializeLayout, serializeLayout } from '@pmndrs/bvh';
+
+const bytes = serializeLayout(layout); // one ArrayBuffer: a 64-byte header, then nodes, triangles and parents
+const loaded = deserializeLayout(bytes); // refuses bytes from another GPU_LAYOUT_VERSION: rebuild those
+```
 
 **Check a tree:**
 

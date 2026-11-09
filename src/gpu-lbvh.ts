@@ -76,7 +76,7 @@ import {
 import { createRadixSort, createRadixSortPipelines, radixPassCount, sortTileTable, type RadixSort, type RadixSortPipelines } from './gpu-radix-sort.ts';
 import { createScanBindGroups, createScanPipelines, encodeScan, SCAN_PARAMS_BYTES, scanParams, scanTileSumWords, type ScanBindGroups } from './gpu-scan.ts';
 import { dispatchWorkgroups2d } from './gpu-workgroup-scan.ts';
-import type { TinyBvhInput } from './tinybvh.ts';
+import { isGpuMeshBuffers, meshTriangleCount, type GpuBuildOptions, type GpuMeshGeometry, type GpuMeshTreeRange, type GpuTreeBuffers } from './mesh-input.ts';
 
 /** Bits of the Morton codes: 10 per axis. */
 export const LBVH_MORTON_BITS = 30;
@@ -90,74 +90,6 @@ export const UNIFORM_STRIDE = 256;
 
 /** The biggest per-triangle (or per-inner-node) share of any one batch buffer: the climb's scratch, 76 bytes. */
 const LARGEST_BYTES_PER_TRIANGLE = Math.max((LBVH_SCRATCH_NODE_WORDS + LBVH_STATE_WORDS) * 4, GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES);
-
-/**
- * Geometry already on the GPU, for example a deformed vertex buffer an
- * adapter wrote. The batch copies the ranges it needs into its own buffers
- * when it is recorded, so the buffers need `COPY_SRC` usage.
- */
-export interface GpuLbvhBufferGeometry {
-    /** f32 vertex positions. */
-    readonly positionBuffer: GPUBuffer;
-    readonly vertexCount: number;
-    /** Floats from one vertex to the next. Default 3 (tightly packed). */
-    readonly positionStrideFloats?: number;
-    /** Float index of vertex 0's x. Default 0. */
-    readonly positionOffsetFloats?: number;
-    /** Three indices per triangle; omit for a plain triangle list. */
-    readonly indexBuffer?: GPUBuffer | null;
-    readonly indexFormat?: 'uint16' | 'uint32';
-    /** Index of the mesh's first index in `indexBuffer` (not bytes). Default 0. */
-    readonly indexOffset?: number;
-    readonly triangleCount: number;
-    /** One `u32` per triangle, by original triangle number, from offset 0. Default 0. */
-    readonly triangleFlagsBuffer?: GPUBuffer | null;
-}
-
-/** CPU arrays (uploaded for the build) or buffers already on the GPU. */
-export type GpuLbvhGeometry = TinyBvhInput | GpuLbvhBufferGeometry;
-
-export interface GpuLbvhOptions {
-    /** Largest leaf the SAH collapse may make. 1 to 8; default 8, the tracer's largest leaf. */
-    readonly maxLeafPrimitives?: number;
-    /** SAH cost of visiting a node, relative to {@link intersectionCost}. Default 1. */
-    readonly traversalCost?: number;
-    /** SAH cost of testing one triangle. Default 1. */
-    readonly intersectionCost?: number;
-}
-
-/** One mesh's tree inside a batch's shared buffers ({@link GpuLbvhTrees}). */
-export interface GpuLbvhMeshTree {
-    /** The mesh's node 0 (its root) is this node of the shared node and parent buffers. Child indices are the mesh's own. */
-    readonly nodeOffset: number;
-    readonly nodeCount: number;
-    /** The mesh's first triangle in the shared triangle buffer. Leaf indices are the mesh's own. */
-    readonly triangleOffset: number;
-    readonly triangleCount: number;
-    readonly leafCount: number;
-    /** Levels of nodes on the longest path. */
-    readonly maxDepth: number;
-    /** Object-space box around the mesh: `[minX, minY, minZ, maxX, maxY, maxZ]`. */
-    readonly bounds: Float32Array;
-    /** Why this tree must not be used, or null. */
-    readonly problem: string | null;
-}
-
-/**
- * The trees of one batch on the GPU, in the tracer's layout: every mesh's
- * nodes, triangles and parents in three shared buffers, each mesh at its
- * offsets. They belong to the caller: `destroy()` frees them.
- */
-export interface GpuLbvhTrees {
-    /** 64-byte nodes. */
-    readonly nodes: GPUBuffer;
-    /** 48-byte triangles, each mesh's in tree order. */
-    readonly triangles: GPUBuffer;
-    /** One `u32` per node: its parent within its mesh, or 0xffffffff for a root. */
-    readonly parents: GPUBuffer;
-    readonly meshes: readonly GpuLbvhMeshTree[];
-    destroy(): void;
-}
 
 /** The steps of a batch's build, in order, as `GpuLbvhBatch.encode` can time them. */
 export const LBVH_STAGES = ['boxes', 'morton', 'sort', 'clear', 'climb', 'mark', 'rank', 'triangles', 'emit'] as const;
@@ -217,17 +149,7 @@ const KERNEL_BINDINGS: Record<LbvhKernel, readonly BindingName[]> = {
     lbvhTriangles: ['positions', 'indices', 'flags', 'values', 'outTriangles', 'params', 'tables'],
 };
 
-export function isBufferGeometry(geometry: GpuLbvhGeometry): geometry is GpuLbvhBufferGeometry {
-    return 'positionBuffer' in geometry;
-}
-
-export function gpuLbvhTriangleCount(geometry: GpuLbvhGeometry): number {
-    if (isBufferGeometry(geometry)) return geometry.triangleCount;
-    const entries = geometry.indices ? geometry.indices.length : geometry.positions.length / 3;
-    return entries / 3;
-}
-
-export function checkOptions(options: GpuLbvhOptions): Required<GpuLbvhOptions> {
+export function checkOptions(options: GpuBuildOptions): Required<GpuBuildOptions> {
     const maxLeaf = options.maxLeafPrimitives ?? GPU_LAYOUT_MAX_LEAF_PRIMITIVES;
     if (!Number.isInteger(maxLeaf) || maxLeaf < 1 || maxLeaf > GPU_LAYOUT_MAX_LEAF_PRIMITIVES) {
         throw new RangeError(`maxLeafPrimitives must be an integer from 1 to ${GPU_LAYOUT_MAX_LEAF_PRIMITIVES}, got ${maxLeaf}`);
@@ -238,10 +160,10 @@ export function checkOptions(options: GpuLbvhOptions): Required<GpuLbvhOptions> 
     return { maxLeafPrimitives: maxLeaf, traversalCost, intersectionCost };
 }
 
-export function checkGeometry(geometry: GpuLbvhGeometry, index: number): void {
+export function checkGeometry(geometry: GpuMeshGeometry, index: number): void {
     const where = `mesh ${index}`;
-    const triangles = gpuLbvhTriangleCount(geometry);
-    if (isBufferGeometry(geometry)) {
+    const triangles = meshTriangleCount(geometry);
+    if (isGpuMeshBuffers(geometry)) {
         if (!Number.isInteger(triangles) || triangles < 1) throw new RangeError(`${where}: needs at least one triangle`);
         if (!Number.isInteger(geometry.vertexCount) || geometry.vertexCount < 1) throw new RangeError(`${where}: needs at least one vertex`);
         const positionStart = (geometry.positionOffsetFloats ?? 0) * 4;
@@ -267,8 +189,8 @@ export function bufferLimit(device: GPUDevice): number {
 }
 
 /** Bytes of vertex positions a geometry needs in a batch's position buffer. */
-export function positionBytes(geometry: GpuLbvhGeometry): number {
-    if (!isBufferGeometry(geometry)) return geometry.positions.byteLength;
+export function positionBytes(geometry: GpuMeshGeometry): number {
+    if (!isGpuMeshBuffers(geometry)) return geometry.positions.byteLength;
     return ((geometry.vertexCount - 1) * (geometry.positionStrideFloats ?? 3) + 3) * 4;
 }
 
@@ -276,7 +198,7 @@ export function positionBytes(geometry: GpuLbvhGeometry): number {
  * Splits meshes into batches whose buffers this device can bind, in order.
  * A mesh too big for any batch comes back in `tooBig`; callers build it on the CPU.
  */
-export function planGpuLbvhBatches(device: GPUDevice, geometries: readonly GpuLbvhGeometry[]): { batches: number[][]; tooBig: number[] } {
+export function planGpuLbvhBatches(device: GPUDevice, geometries: readonly GpuMeshGeometry[]): { batches: number[][]; tooBig: number[] } {
     return planMeshBatches(device, geometries, LARGEST_BYTES_PER_TRIANGLE, GPU_LAYOUT_MAX_TRIANGLES);
 }
 
@@ -287,7 +209,7 @@ export function planGpuLbvhBatches(device: GPUDevice, geometries: readonly GpuLb
  */
 export function planMeshBatches(
     device: GPUDevice,
-    geometries: readonly GpuLbvhGeometry[],
+    geometries: readonly GpuMeshGeometry[],
     bytesPerTriangle: number,
     maxMeshTriangles: number,
 ): { batches: number[][]; tooBig: number[] } {
@@ -298,7 +220,7 @@ export function planMeshBatches(
     let triangles = 0;
     let positions = 0;
     geometries.forEach((geometry, index) => {
-        const meshTriangles = Math.max(1, gpuLbvhTriangleCount(geometry));
+        const meshTriangles = Math.max(1, meshTriangleCount(geometry));
         const meshPositions = positionBytes(geometry);
         if (meshTriangles > maxMeshTriangles || meshTriangles * bytesPerTriangle > limit || meshPositions > limit) {
             tooBig.push(index);
@@ -357,7 +279,7 @@ export class GpuLbvhBuilder {
     }
 
     /** Builds every mesh's tree in one batch and one submit. A refused mesh has `problem` set; the others are fine. */
-    async buildMany(geometries: readonly GpuLbvhGeometry[], options: GpuLbvhOptions = {}): Promise<GpuLbvhTrees> {
+    async buildMany(geometries: readonly GpuMeshGeometry[], options: GpuBuildOptions = {}): Promise<GpuTreeBuffers> {
         const batch = this.createBatch(geometries, options);
         try {
             const encoder = this.device.createCommandEncoder({ label: this.label });
@@ -370,7 +292,7 @@ export class GpuLbvhBuilder {
     }
 
     /** Builds one mesh's tree. Throws if the build was refused. */
-    async build(geometry: GpuLbvhGeometry, options: GpuLbvhOptions = {}): Promise<GpuLbvhTrees> {
+    async build(geometry: GpuMeshGeometry, options: GpuBuildOptions = {}): Promise<GpuTreeBuffers> {
         const trees = await this.buildMany([geometry], options);
         const problem = trees.meshes[0].problem;
         if (problem) {
@@ -386,7 +308,7 @@ export class GpuLbvhBuilder {
      * rebuilds the same trees) and read with `finish`. Throws if the batch is
      * too big for the device (see {@link planGpuLbvhBatches}).
      */
-    createBatch(geometries: readonly GpuLbvhGeometry[], options: GpuLbvhOptions = {}): GpuLbvhBatch {
+    createBatch(geometries: readonly GpuMeshGeometry[], options: GpuBuildOptions = {}): GpuLbvhBatch {
         if (!this.pipelines || !this.sortPipelines) throw new Error('@pmndrs/bvh: call prepare() before building');
         if (geometries.length === 0) throw new RangeError('a batch needs at least one mesh');
         const settings = checkOptions(options);
@@ -399,13 +321,13 @@ export class GpuLbvhBuilder {
     }
 
     /** Copies every usable tree of a batch back into CPU memory (one readback), each exactly as tinybvh's `buildLayout` returns one. */
-    readLayouts(trees: GpuLbvhTrees): Promise<(GpuLayoutMeshBvh | null)[]> {
+    readLayouts(trees: GpuTreeBuffers): Promise<(GpuLayoutMeshBvh | null)[]> {
         return readTreeLayouts(this.device, trees, this.label);
     }
 }
 
 /** Copies every usable tree in shared GPU buffers back into CPU memory, with one readback. Any GPU builder's trees. */
-export async function readTreeLayouts(device: GPUDevice, trees: GpuLbvhTrees, label: string): Promise<(GpuLayoutMeshBvh | null)[]> {
+export async function readTreeLayouts(device: GPUDevice, trees: GpuTreeBuffers, label: string): Promise<(GpuLayoutMeshBvh | null)[]> {
     let nodeEnd = 0;
     let triangleEnd = 0;
     for (const mesh of trees.meshes) {
@@ -447,7 +369,7 @@ export async function readTreeLayouts(device: GPUDevice, trees: GpuLbvhTrees, la
 
 /** Where one mesh sits in a batch's buffers. */
 export interface MeshPlacement {
-    readonly geometry: GpuLbvhGeometry;
+    readonly geometry: GpuMeshGeometry;
     readonly triangleStart: number;
     readonly triangleCount: number;
     readonly innerStart: number;
@@ -474,20 +396,20 @@ export function indexBytes(mesh: Pick<MeshPlacement, 'indexFormat' | 'indexSkip'
 }
 
 /** Lays the meshes out one after another in every batch buffer. */
-export function placeMeshes(geometries: readonly GpuLbvhGeometry[]): MeshPlacement[] {
+export function placeMeshes(geometries: readonly GpuMeshGeometry[]): MeshPlacement[] {
     let triangleStart = 0;
     let innerStart = 0;
     let positionByteStart = 0;
     let indexByteStart = 0;
     let flagsWordStart = 0;
     return geometries.map((geometry) => {
-        const triangleCount = gpuLbvhTriangleCount(geometry);
+        const triangleCount = meshTriangleCount(geometry);
         let vertexCount: number;
         let positionStride = 3;
         let indexFormat: number = LBVH_INDEX_FORMAT.none;
         let indexSkip = 0;
         let hasFlags: boolean;
-        if (isBufferGeometry(geometry)) {
+        if (isGpuMeshBuffers(geometry)) {
             vertexCount = geometry.vertexCount;
             positionStride = geometry.positionStrideFloats ?? 3;
             if (geometry.indexBuffer) {
@@ -588,8 +510,8 @@ export class GpuLbvhBatch {
         label: string,
         pipelines: Record<LbvhKernel, GPUComputePipeline>,
         sortPipelines: RadixSortPipelines,
-        geometries: readonly GpuLbvhGeometry[],
-        options: Required<GpuLbvhOptions>,
+        geometries: readonly GpuMeshGeometry[],
+        options: Required<GpuBuildOptions>,
     ) {
         this.device = device;
         this.label = label;
@@ -788,7 +710,7 @@ export class GpuLbvhBatch {
      * returns the trees. Call after submitting an `encode`. Frees the batch's
      * scratch; the trees stay until the caller destroys them.
      */
-    async finish(): Promise<GpuLbvhTrees> {
+    async finish(): Promise<GpuTreeBuffers> {
         if (this.finished || this.destroyed) throw new Error('@pmndrs/bvh: the batch was already finished');
         const device = this.device;
         const bytes = this.meshCount * LBVH_STATS_BYTES;
@@ -844,7 +766,7 @@ export interface BatchGeometryBuffers {
 export function uploadBatchGeometry(queue: GPUQueue, meshes: readonly MeshPlacement[], buffers: BatchGeometryBuffers): void {
     for (const mesh of meshes) {
         const geometry = mesh.geometry;
-        if (isBufferGeometry(geometry)) continue;
+        if (isGpuMeshBuffers(geometry)) continue;
         queue.writeBuffer(buffers.positions, mesh.positionByteStart, geometry.positions.buffer as ArrayBuffer, geometry.positions.byteOffset, geometry.positions.byteLength);
         const { indices, triangleFlags } = geometry;
         if (indices) {
@@ -868,7 +790,7 @@ export function uploadBatchGeometry(queue: GPUQueue, meshes: readonly MeshPlacem
 export function copyBatchGeometry(encoder: GPUCommandEncoder, meshes: readonly MeshPlacement[], buffers: BatchGeometryBuffers): void {
     for (const mesh of meshes) {
         const geometry = mesh.geometry;
-        if (!isBufferGeometry(geometry)) continue;
+        if (!isGpuMeshBuffers(geometry)) continue;
         const positionStart = (geometry.positionOffsetFloats ?? 0) * 4;
         // Rounded up to whole words, within the buffer (its size was checked when the batch was made).
         const positionSize = Math.min(align4(positionBytes(geometry)), geometry.positionBuffer.size - positionStart);
@@ -886,7 +808,7 @@ export function copyBatchGeometry(encoder: GPUCommandEncoder, meshes: readonly M
 }
 
 /** A mesh's stats words as its tree, checked; `problems` holds what the builder's own checks found. */
-export function meshResult(mesh: MeshPlacement, index: number, stats: Uint32Array, problems: string[] = []): GpuLbvhMeshTree {
+export function meshResult(mesh: MeshPlacement, index: number, stats: Uint32Array, problems: string[] = []): GpuMeshTreeRange {
     const floats = new Float32Array(stats.buffer, stats.byteOffset, stats.length);
     const nodeCount = stats[LBVH_STAT.nodeCount];
     if (stats[LBVH_STAT.badIndices] > 0) problems.push(`${stats[LBVH_STAT.badIndices]} triangle corners name a vertex past the last (${mesh.vertexCount})`);
