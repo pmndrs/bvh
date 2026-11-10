@@ -86,7 +86,8 @@ export const BUILD_FLAGS = [
 ];
 
 const PACKAGE_ROOT = resolve(import.meta.dirname, '..');
-const REPOSITORY_ROOT = resolve(PACKAGE_ROOT, '..', '..');
+// Since the split, the package is the repository root (was packages/bvh in webgpu-ddgi).
+const REPOSITORY_ROOT = PACKAGE_ROOT;
 const SOURCE = join(PACKAGE_ROOT, 'native', 'tinybvh-wasm.cpp');
 const OUTPUT_MODULE = join(PACKAGE_ROOT, 'src', 'tinybvh-wasm.ts');
 const EMSDK_FOLDER = join(REPOSITORY_ROOT, 'tools', 'emsdk');
