@@ -15,7 +15,7 @@
  */
 
 import { HIT_RECORD_BYTES, RAY_FLOATS } from '../../../../packages/ddgi-core/src/platform/trace/index.ts';
-import { createRandom, randomUnitVector } from '../../../../packages/ddgi-core/src/platform/trace/oracle-fixtures.ts';
+import { createRandom, randomUnitVector } from '../../../../packages/bvh/src/trace/oracle-fixtures.ts';
 import { RAY_FAR } from './config.ts';
 import type { BenchInstance, BenchMeshGeometry } from './gltf-geometry.ts';
 

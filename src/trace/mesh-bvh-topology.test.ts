@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createCpuTracer } from './cpu-traversal.ts';
 import { BVH_NODE_WORDS, EMPTY_CHILD_INDEX, NODE_WORD, TRIANGLE_WORD, TRIANGLE_WORDS } from './layout.ts';
-import { createTinyBvhBuilder } from '@pmndrs/bvh';
+import { createTinyBvhBuilder } from '../index.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhAsync } from './mesh-bvh-build.ts';
 import { buildMeshBvhFromTopology, buildMeshBvhWithTinyBvh, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from './mesh-bvh-topology.ts';

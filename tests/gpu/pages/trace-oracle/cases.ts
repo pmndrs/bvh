@@ -28,7 +28,7 @@ import {
     toFloat32Ray,
     type Random,
     type Vector3,
-} from '../../../../packages/ddgi-core/src/platform/trace/oracle-fixtures.ts';
+} from '../../../../packages/bvh/src/trace/oracle-fixtures.ts';
 
 export { unpackRay };
 

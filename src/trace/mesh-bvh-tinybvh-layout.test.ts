@@ -16,7 +16,7 @@ import {
     type GpuLayoutMeshBvh,
     type MeshTreeTopology,
     type TinyBvhBuilder,
-} from '@pmndrs/bvh';
+} from '../index.ts';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { BVH_NODE_BYTES, MAX_LEAF_PRIMITIVES, MAX_REFERENCE_INDEX, TRIANGLE_BYTES } from './layout.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';

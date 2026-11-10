@@ -24,7 +24,7 @@ import {
     referenceCount,
     referenceIndex,
 } from './layout.ts';
-import type { TraceRay } from './trace-gpu.ts';
+import type { TraceRay } from './rays.ts';
 import type { TraceSceneData } from './scene-assembly.ts';
 
 export interface CpuHit {

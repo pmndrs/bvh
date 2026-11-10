@@ -19,10 +19,11 @@
 import { BVH_NODE_BYTES, BVH_NODE_WORDS, EMPTY_CHILD_INDEX, MAX_LEAF_PRIMITIVES, NODE_WORD, NO_PARENT, TRIANGLE_WORD, TRIANGLE_WORDS } from './layout.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { checkGeometry, packTriangles } from './triangle-packing.ts';
-import { TOPOLOGY_EMPTY_CHILD, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology, type TinyBvhBuilder } from '@pmndrs/bvh';
+import { TOPOLOGY_EMPTY_CHILD, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from '../topology.ts';
+import { type TinyBvhBuilder } from '../tinybvh.ts';
 
 // The tree description is the BVH package's Builder contract, so any builder there fits.
-export { TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from '@pmndrs/bvh';
+export { TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from '../topology.ts';
 
 export interface MeshTreeTopologyOptions {
     /** Leaves with more triangles than this are cut in half until they fit. At most {@link MAX_LEAF_PRIMITIVES} (the default). */

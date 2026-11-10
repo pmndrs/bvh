@@ -83,3 +83,7 @@ export {
 
 // Checks on any tree.
 export { checkGpuLayout, treeSahCost, type LayoutCheckOptions } from './layout-check.ts';
+
+// The tracer's layout, the WGSL walk (closest/any) and its CPU port, the oracle,
+// tinybvh trees in the tracer's layout, the top-level builder and the worker wrappers (BX.2).
+export * from './trace/index.ts';

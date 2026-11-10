@@ -17,7 +17,7 @@
 //   bound by memory traffic and object handling; the timings are in PROGRESS.md
 //   (B0b).
 //
-// The GPU layout is defined in packages/ddgi-core/src/platform/trace/layout.ts
+// The GPU layout is defined in src/trace/layout.ts
 // (and the WGSL generated from it). The structs below repeat it; a test there
 // checks that this file's output is byte for byte what the JavaScript
 // conversion (buildMeshBvhFromTopology) makes from the same tinybvh tree.
@@ -102,7 +102,7 @@ static bool arrayBytes(uint64_t count, uint64_t elementBytes, size_t& bytes)
 }
 
 // ---------------------------------------------------------------------------
-// The tracer's GPU layout (packages/ddgi-core/src/platform/trace/layout.ts).
+// The tracer's GPU layout (src/trace/layout.ts).
 // ---------------------------------------------------------------------------
 
 // One node: the boxes of its two children (Aila-Laine layout). A child with
@@ -301,7 +301,7 @@ EXPORT uint32_t tbvh_triangle_order_length()
 // Writing the GPU layout
 //
 // This makes exactly what buildMeshBvhFromTopology (packages/ddgi-core/src/
-// platform/trace/mesh-bvh-topology.ts) makes from tinybvh's tree, as
+// src/trace/mesh-bvh-topology.ts) makes from tinybvh's tree, as
 // topologyFromTinyBvhNodes (src/tinybvh.ts) describes it, so the bytes come out
 // the same:
 // 1. Walk tinybvh's tree depth first, left child first, numbering our nodes as

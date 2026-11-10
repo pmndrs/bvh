@@ -49,12 +49,12 @@ import {
     type MeshBvhBuilder,
     type TraceSceneData,
 } from '../../../../packages/ddgi-core/src/platform/trace/index.ts';
-import { type TracedHit } from '../../../../packages/ddgi-core/src/platform/trace/oracle-compare.ts';
+import { type TracedHit } from '../../../../packages/bvh/src/trace/oracle-compare.ts';
 import { createMeshLayoutBuilder, createTinyBvhBuilder, type MeshLayoutBuilder } from '../../../../packages/bvh/src/index.ts';
 import type { FrameInput } from '../../../../packages/ddgi-core/src/platform/contract/frame.ts';
 import { GIPlatformImpl } from '../../../../packages/ddgi-core/src/platform/gi-platform.ts';
 import type { MeshTreeCounts } from '../../../../packages/ddgi-core/src/platform/trace/ray-queries.ts';
-import { buildMeshBvhWithTinyBvh } from '../../../../packages/ddgi-core/src/platform/trace/mesh-bvh-topology.ts';
+import { buildMeshBvhWithTinyBvh } from '../../../../packages/bvh/src/trace/mesh-bvh-topology.ts';
 import { assert, runGpuTest } from '../../client.ts';
 import {
     buildOracleCases,

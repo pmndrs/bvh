@@ -22,7 +22,6 @@
  * whatever scale, shear or mirror the instance has.
  */
 
-import type { BindingSlot, ModuleBindingEntry } from '../contract/wgsl.ts';
 import {
     EMPTY_CHILD_INDEX,
     REF_COUNT_SHIFT,
@@ -34,6 +33,16 @@ import {
     TRIANGLE_BYTES,
     TRACE_STACK_SIZE,
 } from './layout.ts';
+
+/** Where the trace module's bindings land inside a kernel (structurally the same as ddgi's `BindingSlot`). */
+export interface BindingSlot {
+    readonly group: number;
+    /** Binding number of the module's first entry; the rest follow in order. */
+    readonly firstBinding: number;
+}
+
+/** A bind group layout entry without its binding number, which the caller's kernel builder assigns. */
+export type ModuleBindingEntry = Omit<GPUBindGroupLayoutEntry, 'binding'>;
 
 /** `GPUShaderStage.COMPUTE`. The global does not exist in Node, where the tests import this file. */
 const SHADER_STAGE_COMPUTE = 0x4;

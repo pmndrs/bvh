@@ -1,4 +1,4 @@
-import { GPU_LAYOUT_VERSION } from '@pmndrs/bvh';
+import { GPU_LAYOUT_VERSION } from '../index.ts';
 import { describe, expect, it } from 'vitest';
 import { TRACER_GPU_LAYOUT_VERSION } from './layout.ts';
 import { batchEntryWgsl, HIT_RECORD_BYTES, HIT_RECORD_WORD } from './wgsl.ts';

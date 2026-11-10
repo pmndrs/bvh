@@ -17,9 +17,9 @@
 import type { MeshGeometry } from './mesh-bvh.ts';
 import { countTriangles } from './mesh-bvh.ts';
 import { invertAffine } from './top-level.ts';
-import type { TraceRay } from './trace-gpu.ts';
+import type { TraceRay } from './rays.ts';
 
-export type { TraceRay } from './trace-gpu.ts';
+export type { TraceRay } from './rays.ts';
 import type { TraceSceneInstance } from './scene-assembly.ts';
 
 

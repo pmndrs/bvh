@@ -4,7 +4,7 @@
  * (B0, DECISIONS 2026-11-04); its WASM is started once per thread, on first use.
  */
 
-import { createTinyBvhBuilder, type TinyBvhBuilder } from '@pmndrs/bvh';
+import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
 import type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
 

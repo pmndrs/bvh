@@ -13,7 +13,6 @@
  * in tree order (records are sorted so a leaf's `index` is a record index).
  */
 
-import type { Mat4 } from '../contract/math.ts';
 import {
     BVH_NODE_BYTES,
     INSTANCE_FLAG,
@@ -23,6 +22,9 @@ import {
     TOP_HEADER_WORD,
     TOP_LEVEL_HEADER_BYTES,
 } from './layout.ts';
+
+/** A column-major 4x4 matrix, as any engine stores one (16 numbers). */
+export type Mat4 = ArrayLike<number>;
 import { buildSahTree, DEFAULT_SAH_OPTIONS, type SahBuildOptions } from './sah-builder.ts';
 
 /** One placed copy of a mesh, as the top-level builder sees it. */

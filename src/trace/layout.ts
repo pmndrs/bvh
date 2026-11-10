@@ -4,24 +4,16 @@
  * The CPU builders write these layouts and the WGSL reads them, so every
  * number the two sides must agree on lives here, and the WGSL source is
  * generated from these constants rather than repeating them. The sizes and
- * limits a builder in `@pmndrs/bvh` also needs (node and triangle bytes, the
- * largest leaf, the most triangles per mesh) are defined there, in
- * `gpu-layout.ts`, and taken from it here: that package can't import the core.
+ * limits every builder also needs (node and triangle bytes, the largest leaf,
+ * the most triangles per mesh) are defined in `../gpu-layout.ts` and taken
+ * from it here. (This file moved from ddgi-core in BX.2.)
  *
  * Everything is plain 32-bit words in a few buffers so it survives a worker
  * hand-off (transferable `ArrayBuffer`s) and a GPU upload without conversion.
  * See docs/design/trace.md for the reasoning.
  */
 
-import {
-    GPU_LAYOUT_EMPTY_CHILD,
-    GPU_LAYOUT_MAX_LEAF_PRIMITIVES,
-    GPU_LAYOUT_MAX_TRIANGLES,
-    GPU_LAYOUT_NO_PARENT,
-    GPU_LAYOUT_NODE_BYTES,
-    GPU_LAYOUT_NODE_WORD,
-    GPU_LAYOUT_TRIANGLE_BYTES,
-} from '@pmndrs/bvh';
+import { GPU_LAYOUT_EMPTY_CHILD, GPU_LAYOUT_MAX_LEAF_PRIMITIVES, GPU_LAYOUT_MAX_TRIANGLES, GPU_LAYOUT_NO_PARENT, GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_NODE_WORD, GPU_LAYOUT_TRIANGLE_BYTES } from '../gpu-layout.ts';
 
 /**
  * The version of `@pmndrs/bvh`'s GPU layout (`GPU_LAYOUT_VERSION`) that this

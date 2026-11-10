@@ -7,7 +7,7 @@
  * carries the two offsets the traversal adds.
  */
 
-import type { Mat4 } from '../contract/math.ts';
+import type { Mat4 } from './top-level.ts';
 import { BVH_NODE_BYTES, TRACE_STACK_SIZE, TRIANGLE_BYTES } from './layout.ts';
 import type { MeshBvh } from './mesh-bvh.ts';
 import { buildTopLevel, type TopLevelBvh, type TraceInstance } from './top-level.ts';

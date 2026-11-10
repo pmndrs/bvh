@@ -7,9 +7,9 @@
 
 import { describe, expect, it } from 'vitest';
 import { assembleTraceScene, createCpuTracer } from '../../../../packages/ddgi-core/src/platform/trace/index.ts';
-import { buildMeshBvhWithTinyBvh } from '../../../../packages/ddgi-core/src/platform/trace/mesh-bvh-topology.ts';
+import { buildMeshBvhWithTinyBvh } from '../../../../packages/bvh/src/trace/mesh-bvh-topology.ts';
 import { createTinyBvhBuilder } from '../../../../packages/bvh/src/index.ts';
-import { type TracedHit } from '../../../../packages/ddgi-core/src/platform/trace/oracle-compare.ts';
+import { type TracedHit } from '../../../../packages/bvh/src/trace/oracle-compare.ts';
 import { buildOracleCases, sharedEdgeCase, SMALL_SIZES, unpackRay, type OracleCase } from './cases.ts';
 import {
     computeReferenceAnswers,

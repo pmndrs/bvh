@@ -24,7 +24,7 @@ import type { GITechnique, TechniqueContext, TechniqueFrame } from '../../../../
 import type { ComputeKernel } from '../../../../packages/ddgi-core/src/platform/contract/wgsl.ts';
 import { createGI } from '../../../../packages/ddgi-core/src/platform/gi-platform.ts';
 import { RAY_BYTES } from '../../../../packages/ddgi-core/src/platform/trace/trace-gpu.ts';
-import type { TracedHit } from '../../../../packages/ddgi-core/src/platform/trace/oracle-compare.ts';
+import type { TracedHit } from '../../../../packages/bvh/src/trace/oracle-compare.ts';
 import { assert, runGpuTest } from '../../client.ts';
 import { buildOracleCases, FULL_SIZES, sharedEdgeCase, type OracleCase } from '../trace-oracle/cases.ts';
 import {
