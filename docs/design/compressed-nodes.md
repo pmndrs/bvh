@@ -1,8 +1,21 @@
 # Compressed nodes (P9 lever 3)
 
-## Status (2026-11-12): design only, nothing built
+## Status (2026-11-12): built (option A), off by default
 
-Today every mesh node is 64 bytes: two child boxes as `vec3f` plus an index and a count each (`src/gpu-layout.ts:37-62`, WGSL `BvhNode` at `src/trace/wgsl.ts:162-167`). On Sponza the nodes are 185.1 of the 448.1 MiB we add beyond geometry, and 80.4 of 210.1 on Bistro exterior ([memory.md](memory.md), lever 3). This document picks a smaller node, says how the refit, the walk and the rest of the package meet it, and says what to measure before it can become the default.
+Dennis's answers to section 6: A first, CWBVH stays dropped; the default stays `f32` until the RTX 3060 is measured; merged groups get one frame per group, measured first (the loss is small, below, so no per-instance `f32` fallback); the node format is bits 8-15 of header word 7, `GPU_LAYOUT_VERSION` stays 2; deforming meshes keep a 64-byte `f32` copy and a re-quantize pass; the folded decode is a later, measured option, not built.
+
+**What is in.** One walk, with the node format compiled in as `rayMasks` and `triangleLeaves` are:
+
+- `nodeFormat: 'f32' | 'quantized'` (the option is named `quantized`, not `packed`) on `traceModuleWgsl`, `batchKernelWgsl`, `TraceBatchKernel`, `uploadTraceScene` (from the scene), `assembleTraceScene`/`buildTraceScene`, the builders (tinybvh, the topology builder, the LBVH and H-PLOC CPU twins, the GPU LBVH and H-PLOC, `createMeshLayoutBuilder`), `SceneTrees`; `BvhTraceNodes` reads it from its source. Only `bvhLoadMeshNode` and an instance-entry call `bvhEnterMeshNodes(rootNodeOffset)` differ (an empty function for `f32`); the walk's text is identical (unit-tested), and the counted walk's anchor still applies.
+- **The node** is two `vec4u`, one per child: `(x, y, z, reference)`, each axis word the min plane in bits 0-15 and the max in 16-31 (`GPU_LAYOUT_QUANTIZED_NODE_WORD`). Section 1's sketch put the three left words, then the three right, then both references; per child is symmetric and is what the decode reads.
+- **The frame** lives in the tree, not in a rule over `bounds`: a quantized tree's `nodes` starts with its 32-byte frame slot (origin `vec3f`, step `vec3f`), then the nodes (node `i` is slot `i + 1`), so a scene copies the whole thing and the slot lands at `rootNodeOffset - 1`. Serialized files carry it the same way, so no frame rule is part of the file format. The frame is derived from the union of the root's two children (`nodeFrameOf`, quantized-nodes.ts): per axis the smallest power-of-two step with every coordinate under 2^23 steps from 0 and the box at most 65,532 steps wide; origin = (floor(min / step) - 1) * step. Both conditions are monotone in the step, so the CPU and the GPU (gpu-quantize.ts) find the same frame.
+- **Rounding** tests only exact values `x / step`: `qMin = floor(min / step) - origin / step`, one lower if the fraction is below 1/1024; the max likewise up. So the CPU and GPU encoders agree bit for bit (`bvh-blas-refit` checks it), and every decoded plane lies at least 1/1024 of a step outside the exact one. Empty boxes (min above max, the refit's point at the largest float, non-finite) encode as both planes at 65,535.
+- `checkGpuLayout` checks a quantized tree's decoded boxes against the exact boxes of its triangles (containment with the margin) and its frame against `nodeFrameOf` of the exact root box. `treeSahCost` measures the decoded boxes. `CpuMeshBvh` decodes once in its constructor (CPU trees stay 64 bytes; `traverse` hands callbacks boxes around the exact ones).
+- **GPU builders** still build `f32` (the climbs hand boxes over in `f32` words) and pack in `finish()` with the quantize pass (`quantizeTreeBuffers`): a compact node buffer, each mesh's frame slot then its nodes; ranges gain `parentOffset`. `readTreeLayouts` reads either.
+- **Refit**: `GpuMeshRefit.setTree(layout, { nodeFormat: 'quantized' })` (`meshRefitPlacement` passes it) keeps the 64-byte copy, refits it unchanged, and dispatches the quantize pass in the same compute pass into the target's frame slot and nodes. On the CPU: `refitOnCpu` on an `f32` copy, then `quantizeNodeWords`.
+- **`SceneTrees({ nodeFormat: 'quantized' })`**: 32-byte storage with a frame slot before each root. tinybvh trees arrive quantized from the workers (deforming meshes' arrive `f32`, for their refit's copy, and are packed when placed); GPU batch trees are packed by the quantize pass instead of the node copy; the capped-batch reserve counts the frame slots; `gpuTreeOutputs: 'adopt'` is refused. Works with indexed leaves.
+
+ is 64 bytes: two child boxes as `vec3f` plus an index and a count each (`src/gpu-layout.ts:37-62`, WGSL `BvhNode` at `src/trace/wgsl.ts:162-167`). On Sponza the nodes are 185.1 of the 448.1 MiB we add beyond geometry, and 80.4 of 210.1 on Bistro exterior ([memory.md](memory.md), lever 3). This document picks a smaller node, says how the refit, the walk and the rest of the package meet it, and says what to measure before it can become the default.
 
 The risk to beat is B3. Compressed 8-wide nodes (CWBVH) were 3.9-4.6x smaller and traced at 0.96-1.02x of our BVH2 on Sponza and 0.82x on Bistro interior (RTX 3060; ddgi `PROGRESS.md`, "2026-11-05 · B3 CWBVH spike"; [DIVERGENCES.md](../DIVERGENCES.md), "Deliberately not ported"). Dennis dropped B3 for speed.
 
@@ -36,6 +49,8 @@ struct BvhPackedNode {     // 32 bytes: two vec4u
 - **Where the frame lives.** In the node buffer, in a slot just before the mesh's root (`rootNodeOffset - 1`). The walk reads it once per instance entry, as indexed leaves read their mesh header (`bvhMeshVertexBase`, `wgsl.ts:479`). The frame can be derived from the mesh bounds by a fixed rule, so a serialized tree needs no new field (section 4).
 - **Rounding outward.** The encoder rounds a min down to a grid point and a max up to one. It then decodes the plane in `f32` and requires it to lie at least 1/1024 of a step outside the exact box (today's boxes are exact, recomputed from the triangles: DIVERGENCES W2). Otherwise it moves the plane one more step. B3 learned this rule: with tight planes (rounded to the next step and no further), 1.7% of edge-aimed rays slipped through on the Intel UHD. A 1/1024-step margin fixed it on both GPUs (ddgi `docs/NOTES.md`, "Quantized child boxes need a margin"). Exact decoding should make the margin unnecessary, but the Metal backend compiles with relaxed math (DIVERGENCES T1), and the margin costs nothing measurable.
 - **Watertightness lives in the triangle test, not in the boxes.** The walk only needs each box to contain its subtree, so that no leaf a ray hits is skipped. Whether the ray hits a triangle, and whether it slips between two, is decided by the watertight test on the unchanged `f32` corners (`wgsl.ts:812-880`). A looser box costs node visits, never hits. A box that rounds inward loses hits, so the layout check must verify every decoded plane against the exact box.
+
+- **Limits.** A coordinate of magnitude 2^100 or more, or a non-finite one (`FRAME_LIMIT`, `isEmptyAxis` in `src/quantized-nodes.ts`, `bvhqEmptyAxis` in WGSL), makes that axis of the box empty, so a ray never enters it: hits there are lost where `f32` nodes would find them. Real scenes are far inside this. Separately, the GPU quantizer (`bvhqAxisWord` in `src/gpu-quantize.ts`) clamps a child box that lies outside the root's to the frame, where the CPU encoder (`quantizeAxis`) throws. Builders and refits never produce such a box (a parent holds its children), so the clamp is only a guard; the layout check reports a box that rounds inward.
 
 **A' (per-node frame, 8-bit).** Its loss is relative to each node's own size, which is better at the deepest levels. But the frame (12 + 3 bytes) and the two references make the node 36 bytes, which does not fit a 32-byte, two-`vec4` load, and padding it to 48 bytes saves only a quarter. Not recommended.
 
@@ -97,3 +112,46 @@ Measure it in three steps, the first without a GPU:
 4. Header word 7 as a bit field, or a separate word?
 5. Should the deforming refit's 64-byte shadow tree be acceptable, or should the climb learn to hand boxes over in scratch?
 6. Should the folded decode (`fma(q, step * invDir, (origin - rayOrigin) * invDir)`, fewer operations but no exact plane) be tried after stage 2, or ruled out to keep the exact-plane argument?
+
+## Measured (2026-11-12, Apple M5, Chrome 157 headless)
+
+**Correctness** (the gates):
+
+- `trace-oracle`: 8 quantized variants (tinybvh, masks compiled out, the GPU LBVH and H-PLOC packed by the GPU quantize pass and `checkGpuLayout`-checked, with indexed leaves, merged tinybvh, merged H-PLOC, merged H-PLOC indexed packed) and 21 quantized hook passes: 0 mismatches, 0 of 2M shared-edge rays slipped (B3's leak class), split seams hold. On the one-ulp seams quantized lets **fewer** rays through than `f32` (10,927 against 11,287 of 200k on the plain seam, the same 9,913 on the transformed one): a looser box takes rays an exact box's slab test rounds away. The page checks "never more". `three-mesh-bvh`-built trees already differ from tinybvh's there (11,034), so the count depends on boxes, not only on the triangle test.
+- `trace-inline` (quantized, quantized indexed), `scene-trees-mid-swap` (4 quantized variants: copy, merged, capped, merged capped indexed packed; 132 states, 0 disagreements), `scene-trees-deforming` and `three-trace` (quantized, records and indexed), `scene-trees-sponza`: all pass.
+- `bvh-blas-refit`: GPU refits of quantized trees (grid, soup, one triangle; 5 poses each) are, word for word, the CPU refit packed by `quantizeNodeWords`, and pass the layout check against each pose; a quantized indexed scene refit through `meshRefitPlacement` hits what a scene built in the pose hits.
+- Unit tests: the frame rule, outward rounding with the margin, every builder's quantized tree passing the layout check (meshes far from the origin, tiny, huge, flat, one triangle), serialization, `CpuMeshBvh` boxes around the exact ones, the CPU refit plus re-quantize, `SceneTrees` (fake GPU) through GPU-first, swaps, merged groups, runtime changes and capped batches, and quantized scenes giving the `f32` scene's instance, triangle and `t` bit for bit on 4,000 rays (instanced and merged, records and indexed).
+- The surface-ray bench: every quantized answer has the `f32` answer's `t` bit for bit; 3 to 8 rays per set (of about 230k) name another triangle at exactly that `t` (ties at shared edges, counted apart; the walk keeps the last hit at equal `t`, and looser boxes can change the order). Any-hit is identical on every ray.
+
+**Quality** (`tools/quantized-nodes.ts`, CPU walk, no GPU; air-grid rays about 43k per scene, and secondary rays from their hits):
+
+| | SAH quantized / `f32` | Node visits per ray | Triangle tests per ray |
+| --- | ---: | ---: | ---: |
+| Sponza instanced | 1.0012 | +0.0 to +0.1% | +0.1 to +0.9% |
+| Sponza merged (one 5.7M-triangle group, one frame) | 1.0066 | +0.1 to +0.5% | +0.6 to +2.6% |
+| Bistro exterior instanced | 1.0005 | +0.0 to +0.1% | -0.1 to +0.5% |
+| Bistro exterior merged (2.8M, one frame) | 1.0036 | +0.1 to +0.3% | +0.0 to +0.8% |
+| Bistro interior instanced / merged | 1.0001 / 1.0011 | +0.0 to +0.2% | -0.2 to +0.4% |
+
+The merged groups lose more than per-mesh trees, as section 3 expected, but far below the ~5% that would call for a per-instance `f32` fallback (question 3): one frame per group stays. The counted GPU walk agrees: steps per ray +0.0 to +0.3% instanced, +0.1 to +1.2% merged (Sponza merged surface closest: 70.27 to 71.09 steps, triangle tests 7.17 to 7.65); Bistro interior +0.0 to +0.3%.
+
+**Speed** (indicative only: one run of 5 paired rounds per scene, `f32` and quantized back to back with the order reversed every other round; ratio = quantized rate over `f32` rate, above 1 faster; median of rounds and range):
+
+| | instanced surface | instanced air grid | merged surface | merged air grid |
+| --- | --- | --- | --- | --- |
+| Sponza closest | 0.944 (0.87-0.99) | 0.965 (0.96-0.99) | 0.930 (0.89-1.02) | 0.953 (0.95-0.96) |
+| Sponza any | 0.941 (0.87-0.98) | 0.955 (0.94-0.99) | 0.927 (0.92-0.93) | 0.957 (0.92-0.98) |
+| Bistro interior closest | 0.969 (0.92-0.97) | 0.969 (0.97-0.98) | 0.966 (0.93-0.97) | 0.963 (0.95-0.97) |
+| Bistro interior any | 0.964 (0.96-1.00) | 0.958 (0.96-0.97) | 0.962 (0.96-0.97) | 0.957 (0.95-0.96) |
+
+On the M5, quantized nodes cost 3-7%: with visits nearly unchanged, that is the decode (12 extracts, conversions and FMAs per node) not paid back by the halved node fetch on this GPU's unified memory. Section 3's 0.95-1.05x estimate holds at its low end. The RTX 3060, where B3 found the walk bound by memory loads, decides the default (question 2). Rows: `bench/results/trace.csv`, metrics `surface-rays/paired/quantized_over_f32/...` and `surface-rays/node_format/...`, commit `13e9066`.
+
+**Bytes**: [memory.md](memory.md), "Quantized nodes". Beyond geometry, Sponza 448.1 to 355.5 MiB quantized and **225.5** with indexed leaves; Bistro exterior 210.1 to 169.9 and **115.3**. `SceneTrees` on Sponza (`scene-trees-sponza`, default 256 MiB cap, settled): `f32` 458.6 MiB, peak 711; quantized 360.8, peak 613.2; indexed 327.1, peak 580; quantized and indexed **230.0, peak 483**. tinybvh trees take longer to arrive with quantized nodes (all placed at 439 ms against 351; 512 with indexed leaves against 431): the workers pack 3M nodes. First GPU trees 139 ms against 130. Merged, uncapped: settled 366.7 MiB, the peak (1,482.6) is the one big batch, unchanged.
+
+## Left to do
+
+- The RTX 3060 and Intel: the oracle pages and the paired bench (`BVH_PAGE_QUERY='skip=hit-record,leaves' pnpm test:gpu:page trace-bench-surface-sponza`). The default stays `f32` until then.
+- H-PLOC writing quantized nodes in its emit (it packs after the build; the batch holds both node buffers for a moment).
+- The folded decode (`fma(q, step * invDir, ...)`), as a measured option.
+- Packing tinybvh trees inside the WASM instead of in JavaScript after it (the worker cost above).
+

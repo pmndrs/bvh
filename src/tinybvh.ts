@@ -29,6 +29,7 @@ import {
 import { singleLeafTopology, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from './topology.ts';
 import { TINYBVH_WASM_BASE64 } from './tinybvh-wasm.ts';
 import { checkTriangleFlags, type MeshInput } from './mesh-input.ts';
+import { builderNodeFormat } from './quantized-nodes.ts';
 import { checkTriangleLeaves, indexedTrianglesFromRecordWords } from './indexed-leaves.ts';
 
 /** tinybvh's node: aabbMin (3 floats), leftFirst, aabbMax (3 floats), triCount. 32 bytes. */
@@ -119,6 +120,11 @@ export interface TinyBvhLayoutOptions extends TinyBvhBuildOptions {
      * memory, with no 48-byte copy in JavaScript. Default `'records'`.
      */
     readonly triangleLeaves?: 'records' | 'indexed';
+    /**
+     * `'quantized'`: 32-byte nodes (docs/design/compressed-nodes.md), packed
+     * from the WASM's 64-byte nodes on the way out of its memory. Default `'f32'`.
+     */
+    readonly nodeFormat?: 'f32' | 'quantized';
 }
 
 export interface TinyBvhLayoutBuild {
@@ -327,7 +333,7 @@ function buildGpuLayout(wasm: TinyBvhExports, geometry: MeshInput, options: Tiny
                 leafCount: wasm.tbvh_layout_leaf_count(),
                 bounds: new Float32Array(memory, wasm.tbvh_layout_bounds(), BOUNDS_FLOATS).slice(),
             };
-            return { layout, buildMs: performance.now() - start, wasmBuildMs, layoutMs };
+            return { layout: builderNodeFormat(layout, options.nodeFormat, 'tinybvh'), buildMs: performance.now() - start, wasmBuildMs, layoutMs };
         } finally {
             if (flagsPointer) wasm.tbvh_free(flagsPointer);
         }

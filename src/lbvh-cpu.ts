@@ -26,6 +26,7 @@ import {
 } from './gpu-layout.ts';
 import { checkTriangleFlags, type GpuBuildOptions, type MeshInput } from './mesh-input.ts';
 import { packIndexedTrianglesInOrder } from './indexed-leaves.ts';
+import { builderNodeFormat } from './quantized-nodes.ts';
 
 const f = Math.fround;
 const FLOAT_MAX = 3.4028234663852886e38;
@@ -284,7 +285,7 @@ export function buildLbvhFromSorted(
 export function buildLbvhOnCpu(geometry: MeshInput, options: GpuBuildOptions = {}): GpuLayoutMeshBvh {
     const { boxes, centroidBounds } = triangleBoxes(geometry);
     const sorted = stableSortByKey(mortonCodes(boxes, centroidBounds));
-    return buildLbvhFromSorted(geometry, boxes, sorted, options);
+    return builderNodeFormat(buildLbvhFromSorted(geometry, boxes, sorted, options), options.nodeFormat, 'buildLbvhOnCpu');
 }
 
 /** The layout of a one-triangle mesh: a root holding the triangle on the left and nothing on the right. */

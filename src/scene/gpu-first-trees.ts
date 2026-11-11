@@ -105,6 +105,11 @@ export class GpuTreeOutputs {
         return this.trees.triangles;
     }
 
+    /** The batch's node format; `SceneTrees` takes only `f32` batches (it quantizes on the way in). */
+    get nodeFormat(): 'f32' | 'quantized' {
+        return this.trees.nodeFormat ?? 'f32';
+    }
+
     /** Every tree of the batch, refused ones included (their `problem` is set). */
     get meshes(): readonly GpuMeshTreeRange[] {
         return this.trees.meshes;

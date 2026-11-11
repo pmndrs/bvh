@@ -86,12 +86,26 @@ export interface GpuBuildOptions {
      * docs/design/indexed-leaves.md). The nodes are the same either way.
      */
     readonly triangleLeaves?: 'records' | 'indexed';
+    /**
+     * The node format the tree is written in: `'f32'` (64 bytes, the default)
+     * or `'quantized'` (32-byte nodes on a per-mesh grid, the frame slot
+     * first; docs/design/compressed-nodes.md).
+     * A coordinate of magnitude 2^100 or more, or a non-finite one, makes a quantized box empty on that axis (hits there are lost).
+     */
+    readonly nodeFormat?: 'f32' | 'quantized';
 }
 
 /** One mesh's tree inside a batch's shared buffers ({@link GpuTreeBuffers}). */
 export interface GpuMeshTreeRange {
-    /** The mesh's node 0 (its root) is this node of the shared node and parent buffers. Child indices are the mesh's own. */
+    /**
+     * The mesh's node 0 (its root) is this node of the shared node buffer
+     * (and of the parent buffer, unless {@link parentOffset} says otherwise).
+     * Child indices are the mesh's own. With quantized nodes, the root's
+     * 32-byte slot; the mesh's frame slot is the one before.
+     */
     readonly nodeOffset: number;
+    /** Where the mesh's parents start in the shared parent buffer, when not at {@link nodeOffset} (quantized trees). */
+    readonly parentOffset?: number;
     readonly nodeCount: number;
     /** The mesh's first triangle in the shared triangle buffer. Leaf indices are the mesh's own. */
     readonly triangleOffset: number;
@@ -111,8 +125,10 @@ export interface GpuMeshTreeRange {
  * They belong to the caller: `destroy()` frees them.
  */
 export interface GpuTreeBuffers {
-    /** 64-byte nodes. */
+    /** 64-byte nodes; or with `nodeFormat: 'quantized'`, each mesh's frame slot and 32-byte nodes. */
     readonly nodes: GPUBuffer;
+    /** How `nodes` stores them; omitted means `'f32'`. */
+    readonly nodeFormat?: 'f32' | 'quantized';
     /** 48-byte triangles (16 with `triangleLeaves: 'indexed'`), each mesh's in tree order. */
     readonly triangles: GPUBuffer;
     /** How `triangles` stores them; omitted means `'records'`. */

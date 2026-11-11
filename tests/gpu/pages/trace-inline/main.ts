@@ -55,11 +55,15 @@ interface Format {
     readonly name: string;
     readonly triangleLeaves: 'records' | 'indexed';
     readonly positionLayout?: 'vec4' | 'packed';
+    /** Quantized nodes (docs/design/compressed-nodes.md); default f32. */
+    readonly nodeFormat?: 'f32' | 'quantized';
 }
 const FORMATS: readonly Format[] = [
     { name: 'records', triangleLeaves: 'records' },
     { name: 'indexed', triangleLeaves: 'indexed' },
     { name: 'indexed-packed', triangleLeaves: 'indexed', positionLayout: 'packed' },
+    { name: 'quantized', triangleLeaves: 'records', nodeFormat: 'quantized' },
+    { name: 'quantized-indexed', triangleLeaves: 'indexed', nodeFormat: 'quantized' },
 ];
 
 const KERNEL_WGSL = /* wgsl */ `
@@ -114,9 +118,10 @@ async function readBuffer(device: GPUDevice, source: GPUBuffer, size: number): P
 async function assemble(oracleCase: OracleCase, format: Format): Promise<TraceSceneData> {
     const builder = createMeshBvhBuilder({ worker: 'auto' });
     try {
-        const bvhs = await Promise.all(oracleCase.meshes.map((mesh) => builder.build(mesh, { triangleLeaves: format.triangleLeaves })));
-        if (format.triangleLeaves === 'records') return assembleTraceScene(bvhs, oracleCase.instances);
-        return assembleTraceScene(bvhs, oracleCase.instances, {}, { triangleLeaves: 'indexed', positionLayout: format.positionLayout, geometries: oracleCase.meshes });
+        const bvhs = await Promise.all(oracleCase.meshes.map((mesh) => builder.build(mesh, { triangleLeaves: format.triangleLeaves, nodeFormat: format.nodeFormat })));
+        const nodes = format.nodeFormat === 'quantized' ? { nodeFormat: 'quantized' as const } : {};
+        if (format.triangleLeaves === 'records') return assembleTraceScene(bvhs, oracleCase.instances, {}, nodes);
+        return assembleTraceScene(bvhs, oracleCase.instances, {}, { triangleLeaves: 'indexed', positionLayout: format.positionLayout, geometries: oracleCase.meshes, ...nodes });
     } finally {
         builder.dispose();
     }
@@ -197,7 +202,7 @@ await runGpuTest(async ({ device, log }) => {
     const references = [];
     for (const oracleCase of oracleCases) references.push(await computeReferenceAnswersYielding(oracleCase));
     for (const format of FORMATS) {
-        const module = traceModuleWgsl({ traceSlot: { group: 0, firstBinding: 0 }, triangleFilter: null, triangleLeaves: format.triangleLeaves, positionLayout: format.positionLayout });
+        const module = traceModuleWgsl({ traceSlot: { group: 0, firstBinding: 0 }, triangleFilter: null, triangleLeaves: format.triangleLeaves, positionLayout: format.positionLayout, nodeFormat: format.nodeFormat });
         const pipeline = await device.createComputePipelineAsync({
             label: `trace-inline ${format.name}`,
             layout: 'auto',

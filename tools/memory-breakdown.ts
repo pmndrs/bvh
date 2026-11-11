@@ -13,6 +13,7 @@
  * - the geometry the app already holds (positions, 32-bit indices as loaded);
  * - ours, from `buildTraceScene` over tinybvh trees (the tracer's default
  *   build: the very scene SceneTrees settles on): nodes, triangle records,
+ *   (and the same with indexed leaves, with quantized nodes, and with both),
  *   parents (a CPU array that is never uploaded), the top level; the same
  *   scene with `mergeStaticInstances`; tinybvh trees at leaves of 1, 2, 4, 8;
  * - the CPU twins' trees (H-PLOC, LBVH): used node counts, against the one node
@@ -347,6 +348,27 @@ async function main(): Promise<void> {
         );
     }
     out.indexed = indexedOut;
+
+    // Quantized nodes (docs/design/compressed-nodes.md): the same tinybvh trees with 32-byte nodes and a 32-byte frame
+    // slot per placed tree, with records and with indexed leaves (vec4, welded); instanced and merged.
+    const quantizedOut: Record<string, { nodes: number; triangles: number; positions: number; topLevel: number; total: number }> = {};
+    for (const [name, options] of [
+        ['instanced, records', { indexed: false, merge: false }],
+        ['instanced, indexed', { indexed: true, merge: false }],
+        ['merged, records', { indexed: false, merge: true }],
+        ['merged, indexed', { indexed: true, merge: true }],
+    ] as const) {
+        const built = await buildTraceScene(geometries, sceneInstances, {
+            build: (g) => buildMeshBvhWithTinyBvh(g, tinyBvh, options.indexed ? { triangleLeaves: 'indexed' } : {}),
+            nodeFormat: 'quantized',
+            ...(options.indexed ? { triangleLeaves: 'indexed' as const } : {}),
+            mergeStaticInstances: options.merge,
+        });
+        const entry = { nodes: built.nodes.byteLength, triangles: built.triangles.byteLength, positions: built.positions.byteLength, topLevel: built.topLevel.buffer.byteLength, total: built.byteLength };
+        quantizedOut[name] = entry;
+        console.log(`  quantized nodes (${name}): nodes ${mib(entry.nodes)} MiB, triangles ${mib(entry.triangles)}, positions ${mib(entry.positions)}, top level ${mib(entry.topLevel)}; total ${mib(entry.total)} MiB`);
+    }
+    out.quantized = quantizedOut;
 
     // Leaf size trend: tinybvh at the layout's allowed leaf sizes.
     const leafTrend: Record<number, { nodes: number; nodeBytes: number; leaves: number; triangles: number }> = {};

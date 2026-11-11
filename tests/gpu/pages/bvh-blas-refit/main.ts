@@ -18,10 +18,21 @@
  * meshes: the last is refit in the scene's shared buffers from
  * `meshRefitPlacement`, and the CPU walk over the read-back buffers must hit
  * what a scene built in that pose hits, on every mesh.
+ *
+ * Quantized nodes (docs/design/compressed-nodes.md): the same frames with
+ * the tree's nodes quantized in the shared buffer (frame slot first). The
+ * refit runs on its own f32 copy and the quantize pass packs it into the
+ * buffer: the read-back nodes must be, bit for bit, the CPU refit's f32 nodes
+ * packed by `quantizeNodeWords` (the GPU and CPU encoders agree), pass the
+ * layout check (every decoded box around the deformed triangles, the frame
+ * the posed root's), and leave the markers alone. The static scene runs
+ * quantized too (with indexed leaves), refit through `meshRefitPlacement`.
  */
 
 import { GpuLbvhBuilder } from '../../../../src/gpu-lbvh.ts';
-import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, type GpuLayoutMeshBvh } from '../../../../src/gpu-layout.ts';
+import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_QUANTIZED_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, type GpuLayoutMeshBvh } from '../../../../src/gpu-layout.ts';
+import { quantizeNodes, quantizeNodeWords } from '../../../../src/quantized-nodes.ts';
+import { PRIMITIVE_BOX_FLOATS, refitOnCpu } from '../../../../src/refit-cpu.ts';
 import { GpuMeshRefit } from '../../../../src/gpu-mesh-refit.ts';
 import { checkGpuLayout } from '../../../../src/layout-check.ts';
 import { createTinyBvhBuilder } from '../../../../src/tinybvh.ts';
@@ -199,6 +210,100 @@ async function refitAcrossFrames(device: GPUDevice, name: string, geometry: Mesh
     return failures;
 }
 
+/** The exact box of every triangle corner of `geometry` (the refit root's box). */
+function meshBox(geometry: MeshInput): Float32Array {
+    const box = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+    const count = geometry.indices ? geometry.indices.length : geometry.positions.length / 3;
+    for (let entry = 0; entry < count; entry++) {
+        const vertex = geometry.indices ? geometry.indices[entry] : entry;
+        for (let axis = 0; axis < 3; axis++) {
+            box[axis] = Math.min(box[axis], geometry.positions[vertex * 3 + axis]);
+            box[axis + 3] = Math.max(box[axis + 3], geometry.positions[vertex * 3 + axis]);
+        }
+    }
+    return Float32Array.from(box);
+}
+
+/**
+ * A tree whose nodes sit quantized in the shared buffer: the refit runs on its
+ * f32 copy and packs it in. Checked bit for bit against the CPU refit packed
+ * on the CPU, and against the deformed mesh by the layout check.
+ */
+async function refitQuantizedAcrossFrames(device: GPUDevice, name: string, geometry: MeshInput, layout: GpuLayoutMeshBvh, log: (message: string) => void): Promise<string[]> {
+    const failures: string[] = [];
+    const quantized = quantizeNodes(layout);
+    // The frame slot sits at NODES_BEFORE, the root right after it.
+    const nodeOffsetBytes = NODES_BEFORE * GPU_LAYOUT_QUANTIZED_NODE_BYTES;
+    const triangleOffsetBytes = TRIANGLES_BEFORE * GPU_LAYOUT_TRIANGLE_BYTES;
+    const nodes = storage(device, `${name} nodes`, placed(quantized.nodes, nodeOffsetBytes));
+    const triangles = storage(device, `${name} triangles`, placed(layout.triangles, triangleOffsetBytes));
+    let indexBuffer: GPUBuffer | null = null;
+    if (geometry.indices) {
+        const padded = new Uint16Array(geometry.indices.length + (geometry.indices.length % 2));
+        padded.set(geometry.indices);
+        indexBuffer = storage(device, `${name} indices`, padded);
+    }
+    const refit = new GpuMeshRefit(device, { label: `${name} refit` });
+    await refit.prepare();
+    refit.setTree(layout, { nodeWordOffset: nodeOffsetBytes / 4 + 8, triangleWordOffset: triangleOffsetBytes / 4, nodeFormat: 'quantized' });
+    let vertexBuffer: GPUBuffer | null = null;
+    // The CPU twin: refit an f32 copy from the moved triangles in tree order, then pack it.
+    const cpuNodes = layout.nodes.slice(0);
+    const order = new Uint32Array(layout.triangles).filter((_, k) => k % 12 === 3);
+    try {
+        for (let frame = 1; frame <= 5; frame++) {
+            const moved = deform(geometry.positions, frame);
+            vertexBuffer?.destroy();
+            vertexBuffer = storage(device, `${name} vertices`, interleave(moved));
+            const encoder = device.createCommandEncoder();
+            const pass = encoder.beginComputePass();
+            refit.encode(pass, { nodes, triangles }, {
+                positionBuffer: vertexBuffer,
+                vertexCount: moved.length / 3,
+                positionStrideFloats: VERTEX_STRIDE,
+                positionOffsetFloats: VERTEX_OFFSET,
+                indexBuffer,
+                indexFormat: 'uint16',
+            });
+            pass.end();
+            device.queue.submit([encoder.finish()]);
+
+            const nodeWords = new Uint32Array(await read(device, nodes));
+            const triangleWords = new Uint32Array(await read(device, triangles));
+            if (!markersIntact(nodeWords, nodeOffsetBytes, quantized.nodes.byteLength)) failures.push(`${name} frame ${frame}: the refit wrote outside the mesh's quantized nodes`);
+            if (!markersIntact(triangleWords, triangleOffsetBytes, layout.triangles.byteLength)) failures.push(`${name} frame ${frame}: the refit wrote outside the mesh's triangles`);
+            const refitNodes = nodeWords.buffer.slice(nodeOffsetBytes, nodeOffsetBytes + quantized.nodes.byteLength);
+            const refitTriangles = triangleWords.buffer.slice(triangleOffsetBytes, triangleOffsetBytes + layout.triangles.byteLength);
+            const posed = { positions: moved, indices: geometry.indices };
+            const problems = checkGpuLayout({ ...quantized, nodes: refitNodes, triangles: refitTriangles, bounds: meshBox(posed) }, posed);
+            for (const problem of problems.slice(0, 5)) failures.push(`${name} frame ${frame}: ${problem}`);
+
+            const boxes = new Float32Array(layout.triangleCount * PRIMITIVE_BOX_FLOATS);
+            order.forEach((triangle, slot) => {
+                for (let axis = 0; axis < 3; axis++) {
+                    const values = [0, 1, 2].map((corner) => moved[(geometry.indices ? geometry.indices[triangle * 3 + corner] : triangle * 3 + corner) * 3 + axis]);
+                    boxes[slot * PRIMITIVE_BOX_FLOATS + axis] = Math.min(...values);
+                    boxes[slot * PRIMITIVE_BOX_FLOATS + 4 + axis] = Math.max(...values);
+                }
+            });
+            refitOnCpu(new Float32Array(cpuNodes), new Uint32Array(cpuNodes), 0, layout.nodeCount, layout.parents, boxes);
+            const expected = new Uint32Array(quantized.nodes.byteLength / 4);
+            quantizeNodeWords(new Float32Array(cpuNodes), new Uint32Array(cpuNodes), 0, layout.nodeCount, expected, 0);
+            const actual = new Uint32Array(refitNodes);
+            const differing = expected.reduce((count, word, at) => count + (word === actual[at] ? 0 : 1), 0);
+            if (differing > 0) failures.push(`${name} frame ${frame}: ${differing} words of the GPU-packed nodes differ from the CPU refit packed on the CPU`);
+            log(`${name} frame ${frame}: ${problems.length === 0 && differing === 0 ? 'packed nodes match the CPU twin bit for bit and contain the deformed mesh' : `${problems.length} problems, ${differing} words differ`}`);
+        }
+    } finally {
+        vertexBuffer?.destroy();
+        nodes.destroy();
+        triangles.destroy();
+        indexBuffer?.destroy();
+        refit.dispose();
+    }
+    return failures;
+}
+
 /** Vertices in front of the mesh in the scene's positions buffer. */
 const VERTICES_BEFORE = 9;
 
@@ -281,8 +386,14 @@ async function refitIndexedAcrossFrames(
  * read-back buffers must hit, on every mesh, what a scene built in that pose
  * hits: a refit at the wrong vertex base writes another mesh's positions.
  */
-async function refitIndexedSceneMesh(device: GPUDevice, tinyBvh: Awaited<ReturnType<typeof createTinyBvhBuilder>>, positionLayout: 'vec4' | 'packed', log: (message: string) => void): Promise<string[]> {
-    const name = `static indexed scene (${positionLayout})`;
+async function refitIndexedSceneMesh(
+    device: GPUDevice,
+    tinyBvh: Awaited<ReturnType<typeof createTinyBvhBuilder>>,
+    positionLayout: 'vec4' | 'packed',
+    log: (message: string) => void,
+    nodeFormat: 'f32' | 'quantized' = 'f32',
+): Promise<string[]> {
+    const name = `static indexed scene (${positionLayout}${nodeFormat === 'quantized' ? ', quantized nodes' : ''})`;
     const failures: string[] = [];
     const meshes: MeshGeometry[] = [grid(30), soup(400), grid(40)];
     const instances: TraceSceneInstance[] = meshes.map((_, index) => ({
@@ -305,7 +416,7 @@ async function refitIndexedSceneMesh(device: GPUDevice, tinyBvh: Awaited<ReturnT
     } catch {
         // Expected: a welded mesh's numbering is not the app's.
     }
-    const scene = await buildTraceScene(meshes, instances, { build: indexed, triangleLeaves: 'indexed', positionLayout, weld: false });
+    const scene = await buildTraceScene(meshes, instances, { build: indexed, triangleLeaves: 'indexed', positionLayout, weld: false, nodeFormat });
     const placement = meshRefitPlacement(scene, refitMesh);
     const tree = indexed(meshes[refitMesh]);
     const nodes = storage(device, `${name} nodes`, new Uint32Array(scene.nodes));
@@ -356,8 +467,13 @@ async function refitIndexedSceneMesh(device: GPUDevice, tinyBvh: Awaited<ReturnT
 }
 
 await runGpuTest(
-    async ({ device, log }) => {
+    async ({ device, log: pageLog }) => {
         assert(GpuMeshRefit.isSupported(device), 'the BLAS refit needs subgroups');
+        const lines: string[] = [];
+        const log = (line: string): void => {
+            lines.push(line);
+            pageLog(line);
+        };
         const lbvh = new GpuLbvhBuilder(device);
         await lbvh.prepare();
         const tinyBvh = await createTinyBvhBuilder();
@@ -369,14 +485,16 @@ await runGpuTest(
             assert(gpuLayout !== null, `${name}: the GPU LBVH refused the mesh`);
             failures.push(...(await refitAcrossFrames(device, `${name} (GPU LBVH)`, geometry, gpuLayout, log)));
             failures.push(...(await refitAcrossFrames(device, `${name} (tinybvh)`, geometry, tinyBvh.buildLayout(geometry).layout, log)));
+            failures.push(...(await refitQuantizedAcrossFrames(device, `${name} (GPU LBVH, quantized)`, geometry, gpuLayout, log)));
             for (const positionLayout of ['vec4', 'packed'] as const) {
                 const indexed = tinyBvh.buildLayout(geometry, { triangleLeaves: 'indexed' }).layout;
                 failures.push(...(await refitIndexedAcrossFrames(device, `${name} (indexed, ${positionLayout})`, geometry, indexed, positionLayout, log)));
             }
         }
         for (const positionLayout of ['vec4', 'packed'] as const) failures.push(...(await refitIndexedSceneMesh(device, tinyBvh, positionLayout, log)));
+        failures.push(...(await refitIndexedSceneMesh(device, tinyBvh, 'vec4', log, 'quantized')));
         assert(failures.length === 0, failures.slice(0, 12).join('\n'));
-        return {};
+        return { checks: lines };
     },
     { optionalFeatures: ['subgroups'] },
 );

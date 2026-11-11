@@ -140,8 +140,9 @@ fn benchFinishAny(countsIn: BenchCounts, blocked: bool) -> BenchCounts {
  * counters out, one {@link COUNTED_WORDS}-word record per ray. Dispatches are
  * 2D, as the production batch kernel's.
  */
-export function countedKernelWgsl(mode: 'closest' | 'any'): string {
-    return /* wgsl */ `${traceModuleWgsl({ rayMasks: true })}
+export function countedKernelWgsl(mode: 'closest' | 'any', format: { readonly nodeFormat?: 'f32' | 'quantized' } = {}): string {
+    // The walk's text is the same in every node format (wgsl.ts), so the counted copy applies to all.
+    return /* wgsl */ `${traceModuleWgsl({ rayMasks: true, nodeFormat: format.nodeFormat })}
 ${BENCH_HELPERS_WGSL}
 ${countedWalkWgsl({ kind: mode, name: 'benchCountedWalk', counters: true })}
 

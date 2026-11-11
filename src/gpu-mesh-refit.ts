@@ -27,6 +27,14 @@
  * the shape never changes while the mesh deforms, so that is a one-off at
  * build time, not a per-frame readback.
  *
+ * **Quantized nodes** (docs/design/compressed-nodes.md): the climb hands
+ * boxes over through the node's own `f32` words, which 16-bit planes can't
+ * take part in. So a mesh whose target holds quantized nodes keeps a 64-byte
+ * `f32` copy of its nodes here (the refit runs on it unchanged), and a third
+ * step in the same pass, the quantize pass (gpu-quantize.ts), packs the copy
+ * into the target's frame slot and nodes. The frame follows the pose. Cost:
+ * 64 bytes per node of the mesh, for deforming meshes only.
+ *
  * A refit tree slowly gets worse as triangles move away from where it was
  * built. The refit's quality signal (`latestStats.relativeCost`, with
  * `diagnostics: true`) is the same as the top level's, so a caller can rebuild
@@ -39,6 +47,8 @@ import { LBVH_INDEX_FORMAT } from './gpu-lbvh-wgsl.ts';
 import { GpuBvhRefit, GpuBvhRefitKernels, type BvhRefitStats, type GpuBvhRefitOptions } from './gpu-refit.ts';
 import { leafSlotsOf, parentSlotsOf, PRIMITIVE_BOX_FLOATS } from './refit-cpu.ts';
 import { dispatchWorkgroups2d, WORKGROUP_INDEX_WGSL } from './gpu-workgroup-scan.ts';
+import { nodeQuantizerFor, type QuantizeJob } from './gpu-quantize.ts';
+import { dequantizeNodes } from './quantized-nodes.ts';
 
 const WORKGROUP_SIZE = 64;
 const PARAM_WORDS = 8;
@@ -278,6 +288,8 @@ export class GpuMeshRefit {
     private indexed: { vertexBase: number; vertexCount: number | null; sceneStride: number } | null = null;
     private readonly indexedParams: GPUBuffer;
     private indexedGroups: { copy: GPUBindGroup; boxes: GPUBindGroup; key: readonly unknown[] } | null = null;
+    /** A quantized target: the f32 copy the refit runs on, the target's root slot, and the quantize job for the current target buffer. */
+    private quantized: { shadow: GPUBuffer; rootSlot: number; nodeCount: number; job: QuantizeJob | null; jobTarget: GPUBuffer | null } | null = null;
 
     constructor(device: GPUDevice, options: GpuMeshRefitOptions = {}) {
         this.device = device;
@@ -323,6 +335,13 @@ export class GpuMeshRefit {
             vertexCount?: number;
             /** Indexed trees: the positions buffer's layout. Default `'vec4'`. */
             positionLayout?: 'vec4' | 'packed';
+            /**
+             * The target's node format. Default: the layout's. With
+             * `'quantized'`, `nodeWordOffset` is the root's (its frame slot is
+             * the 8 words before; default 8, a tree in its own buffer), and
+             * the refit runs on an `f32` copy then packs it into the target.
+             */
+            nodeFormat?: 'f32' | 'quantized';
         } = {},
     ): void {
         if (layout.triangleLeaves === 'indexed' && placement.vertexBase === undefined) {
@@ -333,8 +352,29 @@ export class GpuMeshRefit {
                 ? { vertexBase: placement.vertexBase!, vertexCount: placement.vertexCount ?? null, sceneStride: placement.positionLayout === 'packed' ? 3 : 4 }
                 : null;
         if (this.indexed) this.device.queue.writeBuffer(this.indexedParams, 0, new Uint32Array([this.indexed.vertexBase, this.indexed.sceneStride, 0, 0]));
-        const words = new Uint32Array(layout.nodes, 0, layout.nodeCount * 16);
-        const nodeWordOffset = placement.nodeWordOffset ?? 0;
+        const quantized = (placement.nodeFormat ?? layout.nodeFormat ?? 'f32') === 'quantized';
+        // The shape (child indices and counts) from f32 nodes; a quantized layout is decoded for it.
+        const f32Nodes = dequantizeNodes(layout).nodes;
+        const words = new Uint32Array(f32Nodes, 0, layout.nodeCount * 16);
+        let nodeWordOffset = placement.nodeWordOffset ?? 0;
+        this.quantized?.job?.destroy();
+        if (quantized) {
+            const rootWord = placement.nodeWordOffset ?? 8;
+            if (rootWord < 8 || rootWord % 8 !== 0) throw new RangeError(`GpuMeshRefit.setTree: a quantized target's nodeWordOffset (${rootWord}) must be a 32-byte slot after the frame slot`);
+            const bytes = layout.nodeCount * 64;
+            let shadow = this.quantized?.shadow ?? null;
+            if (!shadow || shadow.size < bytes) {
+                shadow?.destroy();
+                shadow = this.device.createBuffer({ label: `${this.label} f32 nodes`, size: Math.max(64, bytes), usage: USAGE.STORAGE | USAGE.COPY_DST });
+            }
+            // The refit rewrites every box; only the indices and counts must be right.
+            this.device.queue.writeBuffer(shadow, 0, f32Nodes, 0, bytes);
+            this.quantized = { shadow, rootSlot: rootWord / 8, nodeCount: layout.nodeCount, job: null, jobTarget: null };
+            nodeWordOffset = 0;
+        } else if (this.quantized) {
+            this.quantized.shadow.destroy();
+            this.quantized = null;
+        }
         this.refit.setShape({
             nodeWordOffset,
             nodeCount: layout.nodeCount,
@@ -392,12 +432,28 @@ export class GpuMeshRefit {
             pass.setBindGroup(0, this.bindGroup(pipeline, target.triangles, vertices.positionBuffer, vertices.indexBuffer ?? vertices.positionBuffer));
             dispatchWorkgroups2d(pass, Math.ceil(this.triangleCount / WORKGROUP_SIZE), maxGroups);
         }
-        this.refit.encode(pass, target.nodes, this.boxes);
+        if (this.quantized) {
+            // Refit the f32 copy, then pack it into the target's frame slot and nodes (ordered after it in the pass).
+            this.refit.encode(pass, this.quantized.shadow, this.boxes);
+            this.quantizeJob(target.nodes).dispatch(pass);
+        } else {
+            this.refit.encode(pass, target.nodes, this.boxes);
+        }
+    }
+
+    private quantizeJob(nodes: GPUBuffer): QuantizeJob {
+        const quantized = this.quantized!;
+        if (!quantized.job || quantized.jobTarget !== nodes) {
+            quantized.job?.destroy();
+            quantized.job = nodeQuantizerFor(this.device).prepare(quantized.shadow, nodes, [{ sourceNodeOffset: 0, targetRootSlot: quantized.rootSlot, nodeCount: quantized.nodeCount }], `${this.label} quantize`);
+            quantized.jobTarget = nodes;
+        }
+        return quantized.job;
     }
 
     /** GPU bytes of this refit's own buffers (the tree belongs to the caller). */
     get memoryBytes(): number {
-        return this.refit.memoryBytes + this.params.size + this.boxes.size;
+        return this.refit.memoryBytes + this.params.size + this.boxes.size + (this.quantized?.shadow.size ?? 0);
     }
 
     /** Stats readback (diagnostics only), as for the top-level refit: poll at a frame's start, copy after the submit's encode. */
@@ -414,6 +470,9 @@ export class GpuMeshRefit {
         this.params.destroy();
         this.indexedParams.destroy();
         this.boxes.destroy();
+        this.quantized?.job?.destroy();
+        this.quantized?.shadow.destroy();
+        this.quantized = null;
     }
 
     private indexedBindGroups(

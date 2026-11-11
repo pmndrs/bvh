@@ -55,6 +55,7 @@ import {
 import type { GpuBuildOptions } from './mesh-input.ts';
 import { mortonCodes, packTrianglesInOrder, singleTriangleLayout, triangleBoxes } from './lbvh-cpu.ts';
 import type { MeshInput } from './mesh-input.ts';
+import { builderNodeFormat } from './quantized-nodes.ts';
 
 const f = Math.fround;
 const FLOAT_MAX = 3.4028234663852886e38;
@@ -419,5 +420,5 @@ export function buildHplocOnCpu(geometry: MeshInput, options: HplocOptions = {})
     const { boxes, centroidBounds } = triangleBoxes(geometry);
     const { high, low } = hplocMortonKeys(boxes, centroidBounds, options.mortonCodes ?? 'cubic-30');
     const order = hplocSortedOrder(high, low);
-    return hplocLayout(geometry, buildHplocClusters(boxes, order, high, low, options.tieBreak), options);
+    return builderNodeFormat(hplocLayout(geometry, buildHplocClusters(boxes, order, high, low, options.tieBreak), options), options.nodeFormat, 'buildHplocOnCpu');
 }

@@ -46,7 +46,8 @@
  * (`device.adapterInfo.subgroupMinSize`), never on a fixed warp width.
  */
 
-import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, gpuLayoutTriangleBytes, type GpuLayoutMeshBvh, type GpuLayoutTriangleLeaves } from './gpu-layout.ts';
+import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, gpuLayoutTriangleBytes, type GpuLayoutMeshBvh, type GpuLayoutNodeFormat, type GpuLayoutTriangleLeaves } from './gpu-layout.ts';
+import { quantizeTreeBuffers } from './gpu-quantize.ts';
 import {
     allocatedBytes,
     batchTotals,
@@ -472,6 +473,8 @@ export class GpuHplocBatch {
     readonly meshCount: number;
     /** The triangle format the batch writes. */
     readonly triangleLeaves: GpuLayoutTriangleLeaves;
+    /** The node format `finish` hands out (the batch builds `f32` nodes either way). */
+    readonly nodeFormat: GpuLayoutNodeFormat;
     private readonly device: GPUDevice;
     private readonly label: string;
     private readonly mortonCodes: HplocMortonCodes;
@@ -519,6 +522,7 @@ export class GpuHplocBatch {
         const totals = batchTotals(this.meshes);
         const sizes = hplocBatchBuffers(totals, options.mortonCodes, options.triangleLeaves);
         this.triangleLeaves = options.triangleLeaves;
+        this.nodeFormat = options.nodeFormat;
         if (tables.byteLength !== sizes.tables || sortTable.offsetWords * 4 !== sizes.sortOffsets) throw new Error('hplocBatchBuffers is out of step with buildTables');
         const output = USAGE.STORAGE | USAGE.COPY_SRC | USAGE.COPY_DST;
         const make = (name: string, bytes: number, usage: number, owned = true): GPUBuffer => {
@@ -762,7 +766,7 @@ export class GpuHplocBatch {
             // From here the outputs are the caller's; if the read above failed, destroy() frees them with the rest.
             this.finished = true;
             const { outNodes, outTriangles, outParents } = this.buffers;
-            return {
+            const trees: GpuTreeBuffers = {
                 nodes: outNodes,
                 triangles: outTriangles,
                 triangleLeaves: this.triangleLeaves,
@@ -777,6 +781,8 @@ export class GpuHplocBatch {
                     outParents.destroy();
                 },
             };
+            // Built f32 (the climb and the leaf collapse need f32 boxes), then packed.
+            return this.nodeFormat === 'quantized' ? quantizeTreeBuffers(device, trees, this.label) : trees;
         } finally {
             readback.destroy();
             this.destroy();

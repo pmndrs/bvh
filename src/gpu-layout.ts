@@ -31,6 +31,10 @@
  * beside the records ({@link GpuLayoutTriangleLeaves}). It is a variant of
  * version 2, not a new version: serialized trees name their format in header
  * word 7 (0 records, 1 indexed), and records are unchanged.
+ * Also in 2, before its release: quantized nodes, a second node format beside
+ * the 64-byte nodes ({@link GpuLayoutNodeFormat}). A variant of version 2 too:
+ * serialized trees name it in bits 8-15 of header word 7 (0 `f32`, 1
+ * quantized), and 64-byte nodes are unchanged.
  */
 export const GPU_LAYOUT_VERSION = 2;
 
@@ -60,6 +64,74 @@ export const GPU_LAYOUT_NODE_WORD = {
     rightMax: 12,
     rightCount: 15,
 } as const;
+
+/**
+ * How a tree stores its nodes (docs/design/compressed-nodes.md). Every tree
+ * and scene is one or the other, and the walk is compiled for one
+ * (`traceModuleWgsl({ nodeFormat })`):
+ *
+ * - `'f32'` (the default): 64-byte nodes with `f32` child boxes,
+ *   {@link GPU_LAYOUT_NODE_WORD}.
+ * - `'quantized'`: 32-byte nodes, {@link GPU_LAYOUT_QUANTIZED_NODE_WORD}: each
+ *   child box as 16-bit planes on a grid (the frame) that covers the mesh, and
+ *   each child as one stack reference. The buffer starts with the frame slot
+ *   (32 bytes, {@link GPU_LAYOUT_NODE_FRAME_WORD}), then the nodes: node `i`
+ *   is slot `i + 1`, so `nodes` holds `nodeCount + 1` slots. A scene keeps the
+ *   frame slot right before each mesh's root (`rootNodeOffset - 1`). Boxes are
+ *   rounded outward, so a decoded box always contains the exact one.
+ */
+export type GpuLayoutNodeFormat = 'f32' | 'quantized';
+
+/** One quantized node: two child boxes as 16-bit planes and two references, 32 bytes (two `vec4u`). */
+export const GPU_LAYOUT_QUANTIZED_NODE_BYTES = 32;
+export const GPU_LAYOUT_QUANTIZED_NODE_WORDS = GPU_LAYOUT_QUANTIZED_NODE_BYTES / 4;
+
+/**
+ * Word positions inside a quantized node. Child `side` (0 left, 1 right) has
+ * its three axis words at `4 * side` and its reference at `4 * side + 3`. An
+ * axis word holds the min plane in bits 0-15 and the max plane in bits 16-31,
+ * each a step count from the frame's origin: plane = `origin + q * step`. A
+ * reference is the walk's stack reference: index in bits 0-27, leaf count in
+ * bits 28-31 (0 for an inner node); a missing right child is
+ * {@link GPU_LAYOUT_EMPTY_CHILD}.
+ */
+export const GPU_LAYOUT_QUANTIZED_NODE_WORD = {
+    leftX: 0,
+    leftY: 1,
+    leftZ: 2,
+    leftReference: 3,
+    rightX: 4,
+    rightY: 5,
+    rightZ: 6,
+    rightReference: 7,
+} as const;
+
+/**
+ * Word positions inside a frame slot (32 bytes, the size of a quantized
+ * node): the grid's origin and its step per axis, as `f32`. Each step is a
+ * power of two and each origin a multiple of its step, so every plane
+ * `origin + q * step` is an exact `f32` (`nodeFrameOf`, quantized-nodes.ts).
+ * Words 3 and 7 are 0.
+ */
+export const GPU_LAYOUT_NODE_FRAME_WORD = {
+    origin: 0,
+    step: 4,
+} as const;
+
+/** Bytes per node slot of a format. */
+export function gpuLayoutNodeBytes(format: GpuLayoutNodeFormat | undefined): number {
+    return format === 'quantized' ? GPU_LAYOUT_QUANTIZED_NODE_BYTES : GPU_LAYOUT_NODE_BYTES;
+}
+
+/** Slots a tree's `nodes` takes: `nodeCount`, plus the frame slot when quantized. */
+export function gpuLayoutNodeSlots(nodeCount: number, format: GpuLayoutNodeFormat | undefined): number {
+    return format === 'quantized' ? nodeCount + 1 : nodeCount;
+}
+
+/** Bytes a tree's `nodes` takes in a format. */
+export function gpuLayoutNodeBufferBytes(nodeCount: number, format: GpuLayoutNodeFormat | undefined): number {
+    return gpuLayoutNodeSlots(nodeCount, format) * gpuLayoutNodeBytes(format);
+}
 
 /** Words between the left child's box and the right child's box (see {@link GPU_LAYOUT_NODE_WORD}). */
 export const GPU_LAYOUT_CHILD_STRIDE_WORDS = 8;
@@ -158,8 +230,14 @@ export const GPU_LAYOUT_MAX_TRIANGLES = 0x0fffffff;
 
 /** A mesh's tree in the GPU layout. The same shape as the tracer's `MeshBvh`. */
 export interface GpuLayoutMeshBvh {
-    /** `nodeCount` nodes, 64 bytes each. Node 0 is the root. */
+    /**
+     * `nodeCount` nodes, 64 bytes each; node 0 is the root. With
+     * `nodeFormat: 'quantized'`, the frame slot and then `nodeCount` 32-byte
+     * nodes ({@link gpuLayoutNodeBufferBytes}); node `i` is slot `i + 1`.
+     */
     readonly nodes: ArrayBuffer;
+    /** How `nodes` stores them; omitted means `'f32'`. */
+    readonly nodeFormat?: GpuLayoutNodeFormat;
     /** `triangleCount` triangles in tree order: 48 bytes each, or 16 with `triangleLeaves: 'indexed'`. */
     readonly triangles: ArrayBuffer;
     /** How `triangles` stores them; omitted means `'records'`. */

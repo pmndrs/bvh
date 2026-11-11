@@ -30,6 +30,12 @@
  *   `surface-rays/paired/triangle_leaves/<tree>/<set>/<mode>/<layout>_mrays_per_s_*` the rates,
  *   `.../<layout>/agreement_with_records` the share of identical answers (must be 1), and
  *   `surface-rays/triangle_leaves/<layout>/<tree>/bytes_{nodes,triangles,positions,topLevel}`;
+ * - `surface-rays/paired/quantized_over_f32/<tree>/<set>/<mode>/{median,min,max}_of_rounds`
+ *   (and `.../round<k>`): quantized nodes over f32 nodes, the same trees, within a round (above 1:
+ *   quantized is faster); `surface-rays/paired/node_format/<tree>/<set>/<mode>/<format>_mrays_per_s_*`
+ *   the rates; `surface-rays/node_format/<tree>/<set>/<mode>/{same,ties,different}` the answers
+ *   against f32 (different must be 0), `.../<format>/{steps,mesh_nodes,triangle_tests}` the counted
+ *   walk per ray, and `surface-rays/node_format/<format>/<tree>/bytes_nodes`;
  * - `surface-rays/<tree>/<set>/<mode>/{steps,instances_entered,instances_entered_without_hit,...}`:
  *   the counted walk's mean work per ray;
  * - `surface-rays/<tree>/<set>/<mode>/agreement_with_instanced`: merged tree only;
@@ -163,6 +169,46 @@ export function surfaceRaysRows(data: SurfaceRaysData): { timed: MetricRow[]; co
         for (const entry of leaves.agreement) counted.push({ scene, metric: `surface-rays/paired/triangle_leaves/${entry.tree}/${entry.set}/${entry.mode}/${entry.layout}/agreement_with_records`, value: entry.same / entry.rays });
         for (const [name, bytes] of Object.entries(leaves.bytes)) {
             for (const [part, value] of Object.entries(bytes)) counted.push({ scene, metric: `surface-rays/triangle_leaves/${name}/bytes_${part}`, value });
+        }
+    }
+    const nodes = data.nodeFormat;
+    if (nodes) {
+        for (const entry of nodes.entries) {
+            const prefix = `surface-rays/paired/node_format/${entry.tree}/${entry.set}/${entry.mode}/${entry.layout}`;
+            const loaded = [...entry.mraysPerRound].sort((a, b) => a - b);
+            timed.push(
+                { scene, metric: `${prefix}_mrays_per_s_median_of_rounds`, value: middle(loaded) },
+                { scene, metric: `${prefix}_mrays_per_s_min_of_rounds`, value: loaded[0] },
+                { scene, metric: `${prefix}_mrays_per_s_max_of_rounds`, value: loaded[loaded.length - 1] },
+            );
+        }
+        for (const ratio of nodes.ratios) {
+            const prefix = `surface-rays/paired/${ratio.name}`;
+            timed.push(
+                { scene, metric: `${prefix}/median_of_rounds`, value: ratio.median },
+                { scene, metric: `${prefix}/min_of_rounds`, value: ratio.min },
+                { scene, metric: `${prefix}/max_of_rounds`, value: ratio.max },
+            );
+            ratio.perRound.forEach((value, round) => timed.push({ scene, metric: `${prefix}/round${round + 1}`, value }));
+        }
+        for (const entry of nodes.agreement) {
+            const prefix = `surface-rays/node_format/${entry.tree}/${entry.set}/${entry.mode}`;
+            counted.push({ scene, metric: `${prefix}/same`, value: entry.same }, { scene, metric: `${prefix}/ties`, value: entry.ties }, { scene, metric: `${prefix}/different`, value: entry.different });
+        }
+        for (const entry of nodes.counts) {
+            for (const format of ['f32', 'quantized'] as const) {
+                const prefix = `surface-rays/node_format/${entry.tree}/${entry.set}/${entry.mode}/${format}`;
+                const summary = entry[format];
+                counted.push(
+                    { scene, metric: `${prefix}/steps`, value: summary.meanSteps },
+                    { scene, metric: `${prefix}/mesh_nodes`, value: summary.meanMeshNodes },
+                    { scene, metric: `${prefix}/triangle_tests`, value: summary.meanTriangleTests },
+                );
+            }
+        }
+        for (const [name, value] of Object.entries(nodes.bytes)) {
+            const [format, tree] = name.split('/');
+            counted.push({ scene, metric: `surface-rays/node_format/${format}/${tree}/bytes_nodes`, value });
         }
     }
     return { timed, counted };
