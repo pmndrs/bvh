@@ -156,3 +156,14 @@ describe('SeparatingAxisBounds', () => {
         expect([b.min, b.max]).toEqual([-3, 4]);
     });
 });
+
+describe('boxArraysIntersect and NaN', () => {
+    it('treats a box with a NaN bound as overlapping nothing, as three does', async () => {
+        const { boxArraysIntersect } = await import('./shapes.ts');
+        const unit = [0, 0, 0, 1, 1, 1];
+        expect(boxArraysIntersect(unit, [0.5, 0.5, 0.5, 2, 2, 2])).toBe(true);
+        expect(boxArraysIntersect(unit, [1, 1, 1, 2, 2, 2])).toBe(true); // touching counts
+        expect(boxArraysIntersect(unit, [NaN, 0, 0, 1, 1, 1])).toBe(false);
+        expect(boxArraysIntersect([0, 0, 0, NaN, 1, 1], unit)).toBe(false);
+    });
+});

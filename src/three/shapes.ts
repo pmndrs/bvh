@@ -36,7 +36,8 @@ export { SeparatingAxisBounds };
 /**
  * three-mesh-bvh's `ExtendedTriangle`: a three `Triangle` with cached
  * separating axes, plane and degeneracy. Set `needsUpdate` after moving `a`,
- * `b` or `c` (`set` and `copy` do).
+ * `b` or `c` (`set` and `copy` do; three's inherited `setFromPointsAndIndices`
+ * and `setFromAttributeAndIndices` don't, as in three-mesh-bvh).
  */
 export class ExtendedTriangle extends Triangle implements ExtendedTriangleState {
     readonly isExtendedTriangle = true as const;

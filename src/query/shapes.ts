@@ -220,9 +220,12 @@ export function transformBoxArray(box: ArrayLike<number>, e: ArrayLike<number>, 
     out[5] = maxZ;
 }
 
-/** Whether two boxes `[min..., max...]` overlap, touching included (three's `Box3.intersectsBox`). */
+/**
+ * Whether two boxes `[min..., max...]` overlap, touching included (three's `Box3.intersectsBox`).
+ * Written as three writes it, so a NaN anywhere gives false (no overlap), not true.
+ */
 export function boxArraysIntersect(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
-    return !(b[3] < a[0] || b[0] > a[3] || b[4] < a[1] || b[1] > a[4] || b[5] < a[2] || b[2] > a[5]);
+    return b[3] >= a[0] && b[0] <= a[3] && b[4] >= a[1] && b[1] <= a[4] && b[5] >= a[2] && b[2] <= a[5];
 }
 
 /** Whether a sphere touches a box (three's `Sphere.intersectsBox`). */

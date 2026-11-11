@@ -96,6 +96,7 @@ raycaster.firstHitOnly = true;                      // optional
 - **Materials:** the triangle ranges are cached per material and draw range, and checked against the groups and the materials an array holds. Swapping `mesh.material[i]` is picked up, and each material's `side` is read at every raycast.
 - **All hits:** without `firstHitOnly`, every hit is returned, as three does. The triangle filter collects them.
 - **Falls back to three's raycast** when the geometry has no tree, for a `SkinnedMesh`, or when there are morph targets.
+- **Queries read the tree's triangles.** `shapecast`, `bvhcast` and `intersects*` hand over the corners stored in the tree, not the geometry's current positions. After editing positions, call `boundsTree.refit()` first (three-mesh-bvh reads the geometry, so it sees edits straight away). `intersectsGeometry` against a bare geometry recomputes that geometry's bounds rather than trusting `geometry.boundingBox`.
 - **Edited geometry:** if the position attribute's version, or the index (object or version), changed since `computeBoundsTree`, the raycast falls back to three's own and warns once. It stays that way until `geometry.boundsTree.refit()` (same index) or `computeBoundsTree` runs again.
 - **Not matched:** a range that starts off a multiple of 3.
 - **Tested:** `src/three/raycast.test.ts` checks it against three on 8,000 random rays.
