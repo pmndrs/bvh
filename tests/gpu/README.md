@@ -21,6 +21,15 @@ The scene benches (`trace-bench-*`, `tools/*.ts`) read models and scene manifest
 
 The models must be the converted ones that webgpu-ddgi's `pnpm assets:fetch` produces; a checkout that only has the raw downloads will fail with "model file not found". Nothing from these folders is copied into this repository. A page that needs a scene that isn't there fails with a message naming the variable.
 
+## Surface-ray pages (instanced tree against merged tree)
+
+`trace-bench-surface-sponza` and `trace-bench-surface-bistro-interior` (manual pages, run by exact name) trace rays that start on surfaces (`surface`, RC1.5's screen-probe set) and in the air (`air-grid`), closest and any hit, through the per-mesh instanced tree and the merged tree (`buildTraceScene(..., { mergeStaticInstances: true })`, every instance `static: true`). The two trees are timed in turn, 5 rounds with the order reversed every other round, then the surface sets again at the end; the merged-over-instanced ratio is taken within each round and is the result (the M5 drifts by up to about 30%). Counters (steps, instances entered) come from a counted copy of the walk built from the production walk's text (`counted-walk-wgsl.ts`). The page fails only if the trees disagree on hits; timing never fails it. `?profile=quick` runs 3 short rounds.
+
+```
+BVH_ASSETS_DIR=<assets> BVH_MANIFESTS_DIR=<manifests> pnpm test:gpu:page trace-bench-surface-sponza --json out.json
+node tests/gpu/pages/trace-bench/surface-to-csv.ts out.json [more.json ...] [--append]   # rows for bench/results/trace.csv
+```
+
 ## Not here
 
 - `platform-bench.ts` and the `platform` tracer of `trace-bench` compared against ddgi's own platform tracer; the `platform*` variants of `trace-oracle` and the createGI/technique version of `trace-inline` tested ddgi's platform. They live on in webgpu-ddgi.
