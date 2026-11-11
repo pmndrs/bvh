@@ -75,11 +75,11 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 | # | three-mesh-bvh | Status | Ours / what is missing | Who needs it |
 | --- | --- | --- | --- | --- |
 | 5.1 | `ObjectBVH` as the GPU scene input (`BVHComputeData`) | have | `SceneTrees` with `SceneTreesObject3DSync` and the GPU top level (`src/scene/scene-trees.ts`, `src/three/scene-trees-sync.ts`) | Denoiser (`reflections-rooms.ts:300`, `shadows-split.ts:311-315`), upscaler (`RealtimeRadianceCascades.js:629`), ddgi-research (`src/provider.js:10`), reflections (`three/src/trace/MeshBVHTraceProvider.ts:492`, which already has a sibling `PmndrsBvhTraceProvider.ts`) |
-| 5.2 | `ObjectBVH.raycast(raycaster)` (CPU scene raycast) | missing | The CPU walk covers a `TraceSceneData` with instances (`createCpuTracer`, `src/trace/cpu-traversal.ts:138`), but there is no `Raycaster` entry point over a scene | None (homefig and drei raycast per mesh) |
+| 5.2 | `ObjectBVH.raycast(raycaster)` (CPU scene raycast) | have | `raycastScene(picker, raycaster)` / `BvhSceneRaycaster.raycast` in `/three` (`src/three/scene-raycast.ts`) returns three's `intersectObject(root, true)` from one CPU walk over the top level (`CpuSceneBvh`, `src/query/cpu-scene.ts`); tested against three's raycast. Layers 8-31 and skinned poses differ (`docs/three.md`) | None (homefig and drei raycast per mesh) |
 | 5.3 | `ObjectBVH.shapecast` | missing | | None found |
 | 5.4 | `InstancedMesh` | have | `bvhSceneFromObject3D` (instances below `count`, `src/three/scene.ts`); raycast through `Mesh.raycast` (`docs/three.md`) | None found (homefig `bvh-ecctrl.tsx:248` excludes `InstancedMesh` from colliders; unverified why) |
 | 5.5 | `BatchedMesh` and `computeBatchedBoundsTree(index)` | partial | Scene read and raycast work (`docs/three.md`: call `batchedMesh.geometry.computeBoundsTree()`). No per-geometry-index `computeBatchedBoundsTree` | None |
-| 5.6 | Frustum culling over the object BVH | missing | P8 lists it; no example named it in the README list | None |
+| 5.6 | Frustum culling over the object BVH | have | `BvhSceneRaycaster.intersectsFrustum(frustum, layers)` and `CpuSceneBvh.intersectsFrustum(planes)` / `intersectsBox(box)` walk the top level; tested against brute force over every world box | None |
 
 ## 6. Deforming meshes, three integration
 
@@ -127,7 +127,7 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 
 ## Counts
 
-51 rows: **29 have, 7 partial, 12 missing, 3 won't** (4.8, 8.12, 9.2). At the audit, before items 1 to 5: 12 have, 13 partial, 23 missing. Every "won't" has its reason in its row; P8's done-when also wants them in the "Coming from three-mesh-bvh" docs page.
+51 rows: **31 have, 7 partial, 10 missing, 3 won't** (4.8, 8.12, 9.2). At the audit, before items 1 to 5: 12 have, 13 partial, 23 missing. Every "won't" has its reason in its row; P8's done-when also wants them in the "Coming from three-mesh-bvh" docs page.
 
 ## Proposed build-out order
 

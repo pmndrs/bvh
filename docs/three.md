@@ -123,6 +123,26 @@ raycaster.firstHitOnly = true;                      // optional
 - **Ranges off a multiple of 3 and overlapping groups** are matched. A range that starts at index 1 or 2 mod 3 is walked in a second tree over the triangles that start there, built with the tree's options on the first raycast that needs it (it needs tinybvh, loaded by `prepareBoundsTrees`; without it the raycast falls back to three's) and refitted with the tree. Overlapping groups are walked once each, so a triangle in two groups is reported twice, as three does. The one difference: three reports the triangle that reads past the end of the index at a `NaN` distance (and its sort is then out of order); we report nothing there.
 - **Tested:** `src/three/raycast.test.ts` checks it against three on 8,000 random rays, and 5,000 more through ranges and groups off a multiple of 3.
 
+### A whole scene at once (`BvhSceneRaycaster`, `raycastScene`)
+
+three-mesh-bvh's `ObjectBVH`: one walk over the scene's top level and its mesh trees, in place of a raycast per object.
+
+```ts
+await prepareBoundsTrees();
+const picker = new BvhSceneRaycaster(scene);          // a tree per geometry and range, and the top level
+scene.updateMatrixWorld(); picker.update();           // when objects moved: the top level only
+const hits = raycastScene(picker, raycaster);         // what raycaster.intersectObject(scene, true) returns
+const seen = picker.intersectsFrustum(frustum, camera.layers); // { object, instanceId, group } per object or instance
+```
+
+- **What it returns:** three's `intersectObject(root, true)` with three's own `Mesh.raycast`: the same triangles (ranges and groups as in "Scenes"), `side`, `near`/`far`, `instanceId` and `batchId`, and the same fields, sorted. Hidden objects are hit too, as three's `Raycaster` hits them (`includeHidden: false` skips them); a `BatchedMesh`'s hidden instances are skipped, as three skips them. `raycaster.firstHitOnly` returns the one closest hit over the scene.
+- **Differs from three:** layers 8-31 (the instance mask holds layers 0-7; `layers: false` ignores layers), skinned and morphed meshes (rest pose here; three poses them on the CPU), and three's `NaN`-distance hit past the end of an index (not reported). Points, lines and sprites aren't read.
+- **`update()`** walks the scene again. With the same meshes it rebuilds only the top level (`CpuSceneBvh.setInstances`); new geometry or ranges get their trees, and trees nobody uses are dropped. It returns whether meshes changed.
+- **Frustum culling:** `intersectsFrustum(frustum, layers?)` walks the top level with three's `Frustum.intersectsBox` test on each node's box: a subtree outside a plane is skipped, one inside every plane is taken whole. It returns the objects and instances whose world box (the walk's own, the mesh tree's box through the instance's matrix) meets the frustum.
+- **Engine-free core:** `CpuSceneBvh` (`src/query/cpu-scene.ts`, from the root): `raycast(ray, { firstHitOnly, mask, accept })`, `intersectsFrustum(planes, { mask })`, `intersectsBox(box, { mask })`, `setInstances(instances)`, over any builder's trees.
+- **Not over `SceneTrees`:** its trees live on the GPU (no CPU copy), so the CPU scene is built from the same three objects. CPU picking over a `SceneTrees` scene would need its trees read back or kept on the CPU too; that is a memory lever we don't have yet.
+- **Tested:** `src/three/scene-raycast.test.ts` (10,000 rays against three's `intersectObject`, before and after moves, all hits and closest; 300 camera frustums against brute force over each object's world box) and `src/query/cpu-scene.test.ts` (brute force over every triangle of every instance, masks, `setInstances`; frustums and boxes against every world box).
+
 ### The tree object (`geometry.boundsTree`)
 
 `computeBoundsTree` makes a `BvhBoundsTree`: the core's `CpuMeshBvh` (`src/query/cpu-mesh-bvh.ts`, exported from `@pmndrs/bvh`) with three's types on top. `acceleratedRaycast` runs through it, so `/three` and the core share one walk and one triangle test. `/three` also exports it as `MeshBVH`, so switching from three-mesh-bvh is one import change (`import { MeshBVH } from '@pmndrs/bvh/three'`); the rows below are where the two differ. In place of three-mesh-bvh's `MeshBVH`:

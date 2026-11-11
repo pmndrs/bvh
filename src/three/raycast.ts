@@ -114,6 +114,11 @@ export async function prepareBoundsTrees(): Promise<TinyBvhBuilder> {
     return sharedBuilderLoading;
 }
 
+/** The tinybvh builder {@link prepareBoundsTrees} loaded, or null before it resolved. */
+export function preparedBoundsTreeBuilder(): TinyBvhBuilder | null {
+    return sharedBuilder;
+}
+
 /** three-mesh-bvh's split strategies, taken by {@link BvhBoundsTreeOptions.strategy}. Every one builds the same tree (see there). */
 export const CENTER = 0;
 export const AVERAGE = 1;
@@ -714,7 +719,7 @@ function cornersOf(geometry: BufferGeometry, first: number): [number, number, nu
  * `faceIndex`, `barycoord`, and `uv`, `uv1` and `normal` (interpolated,
  * turned against `localDirection`) when the geometry has them.
  */
-function intersectionFields(
+export function intersectionFields(
     geometry: BufferGeometry,
     triangle: number,
     firstIndex: number,
