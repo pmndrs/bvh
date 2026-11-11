@@ -34,17 +34,25 @@
  * source's `version` changed (SceneTrees grew a buffer), each storage node
  * gets a new stand-in attribute bound to the new buffer, and three makes new
  * bind groups at its next use. Nothing recompiles: the WGSL doesn't change.
+ * Skipping it after a growth leaves three binding the old, destroyed buffer.
+ *
+ * **Disposal.** three tracks the stand-ins like its own attributes, so
+ * `renderer.dispose()` or a stand-in's `dispose()` would destroy the
+ * source's buffers. The renderer's `backend.destroyAttribute` is wrapped
+ * (once per backend) so that, for a stand-in, a throwaway buffer takes our
+ * buffer's place before three destroys it.
  *
  * **Compile cost.** The walk is emitted once per shader as plain WGSL
  * functions (one loop, no unrolling), and every TSL helper is one small
  * `wgslFn`; the names are fixed, so the shader text is the same on every load
  * (three's and Chrome's shader caches hit).
  *
- * This file reaches into three's WebGPU backend (`backend.get(attribute).buffer`),
- * which is not public API: it is written against three 0.187.
+ * This file reaches into three's WebGPU backend, which is not public API:
+ * it is written against three 0.187 (the peer range), and every internal it
+ * uses is in {@link threeInternals}.
  */
 
-import { CodeNode, StorageBufferAttribute, StructTypeNode, type Node, type NodeBuilder } from 'three/webgpu';
+import { CodeNode, REVISION, StorageBufferAttribute, StructTypeNode, type Node, type NodeBuilder } from 'three/webgpu';
 import { float, storage, wgslFn } from 'three/tsl';
 import { traceModuleWgsl } from '../trace/wgsl.ts';
 
@@ -62,10 +70,78 @@ export interface BvhTraceNodesOptions {
     readonly rayMasks?: boolean;
 }
 
-/** The parts of three's `WebGPURenderer` this file uses. */
+/** The parts of three's `WebGPURenderer` this file uses (see {@link threeInternals}). */
 interface RendererLike {
-    readonly backend: { readonly isWebGPUBackend?: boolean; readonly device: GPUDevice | null; get(object: object): { buffer?: GPUBuffer } };
+    readonly backend: BackendLike;
+    readonly _attributes?: { has(attribute: object): boolean };
 }
+
+interface BackendLike {
+    readonly isWebGPUBackend?: boolean;
+    readonly device: GPUDevice | null;
+    get(object: object): Record<string, unknown> & { buffer?: GPUBuffer };
+    destroyAttribute?(attribute: object): void;
+}
+
+const unsupported = (what: string) =>
+    new Error(
+        `@pmndrs/bvh/three: three r${REVISION} ${what}. BvhTraceNodes binds its buffers through three's WebGPU backend internals, written against three r187 (peer range >=0.187.0 <0.188.0); this three version is unsupported`,
+    );
+
+/** Stand-ins per backend whose buffer is ours: `destroyAttribute` swaps in a throwaway for them. */
+const guarded = new WeakMap<BackendLike, WeakSet<object>>();
+
+/**
+ * Every three internal BvhTraceNodes relies on, checked against three 0.187's source:
+ *
+ * 1. `backend.get(attribute).buffer` is a storage attribute's `GPUBuffer`.
+ *    `WebGPUAttributeUtils.createAttribute` makes one only when it is
+ *    undefined, and `WebGPUBindingUtils.createBindGroup` binds it for a
+ *    storage binding (`backend.get(binding.attribute).buffer`).
+ * 2. `backend.destroyAttribute(attribute)` destroys that buffer. Three's
+ *    `Attributes.delete` calls it on the attribute's `dispose` event and for
+ *    every tracked attribute in `renderer.dispose()` (`Attributes.dispose`).
+ * 3. `renderer._attributes.has(attribute)` is true once three used the attribute.
+ *
+ * The constructor checks 2 and 3 exist; `update()` checks 1 for every
+ * stand-in three used (its buffer is still ours, and three made no other).
+ */
+const threeInternals = {
+    check(renderer: RendererLike): void {
+        if (typeof renderer.backend.destroyAttribute !== 'function') throw unsupported('has no backend.destroyAttribute');
+        if (typeof renderer._attributes?.has !== 'function') throw unsupported('has no renderer._attributes');
+    },
+    bufferOf(backend: BackendLike, attribute: object): GPUBuffer | undefined {
+        return backend.get(attribute).buffer;
+    },
+    bind(backend: BackendLike, attribute: object, buffer: GPUBuffer): void {
+        backend.get(attribute).buffer = buffer;
+    },
+    usedByThree(renderer: RendererLike, attribute: object): boolean {
+        return renderer._attributes!.has(attribute);
+    },
+    /** A GPUBuffer in the backend's record other than `ours` (three made its own). */
+    otherBuffer(backend: BackendLike, attribute: object, ours: GPUBuffer): boolean {
+        return Object.values(backend.get(attribute)).some((value) => value !== ours && typeof (value as GPUBuffer | null)?.getMappedRange === 'function');
+    },
+    /** Makes `backend.destroyAttribute` spare `attribute`'s buffer: a throwaway takes its place first. */
+    guardDestroy(backend: BackendLike, attribute: object): void {
+        let set = guarded.get(backend);
+        if (!set) {
+            const ours = (set = new WeakSet());
+            guarded.set(backend, ours);
+            const destroy = backend.destroyAttribute!;
+            backend.destroyAttribute = function (this: BackendLike, target: object) {
+                if (ours.has(target)) {
+                    ours.delete(target);
+                    backend.get(target).buffer = backend.device!.createBuffer({ label: '@pmndrs/bvh/three retired stand-in', size: 16, usage: 0x80 /* STORAGE */ });
+                }
+                return destroy.call(this, target);
+            };
+        }
+        set.add(attribute);
+    },
+};
 
 /** A three storage buffer node, as far as this file uses one. */
 type StorageNode = Node & { value: unknown; setName(name: string): unknown };
@@ -183,6 +259,7 @@ export class BvhTraceNodes {
     private boundVersion: number | undefined;
     private bound: BvhTraceBufferSource['buffers'];
     private disposed = false;
+    private readonly verified = new WeakSet<object>();
 
     constructor(
         renderer: unknown,
@@ -193,6 +270,7 @@ export class BvhTraceNodes {
         if (!this.renderer.backend?.isWebGPUBackend || !this.renderer.backend.device) {
             throw new Error('@pmndrs/bvh/three: BvhTraceNodes needs an initialized WebGPURenderer on its WebGPU backend (await renderer.init())');
         }
+        threeInternals.check(this.renderer);
         this.rayMasks = options.rayMasks ?? true;
         this.bound = source.buffers;
         this.boundVersion = source.version;
@@ -222,9 +300,12 @@ export class BvhTraceNodes {
     /**
      * Rebinds the storage nodes when the source's buffers were replaced
      * (`version` changed, or a buffer object differs). Returns true when it rebound.
+     * Throws when three bound something other than our buffers to a stand-in
+     * it used (a three version whose internals differ; see {@link threeInternals}).
      */
     update(): boolean {
         if (this.disposed) throw new Error('@pmndrs/bvh/three: this BvhTraceNodes was disposed');
+        this.checkBindings();
         const buffers = this.source.buffers;
         const changed =
             this.source.version !== this.boundVersion || buffers.nodes !== this.bound.nodes || buffers.triangles !== this.bound.triangles || buffers.topLevel !== this.bound.topLevel;
@@ -240,6 +321,20 @@ export class BvhTraceNodes {
         return true;
     }
 
+    /** Each stand-in three used still has our buffer, and three made none of its own. */
+    private checkBindings(): void {
+        const backend = this.renderer.backend;
+        for (const { key } of BUFFERS) {
+            const attribute = this.storage[key].value as StorageBufferAttribute;
+            if (this.verified.has(attribute) || !threeInternals.usedByThree(this.renderer, attribute)) continue;
+            const ours = this.bound[key];
+            if (threeInternals.bufferOf(backend, attribute) !== ours || threeInternals.otherBuffer(backend, attribute, ours)) {
+                throw unsupported(`did not bind the ${key} buffer BvhTraceNodes set (backend.get(attribute).buffer)`);
+            }
+            this.verified.add(attribute);
+        }
+    }
+
     /** Releases the stand-in attributes. The source's buffers are not destroyed (they are the source's). */
     dispose(): void {
         if (this.disposed) return;
@@ -247,21 +342,17 @@ export class BvhTraceNodes {
         this.disposed = true;
     }
 
-    /** A `StorageBufferAttribute` whose GPU buffer is `buffer`: three takes the backend's buffer as made and never creates one. */
+    /** A `StorageBufferAttribute` whose GPU buffer is `buffer`: three takes the backend's buffer as made, never creates one, and never destroys it. */
     private standIn(buffer: GPUBuffer, array: Float32Array | Uint32Array): StorageBufferAttribute {
         const attribute = new StorageBufferAttribute(array, 4);
         attribute.name = buffer.label;
-        this.renderer.backend.get(attribute).buffer = buffer;
+        threeInternals.bind(this.renderer.backend, attribute, buffer);
+        threeInternals.guardDestroy(this.renderer.backend, attribute);
         return attribute;
     }
 
-    /**
-     * Lets three forget an attribute without destroying our buffer: its
-     * backend buffer becomes a small throwaway, which three destroys on dispose.
-     */
+    /** Lets three forget an attribute: the destroy guard swaps a throwaway in for our buffer, which three then destroys. */
     private retire(attribute: StorageBufferAttribute): void {
-        const device = this.renderer.backend.device!;
-        this.renderer.backend.get(attribute).buffer = device.createBuffer({ label: '@pmndrs/bvh/three retired stand-in', size: 16, usage: 0x80 /* STORAGE */ });
         attribute.dispose();
     }
 }

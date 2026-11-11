@@ -263,6 +263,15 @@ try {
     await check('moved-and-grown');
     results.rebinds = rebinds;
 
+    // three's disposal of the stand-ins (as renderer.dispose() does for every attribute) must not destroy SceneTrees' buffers.
+    const beforeDispose = await traceOnGpu(device, kernel, trees.traceBuffers, rays);
+    for (const node of [bvh.storage.nodes, bvh.storage.triangles, bvh.storage.topLevel]) (node.value as StorageBufferAttribute).dispose();
+    const afterDispose = await traceOnGpu(device, kernel, trees.traceBuffers, rays);
+    let changedByDispose = 0;
+    for (let ray = 0; ray < count; ray++) if (beforeDispose.closest(ray)?.t !== afterDispose.closest(ray)?.t) changedByDispose++;
+    if (changedByDispose > 0) failures.push(`${changedByDispose} hits changed after three disposed the stand-in attributes`);
+    results.afterStandInDispose = { changed: changedByDispose };
+
     bvh.dispose();
     sync.dispose();
     trees.dispose();

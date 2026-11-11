@@ -192,11 +192,34 @@ export function threeTriangleRanges(
     return count > 0 ? [{ start: drawStart, count, group: -1, materialIndex: -1, threeMaterial: material ?? null }] : [];
 }
 
+/** The version of a position attribute's data (an interleaved attribute's is its buffer's). */
+function positionVersion(attribute: BufferAttribute | InterleavedBufferAttribute): number {
+    const interleaved = attribute as InterleavedBufferAttribute;
+    return interleaved.isInterleavedBufferAttribute === true ? interleaved.data.version : (attribute as BufferAttribute).version;
+}
+
+/** Compacted positions per attribute (interleaved, normalized or non-float ones), shared by every range of the geometry while the data's version holds. */
+const compacted = new WeakMap<object, { readonly version: number; readonly positions: Float32Array }>();
+
+/** Every vertex's `x, y, z`, tightly packed: the attribute's own array, or one shared compacted copy. */
+function sharedPositionsOf(attribute: BufferAttribute | InterleavedBufferAttribute): Float32Array {
+    const plain = attribute as BufferAttribute;
+    if ((attribute as InterleavedBufferAttribute).isInterleavedBufferAttribute !== true && plain.array instanceof Float32Array && plain.itemSize === 3 && !plain.normalized) {
+        return plain.array.length === attribute.count * 3 ? plain.array : plain.array.subarray(0, attribute.count * 3);
+    }
+    const version = positionVersion(attribute);
+    const cached = compacted.get(attribute);
+    if (cached && cached.version === version && cached.positions.length === attribute.count * 3) return cached.positions;
+    const positions = positionsOf(attribute);
+    compacted.set(attribute, { version, positions });
+    return positions;
+}
+
 /** One range of a geometry as a mesh input. */
 function meshInputOf(geometry: BufferGeometry, start: number, count: number): MeshGeometry {
     const position = geometry.getAttribute('position') as BufferAttribute | InterleavedBufferAttribute;
     const index = geometry.index;
-    if (!index) return { positions: positionsOf(position, start, count), indices: null };
+    if (!index) return { positions: sharedPositionsOf(position).subarray(start * 3, (start + count) * 3), indices: null };
     const array = index.array;
     let indices: Uint16Array | Uint32Array;
     if (array instanceof Uint16Array || array instanceof Uint32Array) {
@@ -204,7 +227,7 @@ function meshInputOf(geometry: BufferGeometry, start: number, count: number): Me
     } else {
         indices = Uint32Array.from({ length: count }, (_, i) => index.getX(start + i));
     }
-    return { positions: positionsOf(position), indices };
+    return { positions: sharedPositionsOf(position), indices };
 }
 
 /** Visible, with every ancestor. */
@@ -230,12 +253,12 @@ export interface WalkedInstance {
 
 const scratch = new Float64Array(16);
 
-/** `out = a x b`, column-major. */
-export function multiplyMatrices(a: ArrayLike<number>, b: ArrayLike<number>, out: Float64Array): Float64Array {
+/** `out = a x b`, column-major; `b` starts at `bOffset` (an `instanceMatrix` array without a subarray). */
+export function multiplyMatrices(a: ArrayLike<number>, b: ArrayLike<number>, out: Float64Array, bOffset = 0): Float64Array {
     for (let column = 0; column < 4; column++) {
         for (let row = 0; row < 4; row++) {
             let sum = 0;
-            for (let k = 0; k < 4; k++) sum += a[k * 4 + row] * b[column * 4 + k];
+            for (let k = 0; k < 4; k++) sum += a[k * 4 + row] * b[bOffset + column * 4 + k];
             scratch[column * 4 + row] = sum;
         }
     }
@@ -264,7 +287,7 @@ export function instancesOf(object: Mesh, out: (instanceId: number, record: Inst
     if (instanced.isInstancedMesh) {
         const matrices = instanced.instanceMatrix.array;
         for (let i = 0; i < instanced.count; i++) {
-            out(i, { objectToWorld: multiplyMatrices(world, matrices.subarray(i * 16, i * 16 + 16), new Float64Array(16)), visible: true }, null);
+            out(i, { objectToWorld: multiplyMatrices(world, matrices, new Float64Array(16), i * 16), visible: true }, null);
         }
     } else if (batched.isBatchedMesh) {
         const info = (batched as unknown as { _instanceInfo: { active: boolean; visible: boolean; geometryIndex: number }[] })._instanceInfo;

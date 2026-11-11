@@ -7,11 +7,13 @@
  */
 
 import {
+    BackSide,
     BatchedMesh,
     BoxGeometry,
     BufferAttribute,
     BufferGeometry,
     DoubleSide,
+    FrontSide,
     Group,
     InstancedMesh,
     InterleavedBuffer,
@@ -26,8 +28,12 @@ import {
     TorusKnotGeometry,
     Vector3,
     type Intersection,
+    type Side,
 } from 'three';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createFakeGpu } from '../../tests/support/fake-gpu.ts';
+import { SceneTrees } from '../scene/scene-trees.ts';
+import { TRIANGLE_FLAG_FILTER } from '../trace/layout.ts';
 import { createTinyBvhBuilder } from '../tinybvh.ts';
 import { createCpuTracer } from '../trace/cpu-traversal.ts';
 import { buildMeshBvhWithTinyBvh } from '../trace/mesh-bvh-topology.ts';
@@ -112,15 +118,35 @@ function testScene(seed: number): Group {
     return root;
 }
 
+function triangleCountOf(mesh: MeshGeometry): number {
+    return (mesh.indices ? mesh.indices.length : mesh.positions.length / 3) / 3;
+}
+
 /** three's first hit on visible objects (its Raycaster ignores `visible`). */
 function threeFirstHit(raycaster: Raycaster, root: Object3D): Intersection | null {
     for (const hit of raycaster.intersectObject(root, true)) if (effectivelyVisible(hit.object)) return hit;
     return null;
 }
 
-async function compareWithThree(scene: BvhThreeScene, root: Object3D, seed: number, rays = 3000, merge = false) {
-    const trace = await buildTraceScene(scene.meshes, scene.instances, { build, mergeStaticInstances: merge });
-    const tracer = createCpuTracer(trace);
+/**
+ * `sided`: every instance's material index is its three material's `side`,
+ * and a triangle filter culls as three does (FrontSide lets back faces
+ * through, BackSide front faces), on `frontFace`.
+ */
+async function compareWithThree(scene: BvhThreeScene, root: Object3D, seed: number, rays = 3000, merge = false, sided = false) {
+    const meshes = sided ? scene.meshes.map((mesh) => ({ ...mesh, triangleFlags: new Uint32Array(triangleCountOf(mesh)).fill(TRIANGLE_FLAG_FILTER) })) : scene.meshes;
+    const trace = await buildTraceScene(meshes, scene.instances, { build, mergeStaticInstances: merge });
+    const tracer = createCpuTracer(
+        trace,
+        sided
+            ? {
+                  triangleFilter: (candidate) => {
+                      const side = scene.instances[candidate.instance].material as Side;
+                      return (side === FrontSide && !candidate.frontFace) || (side === BackSide && candidate.frontFace);
+                  },
+              }
+            : {},
+    );
     const random = createRandom(seed);
     const raycaster = new Raycaster();
     const mask = rayMaskFromLayers(raycaster.layers);
@@ -169,6 +195,67 @@ describe('bvhSceneFromObject3D', () => {
         expect(problems).toEqual([]);
         expect(hits).toBeGreaterThan(200);
         expect(ties).toBeLessThan(hits * 0.01);
+    });
+
+    it("culls single-sided materials as three does, mirrored objects and instances included (frontFace)", async () => {
+        const random = createRandom(21);
+        const root = new Group();
+        const sides: Side[] = [FrontSide, BackSide, FrontSide, BackSide, DoubleSide];
+        const knot = new TorusKnotGeometry(0.8, 0.25, 40, 6);
+        for (let i = 0; i < 10; i++) {
+            const mesh = place(new Mesh(i % 2 ? knot : new SphereGeometry(0.8, 10, 8).toNonIndexed(), new MeshBasicMaterial({ side: sides[i % 5] })), random);
+            if (i < 4) mesh.scale.x = -Math.abs(mesh.scale.x); // mirrored
+            root.add(mesh);
+        }
+        // An InstancedMesh with FrontSide, half of its instances mirrored.
+        const instanced = new InstancedMesh(new BoxGeometry(0.6, 0.4, 0.5, 2, 2, 2), new MeshBasicMaterial({ side: FrontSide }), 12);
+        for (let i = 0; i < 12; i++) {
+            const dummy = place(new Object3D(), random, 8);
+            if (i % 2 === 0) dummy.scale.y = -Math.abs(dummy.scale.y);
+            dummy.updateMatrix();
+            instanced.setMatrixAt(i, dummy.matrix);
+        }
+        root.add(instanced);
+        // Groups whose materials differ in side.
+        root.add(place(new Mesh(new BoxGeometry(1.2, 0.8, 1, 2, 2, 2), [0, 1, 2, 3, 4, 5].map((i) => new MeshBasicMaterial({ side: sides[i % 5] }))), random));
+        root.updateMatrixWorld(true);
+        const scene = bvhSceneFromObject3D(root, { material: (_mesh, info) => info.threeMaterial!.side });
+        const mirrored = scene.instances.filter((instance) => {
+            const m = instance.objectToWorld;
+            return m[0] * (m[5] * m[10] - m[6] * m[9]) - m[4] * (m[1] * m[10] - m[2] * m[9]) + m[8] * (m[1] * m[6] - m[2] * m[5]) < 0;
+        });
+        expect(mirrored.length).toBeGreaterThanOrEqual(10);
+        const { hits, ties, problems } = await compareWithThree(scene, root, 22, 3000, false, true);
+        expect(problems).toEqual([]);
+        expect(hits).toBeGreaterThan(500);
+        expect(ties).toBeLessThan(hits * 0.01);
+        // Without the filter, rays stop on the culled sides three skips: the conversion alone doesn't cull.
+        const unculled = await compareWithThree(scene, root, 22, 3000);
+        expect(unculled.problems.length).toBeGreaterThan(0);
+    });
+
+    it('shares one compacted position array between the groups of an interleaved geometry', () => {
+        const source = new BoxGeometry(1, 1, 1, 2, 2, 2);
+        const count = source.attributes.position.count;
+        const data = new Float32Array(count * 5);
+        for (let i = 0; i < count; i++) data.set([source.attributes.position.getX(i), source.attributes.position.getY(i), source.attributes.position.getZ(i)], i * 5);
+        const geometry = new BufferGeometry();
+        geometry.setAttribute('position', new InterleavedBufferAttribute(new InterleavedBuffer(data, 5), 3, 0));
+        geometry.setIndex(source.index);
+        for (const group of source.groups) geometry.addGroup(group.start, group.count, group.materialIndex);
+        const mesh = new Mesh(geometry, [0, 1, 2, 3, 4, 5].map(() => material()));
+        mesh.updateMatrixWorld();
+        const scene = bvhSceneFromObject3D(mesh);
+        expect(scene.meshes).toHaveLength(6);
+        for (const input of scene.meshes) expect(input.positions).toBe(scene.meshes[0].positions);
+        expect(scene.meshes[0].positions.length).toBe(count * 3);
+        // A second conversion reuses it while the data's version holds, and compacts again after an edit.
+        expect(bvhSceneFromObject3D(mesh).meshes[0].positions).toBe(scene.meshes[0].positions);
+        geometry.attributes.position.setX(0, 9);
+        (geometry.attributes.position as InterleavedBufferAttribute).data.needsUpdate = true;
+        const edited = bvhSceneFromObject3D(mesh).meshes[0].positions;
+        expect(edited).not.toBe(scene.meshes[0].positions);
+        expect(edited[0]).toBe(9);
     });
 
     it('shares one mesh per geometry and range, and keeps instance order', () => {
@@ -310,5 +397,146 @@ describe('SceneTreesObject3DSync', () => {
         sync.dispose();
         expect(trees.instances.size).toBe(0);
         expect(trees.meshes.size).toBe(0);
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    async function mergingTrees() {
+        const gpu = createFakeGpu();
+        const trees = await SceneTrees.create(gpu.device, { gpuFirstTrees: false, topLevel: 'cpu', mergeStaticInstances: true });
+        const frame = async () => {
+            let encoder = gpu.createEncoder();
+            trees.update(encoder);
+            gpu.submit(encoder);
+            await trees.whenBuilt();
+            encoder = gpu.createEncoder();
+            trees.update(encoder);
+            gpu.submit(encoder);
+        };
+        return { trees, frame };
+    }
+
+    it('with merged static content (real SceneTrees): new users of a merged-away mesh get it again, and merged objects are kept with one warning', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const { trees, frame } = await mergingTrees();
+        const root = new Group();
+        const geometry = new BoxGeometry(1, 1, 1, 2, 2, 2);
+        const a = new Mesh(geometry, material());
+        const changing = new Mesh(new SphereGeometry(0.5, 6, 4), material());
+        const grouped = new Mesh(new BoxGeometry(), [0, 1, 2, 3, 4, 5].map(() => material()));
+        root.add(a, changing, grouped);
+        root.updateMatrixWorld(true);
+        const sync = new SceneTreesObject3DSync(trees, root, { static: (object) => !object.userData.moves });
+        await frame();
+        expect(trees.counts.mergedGroups).toBe(1);
+        const aHandle = [...Array(trees.counts.instances).keys()].find((handle) => sync.sourceOf(handle)?.object === a)!;
+        expect(trees.meshStatus(sync.sourceOf(aHandle)!.mesh).mergedInto).not.toBeNull();
+        expect(trees.instanceStatus(aHandle).mergedInto).not.toBeNull();
+
+        // A dynamic clone on the merged-away geometry, and a late static one.
+        const b = a.clone();
+        b.userData.moves = true;
+        const c = a.clone();
+        root.add(b, c);
+        root.updateMatrixWorld(true);
+        const counts = sync.sync();
+        expect(counts).toMatchObject({ added: 2, meshesAdded: 1, removed: 0, skipped: 0 });
+        const bHandle = [...Array(64).keys()].find((handle) => sync.sourceOf(handle)?.object === b)!;
+        expect(trees.meshStatus(sync.sourceOf(bHandle)!.mesh).mergedInto).toBeNull();
+        b.position.x = 4;
+        root.updateMatrixWorld(true);
+        expect(sync.update()).toMatchObject({ moved: 1 });
+        await frame();
+
+        // Removing a merged object, or changing a merged object's geometry or groups: skipped, one warning each, no throw.
+        root.remove(a);
+        changing.geometry = new SphereGeometry(0.7, 6, 4);
+        grouped.geometry.clearGroups();
+        grouped.geometry.addGroup(0, 36, 1);
+        root.updateMatrixWorld(true);
+        expect(() => sync.sync()).not.toThrow();
+        expect(warn).toHaveBeenCalledTimes(3);
+        expect(String(warn.mock.calls[0][0])).toMatch(/merged static content/);
+        expect(() => sync.sync()).not.toThrow();
+        expect(warn).toHaveBeenCalledTimes(3);
+        expect(sync.sourceOf(aHandle)?.object).toBe(a); // rays still hit it
+
+        // Later syncs still work: remove the dynamic clone, add another.
+        root.remove(b);
+        const d = new Mesh(new SphereGeometry(0.3, 5, 4), material());
+        d.userData.moves = true;
+        root.add(d);
+        root.updateMatrixWorld(true);
+        expect(sync.sync()).toMatchObject({ added: 1, removed: 1 });
+        await frame();
+        expect(() => sync.dispose()).not.toThrow();
+        trees.dispose();
+    });
+
+    it('keeps its records consistent when SceneTrees throws partway through a sync', () => {
+        const trees = new RecordingTrees();
+        const root = new Group();
+        const geometry = new BoxGeometry();
+        root.add(new Mesh(geometry, material()));
+        root.updateMatrixWorld(true);
+        const sync = new SceneTreesObject3DSync(trees, root);
+        const extra = new Mesh(new SphereGeometry(1, 5, 4), material());
+        root.add(extra);
+        const addInstance = trees.addInstance.bind(trees);
+        trees.addInstance = () => {
+            throw new Error('out of slots');
+        };
+        expect(() => sync.sync()).toThrow(/out of slots/);
+        trees.addInstance = addInstance;
+        expect(sync.sync()).toMatchObject({ added: 1, meshesAdded: 0 });
+        root.remove(extra);
+        expect(sync.sync()).toMatchObject({ removed: 1, meshesRemoved: 1 });
+        expect(trees.meshes.size).toBe(1);
+        expect(() => new SceneTreesObject3DSync(trees, root, { material: () => -1 })).toThrow(RangeError);
+    });
+
+    it('update() skips unchanged objects, reads materials at sync() only, and sees parent moves and parent visibility', () => {
+        const trees = new RecordingTrees();
+        const root = new Group();
+        const parent = new Group();
+        const child = new Mesh(new BoxGeometry(), material());
+        const instanced = new InstancedMesh(new SphereGeometry(0.5, 6, 4), material(), 4);
+        parent.add(child, instanced);
+        root.add(parent);
+        root.updateMatrixWorld(true);
+        let materialCalls = 0;
+        const sync = new SceneTreesObject3DSync(trees, root, {
+            material: () => {
+                materialCalls++;
+                return 1;
+            },
+        });
+        const callsAtSync = materialCalls;
+        trees.log.length = 0;
+        for (let frame = 0; frame < 3; frame++) expect(sync.update()).toMatchObject({ moved: 0, changed: 0 });
+        expect(trees.log).toEqual([]);
+        expect(materialCalls).toBe(callsAtSync);
+
+        // An InstancedMesh's matrices read only when instanceMatrix.version moved.
+        const array = instanced.instanceMatrix.array as Float32Array;
+        const reads = vi.fn();
+        const proxy = new Proxy(array, { get: (target, key) => (reads(key), Reflect.get(target, key)) });
+        (instanced.instanceMatrix as unknown as { array: Float32Array }).array = proxy as Float32Array;
+        sync.update();
+        expect(reads).not.toHaveBeenCalled();
+        (instanced.instanceMatrix as unknown as { array: Float32Array }).array = array;
+
+        parent.position.y = 2;
+        root.updateMatrixWorld(true);
+        expect(sync.update()).toMatchObject({ moved: 5, changed: 0 });
+        trees.log.length = 0;
+        expect(sync.update()).toMatchObject({ moved: 0, changed: 0 });
+
+        parent.visible = false;
+        expect(sync.update()).toMatchObject({ moved: 0, changed: 5 });
+        expect(trees.log.every((line) => line.endsWith('{"visible":false}'))).toBe(true);
+        expect(materialCalls).toBe(callsAtSync);
     });
 });

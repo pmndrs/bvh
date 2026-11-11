@@ -174,6 +174,12 @@ export interface SceneMeshStatus {
     readonly maxDepth: number;
 }
 
+/** One instance's merge state ({@link SceneTrees.instanceStatus}). */
+export interface SceneInstanceStatus {
+    /** The merged static group holding the instance, or null. */
+    readonly mergedInto: number | null;
+}
+
 /** Counts, for tools and stats. */
 export interface SceneTreeCounts {
     readonly meshes: number;
@@ -752,6 +758,17 @@ export class SceneTrees {
         const state = this.meshes.get(mesh);
         if (!state || state.group >= 0) throw new RangeError(`SceneTrees.meshStatus: no mesh ${mesh}`);
         return this.statusOf(state);
+    }
+
+    /**
+     * An instance's merge state: `mergedInto` is the static group it was
+     * merged into at the first update (then it can't move, change or be
+     * removed), or null.
+     */
+    instanceStatus(instance: number): SceneInstanceStatus {
+        const state = this.instances.get(instance);
+        if (!state) throw new RangeError(`SceneTrees.instanceStatus: no instance ${instance}`);
+        return { mergedInto: state.merged >= 0 ? state.merged : null };
     }
 
     /** A merged group's tree, by group index (0 to `counts.mergedGroups - 1`). */

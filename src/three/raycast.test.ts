@@ -11,12 +11,14 @@
 
 import {
     BackSide,
+    BatchedMesh,
     BoxGeometry,
     type BufferGeometry,
     DoubleSide,
     FrontSide,
     Group,
     InstancedMesh,
+    Matrix4,
     Mesh,
     MeshBasicMaterial,
     Object3D,
@@ -27,7 +29,7 @@ import {
     type Intersection,
     type Side,
 } from 'three';
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createRandom } from '../trace/oracle-fixtures.ts';
 import { acceleratedRaycast, BvhBoundsTree, computeBoundsTree, disposeBoundsTree, prepareBoundsTrees } from './raycast.ts';
 
@@ -38,6 +40,7 @@ beforeAll(async () => {
 });
 afterEach(() => {
     Mesh.prototype.raycast = threeRaycast;
+    vi.restoreAllMocks();
 });
 
 function place(object: Object3D, random: () => number, extent = 6): Object3D {
@@ -197,5 +200,88 @@ describe('acceleratedRaycast', () => {
         expect(withTree[0].distance).toBeCloseTo(4.5, 6);
         disposeBoundsTree.call(geometry);
         expect((geometry as BufferGeometry & { boundsTree?: unknown }).boundsTree).toBeUndefined();
+    });
+
+    /** Our intersections and three's for `rays` random rays through `root`, compared. */
+    function compareRays(root: Object3D, seed: number, rays: number): { problems: string[]; total: number } {
+        const random = createRandom(seed);
+        const raycaster = new Raycaster();
+        const problems: string[] = [];
+        let total = 0;
+        for (let r = 0; r < rays; r++) {
+            randomRay(random, raycaster);
+            Mesh.prototype.raycast = threeRaycast;
+            const expected = raycaster.intersectObject(root, true);
+            Mesh.prototype.raycast = acceleratedRaycast;
+            const ours = raycaster.intersectObject(root, true);
+            total += expected.length;
+            compareLists(expected, ours, problems, `ray ${r}`);
+        }
+        Mesh.prototype.raycast = threeRaycast;
+        return { problems, total };
+    }
+
+    it("follows a swapped material in an array (its side), after raycasts cached the old one", () => {
+        const geometry = new BoxGeometry(2, 2, 2, 3, 3, 3);
+        computeBoundsTree.call(geometry);
+        const materials = [0, 1, 2, 3, 4, 5].map(() => new MeshBasicMaterial({ side: FrontSide }));
+        const mesh = new Mesh(geometry, materials);
+        mesh.updateMatrixWorld();
+        expect(compareRays(mesh, 31, 300).problems).toEqual([]);
+        for (let i = 0; i < 6; i++) materials[i] = new MeshBasicMaterial({ side: i % 2 ? BackSide : DoubleSide });
+        const { problems, total } = compareRays(mesh, 32, 300);
+        expect(problems.slice(0, 5)).toEqual([]);
+        expect(total).toBeGreaterThan(100);
+        // A side changed on the same material is read live too.
+        materials[0].side = BackSide;
+        materials[1].side = FrontSide;
+        expect(compareRays(mesh, 33, 300).problems).toEqual([]);
+    });
+
+    it("uses the batched geometry's tree for a BatchedMesh, one cached range per geometry", () => {
+        const random = createRandom(41);
+        const batched = new BatchedMesh(12, 4000, 12000, new MeshBasicMaterial({ side: FrontSide }));
+        const ids = [batched.addGeometry(new SphereGeometry(0.6, 10, 8)), batched.addGeometry(new BoxGeometry(0.8, 0.5, 0.7, 2, 2, 2)), batched.addGeometry(new TorusKnotGeometry(0.5, 0.15, 30, 6))];
+        const dummy = new Object3D();
+        for (let i = 0; i < 12; i++) {
+            const id = batched.addInstance(ids[i % 3]);
+            place(dummy, random, 7).updateMatrix();
+            batched.setMatrixAt(id, new Matrix4().copy(dummy.matrix));
+        }
+        batched.setVisibleAt(5, false);
+        batched.updateMatrixWorld();
+        const tree = computeBoundsTree.call(batched.geometry);
+        const local = vi.spyOn(tree, 'raycastLocal');
+        const { problems, total } = compareRays(batched, 42, 800);
+        expect(problems.slice(0, 5)).toEqual([]);
+        expect(total).toBeGreaterThan(100);
+        expect(local).toHaveBeenCalled();
+        // One state per geometry range, each without a per-triangle array.
+        const states = (tree as unknown as { rangeCache: WeakMap<object, { ranges: Uint16Array | null }[]> }).rangeCache.get(batched.material)!;
+        expect(states).toHaveLength(3);
+        expect(states.every((state) => state.ranges === null)).toBe(true);
+    });
+
+    it("falls back to three's raycast, warning once, after the positions or index changed", () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const geometry = new SphereGeometry(1, 12, 10);
+        computeBoundsTree.call(geometry);
+        const mesh = new Mesh(geometry, new MeshBasicMaterial({ side: DoubleSide }));
+        mesh.updateMatrixWorld();
+        expect(compareRays(mesh, 51, 200).problems).toEqual([]);
+        expect(warn).not.toHaveBeenCalled();
+        const position = geometry.attributes.position;
+        for (let i = 0; i < position.count; i++) position.setXYZ(i, position.getX(i) * 2, position.getY(i) * 0.5, position.getZ(i));
+        position.needsUpdate = true;
+        geometry.computeBoundingSphere(); // three culls by it
+        const { problems, total } = compareRays(mesh, 52, 200);
+        expect(problems).toEqual([]);
+        expect(total).toBeGreaterThan(30);
+        expect(warn).toHaveBeenCalledTimes(1);
+        computeBoundsTree.call(geometry);
+        expect(compareRays(mesh, 53, 200).problems).toEqual([]);
+        geometry.setIndex(Array.from(geometry.index!.array).reverse());
+        expect(compareRays(mesh, 54, 200).problems).toEqual([]);
+        expect(warn).toHaveBeenCalledTimes(2);
     });
 });

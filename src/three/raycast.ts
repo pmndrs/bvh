@@ -24,7 +24,10 @@
  * has them. `InstancedMesh` and `BatchedMesh` raycast through `Mesh.raycast`,
  * so they use it too (`instanceId` / `batchId` are added by three). Distances
  * agree to float rounding: the walk's watertight test runs on the
- * f32 corners in doubles; three's Möller-Trumbore runs in doubles too.
+ * f32 corners in doubles; three's Möller-Trumbore runs in doubles too. A
+ * `BatchedMesh` uses the tree of its geometry (`batchedMesh.geometry.computeBoundsTree()`):
+ * three raycasts each instance through a stand-in mesh that shares the
+ * geometry's attributes, and the tree is found by its position attribute.
  *
  * **Without `firstHitOnly`** every intersection is returned, as three does
  * (sorted by `Raycaster.intersectObject`): the walk's triangle filter collects
@@ -40,7 +43,9 @@
  * multiple of 3 (three then tests triangles made of neighbouring triangles'
  * corners; the tree only holds the authored ones), and a trailing partial
  * triangle. The tree is built from the positions at {@link computeBoundsTree}
- * time: after editing positions, compute it again.
+ * time: when the position attribute's version, or the index (its object or
+ * version), changed since, the raycast falls back to three's own with a
+ * one-time warning until `computeBoundsTree` runs again.
  */
 
 import {
@@ -84,13 +89,30 @@ export interface BvhBoundsTreeOptions {
 
 /** What a raycast against one mesh needs to know about each candidate triangle. */
 interface RaycastState {
-    /** Per triangle: its group's position in `materials` + 1, or 0 when outside every range. */
-    ranges: Uint16Array;
-    materials: (Material | null)[];
-    groupIndices: number[];
+    /**
+     * Per triangle: its group's position in `materials` + 1, or 0 when outside
+     * every range. Null with one range: then `[first, end)` holds the triangles of `materials[0]`.
+     */
+    readonly ranges: Uint16Array | null;
+    readonly first: number;
+    readonly end: number;
+    /** The materials of the ranges; their `side` is read at each raycast. */
+    readonly materials: (Material | null)[];
+    readonly groupIndices: number[];
     collect: TriangleCandidate[] | null;
-    /** The draw range and groups this was made for. */
-    readonly key: string;
+    /** What it was made for: the draw range, groups (start, count, materialIndex) and, for an array, its materials. */
+    readonly drawStart: number;
+    readonly drawCount: number;
+    readonly groups: number[];
+    readonly arrayMaterials: (Material | undefined)[] | null;
+}
+
+/** States per material kept for different draw ranges (a BatchedMesh raycasts each geometry's range); past this the cache starts again. */
+const MAX_STATES_PER_MATERIAL = 256;
+
+function positionVersionOf(attribute: BufferAttribute | InterleavedBufferAttribute): number {
+    const interleaved = attribute as InterleavedBufferAttribute;
+    return interleaved.isInterleavedBufferAttribute === true ? interleaved.data.version : (attribute as BufferAttribute).version;
 }
 
 /**
@@ -102,9 +124,16 @@ export class BvhBoundsTree {
     readonly geometry: BufferGeometry;
     readonly triangleCount: number;
     readonly bvh: MeshBvh;
+    /** The position attribute and index the tree was built from, and their versions then. */
+    readonly position: BufferAttribute | InterleavedBufferAttribute;
+    readonly positionVersion: number;
+    readonly index: BufferAttribute | null;
+    readonly indexVersion: number;
+    /** Warned once that the geometry changed since the build. */
+    staleWarned = false;
     private readonly tracer: CpuTracer;
     private state: RaycastState | null = null;
-    private readonly rangeCache = new WeakMap<object, RaycastState>();
+    private readonly rangeCache = new WeakMap<object, RaycastState[]>();
 
     constructor(geometry: BufferGeometry, options: BvhBoundsTreeOptions = {}) {
         const builder = options.builder ?? sharedBuilder;
@@ -124,6 +153,10 @@ export class BvhBoundsTree {
         }
         const positions = index ? positionsOf(position) : positionsOf(position, 0, this.triangleCount * 3);
         this.geometry = geometry;
+        this.position = position;
+        this.positionVersion = positionVersionOf(position);
+        this.index = index;
+        this.indexVersion = index ? index.version : 0;
         this.bvh = buildMeshBvhWithTinyBvh({ positions, indices, triangleFlags: new Uint32Array(this.triangleCount).fill(TRIANGLE_FLAG_FILTER) }, builder);
         const scene = assembleTraceScene([this.bvh], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }]);
         this.tracer = createCpuTracer(scene, { triangleFilter: (candidate) => this.passes(candidate) });
@@ -155,7 +188,7 @@ export class BvhBoundsTree {
                 triangle: candidate.triangle,
                 u: candidate.barycentrics[0],
                 v: candidate.barycentrics[1],
-                materialIndex: state.groupIndices[state.ranges[candidate.triangle] - 1],
+                materialIndex: state.groupIndices[state.ranges ? state.ranges[candidate.triangle] - 1 : 0],
             }));
         } finally {
             state.collect = null;
@@ -166,7 +199,8 @@ export class BvhBoundsTree {
     /** The walk's triangle filter: true lets the ray through (outside the ranges, the culled side, or collecting every hit). */
     private passes(candidate: TriangleCandidate): boolean {
         const state = this.state!;
-        const range = state.ranges[candidate.triangle];
+        const triangle = candidate.triangle;
+        const range = state.ranges ? state.ranges[triangle] : triangle >= state.first && triangle < state.end ? 1 : 0;
         if (range === 0) return true;
         const side = state.materials[range - 1]?.side ?? FrontSide;
         if (side === FrontSide && !candidate.frontFace) return true;
@@ -179,39 +213,126 @@ export class BvhBoundsTree {
         return false;
     }
 
-    /** Which triangles count for this material and draw range (cached per material, refreshed when the draw range or groups change). */
+    /** True when the geometry's positions and index are the ones the tree was built from. */
+    current(): boolean {
+        const position = this.geometry.getAttribute('position') as BufferAttribute | InterleavedBufferAttribute | undefined;
+        const index = this.geometry.index;
+        return position === this.position && positionVersionOf(position) === this.positionVersion && index === this.index && (index ? index.version : 0) === this.indexVersion;
+    }
+
+    /**
+     * Which triangles count for this material and draw range: cached per
+     * material and draw range, checked against the groups and (for an array)
+     * the materials it holds. Each material's `side` is read live.
+     */
     private stateFor(material: Material | Material[], drawRange: { readonly start: number; readonly count: number }): RaycastState {
-        const key = `${drawRange.start}:${drawRange.count}:${this.geometry.groups.map((g) => `${g.start},${g.count},${g.materialIndex}`).join(';')}`;
-        const cached = this.rangeCache.get(material);
-        if (cached && cached.key === key) return cached;
-        const ranges = new Uint16Array(this.triangleCount);
+        let states = this.rangeCache.get(material);
+        if (states) {
+            for (const state of states) if (this.matches(state, material, drawRange)) return state;
+        } else {
+            this.rangeCache.set(material, (states = []));
+        }
+        if (states.length >= MAX_STATES_PER_MATERIAL) states.length = 0;
+        const state = this.makeState(material, drawRange);
+        states.push(state);
+        return state;
+    }
+
+    private matches(state: RaycastState, material: Material | Material[], drawRange: { readonly start: number; readonly count: number }): boolean {
+        if (state.drawStart !== drawRange.start || state.drawCount !== drawRange.count) return false;
+        if (!state.arrayMaterials) return true; // one material: groups don't matter
+        const array = material as Material[];
+        if (array.length !== state.arrayMaterials.length) return false;
+        for (let i = 0; i < array.length; i++) if (array[i] !== state.arrayMaterials[i]) return false;
+        const groups = this.geometry.groups;
+        if (groups.length * 3 !== state.groups.length) return false;
+        for (let i = 0; i < groups.length; i++) {
+            const group = groups[i];
+            if (group.start !== state.groups[i * 3] || group.count !== state.groups[i * 3 + 1] || (group.materialIndex ?? 0) !== state.groups[i * 3 + 2]) return false;
+        }
+        return true;
+    }
+
+    private makeState(material: Material | Material[], drawRange: { readonly start: number; readonly count: number }): RaycastState {
         const materials: (Material | null)[] = [];
         const groupIndices: number[] = [];
+        const spans: [number, number][] = [];
         for (const range of threeTriangleRanges(this.geometry, material, drawRange)) {
             if (range.start % 3 !== 0) continue; // not authored triangles (see the file comment)
             materials.push(range.threeMaterial);
             groupIndices.push(range.group >= 0 ? range.materialIndex : 0);
-            ranges.fill(materials.length, range.start / 3, Math.min(this.triangleCount, (range.start + range.count) / 3));
+            spans.push([range.start / 3, Math.min(this.triangleCount, (range.start + range.count) / 3)]);
         }
-        const state: RaycastState = { ranges, materials, groupIndices, collect: null, key };
-        this.rangeCache.set(material, state);
-        return state;
+        let ranges: Uint16Array | null = null;
+        if (spans.length > 1) {
+            const fill = new Uint16Array(this.triangleCount);
+            spans.forEach(([first, end], i) => fill.fill(i + 1, first, end));
+            ranges = fill;
+        }
+        const isArray = Array.isArray(material);
+        return {
+            ranges,
+            first: spans.length === 1 ? spans[0][0] : 0,
+            end: spans.length === 1 ? spans[0][1] : 0,
+            materials,
+            groupIndices,
+            collect: null,
+            drawStart: drawRange.start,
+            drawCount: drawRange.count,
+            groups: isArray ? this.geometry.groups.flatMap((group) => [group.start, group.count, group.materialIndex ?? 0]) : [],
+            arrayMaterials: isArray ? [...material] : null,
+        };
     }
 }
 
 /** `geometry.boundsTree`, whoever made it (three-mesh-bvh types it as its own). */
 type WithBoundsTree = { boundsTree?: unknown };
 
+/**
+ * Trees by position attribute: a BatchedMesh raycasts each instance through
+ * a stand-in mesh whose geometry shares the batched geometry's attributes.
+ */
+const treesByPosition = new WeakMap<object, BvhBoundsTree>();
+
 /** `BufferGeometry.prototype.computeBoundsTree`: builds `this.boundsTree` (a {@link BvhBoundsTree}). */
 export function computeBoundsTree(this: BufferGeometry, options: BvhBoundsTreeOptions = {}): BvhBoundsTree {
     const tree = new BvhBoundsTree(this, options);
     (this as unknown as WithBoundsTree).boundsTree = tree;
+    treesByPosition.set(tree.position, tree);
     return tree;
 }
 
 /** `BufferGeometry.prototype.disposeBoundsTree`: drops `this.boundsTree`. */
 export function disposeBoundsTree(this: BufferGeometry): void {
+    const tree = (this as unknown as WithBoundsTree).boundsTree;
+    if (tree instanceof BvhBoundsTree && treesByPosition.get(tree.position) === tree) treesByPosition.delete(tree.position);
     (this as unknown as WithBoundsTree).boundsTree = undefined;
+}
+
+/**
+ * The tree for a geometry: its own, or (a BatchedMesh's stand-in, one
+ * material) the tree of the geometry whose position and index it shares.
+ * Groups are the tree's geometry's, so a shared tree never serves an array of materials.
+ */
+function treeOf(geometry: BufferGeometry, material: Material | Material[]): BvhBoundsTree | null {
+    const own = (geometry as unknown as WithBoundsTree).boundsTree;
+    if (own instanceof BvhBoundsTree) return own.geometry === geometry ? own : null;
+    if (own !== undefined || Array.isArray(material)) return null; // another library's tree, or groups that may differ
+    const position = geometry.attributes.position;
+    const shared = position ? treesByPosition.get(position) : undefined;
+    return shared && shared.index === geometry.index ? shared : null;
+}
+
+/** A tree whose geometry changed since its build: three's raycast is used until `computeBoundsTree` runs again. */
+function stale(tree: BvhBoundsTree): boolean {
+    if (tree.current()) return false;
+    if (!tree.staleWarned) {
+        tree.staleWarned = true;
+        console.warn(
+            "@pmndrs/bvh/three: a geometry's positions or index changed since computeBoundsTree; raycasts against it use three's own raycast until computeBoundsTree runs again",
+        );
+    }
+    return true;
 }
 
 // three's own raycast, captured before anyone replaces it, for the fallback.
@@ -226,10 +347,9 @@ const vC = new Vector3();
 
 /** `Mesh.prototype.raycast` over the geometry's {@link BvhBoundsTree}, or three's own without one. */
 export function acceleratedRaycast(this: Mesh, raycaster: Raycaster, intersects: Intersection[]): void {
-    const geometry = this.geometry as unknown as WithBoundsTree & { morphAttributes: BufferGeometry["morphAttributes"] };
-    const tree = geometry.boundsTree;
-    const morphs = this.morphTargetInfluences !== undefined && Object.keys(geometry.morphAttributes).length > 0;
-    if (!(tree instanceof BvhBoundsTree) || tree.geometry !== this.geometry || (this as unknown as { isSkinnedMesh?: boolean }).isSkinnedMesh || morphs) {
+    const tree = this.material === undefined ? null : treeOf(this.geometry, this.material);
+    const morphs = this.morphTargetInfluences !== undefined && Object.keys(this.geometry.morphAttributes).length > 0;
+    if (!tree || (this as unknown as { isSkinnedMesh?: boolean }).isSkinnedMesh || morphs || stale(tree)) {
         threeRaycast.call(this, raycaster, intersects);
         return;
     }
