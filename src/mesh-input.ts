@@ -86,6 +86,12 @@ export interface GpuBuildOptions {
      * docs/design/indexed-leaves.md). The nodes are the same either way.
      */
     readonly triangleLeaves?: 'records' | 'indexed';
+    /**
+     * The node format the tree is written in: `'f32'` (64 bytes, the default)
+     * or `'quantized'` (32-byte nodes on a per-mesh grid, the frame slot
+     * first; docs/design/compressed-nodes.md).
+     */
+    readonly nodeFormat?: 'f32' | 'quantized';
 }
 
 /** One mesh's tree inside a batch's shared buffers ({@link GpuTreeBuffers}). */

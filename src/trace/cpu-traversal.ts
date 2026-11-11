@@ -15,6 +15,10 @@
  * ones), and an instance whose mask shares no bit with it is skipped at the
  * top level. `rayMasks: false` mirrors a trace module built without masks:
  * instance masks are ignored and the filter sees all ones.
+ *
+ * Quantized nodes (`nodeFormat: 'quantized'`), as in the WGSL walk: the frame
+ * is read once per instance entered, and each mesh node is decoded as it is
+ * visited (`origin + q * step`, exact, so the boxes are the GPU's bit for bit).
  */
 
 import {
@@ -52,6 +56,8 @@ import {
     referenceIndex,
 } from './layout.ts';
 import type { TraceRay } from './rays.ts';
+import { decodeQuantizedNode, readNodeFrame, type NodeFrame } from '../quantized-nodes.ts';
+import { GPU_LAYOUT_QUANTIZED_NODE_WORDS as QUANTIZED_NODE_WORDS } from '../gpu-layout.ts';
 import type { TraceSceneData } from './scene-assembly.ts';
 import type { TrianglePasses } from './triangle-filter.ts';
 
@@ -170,7 +176,7 @@ export interface CpuTracerOptions {
  * (default `'records'`), `positions` and `positionLayout` (default `'vec4'`)
  * only matter for an indexed scene.
  */
-export type CpuTraceScene = Pick<TraceSceneData, 'nodes' | 'triangles' | 'topLevel'> & Partial<Pick<TraceSceneData, 'triangleLeaves' | 'positions' | 'positionLayout'>>;
+export type CpuTraceScene = Pick<TraceSceneData, 'nodes' | 'triangles' | 'topLevel'> & Partial<Pick<TraceSceneData, 'triangleLeaves' | 'positions' | 'positionLayout' | 'nodeFormat'>>;
 
 /** Where a triangle's corners and ids are, for either format: word offsets into `floats`, and its id and flags. */
 interface TriangleSource {
@@ -190,6 +196,12 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
     const rayMasks = options.rayMasks ?? true;
     const nodeFloats = new Float32Array(scene.nodes);
     const nodeWords = new Uint32Array(scene.nodes);
+    const quantized = scene.nodeFormat === 'quantized';
+    // Quantized: the node being visited, decoded into a 64-byte node, and the instance's frame.
+    const decodedNode = new ArrayBuffer(BVH_NODE_WORDS * 4);
+    const decodedFloats = new Float32Array(decodedNode);
+    const decodedWords = new Uint32Array(decodedNode);
+    let frame: NodeFrame | null = null;
     const triangleFloats = new Float32Array(scene.triangles);
     const triangleWords = new Uint32Array(scene.triangles);
     const indexed = scene.triangleLeaves === 'indexed';
@@ -296,9 +308,11 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
 
             if (count === 0) {
                 if (stats) stats.nodesVisited++;
-                const floats = insideInstance ? nodeFloats : topFloats;
-                const words = insideInstance ? nodeWords : topWords;
-                const nodeWord = insideInstance
+                const decode = insideInstance && quantized;
+                if (decode) decodeQuantizedNode(nodeWords, (rootNodeOffset + index) * QUANTIZED_NODE_WORDS, frame!, decodedFloats, decodedWords, 0);
+                const floats = decode ? decodedFloats : insideInstance ? nodeFloats : topFloats;
+                const words = decode ? decodedWords : insideInstance ? nodeWords : topWords;
+                const nodeWord = decode ? 0 : insideInstance
                     ? (rootNodeOffset + index) * BVH_NODE_WORDS
                     : firstTopLevelNodeWord + index * BVH_NODE_WORDS;
 
@@ -337,6 +351,7 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
                 const record = TOP_LEVEL_HEADER_WORDS + index * INSTANCE_RECORD_WORDS;
                 instanceRecord = record;
                 rootNodeOffset = topWords[record + INSTANCE_WORD.rootNodeOffset];
+                if (quantized) frame = readNodeFrame(nodeWords, (rootNodeOffset - 1) * QUANTIZED_NODE_WORDS);
                 triangleOffset = topWords[record + INSTANCE_WORD.triangleOffset];
                 vertexBase = vertexBaseOf(triangleOffset);
                 instanceIndex = topWords[record + INSTANCE_WORD.instanceIndex];

@@ -38,7 +38,7 @@ export async function readBuffer(device: GPUDevice, source: GPUBuffer, byteLengt
 export async function readScene(
     device: GPUDevice,
     buffers: { nodes: GPUBuffer; triangles: GPUBuffer; topLevel: GPUBuffer; positions?: GPUBuffer | null },
-    format: { triangleLeaves?: TriangleLeaves; positionLayout?: PositionLayout } = {},
+    format: { triangleLeaves?: TriangleLeaves; positionLayout?: PositionLayout; nodeFormat?: 'f32' | 'quantized' } = {},
 ): Promise<TraceSceneData> {
     const [nodes, triangles, topLevelBytes, positions] = await Promise.all([
         readBuffer(device, buffers.nodes),
@@ -57,6 +57,7 @@ export async function readScene(
     };
     return {
         nodes,
+        nodeFormat: format.nodeFormat ?? 'f32',
         triangles,
         triangleLeaves: format.triangleLeaves ?? 'records',
         positions,

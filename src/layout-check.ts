@@ -8,7 +8,9 @@
  * - the nodes form one tree from node 0: every node reached once, every
  *   triangle position in exactly one leaf, leaves of 1 to `maxLeafPrimitives`;
  * - every child box is exactly the box of the triangles below it (boxes are
- *   min and max of f32 values, so "exactly" is bit equality);
+ *   min and max of f32 values, so "exactly" is bit equality); with quantized
+ *   nodes, every decoded box contains it with the 1/1024-step margin on every
+ *   plane, and the frame is the one `nodeFrameOf` gives the exact root box;
  * - the parents, the depth, the leaf count and the mesh box agree with the nodes.
  *
  * Plain arrays and an explicit stack, so it handles meshes of millions of
@@ -32,6 +34,8 @@ import {
 } from './gpu-layout.ts';
 import type { MeshInput } from './mesh-input.ts';
 import { recordsFromIndexed } from './indexed-leaves.ts';
+import { dequantizeNodes, nodeFrameOf, QUANTIZE_MARGIN_STEPS, readNodeFrame, type NodeFrame } from './quantized-nodes.ts';
+import { GPU_LAYOUT_QUANTIZED_NODE_BYTES } from './gpu-layout.ts';
 
 const TRIANGLE_WORDS = GPU_LAYOUT_TRIANGLE_BYTES / 4;
 const CHILD_INDEX = [GPU_LAYOUT_NODE_WORD.leftIndex, GPU_LAYOUT_NODE_WORD.rightIndex] as const;
@@ -71,7 +75,17 @@ const FLIP_FRONT_FACE = 2;
 const MATERIAL_SHIFT = 16;
 
 export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, options: LayoutCheckOptions = {}): string[] {
-    if (layout.triangleLeaves === 'indexed') return checkIndexedLayout(layout, geometry, options);
+    return checkLayout(layout, geometry, options, null);
+}
+
+/** `frame`: the tree's nodes were quantized on this frame (and `layout` holds them decoded). */
+function checkLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, options: LayoutCheckOptions, frame: NodeFrame | null): string[] {
+    if (layout.nodeFormat === 'quantized') {
+        const bytes = (layout.nodeCount + 1) * GPU_LAYOUT_QUANTIZED_NODE_BYTES;
+        if (layout.nodeCount < 1 || layout.nodes.byteLength !== bytes) return [`${layout.nodeCount} quantized nodes need ${bytes} bytes (the frame slot first), got ${layout.nodes.byteLength}`];
+        return checkLayout(dequantizeNodes(layout), geometry, options, readNodeFrame(new Uint32Array(layout.nodes), 0));
+    }
+    if (layout.triangleLeaves === 'indexed') return checkIndexedLayout(layout, geometry, options, frame);
     const maxLeaf = options.maxLeafPrimitives ?? GPU_LAYOUT_MAX_LEAF_PRIMITIVES;
     const maxProblems = options.maxProblems ?? 20;
     const problems: string[] = [];
@@ -233,7 +247,17 @@ export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, op
             }
             const stored = node * GPU_LAYOUT_NODE_WORDS + CHILD_MIN[side];
             for (let axis = 0; axis < 3; axis++) {
-                if (nodeFloats[stored + axis] !== childBox[axis] || nodeFloats[stored + MAX_OFFSET + axis] !== childBox[3 + axis]) {
+                const min = nodeFloats[stored + axis];
+                const max = nodeFloats[stored + MAX_OFFSET + axis];
+                if (frame) {
+                    // Rounded outward with the margin: the decoded planes lie at least 1/1024 of a step outside.
+                    const margin = frame.step[axis] * QUANTIZE_MARGIN_STEPS;
+                    const empty = !(childBox[axis] <= childBox[3 + axis]);
+                    if (!empty && !(childBox[axis] - min >= margin && max - childBox[3 + axis] >= margin)) {
+                        if (report(`node ${node} side ${side}'s decoded box [${min}, ${max}] does not contain the box below it [${childBox[axis]}, ${childBox[3 + axis]}] with the margin (axis ${axis})`)) return problems;
+                        break;
+                    }
+                } else if (min !== childBox[axis] || max !== childBox[3 + axis]) {
                     if (report(`node ${node} side ${side}'s box is not the box of what is below it (axis ${axis})`)) return problems;
                     break;
                 }
@@ -250,6 +274,14 @@ export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, op
             break;
         }
     }
+    if (frame) {
+        const expected = nodeFrameOf(boxes.subarray(0, 6));
+        for (let axis = 0; axis < 3; axis++) {
+            if (frame.origin[axis] !== expected.origin[axis] || frame.step[axis] !== expected.step[axis]) {
+                report(`the frame on axis ${axis} (origin ${frame.origin[axis]}, step ${frame.step[axis]}) is not the root box's (origin ${expected.origin[axis]}, step ${expected.step[axis]})`);
+            }
+        }
+    }
     return problems;
 }
 
@@ -259,7 +291,9 @@ export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, op
  * `traversalCost` per inner node visited and `intersectionCost` per triangle
  * tested. What GPU builders are judged by against tinybvh (bvh-framework.md, B2).
  */
-export function treeSahCost(layout: GpuLayoutMeshBvh, traversalCost = 1, intersectionCost = 1): number {
+export function treeSahCost(tree: GpuLayoutMeshBvh, traversalCost = 1, intersectionCost = 1): number {
+    // Quantized trees are measured on their decoded boxes (what the walk tests).
+    const layout = dequantizeNodes(tree);
     const words = new Uint32Array(layout.nodes, 0, layout.nodeCount * GPU_LAYOUT_NODE_WORDS);
     const floats = new Float32Array(layout.nodes, 0, layout.nodeCount * GPU_LAYOUT_NODE_WORDS);
     const area = (base: number): number => {
@@ -299,7 +333,7 @@ export function treeSahCost(layout: GpuLayoutMeshBvh, traversalCost = 1, interse
  * corners copied out. A merged identity lives in an indexed scene's side
  * tables, not in the tree, so `merged` is refused here.
  */
-function checkIndexedLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, options: LayoutCheckOptions): string[] {
+function checkIndexedLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, options: LayoutCheckOptions, frame: NodeFrame | null): string[] {
     const maxProblems = options.maxProblems ?? 20;
     const problems: string[] = [];
     const report = (problem: string): boolean => {
@@ -333,5 +367,5 @@ function checkIndexedLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, optio
         }
     }
     if (problems.length > 0) return problems;
-    return checkGpuLayout(recordsFromIndexed(layout, positions), geometry, options);
+    return checkLayout(recordsFromIndexed(layout, positions), geometry, options, frame);
 }

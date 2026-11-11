@@ -24,8 +24,10 @@ export interface MeshGeometry {
 
 /** The result of building a mesh BVH. All indices are relative to this mesh. */
 export interface MeshBvh {
-    /** `nodeCount` nodes, 64 bytes each. Node 0 is the root. */
+    /** `nodeCount` nodes, 64 bytes each; node 0 is the root. Quantized: the frame slot, then 32 bytes per node (`GpuLayoutNodeFormat`). */
     readonly nodes: ArrayBuffer;
+    /** How `nodes` stores them; omitted means `'f32'` (`GpuLayoutNodeFormat`, docs/design/compressed-nodes.md). */
+    readonly nodeFormat?: 'f32' | 'quantized';
     /** `triangleCount` triangles in tree order: 48-byte records, or 16-byte indexed triangles with `triangleLeaves: 'indexed'`. */
     readonly triangles: ArrayBuffer;
     /** How `triangles` stores them; omitted means `'records'` (`GpuLayoutTriangleLeaves`). */
@@ -50,6 +52,8 @@ export function meshBvhTransferables(bvh: MeshBvh): ArrayBuffer[] {
 export interface MeshBvhBuildOptions {
     /** The triangle format, `'records'` (the default) or `'indexed'` (docs/design/indexed-leaves.md). */
     readonly triangleLeaves?: 'records' | 'indexed';
+    /** The node format, `'f32'` (the default) or `'quantized'` (docs/design/compressed-nodes.md). */
+    readonly nodeFormat?: 'f32' | 'quantized';
     /** Leaves with more triangles than this are cut in half until they fit. 1 to 8; default 8. */
     readonly maxLeafPrimitives?: number;
 }

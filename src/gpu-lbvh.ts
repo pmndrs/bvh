@@ -50,6 +50,7 @@
  * subgroups first, one fallback).
  */
 
+import { checkNodeFormat } from './quantized-nodes.ts';
 import {
     GPU_LAYOUT_MAX_LEAF_PRIMITIVES,
     GPU_LAYOUT_MAX_TRIANGLES,
@@ -160,7 +161,7 @@ export function checkOptions(options: GpuBuildOptions): Required<GpuBuildOptions
     const traversalCost = options.traversalCost ?? 1;
     const intersectionCost = options.intersectionCost ?? 1;
     if (!(traversalCost > 0) || !(intersectionCost > 0)) throw new RangeError('the SAH costs must be positive');
-    return { maxLeafPrimitives: maxLeaf, traversalCost, intersectionCost, triangleLeaves: checkTriangleLeaves(options.triangleLeaves, 'GPU build') };
+    return { maxLeafPrimitives: maxLeaf, traversalCost, intersectionCost, triangleLeaves: checkTriangleLeaves(options.triangleLeaves, 'GPU build'), nodeFormat: checkNodeFormat(options.nodeFormat, 'GPU build') };
 }
 
 export function checkGeometry(geometry: GpuMeshGeometry, index: number): void {

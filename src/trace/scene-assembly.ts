@@ -28,6 +28,8 @@ import {
     type PositionLayout,
     type TriangleLeaves,
 } from './layout.ts';
+import { checkNodeFormat, quantizeNodes } from '../quantized-nodes.ts';
+import { gpuLayoutNodeBytes, gpuLayoutNodeSlots, type GpuLayoutNodeFormat } from '../gpu-layout.ts';
 import { checkTriangleLeaves, indexedFromRecords, weldExactBits, weldPositions } from '../indexed-leaves.ts';
 import { checkTriangleFlags } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
@@ -65,7 +67,10 @@ export interface TraceSceneInstance {
 
 /** Where one input mesh landed in the scene's shared buffers. A `TriangleRecordRange` for `writeTriangleFilterFlags`. */
 export interface TraceSceneMeshPlacement {
-    /** First node, counted in nodes. */
+    /**
+     * The mesh's root, counted in nodes (in the scene's node size). A
+     * quantized scene keeps the mesh's frame slot right before it, at `nodeOffset - 1`.
+     */
     readonly nodeOffset: number;
     readonly nodeCount: number;
     /** First triangle record, counted in triangles. */
@@ -90,8 +95,10 @@ export interface TraceSceneMeshPlacement {
 }
 
 export interface TraceSceneData {
-    /** Every mesh's nodes, one after another. */
+    /** Every mesh's nodes, one after another (quantized: each mesh's frame slot, then its nodes). */
     readonly nodes: ArrayBuffer;
+    /** How `nodes` stores them. `'f32'` unless assembled with `nodeFormat: 'quantized'`. */
+    readonly nodeFormat: GpuLayoutNodeFormat;
     /**
      * Every mesh's triangles, one after another. Indexed scenes: 16-byte
      * units, and each mesh's region starts with its header (and a merged
@@ -185,6 +192,14 @@ export interface TraceSceneAssemblyOptions {
      * same, and saves memory. Default true.
      */
     readonly weld?: boolean;
+    /**
+     * The scene's node format (docs/design/compressed-nodes.md). Default
+     * `'f32'`: the scene is byte for byte what it was before the option
+     * existed. `'quantized'`: 32-byte nodes, each mesh's frame slot before its
+     * root; `f32` trees are quantized (`quantizeNodes`), quantized trees are
+     * placed as they are. Independent of {@link triangleLeaves}.
+     */
+    readonly nodeFormat?: GpuLayoutNodeFormat;
 }
 
 export function assembleTraceScene(
@@ -215,11 +230,16 @@ export function assembleTraceScene(
         throw new RangeError("assembleTraceScene: geometries, weld and positionLayout are for triangleLeaves: 'indexed'");
     }
 
+    const nodeFormat = checkNodeFormat(options.nodeFormat, 'assembleTraceScene');
+    const quantized = nodeFormat === 'quantized';
+    const nodeBytes = gpuLayoutNodeBytes(nodeFormat);
     let totalNodes = 0;
     let totalTriangles = 0;
     const allPlacements = placed.map((mesh, index): TraceSceneMeshPlacement => {
         const sources = index >= meshes.length ? merged!.plan.groups[index - meshes.length].sources.length : 0;
         const leading = indexed && mesh ? indexedLeadingUnits(mesh.triangleCount, sources) : 0;
+        // A quantized mesh's frame slot comes right before its root.
+        if (quantized && mesh) totalNodes++;
         const placement: TraceSceneMeshPlacement = {
             nodeOffset: totalNodes,
             nodeCount: mesh?.nodeCount ?? 0,
@@ -232,13 +252,15 @@ export function assembleTraceScene(
         return placement;
     });
 
-    const nodes = new ArrayBuffer(Math.max(1, totalNodes) * BVH_NODE_BYTES);
+    const nodes = new ArrayBuffer(Math.max(1, totalNodes) * nodeBytes);
     const triangles = new ArrayBuffer(Math.max(1, totalTriangles) * (indexed ? INDEXED_TRIANGLE_BYTES : TRIANGLE_BYTES));
     placed.forEach((mesh, index) => {
         if (!mesh) return;
-        new Uint8Array(nodes, allPlacements[index].nodeOffset * BVH_NODE_BYTES, mesh.nodeCount * BVH_NODE_BYTES).set(
-            new Uint8Array(mesh.nodes, 0, mesh.nodeCount * BVH_NODE_BYTES),
-        );
+        if (!quantized && mesh.nodeFormat === 'quantized') throw new RangeError(`assembleTraceScene: mesh ${index} has quantized nodes; assemble with nodeFormat: 'quantized'`);
+        // Quantized: the frame slot and the nodes, from one before the root.
+        const tree = quantized ? quantizeNodes(mesh) : mesh;
+        const slots = gpuLayoutNodeSlots(tree.nodeCount, nodeFormat);
+        new Uint8Array(nodes, (allPlacements[index].nodeOffset - (quantized ? 1 : 0)) * nodeBytes, slots * nodeBytes).set(new Uint8Array(tree.nodes, 0, slots * nodeBytes));
         if (indexed) return;
         if (mesh.triangleLeaves === 'indexed') throw new RangeError(`assembleTraceScene: mesh ${index} is indexed; assemble with triangleLeaves: 'indexed'`);
         new Uint8Array(triangles, allPlacements[index].triangleOffset * TRIANGLE_BYTES, mesh.triangleCount * TRIANGLE_BYTES).set(
@@ -327,6 +349,7 @@ export function assembleTraceScene(
     if (indexed) markIndexedSceneTriangles(triangles);
     return {
         nodes,
+        nodeFormat,
         triangles,
         triangleLeaves: leaves,
         positions,
@@ -463,6 +486,8 @@ export interface TraceSceneBuildOptions extends StaticMergeOptions {
     readonly positionLayout?: PositionLayout;
     /** Indexed scenes: the exact-bit weld at assembly. Default true. */
     readonly weld?: boolean;
+    /** The scene's node format (see `TraceSceneAssemblyOptions.nodeFormat`). Default `'f32'`; trees are built `f32` and quantized at assembly. */
+    readonly nodeFormat?: GpuLayoutNodeFormat;
     /**
      * Opt-in: weld each mesh's vertices closer than this on every axis before
      * building (`weldPositions`), in either format. It moves geometry away
@@ -498,9 +523,10 @@ export async function buildTraceScene(
     const tolerance = options.weldTolerance ?? 0;
     const geometries = tolerance > 0 ? inputs.map((geometry) => weldPositions(geometry, { tolerance })) : inputs;
     const indexed = checkTriangleLeaves(options.triangleLeaves, 'buildTraceScene') === 'indexed';
+    const nodeOptions: TraceSceneAssemblyOptions = checkNodeFormat(options.nodeFormat, 'buildTraceScene') === 'quantized' ? { nodeFormat: 'quantized' } : {};
     const layoutOptions: TraceSceneAssemblyOptions = indexed
-        ? { triangleLeaves: 'indexed', geometries, positionLayout: options.positionLayout, weld: options.weld }
-        : {};
+        ? { triangleLeaves: 'indexed', geometries, positionLayout: options.positionLayout, weld: options.weld, ...nodeOptions }
+        : nodeOptions;
     // A tolerance weld renumbers vertices too: the scene's are not the app's, so no refit (meshRefitPlacement).
     const markWelded = (scene: TraceSceneData): TraceSceneData =>
         indexed && tolerance > 0 ? { ...scene, meshes: scene.meshes.map((placement) => ({ ...placement, welded: true })) } : scene;

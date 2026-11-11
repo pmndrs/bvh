@@ -165,6 +165,7 @@ function readScene(scene: SceneTrees): TraceSceneData {
     const header = new Uint32Array(top, 0, 4);
     return {
         nodes: bytes(nodes),
+        nodeFormat: 'f32',
         triangles: bytes(triangles),
         triangleLeaves: scene.triangleLeaves,
         positions: positions ? bytes(positions) : new ArrayBuffer(0),

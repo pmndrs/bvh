@@ -54,10 +54,19 @@
  * built in, `layout` is always records, and {@link CpuMeshBvh.serialize}
  * writes records. Reading corners through the source's own positions instead
  * (16 bytes per triangle) is a later step.
+ *
+ * **Quantized trees** (`nodeFormat: 'quantized'`, docs/design/compressed-nodes.md)
+ * are decoded to 64-byte nodes once, in the constructor (`dequantizeNodes`).
+ * Each decoded plane is exact (the frame rule), so {@link CpuMeshBvh.traverse}
+ * hands `intersectsBounds` plain `f32` boxes that are a little looser than the
+ * exact ones and always contain their subtree: `BVH_CONTAINED` stays right.
+ * `layout` is then `f32`, {@link CpuMeshBvh.refit} makes its boxes exact again,
+ * and {@link CpuMeshBvh.serialize} writes `f32` nodes.
  */
 
 import { GPU_LAYOUT_EMPTY_CHILD, GPU_LAYOUT_MAX_LEAF_PRIMITIVES, GPU_LAYOUT_NO_PARENT, GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_NODE_WORD, GPU_LAYOUT_NODE_WORDS, GPU_LAYOUT_TRIANGLE_BYTES, GPU_LAYOUT_TRIANGLE_WORD, type GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import type { MeshInput } from '../mesh-input.ts';
+import { dequantizeNodes } from '../quantized-nodes.ts';
 import { PRIMITIVE_BOX_FLOATS, refitOnCpu } from '../refit-cpu.ts';
 import { deserializeLayout, serializeLayout } from '../serialize.ts';
 import { recordsFromIndexed } from '../indexed-leaves.ts';
@@ -395,7 +404,10 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
         // Indexed trees are queried as records: the CPU queries, the depth-first reorder and the
         // refit read corners from the records (docs/design/indexed-leaves.md, "CpuMeshBvh").
         if (input.triangleLeaves === 'indexed' && !options.source) throw new RangeError('CpuMeshBvh: an indexed tree needs its geometry (options.source) for its corners');
-        const layout = input.triangleLeaves === 'indexed' ? recordsFromIndexed(input, options.source!.positions) : input;
+        // Quantized nodes are decoded once (docs/design/compressed-nodes.md, "CpuMeshBvh"): CPU trees
+        // stay 64 bytes per node, and every box the queries see contains the exact one.
+        const decoded = dequantizeNodes(input);
+        const layout = decoded.triangleLeaves === 'indexed' ? recordsFromIndexed(decoded, options.source!.positions) : decoded;
         if (layout.nodes.byteLength !== layout.nodeCount * GPU_LAYOUT_NODE_BYTES) throw new RangeError(`CpuMeshBvh: ${layout.nodeCount} nodes need ${layout.nodeCount * GPU_LAYOUT_NODE_BYTES} bytes, got ${layout.nodes.byteLength}`);
         if (layout.triangles.byteLength !== layout.triangleCount * GPU_LAYOUT_TRIANGLE_BYTES) {
             throw new RangeError(`CpuMeshBvh: ${layout.triangleCount} triangles need ${layout.triangleCount * GPU_LAYOUT_TRIANGLE_BYTES} bytes, got ${layout.triangles.byteLength}`);
