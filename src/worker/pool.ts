@@ -1,0 +1,307 @@
+/**
+ * A pool of module workers that build mesh trees with tinybvh (WASM), each
+ * mesh on one worker, several meshes at once (`@pmndrs/bvh/worker`, D3).
+ *
+ * Each worker is single-threaded (tinybvh's WASM build has no threads), so the
+ * pool needs no SharedArrayBuffer and no cross-origin isolation, unlike
+ * three-mesh-bvh's `ParallelMeshBVHWorker`. Parallelism is across meshes: a
+ * scene of many meshes spreads over the pool, while one big mesh (a merged
+ * static group, say: 1.5 s on Sponza) occupies one worker and leaves the rest
+ * to the others. Results come back as transferable `ArrayBuffer`s, so nothing
+ * is copied on the way out; inputs are copied unless `transferInput` is set.
+ *
+ * Where there is no `Worker` (Node, a host that blocks workers) or one can't
+ * start, the pool builds on the calling thread, one mesh at a time on later
+ * turns, so callers see the same asynchronous behaviour (`worker: 'auto'`, the
+ * default; `'always'` throws instead, `'never'` always builds inline).
+ *
+ * Builds are started in the order they were asked for (first in, first out).
+ * A caller that wants the makespan short asks for its biggest meshes first.
+ */
+
+import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
+import type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from '../trace/mesh-bvh.ts';
+import type { BuildRequest, BuildResponse } from '../trace/mesh-bvh-worker.ts';
+
+export interface BvhWorkerPoolOptions {
+    /**
+     * Workers in the pool. Default {@link defaultWorkerPoolSize}: one less than
+     * the logical cores, at least 1 and at most 4. Workers start when builds
+     * need them, not before, so an idle pool costs nothing.
+     */
+    readonly size?: number;
+    /**
+     * `'auto'` (default) uses workers when `Worker` exists, and builds inline if
+     * none can be started or the first one fails before answering. `'never'`
+     * always builds inline; `'always'` throws instead of falling back.
+     */
+    readonly worker?: 'auto' | 'never' | 'always';
+    /**
+     * Move every build's input arrays into the worker instead of copying them;
+     * the caller's arrays are empty afterwards. Default false. A build can
+     * choose for itself with {@link BvhBuildRequest.transferInput}.
+     */
+    readonly transferInput?: boolean;
+}
+
+/** Per-build options of {@link BvhWorkerPool.build}, besides the tree's own. */
+export interface BvhBuildRequest {
+    /**
+     * Cancels the build. A build still waiting for a worker never starts; one
+     * already running finishes in its worker (a tinybvh build can't be
+     * interrupted) and its result is dropped. Either way the promise rejects
+     * with an `AbortError` at once.
+     */
+    readonly signal?: AbortSignal;
+    /** Overrides the pool's `transferInput` for this build. */
+    readonly transferInput?: boolean;
+}
+
+/** Counts for tools and tests. */
+export interface BvhWorkerPoolStats {
+    /** Builds waiting for a worker. */
+    readonly queued: number;
+    /** Builds running now. */
+    readonly running: number;
+    /** Workers started and alive. */
+    readonly workers: number;
+    /** Builds finished (built, failed or cancelled while running) since the pool was made. */
+    readonly finished: number;
+}
+
+export interface BvhWorkerPool {
+    /** Whether builds run in workers (false: inline, on the calling thread). */
+    readonly usesWorkers: boolean;
+    /** The most builds that run at once: the pool's size, or 1 inline. */
+    readonly size: number;
+    readonly stats: BvhWorkerPoolStats;
+    /** Builds one mesh's tree with tinybvh on the next free worker. */
+    build(geometry: MeshGeometry, options?: MeshBvhBuildOptions, request?: BvhBuildRequest): Promise<MeshBvh>;
+    /** Stops every worker. Builds still queued or running reject. */
+    dispose(): void;
+}
+
+/** One less than the logical cores (the main thread keeps one), between 1 and 4. */
+export function defaultWorkerPoolSize(): number {
+    const cores = typeof navigator !== 'undefined' && navigator.hardwareConcurrency > 0 ? navigator.hardwareConcurrency : 2;
+    return Math.max(1, Math.min(4, cores - 1));
+}
+
+interface Job {
+    readonly geometry: MeshGeometry;
+    readonly options: MeshBvhBuildOptions;
+    readonly transferInput: boolean;
+    readonly signal?: AbortSignal;
+    readonly resolve: (bvh: MeshBvh) => void;
+    readonly reject: (error: Error) => void;
+    /** Set once the promise is settled (a cancelled build settles before its worker is done). */
+    settled: boolean;
+    /** The input was moved into a worker: it can't be built again elsewhere. */
+    transferred: boolean;
+    onAbort?: () => void;
+}
+
+interface PoolWorker {
+    readonly worker: Worker;
+    job: Job | null;
+    /** Builds this worker answered: a worker that fails before its first answer may mean workers don't load here. */
+    answered: number;
+    nextId: number;
+}
+
+function abortError(): Error {
+    return typeof DOMException !== 'undefined' ? new DOMException('the BVH build was cancelled', 'AbortError') : Object.assign(new Error('the BVH build was cancelled'), { name: 'AbortError' });
+}
+
+function toError(error: unknown): Error {
+    return error instanceof Error ? error : new Error(String(error));
+}
+
+/** The worker entry's URL. It stays inline in `new Worker(new URL(...))` so bundlers find the file. */
+function startWorker(): Worker {
+    return new Worker(new URL('../trace/mesh-bvh-worker.ts', import.meta.url), { type: 'module' });
+}
+
+export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWorkerPool {
+    const mode = options.worker ?? 'auto';
+    const size = options.size ?? defaultWorkerPoolSize();
+    if (!Number.isInteger(size) || size < 1) throw new RangeError(`a worker pool needs a size of at least 1, got ${size}`);
+    let inline = mode === 'never' || typeof Worker === 'undefined';
+    if (inline && mode === 'always') throw new Error('@pmndrs/bvh/worker: a worker was required, but this environment has no Worker');
+
+    const queue: Job[] = [];
+    const workers: PoolWorker[] = [];
+    let inlineRunning = 0;
+    let finished = 0;
+    let disposed = false;
+
+    const settle = (job: Job, outcome: { bvh: MeshBvh } | { error: Error }): void => {
+        if (job.settled) return;
+        job.settled = true;
+        if (job.onAbort) job.signal?.removeEventListener('abort', job.onAbort);
+        if ('bvh' in outcome) job.resolve(outcome.bvh);
+        else job.reject(outcome.error);
+    };
+
+    const runInline = (job: Job): void => {
+        inlineRunning++;
+        // A later turn, so an inline pool is as asynchronous as a worker one.
+        setTimeout(() => {
+            if (job.settled) {
+                inlineRunning--;
+                finished++;
+                pump();
+                return;
+            }
+            buildMeshBvhAsync(job.geometry, job.options).then(
+                (bvh) => settle(job, { bvh }),
+                (error: unknown) => settle(job, { error: toError(error) }),
+            ).finally(() => {
+                inlineRunning--;
+                finished++;
+                pump();
+            });
+        }, 0);
+    };
+
+    const fallBackToInline = (reason: string): void => {
+        if (mode === 'always') {
+            for (const job of queue.splice(0)) settle(job, { error: new Error(reason) });
+            return;
+        }
+        inline = true;
+        for (const entry of workers.splice(0)) {
+            entry.worker.terminate();
+            const job = entry.job;
+            if (!job) continue;
+            if (job.transferred) settle(job, { error: new Error(`${reason}; this build's input was moved into the worker, so it can't be built again inline`) });
+            else queue.unshift(job);
+        }
+    };
+
+    const attach = (entry: PoolWorker): void => {
+        entry.worker.onmessage = (event: MessageEvent<BuildResponse>) => {
+            const job = entry.job;
+            if (!job || event.data.id !== entry.nextId - 1) return;
+            entry.job = null;
+            entry.answered++;
+            finished++;
+            const response = event.data;
+            settle(job, 'error' in response ? { error: new Error(response.error) } : { bvh: response.bvh });
+            pump();
+        };
+        entry.worker.onerror = (event) => {
+            event.preventDefault?.();
+            const message = `@pmndrs/bvh/worker: a BVH worker failed: ${event.message || 'it could not be loaded'}`;
+            if (entry.answered === 0 && workers.every((other) => other.answered === 0)) {
+                // No worker has ever answered: workers probably can't load here (a bundler that didn't copy
+                // the worker file, a blocked origin). Build inline from now on.
+                fallBackToInline(message);
+                pump();
+                return;
+            }
+            // One worker died: its build fails, and the pool starts a new worker for the next one.
+            const index = workers.indexOf(entry);
+            if (index >= 0) workers.splice(index, 1);
+            entry.worker.terminate();
+            if (entry.job) {
+                finished++;
+                settle(entry.job, { error: new Error(message) });
+            }
+            entry.job = null;
+            pump();
+        };
+    };
+
+    const send = (entry: PoolWorker, job: Job): void => {
+        entry.job = job;
+        const request: BuildRequest = { id: entry.nextId++, geometry: job.geometry, options: job.options };
+        const transfer: Transferable[] = [];
+        if (job.transferInput) {
+            transfer.push(job.geometry.positions.buffer);
+            if (job.geometry.indices && job.geometry.indices.buffer !== job.geometry.positions.buffer) transfer.push(job.geometry.indices.buffer);
+            if (job.geometry.triangleFlags) transfer.push(job.geometry.triangleFlags.buffer);
+            job.transferred = true;
+        }
+        entry.worker.postMessage(request, transfer);
+    };
+
+    /** Starts queued builds on free workers (starting workers up to the pool's size). */
+    function pump(): void {
+        if (disposed) return;
+        while (queue.length > 0) {
+            if (queue[0].settled) {
+                queue.shift();
+                continue;
+            }
+            if (inline) {
+                // One inline build at a time: they share the calling thread.
+                if (inlineRunning > 0) return;
+                runInline(queue.shift()!);
+                continue;
+            }
+            let entry = workers.find((candidate) => candidate.job === null);
+            if (!entry && workers.length < size) {
+                try {
+                    entry = { worker: startWorker(), job: null, answered: 0, nextId: 1 };
+                } catch (error) {
+                    fallBackToInline(`@pmndrs/bvh/worker: a worker could not be started: ${toError(error).message}`);
+                    continue;
+                }
+                attach(entry);
+                workers.push(entry);
+            }
+            if (!entry) return;
+            send(entry, queue.shift()!);
+        }
+    }
+
+    return {
+        get usesWorkers() {
+            return !inline;
+        },
+        get size() {
+            return inline ? 1 : size;
+        },
+        get stats(): BvhWorkerPoolStats {
+            return {
+                queued: queue.filter((job) => !job.settled).length,
+                running: inline ? inlineRunning : workers.filter((entry) => entry.job !== null).length,
+                workers: workers.length,
+                finished,
+            };
+        },
+        build(geometry, buildOptions = {}, request = {}) {
+            if (disposed) return Promise.reject(new Error('@pmndrs/bvh/worker: the pool was disposed'));
+            if (request.signal?.aborted) return Promise.reject(abortError());
+            return new Promise<MeshBvh>((resolve, reject) => {
+                const job: Job = {
+                    geometry,
+                    options: buildOptions,
+                    transferInput: request.transferInput ?? options.transferInput ?? false,
+                    signal: request.signal,
+                    resolve,
+                    reject,
+                    settled: false,
+                    transferred: false,
+                };
+                if (request.signal) {
+                    job.onAbort = () => settle(job, { error: abortError() });
+                    request.signal.addEventListener('abort', job.onAbort, { once: true });
+                }
+                queue.push(job);
+                pump();
+            });
+        },
+        dispose() {
+            if (disposed) return;
+            disposed = true;
+            const error = new Error('@pmndrs/bvh/worker: the pool was disposed');
+            for (const entry of workers.splice(0)) {
+                entry.worker.terminate();
+                if (entry.job) settle(entry.job, { error });
+            }
+            for (const job of queue.splice(0)) settle(job, { error });
+        },
+    };
+}
