@@ -14,6 +14,11 @@ export interface RunnerOptions {
     verbose: boolean;
     /** Launch Chrome with the GPU disabled, to see the "WebGPU unavailable" failure. */
     withoutWebGpu: boolean;
+    /**
+     * Accept a software fallback adapter (SwiftShader) instead of failing. For CI runners with no GPU;
+     * set by --allow-software or BVH_ALLOW_SOFTWARE_ADAPTER=1. Off by default.
+     */
+    allowSoftware: boolean;
     /** Replaces every page's own timeout. */
     timeoutMs: number | null;
     help: boolean;
@@ -29,6 +34,8 @@ export const USAGE = `Usage: pnpm test:gpu [options]
   --chrome <path>      Chrome or Edge executable (default: look for an installed one; or CHROME_PATH).
   --out <dir>          Where screenshots go (default: a temp folder, printed at the end).
   --json <file>        Also write the whole run (adapter, per-page status, durations, data) as JSON.
+  --allow-software     Accept a software adapter (SwiftShader) instead of failing; the run says so.
+                       Also set by BVH_ALLOW_SOFTWARE_ADAPTER=1. For GPU-less CI only.
   --timeout <ms>       Replace every page's timeout.
   --no-webgpu          Start Chrome with the GPU disabled. The run must fail clearly (self-check).
   --verbose            Print all console output, not only for failing pages.
@@ -36,7 +43,7 @@ export const USAGE = `Usage: pnpm test:gpu [options]
 
 const GPU_CHOICES: readonly string[] = ['nvidia', 'intel'];
 
-export function parseRunnerArgs(argv: string[]): RunnerOptions {
+export function parseRunnerArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): RunnerOptions {
     let values;
     try {
         ({ values } = parseArgs({
@@ -48,6 +55,7 @@ export function parseRunnerArgs(argv: string[]): RunnerOptions {
                 out: { type: 'string' },
                 json: { type: 'string' },
                 timeout: { type: 'string' },
+                'allow-software': { type: 'boolean' },
                 'no-webgpu': { type: 'boolean' },
                 verbose: { type: 'boolean' },
                 help: { type: 'boolean' },
@@ -84,6 +92,7 @@ export function parseRunnerArgs(argv: string[]): RunnerOptions {
         jsonPath: values.json ?? null,
         verbose: values.verbose ?? false,
         withoutWebGpu: values['no-webgpu'] ?? false,
+        allowSoftware: values['allow-software'] === true || env.BVH_ALLOW_SOFTWARE_ADAPTER === '1',
         timeoutMs,
         help: values.help ?? false,
     };

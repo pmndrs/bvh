@@ -8,6 +8,13 @@ describe('parseRunnerArgs', () => {
         expect(options.filters).toEqual([]);
         expect(options.withoutWebGpu).toBe(false);
         expect(options.timeoutMs).toBeNull();
+        expect(options.allowSoftware).toBe(false);
+    });
+
+    it('allows a software adapter only by flag or BVH_ALLOW_SOFTWARE_ADAPTER=1', () => {
+        expect(parseRunnerArgs(['--allow-software'], {}).allowSoftware).toBe(true);
+        expect(parseRunnerArgs([], { BVH_ALLOW_SOFTWARE_ADAPTER: '1' }).allowSoftware).toBe(true);
+        expect(parseRunnerArgs([], { BVH_ALLOW_SOFTWARE_ADAPTER: '0' }).allowSoftware).toBe(false);
     });
 
     it('reads --gpu', () => {

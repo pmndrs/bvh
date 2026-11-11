@@ -50,7 +50,9 @@ pnpm bvh:wasm --check   # build, and fail unless it matches the committed .wasm
 
 Needs: Node 24, git and network access. On Linux and macOS it also needs Python 3, because emsdk brings its own Python only on Windows.
 
-**Reproducibility.** On Windows (2026-11-04), repeated builds from different temporary folders gave the same bytes as the committed `.wasm` (`--check` passes). A Linux or macOS build has not been compared yet.
+**Reproducibility.** The reference is the Linux build (SHA-256 `f2cf8c5c...47ed`); CI rebuilds it on ubuntu-latest and macos-latest and both give those exact bytes (`--check` passes, and each job uploads its rebuilt `.wasm` as an artifact).
+
+A Windows build differs in exactly two bytes, in the data section: tinybvh puts `__FILE__` into its error messages, and clang spells the path of an included header `./tiny_bvh_base.h` on Linux and macOS but `.\tiny_bvh_base.h` on Windows (the `/` becomes `\`). Every other section, the code included, is identical (compared section by section on 2026-11-11). So a Windows `pnpm bvh:wasm --check` reports a different hash; that is expected, and it is not a sign of a different compiler or different code. Rebuild the committed file on Linux or macOS (or take the CI artifact), not on Windows. The `.wasm` committed before 2026-11-11 was built on Windows and had these two bytes.
 
 ### How the licences travel with the .wasm
 

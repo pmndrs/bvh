@@ -1,7 +1,7 @@
 /** Tests of the paired method's schedule and ratios, and of the surface-ray CSV rows (no GPU). */
 
 import { describe, expect, it } from 'vitest';
-import { pairedRoundOrder, ratioOfRounds, type PairKey } from './paired-ratio.ts';
+import { hitRecordRoundOrder, pairedRoundOrder, ratioOfRounds, type HitRecordCase, type PairKey } from './paired-ratio.ts';
 import { surfaceRaysRows } from './surface-to-csv.ts';
 import type { SurfaceRaysData } from './surface-rays-bench.ts';
 
@@ -22,6 +22,20 @@ describe('paired schedule', () => {
         let instancedFirst = 0;
         for (let round = 0; round < 6; round++) if (pairedRoundOrder(pairs, round)[0].tree === 'instanced') instancedFirst++;
         expect(instancedFirst).toBe(3);
+    });
+});
+
+describe('hit-record schedule', () => {
+    const cases: HitRecordCase[] = [
+        { tree: 'instanced', set: 'surface' },
+        { tree: 'merged', set: 'surface' },
+    ];
+    const label = (round: number) => hitRecordRoundOrder(cases, round).map((step) => `${step.case.tree}:${step.record}`);
+
+    it('times the two records of a case back to back, the 40-byte one first on even rounds and the 24-byte one first on odd ones', () => {
+        expect(label(0)).toEqual(['instanced:record40', 'instanced:record24', 'merged:record40', 'merged:record24']);
+        expect(label(1)).toEqual(['merged:record24', 'merged:record40', 'instanced:record24', 'instanced:record40']);
+        expect(label(2)).toEqual(label(0));
     });
 });
 
@@ -70,6 +84,12 @@ describe('surface-ray csv rows', () => {
                 ratios: [{ name: 'merged_over_instanced/surface/closest', perRound: [1.9, 1.8], median: 1.9, min: 1.8, max: 1.9 }],
                 repeatRatios: [{ name: 'merged_over_instanced/surface/closest', ratio: 1.85 }],
             },
+            hitRecord: {
+                rounds: 2,
+                entries: [{ tree: 'merged', set: 'surface', record: 'record40', recordBytes: 40, mraysPerRound: [300, 280], singleMraysPerRound: [250, 240] }],
+                ratios: [{ name: 'hit_record_40_over_24/merged/surface/closest', perRound: [0.97, 0.99], median: 0.98, min: 0.97, max: 0.99 }],
+                agreement: [{ tree: 'merged', set: 'surface', rays: 10, same: 10 }],
+            },
         } as unknown as SurfaceRaysData;
         const { timed, counted } = surfaceRaysRows(data);
         const metric = (name: string) => [...timed, ...counted].find((row) => row.metric === name)?.value;
@@ -80,5 +100,9 @@ describe('surface-ray csv rows', () => {
         expect(metric('surface-rays/merged/surface/closest/instances_entered_without_hit')).toBe(8.1);
         expect(metric('surface-rays/merged/surface/closest/agreement_with_instanced')).toBe(1);
         expect(metric('surface-rays/instanced/top_level_instances')).toBe(400);
+        expect(metric('surface-rays/paired/hit_record_40_over_24/merged/surface/closest/median_of_rounds')).toBe(0.98);
+        expect(metric('surface-rays/paired/hit_record_40_over_24/merged/surface/closest/round1')).toBe(0.97);
+        expect(metric('surface-rays/paired/hit_record/merged/surface/closest/record40_mrays_per_s_max_of_rounds')).toBe(300);
+        expect(metric('surface-rays/paired/hit_record/merged/surface/closest/compact_agreement')).toBe(1);
     });
 });
