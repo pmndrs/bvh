@@ -38,6 +38,8 @@ export interface SessionOptions {
     gpu: GpuChoice | null;
     /** Start Chrome with the GPU disabled (a self-check of the failure path). */
     withoutGpu: boolean;
+    /** Accept a software fallback adapter (see --allow-software). */
+    allowSoftware?: boolean;
 }
 
 export interface PageResult {
@@ -154,7 +156,7 @@ export class BrowserSession {
                     : 'navigator.gpu.requestAdapter() returned null (no usable GPU, or the GPU is disabled)';
             throw new WebGpuUnavailableError(`WebGPU is not available: ${reason}.`);
         }
-        const mismatch = adapterMismatch(this.options.gpu, probe.adapter);
+        const mismatch = adapterMismatch(this.options.gpu, probe.adapter, this.options.allowSoftware ?? false);
         if (mismatch) throw new WrongAdapterError(mismatch);
         return probe.adapter;
     }
@@ -200,6 +202,7 @@ export class BrowserSession {
             expectFailure: run.expectFailure,
             expectMessage: page.expectMessage,
             wantedGpu: this.options.gpu,
+            allowSoftware: this.options.allowSoftware ?? false,
         });
         return { page, verdict, report, messages, durationMs: Date.now() - startTime, screenshotPath };
     }

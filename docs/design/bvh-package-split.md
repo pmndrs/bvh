@@ -241,7 +241,7 @@ The only number so far is from T0.10 part C (PROGRESS): Sponza, ours 302 MB agai
 
 So the triangle records are the biggest single item, and the build outputs held until the swap more than double the peak.
 
-**1. Breakdown.** Measure every buffer on Sponza and Bistro exterior (GPU and CPU, resident and transient):
+**1. Breakdown (done 2026-11-11 as BX.19: [memory.md](memory.md), `tools/memory-breakdown.ts`).** Measure every buffer on Sponza and Bistro exterior (GPU and CPU, resident and transient):
 
 - nodes;
 - triangle records;

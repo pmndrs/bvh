@@ -169,10 +169,14 @@ async function main(): Promise<number> {
             chromePath: options.chromePath,
             gpu: options.gpu,
             withoutGpu: options.withoutWebGpu,
+            allowSoftware: options.allowSoftware,
         });
 
         summary.adapter = await session.preflight();
         console.log(`adapter: ${describeAdapter(summary.adapter)}`);
+        if (summary.adapter.isFallbackAdapter) {
+            console.log('SOFTWARE ADAPTER: this run is on a CPU fallback (allowed by --allow-software), not a real GPU.');
+        }
         console.log(`pages: ${pages.map((page) => page.name).join(', ')}`);
 
         for (const page of pages) {

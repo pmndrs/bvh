@@ -51,3 +51,29 @@ export function ratioOfRounds(name: string, numerator: readonly number[], denomi
     const perRound = numerator.map((rate, round) => rate / denominator[round]);
     return { name, perRound, median: median(perRound), min: Math.min(...perRound), max: Math.max(...perRound) };
 }
+
+/** The hit-record comparison: one tree and ray set traced closest-hit with the 40-byte record (`hitNormal: true`) and the 24-byte one (`false`). */
+export type HitRecord = 'record40' | 'record24';
+
+export interface HitRecordCase {
+    tree: Tree;
+    set: string;
+}
+
+export interface HitRecordStep {
+    case: HitRecordCase;
+    record: HitRecord;
+}
+
+/**
+ * The timings of one round of the hit-record comparison, in order. Even rounds
+ * go through `cases` as given with the 40-byte record first; odd rounds go
+ * backwards with the 24-byte record first. The two records of a case are
+ * always timed back to back, as the two trees of a pair are.
+ */
+export function hitRecordRoundOrder(cases: readonly HitRecordCase[], round: number): HitRecordStep[] {
+    const reversed = round % 2 === 1;
+    const ordered = reversed ? [...cases].reverse() : cases;
+    const records: HitRecord[] = reversed ? ['record24', 'record40'] : ['record40', 'record24'];
+    return ordered.flatMap((entry) => records.map((record) => ({ case: entry, record })));
+}

@@ -1,0 +1,2 @@
+# The native sources are compiled in CI on Linux and macOS; keep their bytes the same on every checkout.
+native/** text eol=lf

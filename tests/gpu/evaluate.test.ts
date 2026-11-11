@@ -63,6 +63,14 @@ describe('adapterMismatch', () => {
     it('rejects a software fallback adapter even when none was requested', () => {
         expect(adapterMismatch(null, adapter('google', { isFallbackAdapter: true }))).toContain('software');
     });
+
+    it('accepts a software fallback adapter only when the run opted in', () => {
+        const software = adapter('google', { architecture: 'swiftshader', isFallbackAdapter: true });
+        expect(adapterMismatch(null, software, true)).toBeNull();
+        expect(adapterMismatch(null, software, false)).toContain('software');
+        // Opting in does not excuse a vendor mismatch.
+        expect(adapterMismatch('nvidia', software, true)).toContain('--gpu nvidia');
+    });
 });
 
 describe('isFailureMessage', () => {
@@ -118,6 +126,12 @@ describe('evaluatePage', () => {
             }),
         );
         expect(verdict.reasons).toHaveLength(1);
+    });
+
+    it("rejects a page's own software adapter unless the run allows it", () => {
+        const software = report({ adapter: adapter('google', { isFallbackAdapter: true }) });
+        expect(evaluatePage(evidence({ report: software })).outcome).toBe('fail');
+        expect(evaluatePage(evidence({ report: software, allowSoftware: true })).outcome).toBe('pass');
     });
 
     it('fails when the page ran on a different adapter than requested', () => {

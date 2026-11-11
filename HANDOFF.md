@@ -54,10 +54,10 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
 
 **Open:**
 - **RTX 3060 and Intel:** none of today's work has run on them. The radiance-cache lane runs its RTX pass for the merged tree.
-- **The 40-byte hit record's cost:** not measured.
+- **The 40-byte hit record's cost:** measured on the M5 only (2026-11-11): no measurable cost, ratios 0.96-1.15 against the 24-byte record, medians 1.02-1.11; see `docs/design/memory.md`. RTX 3060 and Intel not run.
 - **The `LICENSE` file:** missing, and the holder (Dennis Smolek or Poimandres) is undecided.
 - **`bvh:wasm --check`:** needs the pinned emsdk, which isn't downloaded.
-- **Peak memory:** smaller H-PLOC batches are the next lever to measure.
+- **Peak memory:** BX.19's breakdown is in `docs/design/memory.md`. Smaller H-PLOC batches only lower the peak if they are built one after another (`GpuFirstTrees` creates every batch before the submit); the rest of the levers are BX.20.
 - **Still to do in `/three`:** draw ranges and groups that don't start on a multiple of 3, skinned and morphed meshes, a CPU scene raycast, a helper, and Windows compile cost.
 - **API tidy:** `export *` in `src/trace/index.ts`, the batch helpers in `gpu-lbvh.ts`, and folding the two layout files into one.
 - **Next phases:** Babylon (P6), the P4 examples and docs site, the comparison suite (P5), and CPU queries (P8).
@@ -98,7 +98,7 @@ The commit messages are ddgi's and refer to ddgi task ids (T0.10, B0, …), so r
    - `tsconfig.json` leaves `tests/` and `tools/` out until this is done.
 3. **`native/build-wasm.ts`** now treats this repo's root as both the package root and the repository root.
    - The generated header line in `src/tinybvh-wasm.ts` still says `packages/bvh/native/build-wasm.ts`. If you change that string in the generator, regenerate the file, or `pnpm bvh:wasm --check` will report a difference.
-   - The `.wasm` has only been compared on Windows. The plan has the check run on Ubuntu and macOS in CI.
+   - The committed `.wasm` is the Linux build; CI reproduces it on Ubuntu and macOS. A Windows build differs in two `__FILE__` path-separator bytes only (see `docs/design/bvh-builders.md`).
 4. **`THIRD_PARTY.md` is ddgi's whole file.** Keep only these rows:
    - tinybvh;
    - tinybvh's `BuildHPLOC`;

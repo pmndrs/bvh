@@ -8,6 +8,7 @@
  *   pnpm bvh:wasm                  install the pinned emsdk if needed, then build
  *   pnpm bvh:wasm --check          build, and fail unless the result matches the committed .wasm
  *   options: --keep-headers        keep the temporary build folder, for inspection
+ *            --out <file>          also write the raw .wasm there (CI uploads it as an artifact)
  *
  * What it does, so the committed .wasm can be checked:
  * 1. Makes sure `tools/emsdk` (gitignored) is emsdk at EMSDK_COMMIT with
@@ -217,7 +218,7 @@ function committedHash(): string | null {
 }
 
 async function main(): Promise<void> {
-    const { values } = parseArgs({ args: process.argv.slice(2), options: { check: { type: 'boolean' }, 'keep-headers': { type: 'boolean' } } });
+    const { values } = parseArgs({ args: process.argv.slice(2), options: { check: { type: 'boolean' }, 'keep-headers': { type: 'boolean' }, out: { type: 'string' } } });
     ensureEmsdk();
 
     const buildFolder = mkdtempSync(join(tmpdir(), 'tinybvh-'));
@@ -233,6 +234,7 @@ async function main(): Promise<void> {
         runEmxx(args, buildFolder);
         const bytes = readFileSync(join(buildFolder, 'tinybvh.wasm'));
         const hash = sha256(bytes);
+        if (values.out) writeFileSync(values.out, bytes);
         if (values.check) {
             const expected = committedHash();
             if (hash !== expected) throw new Error(`rebuilt .wasm has SHA-256 ${hash}; the committed one has ${expected}`);
