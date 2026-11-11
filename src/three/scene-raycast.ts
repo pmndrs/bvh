@@ -210,7 +210,7 @@ export class BvhSceneRaycaster {
         const { origin, direction } = raycaster.ray;
         const length = direction.length();
         if (!(length > 0)) return intersects;
-        const firstHitOnly = (raycaster as Raycaster & { firstHitOnly?: boolean }).firstHitOnly === true;
+        const firstHitOnly = raycaster.firstHitOnly === true;
         const unit = direction.clone().divideScalar(length);
         const hits = bvh.raycast(
             { origin: [origin.x, origin.y, origin.z], direction: [unit.x, unit.y, unit.z], tMin: raycaster.near, tMax: raycaster.far },

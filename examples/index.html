@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>@pmndrs/bvh · Examples</title>
+        <link rel="icon" href="data:," />
+        <style>
+            :root {
+                color-scheme: dark;
+                --bg: #0b0d10;
+                --card: #14181e;
+                --border: rgba(255, 255, 255, 0.1);
+                --text: #cfd8e3;
+                --muted: #8592a3;
+                --accent: #ffc878;
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                margin: 0;
+                min-height: 100vh;
+                background: var(--bg);
+                color: var(--text);
+                font: 14px/1.6 system-ui, sans-serif;
+                padding: 48px 16px 64px;
+            }
+            .wrap {
+                max-width: 1000px;
+                margin: 0 auto;
+            }
+            h1 {
+                font-size: 24px;
+                margin: 0 0 6px;
+            }
+            h1 span,
+            code {
+                color: var(--accent);
+            }
+            h2 {
+                font-size: 13px;
+                margin: 36px 0 4px;
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+            }
+            p {
+                color: var(--muted);
+                margin: 0 0 12px;
+            }
+            .grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+                gap: 16px;
+                margin-top: 16px;
+            }
+            .card {
+                background: var(--card);
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                padding: 18px;
+            }
+            .card:hover {
+                border-color: var(--accent);
+            }
+            .card a.title {
+                display: block;
+                font-size: 15px;
+                margin: 0 0 8px;
+                color: inherit;
+                text-decoration: none;
+            }
+            .card a.title::after {
+                content: ' →';
+                color: var(--accent);
+            }
+            .card .description {
+                color: var(--muted);
+                font-size: 13px;
+            }
+            .card a.source {
+                display: inline-block;
+                margin-top: 10px;
+                font-size: 12px;
+                color: var(--accent);
+            }
+            .gap {
+                opacity: 0.55;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="wrap">
+            <h1><span>@pmndrs/bvh</span> examples</h1>
+            <p>
+                Engine-free WebGPU BVHs: GPU H-PLOC and LBVH builders, tinybvh in WebAssembly and a worker pool, GPU refits, and a WGSL walk. Every page shows
+                which builder ran and why, build times, tree stats, ray rates and a frame-time graph. Drop a glTF on any page, or pass
+                <code>?model=downloads/…/scene.gltf</code> to load one from <code>BVH_ASSETS_DIR</code>.
+            </p>
+            <h2>three.js (WebGPURenderer, <code>@pmndrs/bvh/three</code>)</h2>
+            <div class="grid" id="three"></div>
+            <h2>Not yet</h2>
+            <div class="grid">
+                <div class="card gap">
+                    <span class="title">three/sdf</span>
+                    <div class="description">GPU SDF generation from the trees. The library has no SDF generation yet.</div>
+                </div>
+                <div class="card gap">
+                    <span class="title">vanilla/*, babylon/*, compare/*</span>
+                    <div class="description">The engine-free examples, Babylon and the three-mesh-bvh comparison suite come next (docs/design/bvh-package-split.md).</div>
+                </div>
+            </div>
+        </div>
+        <script type="module" src="./shared/index-page.ts"></script>
+    </body>
+</html>

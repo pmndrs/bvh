@@ -422,7 +422,7 @@ class PosingTrees implements SceneTreesTarget {
 }
 
 describe('SceneTreesObject3DSync with skinned and morphed meshes', () => {
-    it('adds posed objects as deforming meshes of their own, poses them each update, follows their box, and drops the pass with them', () => {
+    it('adds posed objects as deforming meshes of their own, poses them each update, follows their box, and drops the pass with them', async () => {
         const { renderer, gpu } = fakeRenderer();
         const random = createRandom(21);
         const root = new Group();
@@ -453,6 +453,7 @@ describe('SceneTreesObject3DSync with skinned and morphed meshes', () => {
                 return pass;
             },
         });
+        await sync.ready;
         // a: one mesh; b: two groups; rigid: one rest-pose mesh.
         expect(passes).toHaveLength(2);
         const deforming = [...trees.meshes.values()].filter((mesh) => mesh.options?.deforming);
@@ -490,7 +491,7 @@ describe('SceneTreesObject3DSync with skinned and morphed meshes', () => {
         void gpu;
     });
 
-    it('compiles each pose variant once when its first mesh is added, and dispatches nothing until update()', () => {
+    it('compiles each pose variant once when its first mesh is added, and dispatches nothing until update()', async () => {
         const { renderer } = fakeRenderer();
         const random = createRandom(23);
         const root = new Group();
@@ -504,13 +505,14 @@ describe('SceneTreesObject3DSync with skinned and morphed meshes', () => {
         const sync = new SceneTreesObject3DSync(new PosingTrees(), root, { renderer });
         expect(renderer.compiles).toBe(2); // skin+morph, morph
         expect(renderer.computes).toBe(0);
+        await sync.ready;
         sync.update();
         expect(renderer.computes).toBe(3);
         expect(renderer.compiles).toBe(2);
         sync.dispose();
     });
 
-    it('makes a new pass when the skeleton is replaced, and refuses a pose box that is not finite', () => {
+    it('makes a new pass when the skeleton is replaced, and refuses a pose box that is not finite', async () => {
         const { renderer } = fakeRenderer();
         const random = createRandom(25);
         const mesh = skinnedTube(random, 3);
@@ -524,6 +526,7 @@ describe('SceneTreesObject3DSync with skinned and morphed meshes', () => {
                 return pass;
             },
         });
+        await sync.ready;
         sync.update();
         expect(passes).toHaveLength(1);
         const handle = [...trees.meshes.keys()][0];
@@ -556,6 +559,101 @@ describe('SceneTreesObject3DSync with skinned and morphed meshes', () => {
         nanSync.update();
         broken = true;
         expect(() => nanSync.update()).toThrow(/pose box .* is not finite/);
+    });
+
+    it('does not pose a mesh while its pass is compiling (a late compile): no dispatch, its tree left as it was, then poses once ready', async () => {
+        const { renderer } = fakeRenderer();
+        const random = createRandom(27);
+        const root = new Group();
+        const a = skinnedTube(random, 4);
+        const b = skinnedTube(random, 3); // same variant: its pass shares a's pending pipeline
+        root.add(a, b);
+        root.updateMatrixWorld(true);
+        // A stand-in for three's pass whose compile resolves only when the test says so; update() throws
+        // while it is pending, as three's dispatch does (setPipeline(undefined)).
+        let finish!: () => void;
+        const compile = new Promise<void>((resolve) => (finish = resolve));
+        let compiled = false;
+        void compile.then(() => (compiled = true));
+        let dispatches = 0;
+        let prepares = 0;
+        const createPosePass = (mesh: Mesh): BvhPosePassLike => {
+            const real = new BvhPosePass(renderer, mesh);
+            return {
+                buffer: real.buffer,
+                vertexCount: real.vertexCount,
+                variant: real.variant,
+                prepare: () => {
+                    prepares++;
+                    return compile;
+                },
+                update: () => {
+                    if (!compiled) throw new TypeError("Cannot read properties of undefined (reading 'setPipeline')");
+                    dispatches++;
+                    real.update();
+                },
+                bounds: (target?: Float32Array) => real.bounds(target),
+                dispose: () => real.dispose(),
+            };
+        };
+        const trees = new PosingTrees();
+        const sync = new SceneTreesObject3DSync(trees, root, { renderer, createPosePass });
+        expect(prepares).toBe(1); // one variant
+        // Each mesh's deform box as added (the sync moves it in place when the pose leaves it).
+        const boxes = new Map([...trees.meshes.entries()].map(([handle, mesh]) => [handle, Array.from((mesh.options!.deforming as { bounds: ArrayLike<number> }).bounds)]));
+        let settled = false;
+        void sync.ready.then(() => (settled = true));
+
+        // Early updates, the pose moving: nothing dispatched, setPose and setDeformBounds not called.
+        trees.log.length = 0;
+        for (let frame = 0; frame < 3; frame++) {
+            animate(a, random, 3);
+            animate(b, random, 3);
+            root.updateMatrixWorld(true);
+            expect(() => sync.update()).not.toThrow();
+            expect(sync.poseCounts).toEqual({ posed: 0, boundsMoved: 0, waiting: 2 });
+        }
+        expect(dispatches).toBe(0);
+        expect(trees.log).toEqual([]);
+        expect(trees.poses.size).toBe(0);
+        expect(new Map([...trees.meshes.entries()].map(([handle, mesh]) => [handle, Array.from((mesh.options!.deforming as { bounds: ArrayLike<number> }).bounds)]))).toEqual(boxes);
+        await Promise.resolve();
+        expect(settled).toBe(false);
+
+        // The compile resolves late: ready settles, and the next update poses both.
+        finish();
+        await sync.ready;
+        expect(settled).toBe(true);
+        sync.update();
+        expect(sync.poseCounts).toMatchObject({ posed: 2, waiting: 0 });
+        expect(dispatches).toBe(2);
+        expect(trees.log.filter((line) => line.startsWith('setPose'))).toHaveLength(2);
+        expect(trees.poses.size).toBe(2);
+        sync.dispose();
+    });
+
+    it('warns and poses at the first update when a compile fails; ready never rejects', async () => {
+        const { renderer } = fakeRenderer();
+        const random = createRandom(29);
+        const mesh = skinnedTube(random, 3);
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+            const sync = new SceneTreesObject3DSync(new PosingTrees(), mesh, {
+                renderer,
+                createPosePass: (object) => {
+                    const pass = new BvhPosePass(renderer, object);
+                    pass.prepare = () => Promise.reject(new Error('no pipeline'));
+                    return pass;
+                },
+            });
+            await expect(sync.ready).resolves.toBeUndefined();
+            expect(warn).toHaveBeenCalledTimes(1);
+            sync.update();
+            expect(sync.poseCounts).toMatchObject({ posed: 1, waiting: 0 });
+            sync.dispose();
+        } finally {
+            warn.mockRestore();
+        }
     });
 
     it('refuses an InstancedMesh with per-instance morphs (morphTexture) and more than one instance, warning once', () => {

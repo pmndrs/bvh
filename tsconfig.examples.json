@@ -1,0 +1,13 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "types": ["@webgpu/types", "node", "vite/client"],
+        "paths": {
+            "@pmndrs/bvh": ["./src/index.ts"],
+            "@pmndrs/bvh/three": ["./src/three/index.ts"],
+            "@pmndrs/bvh/worker": ["./src/worker/index.ts"]
+        }
+    },
+    "include": ["examples"],
+    "exclude": ["node_modules", "dist", "examples/dist"]
+}

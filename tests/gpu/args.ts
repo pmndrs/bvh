@@ -21,6 +21,8 @@ export interface RunnerOptions {
     allowSoftware: boolean;
     /** Replaces every page's own timeout. */
     timeoutMs: number | null;
+    /** Smoke-run the examples site (examples/) instead of the test pages. */
+    examples: boolean;
     help: boolean;
 }
 
@@ -38,6 +40,8 @@ export const USAGE = `Usage: pnpm test:gpu [options]
                        Also set by BVH_ALLOW_SOFTWARE_ADAPTER=1. For GPU-less CI only.
   --timeout <ms>       Replace every page's timeout.
   --no-webgpu          Start Chrome with the GPU disabled. The run must fail clearly (self-check).
+  --examples           Smoke-run every example page (examples/) instead of the test pages;
+                       --filter matches example names (three-raycast, ...).
   --verbose            Print all console output, not only for failing pages.
   --help               Show this text.`;
 
@@ -58,6 +62,7 @@ export function parseRunnerArgs(argv: string[], env: NodeJS.ProcessEnv = process
                 'allow-software': { type: 'boolean' },
                 'no-webgpu': { type: 'boolean' },
                 verbose: { type: 'boolean' },
+                examples: { type: 'boolean' },
                 help: { type: 'boolean' },
             },
             strict: true,
@@ -94,6 +99,7 @@ export function parseRunnerArgs(argv: string[], env: NodeJS.ProcessEnv = process
         withoutWebGpu: values['no-webgpu'] ?? false,
         allowSoftware: values['allow-software'] === true || env.BVH_ALLOW_SOFTWARE_ADAPTER === '1',
         timeoutMs,
+        examples: values.examples ?? false,
         help: values.help ?? false,
     };
 }

@@ -99,9 +99,13 @@ export interface BvhPosePassLike {
     update(): void;
     /** A box (object space) that holds the pose of the last {@link update}. */
     bounds(target?: Float32Array): Float32Array;
-    /** Compiles the pass's pipeline ahead of its first {@link update}. */
+    /**
+     * Compiles the pass's pipeline ahead of its first {@link update}. Until it
+     * settles, no pass of its variant may be updated (a dispatch while three's
+     * pipeline is pending fails): the sync skips them meanwhile.
+     */
     prepare?(): Promise<void>;
-    /** Passes with the same variant share a pipeline: the sync prepares one of each. */
+    /** Passes with the same variant share a pipeline: the sync prepares one of each, and waits for it before updating any. */
     readonly variant?: string;
     dispose(): void;
 }
@@ -215,6 +219,8 @@ export class BvhPosePass implements BvhPosePassLike {
     private readonly bind32 = new Float32Array(16);
     private readonly bindInverse32 = new Float32Array(16);
     private disposed = false;
+    /** The {@link prepare} compile, once started. */
+    private compile: Promise<void> | undefined;
 
     constructor(
         renderer: unknown,
@@ -351,9 +357,18 @@ export class BvhPosePass implements BvhPosePassLike {
         this.node = (kernel() as unknown as Node & { compute(count: number, workgroupSize: number[]): ComputeNode }).compute(count, [options.workgroupSize ?? 64]);
     }
 
-    /** Compiles the pass's pipeline ahead of the first {@link update} (`compileComputeAsync`), so the first frame doesn't compile synchronously. */
-    async prepare(): Promise<void> {
-        await this.renderer.compileComputeAsync?.(this.node);
+    /**
+     * Compiles the pass's pipeline ahead of the first {@link update}
+     * (`compileComputeAsync`), so the first frame doesn't compile
+     * synchronously. Await it before calling {@link update} on this pass or
+     * any other of its {@link variant}: three makes the pipeline
+     * asynchronously and shares it by shader, and a dispatch while it is
+     * pending fails. `SceneTreesObject3DSync` waits for it (its `ready`).
+     * Called again, it returns the same promise.
+     */
+    prepare(): Promise<void> {
+        this.compile ??= Promise.resolve(this.renderer.compileComputeAsync?.(this.node)).then(() => undefined);
+        return this.compile;
     }
 
     /**

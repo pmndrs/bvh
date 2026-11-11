@@ -36,7 +36,7 @@ const engineRules = (allowThree) => ({
 });
 
 export default tseslint.config(
-    { ignores: ['**/dist/', 'node_modules/', '.claude/', 'native/build/', 'tools/emsdk/', 'bench/results/'] },
+    { ignores: ['**/dist/', 'examples/dist/','node_modules/', '.claude/', 'native/build/', 'tools/emsdk/', 'bench/results/'] },
     js.configs.recommended,
     ...tseslint.configs.recommended,
     {
@@ -63,5 +63,14 @@ export default tseslint.config(
         // Tests, GPU pages and tools may use three (as the reference builder and loader), the DOM and WebGPU.
         files: ['tests/**/*.ts', 'tools/**/*.ts', 'bench/**/*.ts', 'native/**/*.ts'],
         rules: { 'no-restricted-imports': 'off', 'no-restricted-syntax': 'off' },
+    },
+    {
+        // The examples are apps: three is allowed, and the library only through its public entry points
+        // (@pmndrs/bvh, /three, /worker, aliased to src/ by examples/vite.config.ts), never by a path into src/.
+        files: ['examples/**/*.ts'],
+        rules: {
+            'no-restricted-imports': ['error', { patterns: [{ group: ['**/src/**', '../../src/*', '../../../src/*'], message: 'Examples use the package by its public names: @pmndrs/bvh, @pmndrs/bvh/three, @pmndrs/bvh/worker.' }] }],
+            'no-restricted-syntax': 'off',
+        },
     },
 );
