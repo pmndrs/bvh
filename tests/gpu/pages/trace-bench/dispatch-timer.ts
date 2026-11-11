@@ -23,8 +23,6 @@ export interface DispatchTimer {
     dispose(): void;
 }
 
-const PASS_NAME = 'trace-bench/dispatch';
-
 export async function createDispatchTimer(device: GPUDevice): Promise<DispatchTimer> {
     if (!device.features.has('timestamp-query')) return createWallClockTimer(device);
 
