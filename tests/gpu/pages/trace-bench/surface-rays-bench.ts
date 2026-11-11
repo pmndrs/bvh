@@ -25,10 +25,19 @@
  *      (paired-ratio.ts), then the surface sets once more at the end. The
  *      ratio of the two trees' rates within each round is the result.
  *
+ *   4. the cost of the 40-byte hit record: the same trees and sets traced
+ *      closest-hit by a kernel with `hitNormal: true` (the default, 40-byte
+ *      records with material and normal) and one with `hitNormal: false`
+ *      (24-byte records), timed back to back with the same rounds and the
+ *      order reversed every other round. The ratio is the 40-byte kernel's
+ *      rate over the 24-byte kernel's (below 1: the bigger record costs).
+ *      The compact kernel's hit, instance and triangle must equal the full
+ *      kernel's on the rays.
+ *
  * Timing never fails the page: speeds depend on the GPU and on its heat.
  */
 
-import { buildTraceScene, createMeshBvhBuilder, HIT_RECORD_BYTES, HIT_RECORD_WORD, RAY_FLOATS, type MeshGeometry, type TraceSceneData, type TraceSceneInstance } from '../../../../src/trace/index.ts';
+import { buildTraceScene, createMeshBvhBuilder, HIT_RECORD_BYTES, HIT_RECORD_COMPACT_BYTES, HIT_RECORD_COMPACT_WORD, HIT_RECORD_WORD, RAY_FLOATS, type MeshGeometry, type TraceSceneData, type TraceSceneInstance } from '../../../../src/trace/index.ts';
 import { createRandom } from '../../../../src/trace/oracle-fixtures.ts';
 import type { AdapterSummary } from '../../contract.ts';
 import { drainDevice, reportGpuTest, summarizeAdapterInfo, watchDevice } from '../../client.ts';
@@ -38,7 +47,7 @@ import { COUNTED_WORD, COUNTED_WORDS, countedKernelWgsl } from './counted-walk-w
 import { createDispatchTimer, measureDispatches } from './dispatch-timer.ts';
 import { timeLoaded } from './loaded-timing.ts';
 import { readBuffer, uploadRays, yieldToBrowser } from './ours-bench.ts';
-import { pairedRoundOrder, ratioOfRounds, type PairKey, type PairedRatio, type Tree } from './paired-ratio.ts';
+import { hitRecordRoundOrder, pairedRoundOrder, ratioOfRounds, type HitRecord, type HitRecordCase, type PairKey, type PairedRatio, type Tree } from './paired-ratio.ts';
 import { makePlacementRays, rayProblems, tileGrid } from './rc-rays.ts';
 import { makeProbeGrid, makeProbeRays as makeGridRays, makeSphereDirections } from './rays.ts';
 import { fullBrowserVersion, requestBenchDevice } from './run.ts';
@@ -108,6 +117,25 @@ export interface PairedResult {
     repeatRatios: { name: string; ratio: number }[];
 }
 
+/** One tree's closest-hit rate on one set with one record size, per round. */
+export interface HitRecordEntry {
+    tree: Tree;
+    set: SetName;
+    record: HitRecord;
+    recordBytes: number;
+    mraysPerRound: number[];
+    singleMraysPerRound: number[];
+}
+
+/** The 40-byte record over the 24-byte one, per tree and set (named `hit_record_40_over_24/<tree>/<set>/closest`). */
+export interface HitRecordResult {
+    rounds: number;
+    entries: HitRecordEntry[];
+    ratios: PairedRatio[];
+    /** Rays where the compact kernel's t, instance, triangle, front face and barycentrics equal the full kernel's. */
+    agreement: { tree: Tree; set: SetName; rays: number; same: number }[];
+}
+
 export interface TreeSummary {
     topLevelInstances: number;
     topLevelNodes: number;
@@ -134,6 +162,7 @@ export interface SurfaceRaysData {
     trees: Record<Tree, TreeSummary>;
     sets: SurfaceSetResult[];
     paired: PairedResult;
+    hitRecord?: HitRecordResult;
 }
 
 function summarizeTree(data: TraceSceneData, buildMs: number): TreeSummary {
@@ -264,6 +293,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
         const builder = createMeshBvhBuilder({ worker: 'auto' });
         const sceneBuffers: TraceSceneBuffers[] = [];
         let kernel: TraceBatchKernel | null = null;
+        let compactKernel: TraceBatchKernel | null = null;
         try {
             progress(`${sceneId}: profile ${profileName}; loading geometry`);
             const scene = await loadBenchScene(sceneId, 'manifest');
@@ -300,6 +330,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             };
             sceneBuffers.push(scenes.instanced, scenes.merged);
             kernel = await TraceBatchKernel.create(device, { label: 'surface' });
+            compactKernel = await TraceBatchKernel.create(device, { label: 'surface compact', hitNormal: false });
             const counted = await CountedKernel.create(device);
 
             // Placement, as RC1.5: one primary ray per 16x16 tile from the first bookmark, through the instanced tree.
@@ -437,6 +468,77 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                 progress(`${sceneId}: ${pair.set} ${pair.mode}: instanced ${middle(instanced.mraysPerRound).toFixed(1)} Mrays/s, merged ${middle(merged.mraysPerRound).toFixed(1)} Mrays/s (median of rounds, loaded)`);
             }
 
+            // 4: the 40-byte hit record against the 24-byte one, closest-hit, on each tree and set.
+            const recordCases: HitRecordCase[] = sets.flatMap((set) => (['instanced', 'merged'] as const).map((tree) => ({ tree, set: set.name })));
+            const recordBytes: Record<HitRecord, number> = { record40: HIT_RECORD_BYTES, record24: HIT_RECORD_COMPACT_BYTES };
+            const recordEntries: HitRecordEntry[] = recordCases.flatMap((entry) =>
+                (['record40', 'record24'] as const).map((record): HitRecordEntry => ({ tree: entry.tree, set: entry.set as SetName, record, recordBytes: recordBytes[record], mraysPerRound: [], singleMraysPerRound: [] })),
+            );
+            const recordEntryOf = (entry: HitRecordCase, record: HitRecord): HitRecordEntry => {
+                const found = recordEntries.find((candidate) => candidate.tree === entry.tree && candidate.set === entry.set && candidate.record === record);
+                if (!found) throw new Error(`no hit-record entry ${entry.tree} ${entry.set} ${record}`);
+                return found;
+            };
+            const fullKernel = kernel;
+            const narrowKernel = compactKernel;
+            const recordKernels: Record<HitRecord, TraceBatchKernel> = { record40: fullKernel, record24: narrowKernel };
+            const recordResults = new Map<string, GPUBuffer>();
+            for (const record of ['record40', 'record24'] as const) {
+                for (const set of sets) {
+                    const buffer = device.createBuffer({ label: `surface ${set.name} ${record} results`, size: set.count * recordBytes[record], usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+                    gpuBuffers.push(buffer);
+                    recordResults.set(`${set.name}/${record}`, buffer);
+                }
+            }
+            const timeRecord = async (entry: HitRecordCase, record: HitRecord): Promise<{ loaded: number; single: number }> => {
+                const set = sets.find((candidate) => candidate.name === entry.set) as RaySet;
+                const results = recordResults.get(`${set.name}/${record}`) as GPUBuffer;
+                const encode = (encoder: GPUCommandEncoder, timestampWrites?: GPUComputePassTimestampWrites): void =>
+                    recordKernels[record].encode(encoder, scenes[entry.tree], { mode: 'closest', rays: set.buffer, results, count: set.count, timestampWrites });
+                const single = await measureDispatches(() => timer.time((encoder, timestampWrites) => encode(encoder, timestampWrites)), profile.warmups, profile.timed);
+                const loaded = await timeLoaded(device, encode, set.count, single.medianMs, profile.loadedMs);
+                await yieldToBrowser();
+                return { loaded: loaded.mraysPerSecond, single: set.count / (single.medianMs * 1e3) };
+            };
+            const agreement: HitRecordResult['agreement'] = [];
+            for (const entry of recordCases) {
+                const set = sets.find((candidate) => candidate.name === entry.set) as RaySet;
+                const full = new Uint32Array(await traceOnce(device, fullKernel, scenes[entry.tree], 'closest', set.buffer, set.count));
+                const compact = new Uint32Array(await traceOnce(device, narrowKernel, scenes[entry.tree], 'closest', set.buffer, set.count, HIT_RECORD_COMPACT_BYTES));
+                const fullWords = HIT_RECORD_BYTES / 4;
+                const compactWords = HIT_RECORD_COMPACT_BYTES / 4;
+                // Words 0-3 and the two barycentric words (the compact record is words 0-5 of the full one).
+                let same = 0;
+                for (let ray = 0; ray < set.count; ray++) {
+                    let equal = true;
+                    for (const word of [HIT_RECORD_COMPACT_WORD.t, HIT_RECORD_COMPACT_WORD.instance, HIT_RECORD_COMPACT_WORD.triangle, HIT_RECORD_COMPACT_WORD.frontFace, HIT_RECORD_COMPACT_WORD.barycentrics, HIT_RECORD_COMPACT_WORD.barycentrics + 1]) {
+                        equal &&= full[ray * fullWords + word] === compact[ray * compactWords + word];
+                    }
+                    if (equal) same++;
+                }
+                agreement.push({ tree: entry.tree, set: entry.set as SetName, rays: set.count, same });
+            }
+            progress(`${sceneId}: hit record 40 against 24 bytes, ${profile.rounds} rounds of ${recordCases.length} cases, the order reversed every other round; compact kernel agrees on ${agreement.map((a) => `${a.tree} ${a.set} ${percent(a.same / a.rays)}`).join(', ')}`);
+            for (let round = 0; round < profile.rounds; round++) {
+                for (const step of hitRecordRoundOrder(recordCases, round)) {
+                    const entry = recordEntryOf(step.case, step.record);
+                    const timed = await timeRecord(step.case, step.record);
+                    entry.mraysPerRound.push(timed.loaded);
+                    entry.singleMraysPerRound.push(timed.single);
+                }
+                progress(
+                    `${sceneId}: hit record round ${round + 1} of ${profile.rounds}: ` +
+                        recordCases.map((entry) => `${entry.tree} ${entry.set} 40/24 ${(recordEntryOf(entry, 'record40').mraysPerRound[round] / recordEntryOf(entry, 'record24').mraysPerRound[round]).toFixed(3)}`).join(', '),
+                );
+            }
+            const recordRatios: PairedRatio[] = recordCases.map((entry) =>
+                ratioOfRounds(`hit_record_40_over_24/${entry.tree}/${entry.set}/closest`, recordEntryOf(entry, 'record40').mraysPerRound, recordEntryOf(entry, 'record24').mraysPerRound),
+            );
+            for (const ratio of recordRatios) {
+                progress(`${sceneId}: ${ratio.name}: median ${ratio.median.toFixed(3)} (${ratio.min.toFixed(3)}-${ratio.max.toFixed(3)} over ${profile.rounds} rounds; per round ${ratio.perRound.map((value) => value.toFixed(3)).join(', ')})`);
+            }
+            const hitRecord: HitRecordResult = { rounds: profile.rounds, entries: recordEntries, ratios: recordRatios, agreement };
+
             data = {
                 benchmark: 'surface-rays',
                 scene: sceneId,
@@ -454,6 +556,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                 trees,
                 sets: results,
                 paired: { rounds: profile.rounds, profile: profileName, entries, ratios, repeatRatios },
+                hitRecord,
             };
 
             // The verdict is correctness only.
@@ -470,12 +573,16 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                     failures.push(`the merged tree blocks the same ${result.set} rays as the instanced one on only ${percent(result.blockedAgreement)}`);
                 }
             }
+            for (const entry of agreement) {
+                if (entry.same / entry.rays < MIN_HIT_AGREEMENT) failures.push(`the compact-record kernel differs from the full one on ${entry.tree} ${entry.set}: ${percent(entry.same / entry.rays)} of rays the same`);
+            }
             if (failures.length > 0) {
                 status = 'fail';
                 message = failures.join(' | ');
             }
         } finally {
             kernel?.destroy();
+            compactKernel?.destroy();
             for (const buffers of sceneBuffers) buffers.destroy();
             builder.dispose();
             timer.dispose();
@@ -498,8 +605,8 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
 }
 
 /** One untimed dispatch; returns the answers (hit records for closest, one word per ray for any). */
-async function traceOnce(device: GPUDevice, kernel: TraceBatchKernel, scene: TraceSceneBuffers, mode: 'closest' | 'any', rays: GPUBuffer, count: number): Promise<ArrayBuffer> {
-    const bytes = count * (mode === 'closest' ? HIT_RECORD_BYTES : 4);
+async function traceOnce(device: GPUDevice, kernel: TraceBatchKernel, scene: TraceSceneBuffers, mode: 'closest' | 'any', rays: GPUBuffer, count: number, recordBytes = HIT_RECORD_BYTES): Promise<ArrayBuffer> {
+    const bytes = count * (mode === 'closest' ? recordBytes : 4);
     const results = device.createBuffer({ label: `surface ${mode} answers`, size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     try {
         const encoder = device.createCommandEncoder({ label: `surface ${mode}` });
