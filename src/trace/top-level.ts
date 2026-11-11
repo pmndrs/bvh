@@ -17,7 +17,9 @@ import {
     BVH_NODE_BYTES,
     INSTANCE_FLAG,
     INSTANCE_MASK_SHIFT,
+    MATERIAL_SHIFT,
     checkInstanceMask,
+    materialCode,
     INSTANCE_RECORD_BYTES,
     INSTANCE_RECORD_WORDS,
     INSTANCE_WORD,
@@ -51,6 +53,14 @@ export interface TraceInstance {
      * Defaults to 0xff, visible to every ray.
      */
     readonly mask?: number;
+    /**
+     * The instance's material index (0 to `MAX_MATERIAL`, 65534), reported as
+     * `BvhHit.material`; stored as material + 1 in bits 16-31 of the record's
+     * flags. Omitted (or `NO_MATERIAL`): none, and hits report `NO_MATERIAL`.
+     * Anything else is a `RangeError`. A merged record may not have one: its
+     * triangles carry their sources' materials.
+     */
+    readonly material?: number;
     /**
      * A merged mesh of static instances (static-merge.ts): the record gets
      * `INSTANCE_FLAG.merged`, and hits take their instance from the triangle.
@@ -206,6 +216,10 @@ export function buildTopLevel(instances: readonly TraceInstance[], options: Part
     instances.forEach((instance, input) => {
         if (instance.visible === false || instance.contributesToGi === false) return;
         checkInstanceMask(instance.mask, instance.instanceIndex);
+        const material = materialCode(instance.material, instance.instanceIndex);
+        if (instance.merged === true && material !== 0) {
+            throw new RangeError(`instance ${instance.instanceIndex}: a merged record has no material of its own (its triangles carry their sources')`);
+        }
         if (instance.merged === true && !isIdentityTransform(instance.objectToWorld)) throwMergedTransformChange(instance.instanceIndex, 'buildTopLevel');
         const inverse = invertAffine(instance.objectToWorld);
         if (inverse === null) {
@@ -252,7 +266,8 @@ export function buildTopLevel(instances: readonly TraceInstance[], options: Part
                 INSTANCE_FLAG.visible |
                 (entry.mirrored ? INSTANCE_FLAG.mirrored : 0) |
                 (instance.merged === true ? INSTANCE_FLAG.merged : 0) |
-                (checkInstanceMask(instance.mask, instance.instanceIndex) << INSTANCE_MASK_SHIFT)) >>>
+                (checkInstanceMask(instance.mask, instance.instanceIndex) << INSTANCE_MASK_SHIFT) |
+                (materialCode(instance.material, instance.instanceIndex) << MATERIAL_SHIFT)) >>>
             0;
     }
 

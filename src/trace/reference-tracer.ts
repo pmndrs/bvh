@@ -36,7 +36,7 @@ import type { TraceRay } from './rays.ts';
 export type { TraceRay } from './rays.ts';
 import type { TraceSceneInstance } from './scene-assembly.ts';
 import type { TrianglePasses } from './triangle-filter.ts';
-import { BVH_QUERY_ANY, BVH_QUERY_CLOSEST, RAY_MASK_ALL, checkInstanceMask, type BvhQuery } from './layout.ts';
+import { BVH_QUERY_ANY, BVH_QUERY_CLOSEST, NO_MATERIAL, RAY_MASK_ALL, checkInstanceMask, materialCode, type BvhQuery } from './layout.ts';
 
 
 export interface ReferenceHit {
@@ -47,6 +47,10 @@ export interface ReferenceHit {
     readonly u: number;
     readonly v: number;
     readonly frontFace: boolean;
+    /** The instance's material index, or `NO_MATERIAL`. */
+    readonly material: number;
+    /** World-space geometric normal of the authored front side, unit length. */
+    readonly normal: readonly [number, number, number];
     /** The ray is within rounding distance of an edge or of its interval end, or two triangles tie. A different f32 answer is acceptable. */
     readonly ambiguous: boolean;
 }
@@ -68,6 +72,8 @@ export interface ReferenceScene {
     readonly mirrored: Uint8Array;
     /** Each triangle's instance mask (0xff unless the instance gives one). */
     readonly instanceMasks: Uint8Array;
+    /** Each triangle's instance material (`NO_MATERIAL` for none). */
+    readonly materials: Uint32Array;
     /** Asked about every hit; true lets the ray through. Undefined: every triangle blocks. */
     readonly triangleFilter?: TrianglePasses;
     /** False: instance masks are ignored and the filter sees all ones (a trace module built with `rayMasks: false`). */
@@ -106,11 +112,14 @@ export function buildReferenceScene(
     const triangleIndices = new Uint32Array(total);
     const mirrored = new Uint8Array(total);
     const instanceMasks = new Uint8Array(total);
+    const materials = new Uint32Array(total);
     let slot = 0;
     for (const instance of traceable) {
         const mesh = meshes[instance.meshIndex];
         const instanceMirrored = isMirrored(instance) ? 1 : 0;
         const instanceMask = checkInstanceMask(instance.mask, instance.instanceIndex);
+        const code = materialCode(instance.material, instance.instanceIndex);
+        const instanceMaterial = code === 0 ? NO_MATERIAL : code - 1;
         const e = instance.objectToWorld;
         const toWorld = (vertex: number): [number, number, number] => {
             const x = mesh.positions[vertex * 3];
@@ -138,6 +147,7 @@ export function buildReferenceScene(
             triangleIndices[slot] = triangle;
             mirrored[slot] = instanceMirrored;
             instanceMasks[slot] = instanceMask;
+            materials[slot] = instanceMaterial;
             slot++;
         }
     }
@@ -148,6 +158,7 @@ export function buildReferenceScene(
         triangleIndices,
         mirrored,
         instanceMasks,
+        materials,
         triangleFilter: options.triangleFilter,
         rayMasks: options.rayMasks ?? true,
     };
@@ -279,8 +290,18 @@ export function traceClosestReference(scene: ReferenceScene, ray: TraceRay, opti
         bestIsAmbiguous = closeHits > 1;
     }
 
+    // The authored front side's normal: the world winding's, reversed for a mirrored instance.
+    const g = scene.geometry;
+    const b = best * 9;
+    const nx = g[b + 4] * g[b + 8] - g[b + 5] * g[b + 7];
+    const ny = g[b + 5] * g[b + 6] - g[b + 3] * g[b + 8];
+    const nz = g[b + 3] * g[b + 7] - g[b + 4] * g[b + 6];
+    const normalScale = (scene.mirrored[best] === 1 ? -1 : 1) / (Math.hypot(nx, ny, nz) || 1);
+
     return {
         t: bestT,
+        material: scene.materials[best],
+        normal: [nx * normalScale, ny * normalScale, nz * normalScale],
         instanceIndex: scene.instanceIndices[best],
         triangleIndex: scene.triangleIndices[best],
         u: bestU,

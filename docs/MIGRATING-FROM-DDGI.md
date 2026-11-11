@@ -15,7 +15,8 @@ Every WGSL name the trace module declares now starts with `bvh`, `Bvh` or `BVH_`
 | `GiRay`, `GiHit` | `BvhRay`, `BvhHit` (same fields, `BvhRay` still 32 bytes) |
 | `GiBvhNode`, `GiBvhTriangle` | `BvhNode`, `BvhTriangle` (not `BvhBvh*`) |
 | `GiInstance`, `GiRaySetup`, `GiTriangleHit` | `BvhInstance`, `BvhRaySetup`, `BvhTriangleHit` |
-| `GiHitRecord` (batch results) | `BvhHitRecord` (same 24-byte layout, `HIT_RECORD_WORD` unchanged) |
+| `GiHitRecord` (batch results) | `BvhHitRecord`: 40 bytes by default, words 0-5 as before plus `material` (6) and the normal (7-9); `batchKernelWgsl(mode, { hitNormal: false })` keeps the old 24-byte layout as `BvhHitRecordCompact` (`HIT_RECORD_COMPACT_BYTES`, `HIT_RECORD_COMPACT_WORD`) |
+| `GiHit` | `BvhHit` gained `material: u32` and `normal: vec3f` at the end (see trace.md, "Hit normal and material"); code that builds a `BvhHit` with five arguments must pass seven |
 | `giBatch` (batch entry point), `giBatchRays`, `giBatchResults` | `bvhBatch`, `bvhBatchRays`, `bvhBatchResults` |
 | `giTraceNodes`, `giTraceTriangles`, `giTraceTopLevel` | `bvhTraceNodes`, `bvhTraceTriangles`, `bvhTraceTopLevel` |
 | `giEdgeFunction`, `giIntersectWatertight`, `giBoxEntry`, `giMakeRaySetup`, every other `gi*` helper | the same with `bvh` |
@@ -103,7 +104,7 @@ writeTriangleFilterFlags(triangleWords, (originalIndex) => (mask & slotMaskBit(s
 - `range` is `{ triangleOffset, triangleCount }`, the same shape as ddgi's `MeshTriangleRange` without `meshSlot`. Each `TraceSceneData.meshes` entry now has `nodeCount` and `triangleCount` too, so it can be passed as the range directly.
 - It returns how many records it flagged, keeps the other flag bits, and throws a `RangeError` for a range outside the buffer (ddgi's version doesn't check).
 - The predicate gets a second argument: on a merged static group's range (`TraceSceneData.mergedGroups[g]`), the record's source instance; `undefined` elsewhere (§6).
-- `MeshInput.triangleFlags` may set bit 0 only. Bits 1-31 are reserved (bit 1 is the merged flip bit, 16-31 the coming per-instance material), and every builder throws for them.
+- `MeshInput.triangleFlags` may set bit 0 only. Bits 1-31 are reserved (bit 1 is the merged flip bit, 16-31 a merged triangle's material, which assembly writes), and every builder throws for them.
 - `assembleTraceScene` copies each mesh's records into the scene's buffer. Flags written to a `MeshBvh` after assembly don't reach the scene: write the scene's `triangles` with the mesh's range, as ddgi's install hook already does on the GPU.
 
 ddgi's GPU pass (`gi/triangle-flags`) writes the same bit of the same word, so it needs no change.
@@ -117,7 +118,7 @@ ddgi's GPU pass (`gi/triangle-flags`) writes the same bit of the same word, so i
 | 0-2 | `contributesToGi`, `visible`, `mirrored` (unchanged) |
 | 3-7 | reserved, 0 |
 | 8-15 | the instance mask (`INSTANCE_MASK_SHIFT`, `INSTANCE_MASK_BITS`): 8 bits as in DXR |
-| 16-31 | reserved, 0 |
+| 16-31 | the instance's material + 1 (`MATERIAL_SHIFT`), 0 for none (hits report `NO_MATERIAL`) |
 
 A masked trace skips an instance whose `(instanceMask & rayMask) == 0` at the top level, before entering its tree. `bvhTraceClosest` and `bvhTraceAny` use all ones, so **an instance whose mask is 0 is never hit** by them either (as in DXR) unless masks are compiled out with `rayMasks: false`, where every instance is visible. The cost with masks on is one shift, AND and compare per instance leaf, not per triangle. `buildTopLevel` and `assembleTraceScene` write `0xff` (visible to every ray) unless the instance gives `mask` (0-255; anything else is a `RangeError`).
 
@@ -139,12 +140,12 @@ Off by default, and nothing changes when it stays off. It targets the surface-ra
 
 1. Mark never-moving instances `static: true` in the `TraceSceneInstance`s ddgi builds from its scene copy. Instances that ddgi can move, hide or toggle at runtime must stay `static: false`, because a merged instance can't move. Static instances that are already hidden or don't contribute to GI are left unmerged. Merged instances need distinct `instanceIndex` values.
 2. Call `mergeStaticGeometry(meshes, instances)`. Build each `plan.groups[g].geometry` with the same builder as the other meshes: the GPU H-PLOC first, then tinybvh when the swap comes. Assemble with `assembleTraceScene(meshes, instances, {}, { merged: { plan, meshes: groupTrees } })`. At the tinybvh swap, assemble again with tinybvh's group trees. Meshes with `plan.meshNeeded[i] === 0` need no tree of their own.
-3. **ddgi's GPU top level** (`trace/top-level-gpu.ts`, the gather) writes records itself. It must write one record per merged group, with the identity transform, `INSTANCE_FLAG.merged` (bit 3, `| 8u`) and the group's mask, and no records for the merged sources. Their slots must not be refitted. Leave bits 16-31 of the flags at 0. Nothing notices a merged source that moves or is hidden until ddgi assembles again with the plan (which then throws), so ddgi must not merge anything it can move, hide or re-mask. Merged groups' triangle ranges must never be refit (`GpuMeshRefit`): get refit offsets from `meshRefitPlacement`, which refuses merged meshes.
-4. **ddgi's triangle-flags pass** (`gi/triangle-flags`) must keep bits 1-31 when it rewrites a merged mesh's flags word: set or clear bit 0 only, don't overwrite (bit 1 is the merged flip bit). Its per-mesh ranges for merged sources are gone: `TraceSceneData.meshes[i]` of a merged mesh is empty (`triangleCount` 0) and carries `mergedInto: g`, and `writeTriangleFilterFlags` throws when given it. Two ways remain:
+3. **ddgi's GPU top level** (`trace/top-level-gpu.ts`, the gather) writes records itself. It must write one record per merged group, with the identity transform, `INSTANCE_FLAG.merged` (bit 3, `| 8u`) and the group's mask, and no records for the merged sources. Their slots must not be refitted. Leave bits 16-31 of the flags at 0 (a merged record has no material of its own; its triangles carry theirs). Records ddgi writes for normal instances may put a material + 1 there, or leave 0 for none. Nothing notices a merged source that moves or is hidden until ddgi assembles again with the plan (which then throws), so ddgi must not merge anything it can move, hide or re-mask. Merged groups' triangle ranges must never be refit (`GpuMeshRefit`): get refit offsets from `meshRefitPlacement`, which refuses merged meshes.
+4. **ddgi's triangle-flags pass** (`gi/triangle-flags`) must keep bits 1-31 when it rewrites a merged mesh's flags word: set or clear bit 0 only, don't overwrite (bit 1 is the merged flip bit, bits 16-31 the material). Its per-mesh ranges for merged sources are gone: `TraceSceneData.meshes[i]` of a merged mesh is empty (`triangleCount` 0) and carries `mergedInto: g`, and `writeTriangleFilterFlags` throws when given it. Two ways remain:
    - Before the build: set `triangleFlags` (bit 0 only; anything else throws) on the source mesh. `mergeStaticGeometry` copies them per source triangle.
    - After assembly, on the CPU: `writeTriangleFilterFlags(scene.triangles, (originalIndex, sourceInstance) => ..., scene.mergedGroups[g])`. On a merged range `originalIndex` is the triangle's index in its source mesh and `sourceInstance` the source's `instanceIndex` (`mergedGroups[g].sourceInstances` / `sourceMeshes` map it to the mesh); on other ranges `sourceInstance` is `undefined`. Upload the range again.
    - On the GPU, a pass over the group's range (`mergedGroups[g].triangleOffset` / `triangleCount`) must read the source instance from the record's padding word (word 11) and the source triangle from word 3, because a merged range interleaves its sources in tree order. ddgi's per-mesh dispatch can't be reused as is.
-5. Hits, filter candidates and `frontFace` name the source instance and its triangle as before, so the material lookups don't change. When the per-instance material lands, it will be copied into each merged triangle's flags bits 16-31. Material is not a grouping key.
+5. Hits, filter candidates and `frontFace` name the source instance and its triangle as before, so the material lookups don't change. The per-instance material (`TraceSceneInstance.material`) is copied into each merged triangle's flags bits 16-31. Material is not a grouping key.
 
 ## 7. Checklist for the switch
 

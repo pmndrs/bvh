@@ -2,10 +2,24 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { buildLbvhOnCpu, checkGpuLayout, createTinyBvhBuilder } from '../index.ts';
 import { createCpuTracer, type CpuHit } from './cpu-traversal.ts';
-import { INSTANCE_FLAG, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_LEVEL_HEADER_WORDS, TRIANGLE_FLAG_FILTER, TRIANGLE_FLAG_FLIP_FRONT_FACE, TRIANGLE_WORD, TRIANGLE_WORDS } from './layout.ts';
+import {
+    INSTANCE_FLAG,
+    INSTANCE_RECORD_WORDS,
+    INSTANCE_WORD,
+    MATERIAL_BITS,
+    MATERIAL_SHIFT,
+    MAX_MATERIAL,
+    NO_MATERIAL,
+    TOP_LEVEL_HEADER_WORDS,
+    TRIANGLE_FLAG_FILTER,
+    TRIANGLE_FLAG_FLIP_FRONT_FACE,
+    TRIANGLE_WORD,
+    TRIANGLE_WORDS,
+    materialFromFlags,
+} from './layout.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
-import { addToTally, compareAny, compareClosest, newTally } from './oracle-compare.ts';
+import { addToTally, compareAny, compareClosest, newTally, NORMAL_COSINE_TOLERANCE, normalCosine } from './oracle-compare.ts';
 import { createRandom, randomAffine, randomRays, randomTriangleSoup, tessellatedQuad, toFloat32Ray } from './oracle-fixtures.ts';
 import { buildReferenceScene, traceAnyReference, traceClosestReference } from './reference-tracer.ts';
 import { assembleTraceScene, buildTraceScene, meshRefitPlacement, type TraceSceneData, type TraceSceneInstance } from './scene-assembly.ts';
@@ -24,7 +38,8 @@ const withFlags = (geometry: MeshGeometry, every: number): MeshGeometry => {
 
 /**
  * A mixed scene: unique static meshes (mirrored, non-uniform scales, three masks, filtered
- * triangles), a static mesh used twice (must not merge), and non-static instances.
+ * triangles, materials on most, the largest one included), a static mesh used twice (must
+ * not merge), and non-static instances.
  */
 function mixedScene(seed: number): { meshes: MeshGeometry[]; instances: TraceSceneInstance[] } {
     const random = createRandom(seed);
@@ -40,12 +55,13 @@ function mixedScene(seed: number): { meshes: MeshGeometry[]; instances: TraceSce
             objectToWorld: randomAffine(random, { extent: 8, mirror: i % 3 === 1 }),
             static: i % 6 !== 5,
             mask: masks[i % 3],
+            material: i % 4 === 3 ? undefined : i === 2 ? MAX_MATERIAL : i * 101,
         });
     }
     // One mesh used twice, both static: stays instanced.
     meshes.push(withFlags(randomTriangleSoup(random, 80, 2, 0.6), 2));
     for (let k = 0; k < 2; k++) {
-        instances.push({ meshIndex: 18, instanceIndex: 10 + k, objectToWorld: randomAffine(random, { extent: 8, mirror: k === 1 }), static: true });
+        instances.push({ meshIndex: 18, instanceIndex: 10 + k, objectToWorld: randomAffine(random, { extent: 8, mirror: k === 1 }), static: true, material: k === 0 ? 7 : undefined });
     }
     return { meshes, instances };
 }
@@ -64,6 +80,8 @@ function sameHit(a: CpuHit | null, b: CpuHit | null): string | null {
         return `${a.instanceIndex}/${a.triangleIndex}/${a.frontFace} vs ${b.instanceIndex}/${b.triangleIndex}/${b.frontFace}`;
     }
     if (Math.abs(a.t - b.t) > 1e-4 * Math.max(1, a.t)) return `t ${a.t} vs ${b.t}`;
+    if (a.material !== b.material) return `material ${a.material} vs ${b.material}`;
+    if (!(normalCosine(a.normal, b.normal) >= NORMAL_COSINE_TOLERANCE)) return `normal ${a.normal.join(', ')} vs ${b.normal.join(', ')}`;
     return null;
 }
 
@@ -127,6 +145,12 @@ describe('merged static scene against the instanced scene', () => {
             }
         }
         expect(mergedRecords).toBe(plan.groups.length);
+        // Merged records carry no material; normal records carry their instance's.
+        for (let record = 0; record < merged.topLevel.instanceCount; record++) {
+            const flags = top[TOP_LEVEL_HEADER_WORDS + record * INSTANCE_RECORD_WORDS + INSTANCE_WORD.flags];
+            const input = merged.topLevel.recordOrder[record];
+            expect(flags & MATERIAL_BITS).toBe(flags & INSTANCE_FLAG.merged ? 0 : (((instances[input].material ?? -1) + 1) << MATERIAL_SHIFT) >>> 0);
+        }
         expect(merged.topLevel.instanceCount).toBe(plan.instanced.length + plan.groups.length);
         const words = new Uint32Array(merged.triangles);
         for (const [g, group] of merged.mergedGroups.entries()) {
@@ -137,7 +161,9 @@ describe('merged static scene against the instanced scene', () => {
                 const sourceMesh = meshes[source.meshIndex];
                 const original = words[base + TRIANGLE_WORD.originalIndex];
                 const sourceFlags = sourceMesh.triangleFlags?.[original] ?? 0;
-                expect(words[base + TRIANGLE_WORD.flags]).toBe(sourceFlags | (source.mirrored ? TRIANGLE_FLAG_FLIP_FRONT_FACE : 0));
+                const material = source.material === NO_MATERIAL ? 0 : source.material + 1;
+                expect(words[base + TRIANGLE_WORD.flags]).toBe((sourceFlags | (source.mirrored ? TRIANGLE_FLAG_FLIP_FRONT_FACE : 0) | (material << MATERIAL_SHIFT)) >>> 0);
+                expect(materialFromFlags(words[base + TRIANGLE_WORD.flags])).toBe(instances[source.inputIndex].material ?? NO_MATERIAL);
             }
         }
     });
@@ -165,6 +191,9 @@ describe('merged static scene against the instanced scene', () => {
             }
             expect(problems.slice(0, 10).join('\n')).toBe('');
             expect(compared).toBeGreaterThan(masks.length * 3900);
+            // Materials are on most hits, and some have none.
+            const materials = new Set(rays.map((ray) => b.closest(ray)?.material).filter((material) => material !== undefined));
+            expect(materials.has(NO_MATERIAL) && materials.has(MAX_MATERIAL) && materials.size > 5).toBe(true);
             expect(hits).toBeGreaterThan(1000);
         }
     });
@@ -240,6 +269,48 @@ describe('merged static scene against the instanced scene', () => {
         }
         expect(rayCount).toBeGreaterThan(400);
         expect(slips).toBe(0);
+    });
+});
+
+describe('merged normals and materials', () => {
+    it('match the instanced scene for mirrored, scaled and sheared sources, with and without a material', () => {
+        // One tilted triangle per instance, each its own mesh, all static: they merge into one group.
+        const triangle = { positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 1]) };
+        const transforms = [
+            [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], // non-uniform scale
+            [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 0, 0, 1], // mirror
+            [1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 20, 0, 0, 1], // shear of x into z
+            [-1, 0, 0, 0, 0, 3, 0, 0, 0, 0.5, 1, 0, 30, 0, 0, 1], // mirrored, scaled and sheared
+        ];
+        const materials = [5, undefined, MAX_MATERIAL, 0];
+        const meshes = transforms.map(() => triangle);
+        const instances: TraceSceneInstance[] = transforms.map((objectToWorld, i) => ({ meshIndex: i, instanceIndex: 40 + i, objectToWorld, static: true, material: materials[i] }));
+        const instanced = createCpuTracer(assembleTraceScene(meshes.map(build), instances));
+        const plan = mergeStaticGeometry(meshes, instances);
+        expect(plan.groups.length).toBe(1);
+        expect(Array.from(plan.groups[0].sourceMaterials)).toEqual(materials.map((material) => (material === undefined ? 0 : material + 1)));
+        const merged = createCpuTracer(assembleTraceScene(meshes.map(() => null), instances, {}, { merged: { plan, meshes: plan.groups.map((group) => build(group.geometry)) } }));
+        const reference = buildReferenceScene(meshes, instances);
+        let hits = 0;
+        for (const [i, e] of transforms.entries()) {
+            // Aim at the object point 0.2 v1 + 0.15 v2, moved to world space.
+            const p = [0.2, 0.15, 0.15];
+            const target = [0, 1, 2].map((r) => e[r] * p[0] + e[4 + r] * p[1] + e[8 + r] * p[2] + e[12 + r]);
+            for (const direction of [[0, 0, -1], [0, 0, 1], [0.3, -0.2, -1]] as const) {
+                const length = Math.hypot(...direction);
+                const unit = direction.map((d) => d / length) as [number, number, number];
+                const ray = { origin: target.map((value, axis) => value - 5 * unit[axis]) as [number, number, number], direction: unit, tMin: 0, tMax: 100 };
+                const a = instanced.closest(ray);
+                const b = merged.closest(ray);
+                expect(sameHit(a, b), `instance ${i} direction ${direction}`).toBeNull();
+                if (!b) continue;
+                hits++;
+                expect(b.material).toBe(materials[i] ?? NO_MATERIAL);
+                expect(b.frontFace).toBe(b.normal[0] * unit[0] + b.normal[1] * unit[1] + b.normal[2] * unit[2] < 0);
+                expect(compareClosest({ hit: true, ...b }, traceClosestReference(reference, ray), ray).verdict).toBe('match');
+            }
+        }
+        expect(hits).toBe(12);
     });
 });
 
@@ -348,6 +419,17 @@ describe('a stale merge plan', () => {
     const sourceMeshes = meshes.map((mesh, index) => (plan.meshNeeded[index] ? build(mesh) : null));
     const source = plan.groups.find((group) => group.mask === 0xff)!.sources[0];
     const changed = (change: Partial<TraceSceneInstance>) => instances.map((instance, input) => (input === source.inputIndex ? { ...instance, ...change } : instance));
+
+    it('throws, naming the instance, when a source changed its material', () => {
+        // The source has a material (mixedScene gives input 0 one); dropping it is a change too.
+        expect(source.material).not.toBe(NO_MATERIAL);
+        for (const change of [{ material: source.material + 1 }, { material: undefined }]) {
+            expect(() => assembleTraceScene(sourceMeshes, changed(change), {}, { merged: trees }), JSON.stringify(change)).toThrow(
+                new RegExp(`instance ${source.instanceIndex} is a merged static instance, but its material changed`),
+            );
+        }
+        expect(() => assembleTraceScene(sourceMeshes, changed({ material: source.material }), {}, { merged: trees })).not.toThrow();
+    });
 
     it('throws, naming the instance, when a source was hidden, left GI, or changed its mask', () => {
         for (const change of [{ visible: false }, { contributesToGi: false }, { mask: 0x0f }, { mask: 0 }]) {

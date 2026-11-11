@@ -6,6 +6,8 @@
  * 3 + 3 = 6 storage buffers, inside the default per-stage limit of 8. The kernel supplies the walk's
  * triangle filter itself (`triangleFilter: null`, then `DEFAULT_TRIANGLE_FILTER_WGSL`: every
  * triangle blocks), and calls the masked closest-hit with all ones next to the plain any-hit.
+ * It writes the hit's material and normal too (`BvhHit.material`, `.normal`), which
+ * are checked like the rest.
  *
  * The answers are checked against the CPU reference on the oracle scenes, mirrored
  * boxes and thin walls included, plus rays at shared edges. Default device limits,
@@ -42,7 +44,7 @@ const SHARED_EDGE_REFERENCE_RAYS = 5000;
 
 const WORKGROUP_SIZE = 64;
 /** 32-bit words the kernel writes per ray. */
-const RESULT_WORDS = 8;
+const RESULT_WORDS = 10;
 /** Written as the instance for a miss. */
 const NO_INSTANCE = 0xffffffff;
 
@@ -53,8 +55,10 @@ struct InlineResult {
     triangle: u32,
     frontFace: u32,
     barycentrics: vec2f,
-    padding0: u32,
-    padding1: u32,
+    material: u32,
+    normalX: f32,
+    normalY: f32,
+    normalZ: f32,
 }
 
 @group(1) @binding(0) var<storage, read> inlineRays: array<BvhRay>;
@@ -71,7 +75,7 @@ fn main(@builtin(global_invocation_id) id: vec3u, @builtin(num_workgroups) group
     let ray = inlineRays[index];
     // Masked with all ones: the same answers as bvhTraceClosest(ray).
     let hit = bvhTraceClosestMasked(ray, 0xffffffffu);
-    var result = InlineResult(hit.t, ${NO_INSTANCE}u, hit.triangle, select(0u, 1u, hit.frontFace), hit.barycentrics, 0u, 0u);
+    var result = InlineResult(hit.t, ${NO_INSTANCE}u, hit.triangle, select(0u, 1u, hit.frontFace), hit.barycentrics, hit.material, hit.normal.x, hit.normal.y, hit.normal.z);
     if (hit.t >= 0.0) {
         result.instance = hit.instance;
     }
@@ -159,6 +163,9 @@ async function traceCase(device: GPUDevice, pipeline: GPUComputePipeline, oracle
             frontFace: words[base + 3] !== 0,
             u: floats[base + 4],
             v: floats[base + 5],
+            // BvhHit.material and .normal, compared with the reference too.
+            material: words[base + 6],
+            normal: [floats[base + 7], floats[base + 8], floats[base + 9]],
         };
     };
     return { closest, any: (index) => blockedWords[index] !== 0 };

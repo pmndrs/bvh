@@ -68,7 +68,7 @@ export interface TraceBatch {
     readonly mode: 'closest' | 'any';
     /** At least `count` rays of 32 bytes (`BvhRay`). */
     readonly rays: GPUBuffer;
-    /** Closest: `count` records of `HIT_RECORD_BYTES`. Any: `count` u32, 1 = blocked. */
+    /** Closest: `count` records of `HIT_RECORD_BYTES` (`HIT_RECORD_COMPACT_BYTES` with `hitNormal: false`). Any: `count` u32, 1 = blocked. */
     readonly results: GPUBuffer;
     readonly count: number;
     /** The batch's ray mask (one for the whole batch). Default all ones. Ignored by a kernel made with `rayMasks: false`. */
@@ -88,6 +88,8 @@ export interface TraceBatchKernelOptions {
     readonly triangleFilter?: string;
     /** Default true: each batch has a ray mask (`TraceBatch.mask`). False compiles masks out. */
     readonly rayMasks?: boolean;
+    /** Default true: 40-byte closest-hit records with material and normal. False: the 24-byte compact record. */
+    readonly hitNormal?: boolean;
 }
 
 /**
@@ -108,13 +110,13 @@ export class TraceBatchKernel {
     ) {}
 
     static async create(device: GPUDevice, options: TraceBatchKernelOptions = {}): Promise<TraceBatchKernel> {
-        const { label = 'trace', triangleFilter, rayMasks = true } = options;
+        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true } = options;
         const pipelineFor = (mode: 'closest' | 'any') =>
             device.createComputePipelineAsync({
                 label: `${label} batch ${mode}`,
                 layout: 'auto',
                 compute: {
-                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks }) }),
+                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks, hitNormal }) }),
                     entryPoint: 'bvhBatch',
                 },
             });

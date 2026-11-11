@@ -8,6 +8,12 @@ import {
     instanceMaskFromFlags,
     INSTANCE_RECORD_WORDS,
     INSTANCE_WORD,
+    MATERIAL_BITS,
+    MATERIAL_SHIFT,
+    MAX_MATERIAL,
+    materialCode,
+    materialFromFlags,
+    NO_MATERIAL,
     NODE_WORD,
     TOP_HEADER_WORD,
     TOP_LEVEL_HEADER_WORDS,
@@ -120,6 +126,26 @@ describe('buildTopLevel', () => {
         for (const mask of [256, -1, 1.5]) {
             expect(() => buildTopLevel([{ ...instances[0], mask }])).toThrow(RangeError);
         }
+    });
+
+    it('writes material + 1 in flags bits 16-31 (0 for none), and refuses a material out of range or on a merged record', () => {
+        const base = { nodeOffset: 0, triangleOffset: 0, meshBounds: [0, 0, 0, 1, 1, 1], objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] };
+        const materials = [undefined, 0, 41, MAX_MATERIAL, NO_MATERIAL];
+        const top = buildTopLevel(materials.map((material, instanceIndex) => ({ ...base, instanceIndex, material, mask: 0x5a })));
+        const words = new Uint32Array(top.buffer);
+        for (let record = 0; record < top.instanceCount; record++) {
+            const flags = words[TOP_LEVEL_HEADER_WORDS + record * INSTANCE_RECORD_WORDS + INSTANCE_WORD.flags];
+            const material = materials[top.recordOrder[record]];
+            expect(flags >>> MATERIAL_SHIFT).toBe(materialCode(material, 0));
+            expect(materialFromFlags(flags)).toBe(material ?? NO_MATERIAL);
+            // The mask and flag bits are untouched.
+            expect(instanceMaskFromFlags(flags)).toBe(0x5a);
+            expect(flags & ~MATERIAL_BITS & ~INSTANCE_MASK_BITS).toBe(INSTANCE_FLAG.contributesToGi | INSTANCE_FLAG.visible);
+        }
+        for (const bad of [-1, MAX_MATERIAL + 1, 1.5, Number.NaN]) {
+            expect(() => buildTopLevel([{ ...base, instanceIndex: 9, material: bad }]), String(bad)).toThrow(/instance 9: material must be an integer in 0-65534/);
+        }
+        expect(() => buildTopLevel([{ ...base, instanceIndex: 9, material: 2, merged: true }])).toThrow(/merged record has no material/);
     });
 
     it('puts every instance in exactly one leaf and every leaf box around its instance', () => {
@@ -236,6 +262,8 @@ describe('CPU traversal against the brute-force reference', () => {
             // Instance indices deliberately unrelated to the order they are placed in.
             instanceIndex: 500 - i * 3,
             objectToWorld: randomAffine(random, { extent: 12, mirror: i % 4 === 0 }),
+            // Some without a material, the rest with one unrelated to the index (compared through the oracle).
+            material: i % 5 === 0 ? undefined : (i * 7919) % 1000,
         }));
         const rays = randomRays(createRandom(21), 4000, [-14, -14, -14, 14, 14, 14], 6, { randomInterval: true });
         const { closest, any, scene } = compareCpuTracerWithReference(meshes, instances, rays);
@@ -280,6 +308,50 @@ describe('CPU traversal against the brute-force reference', () => {
         expect(tracer.closest({ ...up, origin: [0, 0, -5] })?.frontFace).toBe(false);
         expect(tracer.closest({ ...down, origin: [10, 0, 5] })?.frontFace).toBe(true);
         expect(tracer.closest({ ...up, origin: [10, 0, -5] })?.frontFace).toBe(false);
+    });
+
+    it("reports the authored side's world normal and the instance material, also when mirrored, scaled and sheared", () => {
+        // One triangle facing (0, -1, 1). Mirrored in x it keeps the authored side, and a
+        // non-uniform scale moves the normal by the inverse transpose, not the transform itself.
+        const mesh = { positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 1]) };
+        const scale = [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+        const mirror = [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 0, 0, 1];
+        const instances: TraceSceneInstance[] = [
+            { meshIndex: 0, instanceIndex: 0, objectToWorld: scale, material: 3 },
+            { meshIndex: 0, instanceIndex: 1, objectToWorld: mirror },
+        ];
+        const scene = assembleTraceScene([buildMeshBvh(mesh)], instances);
+        const tracer = createCpuTracer(scene);
+        const reference = buildReferenceScene([mesh], instances);
+        const rays = [
+            { origin: [0.2, 0.2, 5] as const, direction: [0, 0, -1] as const, tMin: 0, tMax: 100 },
+            { origin: [9.8, 0.2, 5] as const, direction: [0, 0, -1] as const, tMin: 0, tMax: 100 },
+        ];
+        const [scaled, mirrored] = rays.map((ray) => tracer.closest(ray));
+        expect(scaled?.material).toBe(3);
+        expect(mirrored?.material).toBe(NO_MATERIAL);
+        // Object normal (0, -1, 1)/sqrt2; the inverse transpose of diag(2, 1, 1) keeps its direction here.
+        expect(scaled?.normal[0]).toBeCloseTo(0, 6);
+        expect(scaled?.normal[1]).toBeCloseTo(-Math.SQRT1_2, 6);
+        expect(mirrored?.normal[2]).toBeCloseTo(Math.SQRT1_2, 6);
+        // Front face is the side the normal points to.
+        for (const [index, hit] of [scaled, mirrored].entries()) {
+            const direction = rays[index].direction;
+            expect(hit?.frontFace).toBe(hit!.normal[0] * direction[0] + hit!.normal[1] * direction[1] + hit!.normal[2] * direction[2] < 0);
+        }
+        rays.forEach((ray) => {
+            const actual = tracer.closest(ray);
+            expect(compareClosest(actual && { hit: true, ...actual }, traceClosestReference(reference, ray), ray).verdict).toBe('match');
+        });
+        // A shear of x into z: the normal of the z = 0 plane must lean against it.
+        const shear = [1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+        const flat = { positions: new Float32Array([-1, -1, 0, 1, -1, 0, 0, 1, 0]) };
+        const sheared = createCpuTracer(assembleTraceScene([buildMeshBvh(flat)], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: shear }]));
+        const hit = sheared.closest({ origin: [0, 0, 5], direction: [0, 0, -1], tMin: 0, tMax: 100 });
+        // World plane z = x: normal (-1, 0, 1)/sqrt2.
+        expect(hit?.normal[0]).toBeCloseTo(-Math.SQRT1_2, 6);
+        expect(hit?.normal[1]).toBeCloseTo(0, 6);
+        expect(hit?.normal[2]).toBeCloseTo(Math.SQRT1_2, 6);
     });
 
     it('refuses a scene whose trees could overflow the stack', () => {

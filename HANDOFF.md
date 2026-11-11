@@ -22,6 +22,13 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
   - `docs/MIGRATING-FROM-DDGI.md`: the P3 checklist.
 - The walk API is final for 0.1, with `GPU_LAYOUT_VERSION` 2. Masked and unmasked runs show no measurable difference in the quick bench, but that bench is noisy.
 
+**Hit normal and per-instance material (ported from `reflections-integration` 9aaaa11 onto the 0.1 API):**
+- `BvhHit` gained `material: u32` (`BVH_NO_MATERIAL` for none) and `normal: vec3f` (world geometric normal of the authored front side, unit). Both are worked out once per closest hit after the walk (`bvhFinishClosest`), from the kept instance record and triangle slot: for an instance, the object-space edge cross through the transpose of the world-to-object rows; for a merged triangle, the world-space cross, negated on flags bit 1.
+- `material?: number` (0-65534, else `RangeError`) on `TraceInstance`/`TraceSceneInstance`, stored as material + 1 in instance flags bits 16-31. Merged triangles carry their source's in triangle flags bits 16-31 (`StaticMergeGroup.sourceMaterials`, written by assembly). It isn't a grouping key, and a changed material fails re-assembly. `checkTriangleFlags` still allows bit 0 only. Layout version stays 2.
+- `batchKernelWgsl(mode, { hitNormal })`: the 40-byte `BvhHitRecord` by default (`HIT_RECORD_BYTES`, `HIT_RECORD_WORD` with `material` 6 and `normal` 7-9). With `false`, the 24-byte `BvhHitRecordCompact` has no material (no padding to hold it): `HIT_RECORD_COMPACT_BYTES`, `HIT_RECORD_COMPACT_WORD`, `hitRecordBytes()`.
+- CPU walk, reference and `compareClosest` (cosine >= 0.9999) compare both. `trace-oracle` (all variants, merged included, plus a `-compact` variant) and `trace-inline` check them, and both pass on the Apple M5.
+- For the reflections project: `docs/MIGRATING-FROM-REFLECTIONS-BRANCH.md`.
+
 **Still open in P2:**
 - `TraceBatchKernel` and `uploadTraceScene` were copied into `tests/gpu/trace-gpu.ts`. They belong in `src/trace/`.
 - `src/trace/index.ts` still uses `export *`.

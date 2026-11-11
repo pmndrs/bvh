@@ -213,4 +213,39 @@ describe('the oracle checks fail on a faulty tracer', () => {
             expect(failuresWith('thin-box', { index: tiedCornerRay(), closest: flipped })).toMatch(/shows one side to an interior ray/);
         });
     });
+
+    describe('a wrong hit normal or material', () => {
+        const reversedNormal = (correct: TracedHit | null): TracedHit => {
+            const hit = requireHit(correct);
+            const [x, y, z] = hit.normal!;
+            return { ...hit, normal: [-x, -y, -z] };
+        };
+        // A small tilt (about 1.1 degrees) is past the cosine tolerance too.
+        const tiltedNormal = (correct: TracedHit | null): TracedHit => {
+            const hit = requireHit(correct);
+            const [x, y, z] = hit.normal!;
+            // Turn it by 0.02 rad toward a direction perpendicular to it.
+            const [px, py, pz] = Math.abs(x) < 0.9 ? [0, z, -y] : [-z, 0, x];
+            const length = Math.hypot(px, py, pz);
+            const c = Math.cos(0.02);
+            const s = Math.sin(0.02) / length;
+            return { ...hit, normal: [x * c + px * s, y * c + py * s, z * c + pz * s] };
+        };
+        const otherMaterial = (correct: TracedHit | null): TracedHit => {
+            const hit = requireHit(correct);
+            return { ...hit, material: hit.material === 3 ? 4 : 3 };
+        };
+
+        it('fails the hand-worked expectation', () => {
+            const index = curatedIndex(setup('analytic').oracleCase, 'mirrored');
+            expect(failuresWith('analytic', { index, closest: reversedNormal })).toMatch(/mirrored: normal .*expected/);
+            expect(failuresWith('analytic', { index, closest: otherMaterial })).toMatch(/mirrored: material 3, expected 9/);
+        });
+
+        it('fails against the reference', () => {
+            for (const fault of [reversedNormal, tiltedNormal, otherMaterial]) {
+                expect(failuresWith('random-soup', { index: clearRandomHit(), closest: fault })).toMatch(/closest: 1 mismatches/);
+            }
+        });
+    });
 });
