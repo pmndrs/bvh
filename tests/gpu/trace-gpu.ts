@@ -8,7 +8,8 @@
  */
 
 import type { TraceSceneData } from '../../src/trace/scene-assembly.ts';
-import { BATCH_WORKGROUP_SIZE, batchKernelWgsl } from '../../src/trace/wgsl.ts';
+import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl } from '../../src/trace/wgsl.ts';
+import { RAY_MASK_ALL } from '../../src/trace/layout.ts';
 import { RAY_BYTES } from '../../src/trace/rays.ts';
 
 export { RAY_BYTES, RAY_FLOATS, packRays, unpackRay, type TraceRay } from '../../src/trace/rays.ts';
@@ -70,6 +71,8 @@ export interface TraceBatch {
     /** Closest: `count` records of `HIT_RECORD_BYTES`. Any: `count` u32, 1 = blocked. */
     readonly results: GPUBuffer;
     readonly count: number;
+    /** The batch's ray mask (one for the whole batch). Default all ones. Ignored by a kernel made with `rayMasks: false`. */
+    readonly mask?: number;
     /** Optional GPU timing for the dispatch's pass, for example from `GpuTimer.computePass()`. */
     readonly timestampWrites?: GPUComputePassTimestampWrites;
 }
@@ -79,31 +82,62 @@ interface SceneBindGroups {
     readonly any: GPUBindGroup;
 }
 
+export interface TraceBatchKernelOptions {
+    readonly label?: string;
+    /** The triangle filter (`bvhTrianglePasses`); default: every triangle blocks. */
+    readonly triangleFilter?: string;
+    /** Default true: each batch has a ray mask (`TraceBatch.mask`). False compiles masks out. */
+    readonly rayMasks?: boolean;
+}
+
 /**
  * Runs batches of rays through the trace module. Group 0 is the scene; group 1
- * is the batch's rays and results. One kernel serves any number of scenes.
+ * is the batch's rays and results (and, with ray masks, its mask). One kernel
+ * serves any number of scenes.
  */
 export class TraceBatchKernel {
     private readonly sceneGroups = new WeakMap<TraceSceneBuffers, SceneBindGroups>();
+    /** One small uniform per mask used: dispatches recorded into one command buffer may use different masks. */
+    private readonly maskBuffers = new Map<number, GPUBuffer>();
 
     private constructor(
         private readonly device: GPUDevice,
         private readonly closestPipeline: GPUComputePipeline,
         private readonly anyPipeline: GPUComputePipeline,
+        readonly rayMasks: boolean,
     ) {}
 
-    static async create(device: GPUDevice, label = 'trace'): Promise<TraceBatchKernel> {
+    static async create(device: GPUDevice, options: TraceBatchKernelOptions = {}): Promise<TraceBatchKernel> {
+        const { label = 'trace', triangleFilter, rayMasks = true } = options;
         const pipelineFor = (mode: 'closest' | 'any') =>
             device.createComputePipelineAsync({
                 label: `${label} batch ${mode}`,
                 layout: 'auto',
                 compute: {
-                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode) }),
+                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks }) }),
                     entryPoint: 'bvhBatch',
                 },
             });
         const [closestPipeline, anyPipeline] = await Promise.all([pipelineFor('closest'), pipelineFor('any')]);
-        return new TraceBatchKernel(device, closestPipeline, anyPipeline);
+        return new TraceBatchKernel(device, closestPipeline, anyPipeline, rayMasks);
+    }
+
+    private maskBuffer(mask: number): GPUBuffer {
+        let buffer = this.maskBuffers.get(mask);
+        if (!buffer) {
+            buffer = this.device.createBuffer({ label: `trace batch mask ${mask.toString(16)}`, size: BATCH_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            const words = new Uint32Array(BATCH_PARAMS_BYTES / 4);
+            words[BATCH_PARAMS_WORD.rayMask] = mask;
+            this.device.queue.writeBuffer(buffer, 0, words);
+            this.maskBuffers.set(mask, buffer);
+        }
+        return buffer;
+    }
+
+    /** Frees the mask uniforms. The pipelines need no freeing. */
+    destroy(): void {
+        for (const buffer of this.maskBuffers.values()) buffer.destroy();
+        this.maskBuffers.clear();
     }
 
     private groupsFor(scene: TraceSceneBuffers): SceneBindGroups {
@@ -129,13 +163,14 @@ export class TraceBatchKernel {
     encode(encoder: GPUCommandEncoder, scene: TraceSceneBuffers, batch: TraceBatch): void {
         if (batch.count <= 0) return;
         const pipeline = batch.mode === 'closest' ? this.closestPipeline : this.anyPipeline;
-        // The ray count is the size of the bound range, so no uniform is needed.
+        // The ray count is the size of the bound range; the mask is the only uniform.
         const batchGroup = this.device.createBindGroup({
             label: `trace batch ${batch.mode}`,
             layout: pipeline.getBindGroupLayout(1),
             entries: [
                 { binding: 0, resource: { buffer: batch.rays, offset: 0, size: batch.count * RAY_BYTES } },
                 { binding: 1, resource: { buffer: batch.results } },
+                ...(this.rayMasks ? [{ binding: 2, resource: { buffer: this.maskBuffer((batch.mask ?? RAY_MASK_ALL) >>> 0) } }] : []),
             ],
         });
         const workgroups = Math.ceil(batch.count / BATCH_WORKGROUP_SIZE);

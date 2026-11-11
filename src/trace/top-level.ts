@@ -16,6 +16,8 @@
 import {
     BVH_NODE_BYTES,
     INSTANCE_FLAG,
+    INSTANCE_MASK_SHIFT,
+    checkInstanceMask,
     INSTANCE_RECORD_BYTES,
     INSTANCE_RECORD_WORDS,
     INSTANCE_WORD,
@@ -43,6 +45,12 @@ export interface TraceInstance {
     readonly contributesToGi?: boolean;
     /** Defaults to true. */
     readonly visible?: boolean;
+    /**
+     * The instance mask, 8 bits (0-255), stored in bits 8-15 of the record's
+     * flags. A masked trace skips the instance when `(mask & rayMask) == 0`.
+     * Defaults to 0xff, visible to every ray.
+     */
+    readonly mask?: number;
 }
 
 export interface TopLevelBvh {
@@ -171,6 +179,7 @@ export function buildTopLevel(instances: readonly TraceInstance[], options: Part
     let skippedSingular = 0;
     instances.forEach((instance, input) => {
         if (instance.visible === false || instance.contributesToGi === false) return;
+        checkInstanceMask(instance.mask, instance.instanceIndex);
         const inverse = invertAffine(instance.objectToWorld);
         if (inverse === null) {
             skippedSingular++;
@@ -212,7 +221,11 @@ export function buildTopLevel(instances: readonly TraceInstance[], options: Part
         words[base + INSTANCE_WORD.triangleOffset] = instance.triangleOffset;
         words[base + INSTANCE_WORD.instanceIndex] = instance.instanceIndex;
         words[base + INSTANCE_WORD.flags] =
-            INSTANCE_FLAG.contributesToGi | INSTANCE_FLAG.visible | (entry.mirrored ? INSTANCE_FLAG.mirrored : 0);
+            (INSTANCE_FLAG.contributesToGi |
+                INSTANCE_FLAG.visible |
+                (entry.mirrored ? INSTANCE_FLAG.mirrored : 0) |
+                (checkInstanceMask(instance.mask, instance.instanceIndex) << INSTANCE_MASK_SHIFT)) >>>
+            0;
     }
 
     new Uint8Array(buffer, TOP_LEVEL_HEADER_BYTES + recordBytes, nodeBytes).set(new Uint8Array(tree.nodes));

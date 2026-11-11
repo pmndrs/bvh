@@ -421,7 +421,7 @@ export async function runOursTracer(
 ): Promise<OursTracerRun> {
     const resources = new Resources();
     try {
-        const kernel = await TraceBatchKernel.create(device, tracer);
+        const kernel = await TraceBatchKernel.create(device, { label: tracer });
         const scene = resources.add(uploadTraceScene(device, data, tracer));
 
         const hits = resources.add(
@@ -487,7 +487,7 @@ export async function estimateNsPerRay(device: GPUDevice, timer: DispatchTimer, 
     const resources = new Resources();
     try {
         const count = sampleRays.length / RAY_FLOATS;
-        const kernel = await TraceBatchKernel.create(device, 'ours calibrate');
+        const kernel = await TraceBatchKernel.create(device, { label: 'ours calibrate' });
         const scene = resources.add(uploadTraceScene(device, data, 'ours calibrate'));
         const rays = resources.add(uploadRays(device, 'calibration rays', sampleRays));
         const hits = resources.add(
@@ -519,7 +519,7 @@ export async function traceClosestOnce(
 ): Promise<ArrayBuffer> {
     const resources = new Resources();
     try {
-        const kernel = await TraceBatchKernel.create(device, 'ours prepare');
+        const kernel = await TraceBatchKernel.create(device, { label: 'ours prepare' });
         const scene = resources.add(uploadTraceScene(device, data, 'ours prepare'));
         const hits = resources.add(
             device.createBuffer({

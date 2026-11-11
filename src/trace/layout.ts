@@ -21,7 +21,7 @@ import { GPU_LAYOUT_EMPTY_CHILD, GPU_LAYOUT_MAX_LEAF_PRIMITIVES, GPU_LAYOUT_MAX_
  * fails when the package's version moves, so a layout change can't reach the
  * tracer without someone reviewing the walk.
  */
-export const TRACER_GPU_LAYOUT_VERSION = 1;
+export const TRACER_GPU_LAYOUT_VERSION = 2;
 
 /** One BVH node: two child boxes (Aila-Laine layout), 16 words. */
 export const BVH_NODE_BYTES = GPU_LAYOUT_NODE_BYTES;
@@ -76,7 +76,7 @@ export const TRIANGLE_WORD = {
 
 /**
  * Triangle `flags` bit 0: consult the triangle filter. The walk asks the
- * kernel's `bvhTriangleFilter` (the CPU walk its `triangleFilter`) whether the
+ * kernel's `bvhTrianglePasses` (the CPU walk its `triangleFilter`) whether the
  * ray passes before taking the hit (triangle-filter.ts).
  */
 export const TRIANGLE_FLAG_FILTER = 1;
@@ -103,7 +103,10 @@ export const INSTANCE_WORD = {
     flags: 15,
 } as const;
 
-/** Instance `flags` bits. */
+/**
+ * Instance `flags` bits 0-2. Bits 3-7 are reserved; bits 8-15 hold the
+ * instance mask ({@link INSTANCE_MASK_SHIFT}); bits 16-31 are reserved.
+ */
 export const INSTANCE_FLAG = {
     /** Rays that hit this instance count (an instance can be hidden from GI only). */
     contributesToGi: 1,
@@ -117,6 +120,43 @@ export const INSTANCE_FLAG = {
      */
     mirrored: 4,
 } as const;
+
+/**
+ * The instance mask: 8 bits (as in DXR) at bits 8-15 of the instance `flags`
+ * word. A masked trace skips an instance whose `(mask & rayMask) == 0` at the
+ * top level, before entering its tree. The builders write
+ * {@link INSTANCE_MASK_ALL} unless the instance gives a mask. A trace module
+ * built with `rayMasks: false` ignores it.
+ */
+export const INSTANCE_MASK_SHIFT = 8;
+/** The mask's bits in the `flags` word. */
+export const INSTANCE_MASK_BITS = 0xff << INSTANCE_MASK_SHIFT;
+/** The default instance mask: visible to every ray. */
+export const INSTANCE_MASK_ALL = 0xff;
+/** The default ray mask: every instance mask bit (all 32 bits set, so it is also right if the mask grows). */
+export const RAY_MASK_ALL = 0xffffffff;
+
+/** An instance's mask, from its `flags` word. */
+export function instanceMaskFromFlags(flags: number): number {
+    return (flags & INSTANCE_MASK_BITS) >>> INSTANCE_MASK_SHIFT;
+}
+
+/** Checks an instance mask from user input: an integer in 0-255. Undefined gives {@link INSTANCE_MASK_ALL}. */
+export function checkInstanceMask(mask: number | undefined, instanceIndex: number): number {
+    if (mask === undefined) return INSTANCE_MASK_ALL;
+    if (!Number.isInteger(mask) || mask < 0 || mask > INSTANCE_MASK_ALL) {
+        throw new RangeError(`instance ${instanceIndex}: mask must be an integer in 0-255, got ${mask}`);
+    }
+    return mask;
+}
+
+/**
+ * Which query a triangle filter is asked from: `query` in `BvhCandidate`
+ * (WGSL `BVH_QUERY_CLOSEST`, `BVH_QUERY_ANY`) and in `TriangleCandidate`.
+ */
+export const BVH_QUERY_CLOSEST = 0;
+export const BVH_QUERY_ANY = 1;
+export type BvhQuery = typeof BVH_QUERY_CLOSEST | typeof BVH_QUERY_ANY;
 
 /**
  * The top-level buffer is `[header][instance records][top-level nodes]`.

@@ -20,6 +20,23 @@
  * renormalized after the transform into object space: a point at parameter
  * `t` on the object-space ray is the same point as at `t` on the world ray,
  * whatever scale, shear or mirror the instance has.
+ *
+ * The public WGSL API (stable from 0.1):
+ *
+ *     struct BvhRay  { origin: vec3f, tMin: f32, direction: vec3f, tMax: f32 }   // 32 bytes
+ *     struct BvhHit  { t: f32, instance: u32, triangle: u32, barycentrics: vec2f, frontFace: bool }
+ *     fn bvhTraceClosest(ray: BvhRay) -> BvhHit
+ *     fn bvhTraceAny(ray: BvhRay) -> bool
+ *     fn bvhTraceClosestMasked(ray: BvhRay, mask: u32) -> BvhHit   // unless rayMasks: false
+ *     fn bvhTraceAnyMasked(ray: BvhRay, mask: u32) -> bool         // unless rayMasks: false
+ *
+ *     // The triangle filter, supplied by the caller (or the default, every triangle blocks):
+ *     struct BvhCandidate { instance: u32, triangle: u32, t: f32, barycentrics: vec2f,
+ *                           frontFace: bool, query: u32, rayMask: u32 }
+ *     fn bvhTrianglePasses(candidate: BvhCandidate) -> bool         // true: the ray passes through
+ *
+ * Every other name the module declares starts with `bvh`, `Bvh` or `BVH_`;
+ * callers should keep clear of those prefixes.
  */
 
 import {
@@ -33,8 +50,13 @@ import {
     TRIANGLE_BYTES,
     TRACE_STACK_SIZE,
     TRIANGLE_FLAG_FILTER,
+    INSTANCE_MASK_SHIFT,
+    INSTANCE_MASK_ALL,
+    RAY_MASK_ALL,
+    BVH_QUERY_CLOSEST,
+    BVH_QUERY_ANY,
 } from './layout.ts';
-import { NO_TRIANGLE_FILTER_WGSL } from './triangle-filter.ts';
+import { DEFAULT_TRIANGLE_FILTER_WGSL } from './triangle-filter.ts';
 
 /** Where the trace module's bindings land inside a kernel (structurally the same as ddgi's `BindingSlot`). */
 export interface BindingSlot {
@@ -79,6 +101,27 @@ struct BvhHit {
     barycentrics: vec2f, // weights of vertices 1 and 2
     frontFace: bool,     // true on the side the mesh was authored as front (also when mirrored)
 }
+
+// What the triangle filter (bvhTrianglePasses, trace/triangle-filter.ts) is
+// told about a candidate hit on a flagged triangle. A struct, so fields can be
+// added later without breaking filters. Function-scope only: bool is not
+// host-shareable, and this never lives in a buffer.
+struct BvhCandidate {
+    instance: u32,       // platform instance index (BvhHit.instance)
+    triangle: u32,       // original triangle index within the instance's mesh
+    t: f32,              // distance along the ray, in world units
+    barycentrics: vec2f, // weights of vertices 1 and 2
+    frontFace: bool,     // the authored front side, also when mirrored
+    query: u32,          // BVH_QUERY_CLOSEST or BVH_QUERY_ANY
+    rayMask: u32,        // the trace's mask; all ones without one or with masks off
+}
+
+// BvhCandidate.query, the query that asks the filter.
+const BVH_QUERY_CLOSEST: u32 = ${BVH_QUERY_CLOSEST}u;
+const BVH_QUERY_ANY: u32 = ${BVH_QUERY_ANY}u;
+
+// The ray mask of bvhTraceClosest/bvhTraceAny: every instance is visible.
+const BVH_RAY_MASK_ALL: u32 = ${hex(RAY_MASK_ALL)};
 
 // ---- Memory layout (generated from layout.ts) -------------------------------
 
@@ -161,8 +204,13 @@ const BVH_BOX_EXIT_PADDING: f32 = 1.0000004;
  * On the bench scenes far-first made any-hit much faster than near-first, with
  * every answer unchanged (numbers: PROGRESS, T1.3, and bench/results/trace.csv).
  */
-function walkWgsl(kind: 'closest' | 'any'): string {
+function walkWgsl(kind: 'closest' | 'any', rayMasks: boolean): string {
     const closest = kind === 'closest';
+    // With masks compiled out the walk has no mask parameter, no mask test, and
+    // hands the filter all ones; it is otherwise the same code.
+    const maskParameter = rayMasks ? ', rayMask: u32' : '';
+    const candidateMask = rayMasks ? 'rayMask' : 'BVH_RAY_MASK_ALL';
+    const query = closest ? 'BVH_QUERY_CLOSEST' : 'BVH_QUERY_ANY';
     const name = closest ? 'bvhWalkClosest' : 'bvhWalkAny';
     const returnType = closest ? 'BvhHit' : 'bool';
     const noHit = closest ? 'result' : 'false';
@@ -173,11 +221,11 @@ function walkWgsl(kind: 'closest' | 'any'): string {
         ? `// The test ran in object space, where the winding is the one the mesh was
                     // authored with, so frontFacing is the authored side even for a mirrored
                     // instance (DECISIONS 2026-11-04).
-                    result = BvhHit(candidate.t, instance.instanceIndex, triangle.originalIndex, candidate.barycentrics, candidate.frontFacing);
-                    farthest = candidate.t;`
+                    result = BvhHit(triangleHit.t, instance.instanceIndex, triangle.originalIndex, triangleHit.barycentrics, triangleHit.frontFacing);
+                    farthest = triangleHit.t;`
         : 'return true;';
     return /* wgsl */ `
-fn ${name}(ray: BvhRay) -> ${returnType} {
+fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
     ${resultDeclaration}
     let header = bvhTraceTopLevel[0];
     let instanceCount = header.x;
@@ -247,27 +295,40 @@ fn ${name}(ray: BvhRay) -> ${returnType} {
             // A top-level leaf is one instance. Move the ray into its object space
             // and start at the root of its mesh tree.
             instance = bvhLoadInstance(index);
-            setup = bvhMakeRaySetup(
-                bvhTransformPoint(instance, ray.origin),
-                bvhTransformDirection(instance, ray.direction),
-            );
-            stack[stackSize] = BVH_REF_INSTANCE_MARKER;
-            stackSize += 1u;
-            insideInstance = true;
-            current = bvhMakeReference(0u, 0u);
-            continue;
+            ${rayMasks ? `// A masked trace skips an instance whose mask shares no bit with the
+            // ray's, before entering its tree (it falls through to pop).
+            if ((bvhInstanceMask(instance) & rayMask) != 0u) {` : '{'}
+                setup = bvhMakeRaySetup(
+                    bvhTransformPoint(instance, ray.origin),
+                    bvhTransformDirection(instance, ray.direction),
+                );
+                stack[stackSize] = BVH_REF_INSTANCE_MARKER;
+                stackSize += 1u;
+                insideInstance = true;
+                current = bvhMakeReference(0u, 0u);
+                continue;
+            }
         } else {
             // A mesh leaf: 'count' triangles starting at 'index'.
             for (var i = 0u; i < count; i += 1u) {
                 let triangle = bvhLoadTriangle(instance.triangleOffset + index + i);
-                let candidate = bvhIntersectWatertight(triangle, setup, ray.tMin, farthest);
-                // A flagged triangle asks the kernel's filter first (triangle-filter.ts).
-                // A ray that passes records nothing and leaves 'farthest' alone, so what
-                // lies behind the triangle is still found.
-                let consultFilter = (triangle.flags & BVH_TRIANGLE_FLAG_FILTER) != 0u;
-                if (candidate.hit && !(consultFilter && bvhTriangleFilter(instance.instanceIndex, triangle.originalIndex, candidate.t, candidate.barycentrics, candidate.frontFacing))) {
-                    ${onTriangleHit}
+                let triangleHit = bvhIntersectWatertight(triangle, setup, ray.tMin, farthest);
+                if (!triangleHit.hit) {
+                    continue;
                 }
+                // A flagged triangle asks the filter first (triangle-filter.ts). A ray
+                // that passes records nothing and leaves 'farthest' alone, so what
+                // lies behind the triangle is still found.
+                if ((triangle.flags & BVH_TRIANGLE_FLAG_FILTER) != 0u) {
+                    let candidate = BvhCandidate(
+                        instance.instanceIndex, triangle.originalIndex, triangleHit.t, triangleHit.barycentrics,
+                        triangleHit.frontFacing, ${query}, ${candidateMask},
+                    );
+                    if (bvhTrianglePasses(candidate)) {
+                        continue;
+                    }
+                }
+                ${onTriangleHit}
             }
         }
 
@@ -293,14 +354,41 @@ fn ${name}(ray: BvhRay) -> ${returnType} {
 `;
 }
 
+/** Options of {@link traceModuleWgsl}. */
+export interface TraceModuleOptions {
+    /** Where the module's three bindings land. Default: group 0, bindings 0-2. */
+    readonly traceSlot?: BindingSlot;
+    /**
+     * The triangle filter, `fn bvhTrianglePasses(candidate: BvhCandidate) -> bool`,
+     * included in the module. Default: {@link DEFAULT_TRIANGLE_FILTER_WGSL}
+     * (every triangle blocks). `null` leaves it out, for a kernel that
+     * declares `bvhTrianglePasses` itself.
+     */
+    readonly triangleFilter?: string | null;
+    /**
+     * Instance masks against ray masks. Default true: the module also has
+     * `bvhTraceClosestMasked(ray, mask)` and `bvhTraceAnyMasked(ray, mask)`,
+     * and the walk skips an instance whose `(instanceMask & rayMask) == 0`.
+     * False compiles masks out: no `*Masked` functions, no mask test in the
+     * walk, instance masks are ignored, and the filter sees `rayMask` as all
+     * ones. It is the same walk either way, with the mask code left out.
+     */
+    readonly rayMasks?: boolean;
+}
+
+const DEFAULT_TRACE_SLOT: BindingSlot = { group: 0, firstBinding: 0 };
+
 /**
- * The trace module: contract types, layout, and `bvhTraceClosest` / `bvhTraceAny`.
- * Bindings land at `slot`: nodes, triangles, top level, in that order. The
- * walk calls `bvhTriangleFilter` for flagged triangles, which the kernel
- * supplies as its own piece: a filter of its own, or
- * `NO_TRIANGLE_FILTER_WGSL` (triangle-filter.ts).
+ * The trace module: contract types, layout, the triangle filter (unless
+ * `triangleFilter: null`), and `bvhTraceClosest` / `bvhTraceAny` (plus their
+ * `*Masked` forms unless `rayMasks: false`). Bindings land at `traceSlot`:
+ * nodes, triangles, top level, in that order. The walk calls
+ * `bvhTrianglePasses` for flagged triangles (triangle-filter.ts).
  */
-export function traceModuleWgsl(slot: BindingSlot): string {
+export function traceModuleWgsl(options: TraceModuleOptions = {}): string {
+    const slot = options.traceSlot ?? DEFAULT_TRACE_SLOT;
+    const rayMasks = options.rayMasks ?? true;
+    const triangleFilter = options.triangleFilter === undefined ? DEFAULT_TRIANGLE_FILTER_WGSL : options.triangleFilter;
     const group = slot.group;
     const nodes = slot.firstBinding;
     const triangles = slot.firstBinding + 1;
@@ -320,8 +408,8 @@ fn bvhMakeReference(index: u32, count: u32) -> u32 {
 
 const BVH_VEC4_PER_TRIANGLE: u32 = ${TRIANGLE_BYTES / 16}u;
 
-// Triangle flags bit 0: consult the triangle filter (bvhTriangleFilter, which
-// the kernel supplies as its own piece; trace/triangle-filter.ts).
+// Triangle flags bit 0: consult the triangle filter (bvhTrianglePasses;
+// trace/triangle-filter.ts).
 const BVH_TRIANGLE_FLAG_FILTER: u32 = ${TRIANGLE_FLAG_FILTER}u;
 
 fn bvhLoadMeshNode(nodeIndex: u32) -> BvhNode {
@@ -558,9 +646,49 @@ fn bvhIntersectWatertight(triangle: BvhTriangle, setup: BvhRaySetup, tMin: f32, 
     return BvhTriangleHit(true, t, vec2f(weight1, weight2) * inverseDeterminant, determinant > 0.0);
 }
 
-${walkWgsl('closest')}
-${walkWgsl('any')}
-// Nearest hit; flagged triangles the filter lets through are skipped.
+${rayMasks ? INSTANCE_MASK_WGSL : ''}
+${walkWgsl('closest', rayMasks)}
+${walkWgsl('any', rayMasks)}
+${rayMasks ? MASKED_TRACE_WGSL : UNMASKED_TRACE_WGSL}
+${triangleFilter ?? '// bvhTrianglePasses is supplied by the kernel.'}
+`;
+}
+
+// Only in a module with ray masks.
+const INSTANCE_MASK_WGSL = /* wgsl */ `
+// The instance mask: 8 bits at bits 8-15 of the instance flags (layout.ts).
+const BVH_INSTANCE_MASK_SHIFT: u32 = ${INSTANCE_MASK_SHIFT}u;
+const BVH_INSTANCE_MASK_ALL: u32 = ${hex(INSTANCE_MASK_ALL)};
+
+fn bvhInstanceMask(instance: BvhInstance) -> u32 {
+    return (instance.flags >> BVH_INSTANCE_MASK_SHIFT) & BVH_INSTANCE_MASK_ALL;
+}
+`;
+
+const MASKED_TRACE_WGSL = /* wgsl */ `
+// Nearest hit; flagged triangles the filter lets through are skipped. Every instance is visible.
+fn bvhTraceClosest(ray: BvhRay) -> BvhHit {
+    return bvhWalkClosest(ray, BVH_RAY_MASK_ALL);
+}
+
+// True if anything blocks the ray (the filter has the same say as above). Stops at the first blocker found.
+fn bvhTraceAny(ray: BvhRay) -> bool {
+    return bvhWalkAny(ray, BVH_RAY_MASK_ALL);
+}
+
+// As bvhTraceClosest, but instances whose mask shares no bit with 'mask' are skipped.
+fn bvhTraceClosestMasked(ray: BvhRay, mask: u32) -> BvhHit {
+    return bvhWalkClosest(ray, mask);
+}
+
+// As bvhTraceAny, but instances whose mask shares no bit with 'mask' are skipped.
+fn bvhTraceAnyMasked(ray: BvhRay, mask: u32) -> bool {
+    return bvhWalkAny(ray, mask);
+}
+`;
+
+const UNMASKED_TRACE_WGSL = /* wgsl */ `
+// Nearest hit; flagged triangles the filter lets through are skipped. (Ray masks are compiled out.)
 fn bvhTraceClosest(ray: BvhRay) -> BvhHit {
     return bvhWalkClosest(ray);
 }
@@ -570,7 +698,6 @@ fn bvhTraceAny(ray: BvhRay) -> bool {
     return bvhWalkAny(ray);
 }
 `;
-}
 
 /**
  * What a batch writes per ray in closest-hit mode. `BvhHit` itself cannot live
@@ -597,15 +724,18 @@ export const HIT_RECORD_WORD = {
 export const BATCH_WORKGROUP_SIZE = 64;
 
 /**
- * The batch kernel's own part: its two bindings in `group` (rays in, results
- * out) and the entry point `bvhBatch`, which traces `arrayLength(bvhBatchRays)`
- * rays and writes one result per ray. The trace module comes separately (the
- * platform's kernel builder puts it in group 0).
+ * The batch kernel's own part: its bindings in `group` (rays in, results
+ * out, and with `rayMasks` the batch's ray mask as a uniform at binding 2) and
+ * the entry point `bvhBatch`, which traces `arrayLength(bvhBatchRays)` rays and
+ * writes one result per ray. The trace module comes separately (the
+ * platform's kernel builder puts it in group 0). It must be built with the
+ * same `rayMasks`.
  *
- * The ray count is the size of the bound `rays` range, so there is no uniform
- * to keep in step between several dispatches recorded into one command buffer.
+ * The ray count is the size of the bound `rays` range, so it needs no uniform.
+ * The mask does: dispatches with different masks recorded into one command
+ * buffer need a uniform buffer each.
  */
-export function batchEntryWgsl(mode: 'closest' | 'any', group: number): string {
+export function batchEntryWgsl(mode: 'closest' | 'any', group: number, rayMasks = true): string {
     const resultDeclaration =
         mode === 'closest'
             ? `struct BvhHitRecord {
@@ -622,13 +752,24 @@ export function batchEntryWgsl(mode: 'closest' | 'any', group: number): string {
 
     const body =
         mode === 'closest'
-            ? `let hit = bvhTraceClosest(bvhBatchRays[rayIndex]);
+            ? `let hit = ${rayMasks ? 'bvhTraceClosestMasked(bvhBatchRays[rayIndex], bvhBatchParams.rayMask)' : 'bvhTraceClosest(bvhBatchRays[rayIndex])'};
     bvhBatchResults[rayIndex] = BvhHitRecord(hit.t, hit.instance, hit.triangle, select(0u, 1u, hit.frontFace), hit.barycentrics);`
-            : `bvhBatchResults[rayIndex] = select(0u, 1u, bvhTraceAny(bvhBatchRays[rayIndex]));`;
+            : `bvhBatchResults[rayIndex] = select(0u, 1u, ${rayMasks ? 'bvhTraceAnyMasked(bvhBatchRays[rayIndex], bvhBatchParams.rayMask)' : 'bvhTraceAny(bvhBatchRays[rayIndex])'});`;
+
+    // One ray mask for the whole batch (no per-ray mask buffer).
+    const params = rayMasks
+        ? `
+struct BvhBatchParams {
+    rayMask: u32,
+}
+
+@group(${group}) @binding(2) var<uniform> bvhBatchParams: BvhBatchParams;`
+        : '';
 
     return /* wgsl */ `
 @group(${group}) @binding(0) var<storage, read> bvhBatchRays: array<BvhRay>;
 ${resultDeclaration}
+${params}
 
 @compute @workgroup_size(${BATCH_WORKGROUP_SIZE})
 fn bvhBatch(
@@ -646,17 +787,34 @@ fn bvhBatch(
 `;
 }
 
+/** Options of {@link batchKernelWgsl}. */
+export interface BatchKernelOptions {
+    /** Where the trace module's bindings land. Default: group 0, bindings 0-2. The batch's own bindings are group 1. */
+    readonly traceSlot?: BindingSlot;
+    /** The triangle filter (`bvhTrianglePasses`). Default: {@link DEFAULT_TRIANGLE_FILTER_WGSL}, every triangle blocks. */
+    readonly triangleFilter?: string;
+    /**
+     * Default true: the batch traces with one ray mask for the whole batch,
+     * read from a uniform at group 1, binding 2 ({@link BATCH_PARAMS_BYTES},
+     * word {@link BATCH_PARAMS_WORD}.rayMask). False compiles masks out and
+     * the batch has no binding 2.
+     */
+    readonly rayMasks?: boolean;
+}
+
+/** Bytes of the batch kernel's uniform (`BvhBatchParams`, group 1 binding 2, only with ray masks). Padded to 16. */
+export const BATCH_PARAMS_BYTES = 16;
+
+/** Word positions inside the batch kernel's uniform. */
+export const BATCH_PARAMS_WORD = { rayMask: 0 } as const;
+
 /**
- * A whole batch kernel: the trace module at `traceSlot`, the triangle filter
- * (`bvhTriangleFilter`; by default none, so every triangle blocks), and the
- * batch's own group 1.
+ * A whole batch kernel: the trace module at `traceSlot` with the triangle
+ * filter, and the batch's own group 1 (rays, results, and with ray masks the
+ * batch's mask). The entry point is `bvhBatch`.
  */
-export function batchKernelWgsl(
-    mode: 'closest' | 'any',
-    traceSlot: BindingSlot = { group: 0, firstBinding: 0 },
-    triangleFilterWgsl: string = NO_TRIANGLE_FILTER_WGSL,
-): string {
-    return `${traceModuleWgsl(traceSlot)}
-${triangleFilterWgsl}
-${batchEntryWgsl(mode, 1)}`;
+export function batchKernelWgsl(mode: 'closest' | 'any', options: BatchKernelOptions = {}): string {
+    const rayMasks = options.rayMasks ?? true;
+    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks })}
+${batchEntryWgsl(mode, 1, rayMasks)}`;
 }

@@ -14,10 +14,18 @@
  * when it is set.
  *
  * The triangle filter (triangle-filter.ts): given one, a triangle it lets the
- * ray through at a candidate hit is skipped, as if it weren't there. The
- * reference has no flags, so it asks the filter about every triangle; the
- * walk only asks about flagged ones, and agreeing with this shows the flags
- * cover every triangle the filter can let through.
+ * ray through at a hit is skipped, as if it weren't there. The reference has
+ * no flags, so it asks the filter about every triangle it really hits (inside
+ * the triangle and the ray interval; never about near misses); the walk only
+ * asks about flagged ones, and agreeing with this shows the flags cover every
+ * triangle the filter can let through. Filters used against the reference
+ * should give the same answer for every hit on a triangle: one that changes
+ * its mind across a triangle (by t or barycentrics) can flip at a point where
+ * f32 and f64 disagree.
+ *
+ * Instance masks, as in the walk: each trace takes a `mask` (default all
+ * ones), and the triangles of an instance whose mask shares no bit with it are
+ * skipped. `rayMasks: false` ignores masks, as a trace module built without them.
  */
 
 import type { MeshGeometry } from './mesh-bvh.ts';
@@ -27,7 +35,8 @@ import type { TraceRay } from './rays.ts';
 
 export type { TraceRay } from './rays.ts';
 import type { TraceSceneInstance } from './scene-assembly.ts';
-import type { TriangleFilter } from './triangle-filter.ts';
+import type { TrianglePasses } from './triangle-filter.ts';
+import { BVH_QUERY_ANY, BVH_QUERY_CLOSEST, RAY_MASK_ALL, checkInstanceMask, type BvhQuery } from './layout.ts';
 
 
 export interface ReferenceHit {
@@ -57,13 +66,25 @@ export interface ReferenceScene {
     readonly triangleIndices: Uint32Array;
     /** 1 for triangles of a mirrored instance, whose world-space winding is the reverse of the authored one. */
     readonly mirrored: Uint8Array;
-    /** Asked about every candidate hit; true lets the ray through. Undefined: every triangle blocks. */
-    readonly triangleFilter?: TriangleFilter;
+    /** Each triangle's instance mask (0xff unless the instance gives one). */
+    readonly instanceMasks: Uint8Array;
+    /** Asked about every hit; true lets the ray through. Undefined: every triangle blocks. */
+    readonly triangleFilter?: TrianglePasses;
+    /** False: instance masks are ignored and the filter sees all ones (a trace module built with `rayMasks: false`). */
+    readonly rayMasks: boolean;
 }
 
 export interface ReferenceSceneOptions {
     /** The same filter the walk is given; the reference applies it to every triangle. */
-    readonly triangleFilter?: TriangleFilter;
+    readonly triangleFilter?: TrianglePasses;
+    /** As the trace module's `rayMasks` option. Default true. */
+    readonly rayMasks?: boolean;
+}
+
+/** Per-trace options of the reference. */
+export interface ReferenceTraceOptions {
+    /** The ray mask. Default all ones. Ignored when the scene was built with `rayMasks: false`. */
+    readonly mask?: number;
 }
 
 /** Transforms every triangle of every traceable instance to world space. */
@@ -84,10 +105,12 @@ export function buildReferenceScene(
     const instanceIndices = new Uint32Array(total);
     const triangleIndices = new Uint32Array(total);
     const mirrored = new Uint8Array(total);
+    const instanceMasks = new Uint8Array(total);
     let slot = 0;
     for (const instance of traceable) {
         const mesh = meshes[instance.meshIndex];
         const instanceMirrored = isMirrored(instance) ? 1 : 0;
+        const instanceMask = checkInstanceMask(instance.mask, instance.instanceIndex);
         const e = instance.objectToWorld;
         const toWorld = (vertex: number): [number, number, number] => {
             const x = mesh.positions[vertex * 3];
@@ -114,10 +137,20 @@ export function buildReferenceScene(
             instanceIndices[slot] = instance.instanceIndex;
             triangleIndices[slot] = triangle;
             mirrored[slot] = instanceMirrored;
+            instanceMasks[slot] = instanceMask;
             slot++;
         }
     }
-    return { triangleCount: total, geometry, instanceIndices, triangleIndices, mirrored, triangleFilter: options.triangleFilter };
+    return {
+        triangleCount: total,
+        geometry,
+        instanceIndices,
+        triangleIndices,
+        mirrored,
+        instanceMasks,
+        triangleFilter: options.triangleFilter,
+        rayMasks: options.rayMasks ?? true,
+    };
 }
 
 /** Möller-Trumbore in doubles. Writes `t, u, v, determinant` to `out` and returns false when the ray misses the triangle's plane region. */
@@ -161,15 +194,42 @@ function edgeMargin(u: number, v: number): number {
 }
 
 /**
- * Whether the scene's filter lets the ray through `triangle` at a candidate
- * hit. The side is the authored one: the world-space winding test, flipped
- * back for a mirrored instance (as `frontFace` below).
+ * Whether the scene's filter lets the ray through `triangle` at a hit. The
+ * side is the authored one: the world-space winding test, flipped back for a
+ * mirrored instance (as `frontFace` below).
  */
-function filterPasses(scene: ReferenceScene, triangle: number, t: number, u: number, v: number, determinant: number): boolean {
+function filterPasses(
+    scene: ReferenceScene,
+    triangle: number,
+    t: number,
+    u: number,
+    v: number,
+    determinant: number,
+    query: BvhQuery,
+    rayMask: number,
+): boolean {
     const filter = scene.triangleFilter;
     if (!filter) return false;
     const frontFace = determinant > 0 !== (scene.mirrored[triangle] === 1);
-    return filter(scene.instanceIndices[triangle], scene.triangleIndices[triangle], { t, u, v, frontFace });
+    return filter({
+        instance: scene.instanceIndices[triangle],
+        triangle: scene.triangleIndices[triangle],
+        t,
+        barycentrics: [u, v],
+        frontFace,
+        query,
+        rayMask,
+    });
+}
+
+/** The ray mask a trace uses: the given one, or all ones (always all ones with masks off). */
+function traceMask(scene: ReferenceScene, options: ReferenceTraceOptions): number {
+    return scene.rayMasks ? (options.mask ?? RAY_MASK_ALL) >>> 0 : RAY_MASK_ALL;
+}
+
+/** Whether a masked trace skips the triangle's instance. */
+function maskedOut(scene: ReferenceScene, triangle: number, rayMask: number): boolean {
+    return scene.rayMasks && (scene.instanceMasks[triangle] & rayMask) === 0;
 }
 
 function nearIntervalEnd(t: number, ray: TraceRay): boolean {
@@ -180,7 +240,8 @@ function nearIntervalEnd(t: number, ray: TraceRay): boolean {
 const scratch = new Float64Array(4);
 
 /** Nearest hit within `[tMin, tMax]`, or null. Back faces count as hits. */
-export function traceClosestReference(scene: ReferenceScene, ray: TraceRay): ReferenceHit | null {
+export function traceClosestReference(scene: ReferenceScene, ray: TraceRay, options: ReferenceTraceOptions = {}): ReferenceHit | null {
+    const rayMask = traceMask(scene, options);
     let bestT = Infinity;
     let best = -1;
     let bestU = 0;
@@ -189,13 +250,14 @@ export function traceClosestReference(scene: ReferenceScene, ray: TraceRay): Ref
     const hitTimes: number[] = [];
 
     for (let triangle = 0; triangle < scene.triangleCount; triangle++) {
+        if (maskedOut(scene, triangle, rayMask)) continue;
         if (!intersect(scene, triangle, ray, scratch)) continue;
         const t = scratch[0];
         const u = scratch[1];
         const v = scratch[2];
         const determinant = scratch[3];
         if (edgeMargin(u, v) < 0 || t < ray.tMin || t > ray.tMax) continue;
-        if (filterPasses(scene, triangle, t, u, v, determinant)) continue;
+        if (filterPasses(scene, triangle, t, u, v, determinant, BVH_QUERY_CLOSEST, rayMask)) continue;
         hitTimes.push(t);
         if (t < bestT) {
             bestT = t;
@@ -237,11 +299,13 @@ export interface ReferenceOcclusion {
 }
 
 /** Is anything within `[tMin, tMax]`? Used for shadow rays. */
-export function traceAnyReference(scene: ReferenceScene, ray: TraceRay): ReferenceOcclusion {
+export function traceAnyReference(scene: ReferenceScene, ray: TraceRay, options: ReferenceTraceOptions = {}): ReferenceOcclusion {
+    const rayMask = traceMask(scene, options);
     let blocked = false;
     let robustlyBlocked = false;
     let ambiguousCandidate = false;
     for (let triangle = 0; triangle < scene.triangleCount; triangle++) {
+        if (maskedOut(scene, triangle, rayMask)) continue;
         if (!intersect(scene, triangle, ray, scratch)) continue;
         const t = scratch[0];
         const u = scratch[1];
@@ -251,7 +315,10 @@ export function traceAnyReference(scene: ReferenceScene, ray: TraceRay): Referen
         const inside = margin >= 0 && t >= ray.tMin && t <= ray.tMax;
         const nearMiss = margin >= -REFERENCE_TOLERANCE && t >= ray.tMin - slack && t <= ray.tMax + slack;
         if (!nearMiss) continue;
-        if (filterPasses(scene, triangle, t, u, v, scratch[3])) continue;
+        // The filter is asked only about real hits, never about a near miss: it
+        // can't be asked about a point outside the triangle or the interval. A
+        // near miss stays a candidate (ambiguous) whatever the filter would say.
+        if (inside && filterPasses(scene, triangle, t, u, v, scratch[3], BVH_QUERY_ANY, rayMask)) continue;
         if (inside) blocked = true;
         if (inside && margin >= REFERENCE_TOLERANCE && !nearIntervalEnd(t, ray)) {
             robustlyBlocked = true;

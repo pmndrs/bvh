@@ -10,6 +10,11 @@
  * The triangle filter, as in the WGSL walk: a triangle whose flag bit 0 is set
  * asks `options.triangleFilter`, and a ray it lets through goes on without
  * narrowing. Without a filter, flagged triangles block (triangle-filter.ts).
+ *
+ * Ray masks, as in the WGSL walk: each trace takes a `mask` (default all
+ * ones), and an instance whose mask shares no bit with it is skipped at the
+ * top level. `rayMasks: false` mirrors a trace module built without masks:
+ * instance masks are ignored and the filter sees all ones.
  */
 
 import {
@@ -23,6 +28,10 @@ import {
     TRACE_STACK_SIZE,
     TRIANGLE_FLAG_FILTER,
     TRIANGLE_WORD,
+    BVH_QUERY_ANY,
+    BVH_QUERY_CLOSEST,
+    RAY_MASK_ALL,
+    instanceMaskFromFlags,
     TRIANGLE_WORDS,
     REF_INSTANCE_MARKER,
     makeReference,
@@ -31,7 +40,7 @@ import {
 } from './layout.ts';
 import type { TraceRay } from './rays.ts';
 import type { TraceSceneData } from './scene-assembly.ts';
-import type { TriangleFilter } from './triangle-filter.ts';
+import type { TrianglePasses } from './triangle-filter.ts';
 
 export interface CpuHit {
     readonly t: number;
@@ -53,9 +62,17 @@ export function newTraceStats(): CpuTraceStats {
     return { maxStackSize: 0, nodesVisited: 0, trianglesTested: 0 };
 }
 
+/** Per-trace options. */
+export interface CpuTraceOptions {
+    /** The ray mask (the WGSL `*Masked` functions' `mask`). Default all ones. Ignored with `rayMasks: false`. */
+    readonly mask?: number;
+    /** Counters to fill in. */
+    readonly stats?: CpuTraceStats;
+}
+
 export interface CpuTracer {
-    closest(ray: TraceRay, stats?: CpuTraceStats): CpuHit | null;
-    any(ray: TraceRay, stats?: CpuTraceStats): boolean;
+    closest(ray: TraceRay, options?: CpuTraceOptions): CpuHit | null;
+    any(ray: TraceRay, options?: CpuTraceOptions): boolean;
 }
 
 const BOX_MISS = Infinity;
@@ -104,12 +121,15 @@ interface TriangleHit {
 }
 
 export interface CpuTracerOptions {
-    /** The CPU twin of the kernel's `bvhTriangleFilter`, for flagged triangles; without it they block. */
-    readonly triangleFilter?: TriangleFilter;
+    /** The CPU twin of the kernel's `bvhTrianglePasses`, for flagged triangles; without it they block. */
+    readonly triangleFilter?: TrianglePasses;
+    /** As the trace module's `rayMasks` option. Default true. */
+    readonly rayMasks?: boolean;
 }
 
 export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions = {}): CpuTracer {
     const triangleFilter = options.triangleFilter;
+    const rayMasks = options.rayMasks ?? true;
     const nodeFloats = new Float32Array(scene.nodes);
     const nodeWords = new Uint32Array(scene.nodes);
     const triangleFloats = new Float32Array(scene.triangles);
@@ -142,8 +162,10 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
         return enter <= exit ? enter : BOX_MISS;
     }
 
-    function traverse(ray: TraceRay, stopAtFirstHit: boolean, stats?: CpuTraceStats): CpuHit | null {
+    function traverse(ray: TraceRay, stopAtFirstHit: boolean, traceOptions: CpuTraceOptions): CpuHit | null {
         if (topNodeCount === 0) return null;
+        const stats = traceOptions.stats;
+        const rayMask = rayMasks ? (traceOptions.mask ?? RAY_MASK_ALL) >>> 0 : RAY_MASK_ALL;
 
         const worldSetup = makeRaySetup(ray.origin, ray.direction);
         let setup = worldSetup;
@@ -201,6 +223,8 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
                     current = rightReference;
                     descended = true;
                 }
+            } else if (!insideInstance && rayMasks && (instanceMaskFromFlags(topWords[TOP_LEVEL_HEADER_WORDS + index * INSTANCE_RECORD_WORDS + INSTANCE_WORD.flags]) & rayMask) === 0) {
+                // As the WGSL: a masked-out instance is skipped before entering its tree (fall through to pop).
             } else if (!insideInstance) {
                 const record = TOP_LEVEL_HEADER_WORDS + index * INSTANCE_RECORD_WORDS;
                 rootNodeOffset = topWords[record + INSTANCE_WORD.rootNodeOffset];
@@ -231,7 +255,21 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
                     // As the WGSL leaf test: a flagged triangle's filter may let the ray through,
                     // and then nothing is recorded and closestT stays.
                     const consult = (triangleWords[base + TRIANGLE_WORD.flags] & TRIANGLE_FLAG_FILTER) !== 0;
-                    if (consult && triangleFilter && triangleFilter(instanceIndex, triangleIndex, hit)) continue;
+                    if (
+                        consult &&
+                        triangleFilter &&
+                        triangleFilter({
+                            instance: instanceIndex,
+                            triangle: triangleIndex,
+                            t: hit.t,
+                            barycentrics: [hit.u, hit.v],
+                            frontFace: hit.frontFace,
+                            query: stopAtFirstHit ? BVH_QUERY_ANY : BVH_QUERY_CLOSEST,
+                            rayMask,
+                        })
+                    ) {
+                        continue;
+                    }
                     result = {
                         t: hit.t,
                         instanceIndex,
@@ -270,8 +308,8 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
     }
 
     return {
-        closest: (ray, stats) => traverse(ray, false, stats),
-        any: (ray, stats) => traverse(ray, true, stats) !== null,
+        closest: (ray, traceOptions = {}) => traverse(ray, false, traceOptions),
+        any: (ray, traceOptions = {}) => traverse(ray, true, traceOptions) !== null,
     };
 }
 

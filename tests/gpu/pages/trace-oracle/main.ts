@@ -197,8 +197,8 @@ function probeStackDepth(scene: TraceSceneData, oracleCase: OracleCase): number 
     const rayCount = Math.min(STACK_PROBE_RAYS, oracleCase.rays.length / 8);
     for (let index = 0; index < rayCount; index++) {
         const ray = unpackRay(oracleCase.rays, index);
-        tracer.closest(ray, stats);
-        tracer.any(ray, stats);
+        tracer.closest(ray, { stats });
+        tracer.any(ray, { stats });
     }
     return stats.maxStackSize;
 }

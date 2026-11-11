@@ -64,6 +64,13 @@ describe('serializeLayout / deserializeLayout', () => {
         expect(() => deserializeLayout(otherLayout)).toThrow(/rebuild/);
     });
 
+    it('refuses trees saved with layout version 1, from before instance masks', () => {
+        expect(GPU_LAYOUT_VERSION).toBe(2);
+        const oldBytes = serializeLayout(layout);
+        new DataView(oldBytes).setUint32(8, 1, true);
+        expect(() => deserializeLayout(oldBytes)).toThrow(/GPU layout version 1, this package uses 2; rebuild/);
+    });
+
     it('refuses a layout whose arrays do not match its counts', () => {
         expect(() => serializeLayout({ ...layout, parents: layout.parents.subarray(1) })).toThrow(/parent/);
         expect(() => serializeLayout({ ...layout, nodeCount: layout.nodeCount + 1 })).toThrow(/nodes need/);

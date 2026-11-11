@@ -16,8 +16,12 @@
  * to a size, a word position or a meaning bumps this number, and that is a
  * breaking change. Code with its own walk checks it at startup; serialized
  * trees (serialize.ts) carry it and are refused when it differs.
+ *
+ * History: 1, the first layout. 2, instance records carry an 8-bit instance
+ * mask in bits 8-15 of their `flags` word (written as 0xff, visible to every
+ * ray, unless the instance gives one); nothing else moved.
  */
-export const GPU_LAYOUT_VERSION = 1;
+export const GPU_LAYOUT_VERSION = 2;
 
 /** One node: two child boxes (Aila-Laine layout), 64 bytes. */
 export const GPU_LAYOUT_NODE_BYTES = 64;

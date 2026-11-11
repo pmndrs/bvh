@@ -31,7 +31,7 @@ function traceOnCpu(oracleCase: OracleCase, reference: ReturnType<typeof compute
         oracleCase,
         {
             closest(index): TracedHit | null {
-                const hit = tracer.closest(unpackRay(oracleCase.rays, index), stats);
+                const hit = tracer.closest(unpackRay(oracleCase.rays, index), { stats });
                 return hit && { hit: true, ...hit };
             },
             any: (index) => tracer.any(unpackRay(oracleCase.rays, index)),
