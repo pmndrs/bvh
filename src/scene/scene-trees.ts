@@ -48,6 +48,19 @@
  *   builds, so the main one is adopted; trees that arrive with the adopted
  *   batch are placed into its buffers at the next update.
  *
+ * **A cap on the GPU batches' bytes** (`gpuMaxBatchBytes`, off by default: the
+ * P9 build-peak lever; docs/design/bvh-builders.md, "Build peak memory"). The
+ * load's H-PLOC build is the biggest memory number (Sponza: 1,483 MB at peak,
+ * scratch and outputs of one batch of 5.74M triangles, against 470 MB
+ * settled). With a cap, an update's meshes are built in batches of at most
+ * that many bytes, one after another on one scratch pool, and each batch
+ * starts once the previous one's outputs were copied out and released, which
+ * takes two updates. So the peak is about the storage plus one batch, and the
+ * first trees take a few more frames. A mesh bigger than the cap builds alone
+ * in its batch. While later batches wait, their meshes' geometry stays with
+ * the GPU build, so it is copied into the worker rather than moved
+ * (`transferGeometry`, merged groups). Undo: leave `gpuMaxBatchBytes` unset.
+ *
  * Call {@link SceneTrees.update} once per frame, before anything traces, with
  * the frame's encoder; it records copies and passes, and the caller submits.
  */
@@ -73,7 +86,7 @@ import { GpuTopLevel, type GpuTopLevelInstance } from '../trace/top-level-gpu.ts
 import type { TraceSceneBuffers } from '../trace/trace-gpu.ts';
 import { countTriangles } from '../trace/triangle-packing.ts';
 import { createBvhWorkerPool, type BvhWorkerPool, type BvhWorkerPoolOptions } from '../worker/pool.ts';
-import { GpuFirstTrees, type FirstTreeBuilder, type GpuBuiltTree, type GpuTreeBatchResult, type GpuTreeOutputs, type GpuTreeRequest } from './gpu-first-trees.ts';
+import { GpuFirstTrees, type FirstTreeBuilder, type GpuBuiltTree, type GpuTreeBatchResult, type GpuTreeBuilds, type GpuTreeOutputs, type GpuTreeRequest } from './gpu-first-trees.ts';
 import { GrowableStorage } from './growable-storage.ts';
 import { GpuMergedIdentity } from './merged-identity-gpu.ts';
 
@@ -111,6 +124,14 @@ export interface SceneTreesOptions {
     readonly gpuFirstTrees?: boolean;
     /** How GPU trees reach the scene's buffers: `'copy'` (default) or `'adopt'` (see the file comment). */
     readonly gpuTreeOutputs?: GpuTreeOutputsMode;
+    /**
+     * Cap each GPU build batch's bytes (inputs, scratch and outputs) and build
+     * the batches one after another (see the file comment). Default: no cap,
+     * one batch for all of an update's meshes, as big as the device allows.
+     * With a cap, keep calling {@link SceneTrees.update}: each batch after the
+     * first starts once an update has copied the previous one out.
+     */
+    readonly gpuMaxBatchBytes?: number;
     /** The worker pool for tinybvh builds, or options for one this scene makes (and disposes). */
     readonly workers?: BvhWorkerPool | BvhWorkerPoolOptions;
     /**
@@ -193,6 +214,10 @@ export interface SceneTreeCounts {
     readonly gpuTreesRefused: number;
     readonly swaps: number;
     readonly lastGpuBuildMs: number;
+    /** GPU build batches whose stats were read. */
+    readonly gpuBatches: number;
+    /** The sum of every GPU batch's time from its submit to its stats on the CPU. */
+    readonly gpuBuildMs: number;
 }
 
 /** GPU bytes the scene's trees hold. */
@@ -410,7 +435,13 @@ export class SceneTrees {
     private pendingTinybvh = 0;
     private readonly liveOutputs = new Set<GpuTreeOutputs>();
     private outputsToRelease: GpuTreeOutputs[] = [];
-    private gpuBuilding = 0;
+    /** GPU builds still running; their bytes count in `memory.gpuBuilding`. */
+    private readonly buildsRunning = new Set<GpuTreeBuilds>();
+    /** Meshes whose geometry a capped GPU build still has to upload: not moved into a worker. */
+    private readonly gpuReadsGeometryLater = new Set<number>();
+    private readonly maxBatchBytes: number | undefined;
+    private gpuBatches = 0;
+    private gpuBuildMs = 0;
     private buildFailure: Error | null = null;
     private builtWaiters: (() => void)[] = [];
     private refinedWaiters: (() => void)[] = [];
@@ -434,6 +465,8 @@ export class SceneTrees {
         this.warn = options.warn ?? ((message) => console.warn(message));
         this.onTree = options.onTree ?? null;
         this.gpuTreeOutputs = options.gpuTreeOutputs ?? 'copy';
+        this.maxBatchBytes = options.gpuMaxBatchBytes;
+        if (this.maxBatchBytes !== undefined && !(this.maxBatchBytes > 0)) throw new RangeError(`gpuMaxBatchBytes must be a positive number of bytes, got ${this.maxBatchBytes}`);
         this.transferGeometry = options.transferGeometry ?? false;
         this.mergeStatic = options.mergeStaticInstances ?? false;
         this.gpuMaxDepth = options.gpuMaxDepth ?? GPU_TREE_MAX_DEPTH;
@@ -745,6 +778,8 @@ export class SceneTrees {
             gpuTreesRefused: this.gpuTreesRefused,
             swaps: this.swaps,
             lastGpuBuildMs: this.lastGpuBuildMs,
+            gpuBatches: this.gpuBatches,
+            gpuBuildMs: this.gpuBuildMs,
         };
     }
 
@@ -798,7 +833,9 @@ export class SceneTrees {
         for (const outputs of this.liveOutputs) gpuBuildOutputs += outputs.bytes;
         const retired = this.nodes.retiredByteLength + this.triangles.retiredByteLength + this.retiredTopLevel.reduce((sum, buffer) => sum + buffer.size, 0) + this.identity.pendingBytes;
         const resident = nodes + triangles + topLevel + meshRefits;
-        const transient = gpuBuildOutputs + this.gpuBuilding + retired;
+        let gpuBuilding = 0;
+        for (const builds of this.buildsRunning) gpuBuilding += builds.buildingBytes;
+        const transient = gpuBuildOutputs + gpuBuilding + retired;
         const total = resident + transient;
         if (total > this.peakBytes) this.peakBytes = total;
         return {
@@ -809,7 +846,7 @@ export class SceneTrees {
             topLevel,
             meshRefits,
             gpuBuildOutputs,
-            gpuBuilding: this.gpuBuilding,
+            gpuBuilding,
             retired,
             resident,
             transient,
@@ -1033,24 +1070,29 @@ export class SceneTrees {
             if (kind.rebuild) this.deforming?.rebuildRefused(slot);
             else this.gpuRefused(slot, generation, reason);
         };
-        let builds;
+        let builds: GpuTreeBuilds;
         try {
-            builds = builder.build(requests, { readLayouts: kind.readLayouts });
+            builds = builder.build(requests, {
+                readLayouts: kind.readLayouts,
+                maxBatchBytes: this.maxBatchBytes,
+                cancelled: () => this.disposed,
+                onMemoryChange: () => this.samplePeak(),
+            });
         } catch (error) {
             this.warn(`@pmndrs/bvh: the GPU mesh tree build failed, so ${kind.rebuild ? 'the mesh keeps its refit tree' : 'the meshes wait for tinybvh'}: ${describe(error)}`);
             for (const { slot, generation } of requests) refuse(slot, generation, `the GPU build failed: ${describe(error)}`);
             return false;
         }
         for (const { slot, generation, reason } of builds.notBuilt) refuse(slot, generation, reason);
-        this.gpuBuilding += builds.buildingBytes;
-        this.samplePeak();
+        for (const slot of builds.readsGeometryLater ?? []) this.gpuReadsGeometryLater.add(slot);
         let left = builds.batches.length;
-        if (left === 0) this.gpuBuilding -= builds.buildingBytes;
+        if (left > 0) this.buildsRunning.add(builds);
+        this.samplePeak();
         for (const batch of builds.batches) {
             void batch.then((result) => {
                 if (--left === 0) {
                     this.samplePeak();
-                    this.gpuBuilding -= builds.buildingBytes;
+                    this.buildsRunning.delete(builds);
                 }
                 this.gpuBatchFinished(result, kind.rebuild);
             });
@@ -1075,6 +1117,10 @@ export class SceneTrees {
 
     private gpuBatchFinished(result: GpuTreeBatchResult, rebuild: boolean): void {
         this.lastGpuBuildMs = result.buildMs;
+        if (result.failure === null) {
+            this.gpuBatches++;
+            this.gpuBuildMs += result.buildMs;
+        }
         for (const outputs of new Set(result.built.map((built) => built.outputs))) {
             if (this.disposed) outputs.destroy();
             else this.liveOutputs.add(outputs);
@@ -1116,7 +1162,8 @@ export class SceneTrees {
         state.geometry = null;
         state.abort = new AbortController();
         this.pendingTinybvh++;
-        const transferInput = state.group >= 0 || this.transferGeometry;
+        // A capped GPU build that hasn't uploaded this mesh yet still reads its arrays: copy them into the worker instead.
+        const transferInput = (state.group >= 0 || this.transferGeometry) && !this.gpuReadsGeometryLater.delete(state.slot);
         const finished = (bvh: MeshBvh | null): void => {
             this.pendingTinybvh--;
             const current = this.disposed ? undefined : this.currentState(state.slot, generation);
@@ -1321,13 +1368,17 @@ export class SceneTrees {
         // From here on nothing throws: forget the replaced trees, grow, write and copy.
         for (const slot of oldSlots) this.forgetTree(slot);
         const resident = [...this.placed.values()];
+        // A capped load's later batches are still coming: grow once for them too, not by doubling batch after batch.
+        const reserve = this.capReserve(arrived, sizes);
         if (nodeOffsets === null) {
             const headroom = arrived.some((tree) => tree.source === 'gpu') ? GPU_TREE_NODE_HEADROOM : 0;
-            this.nodes.grow(encoder, sum(nodeCounts), resident.map((tree) => ({ offset: tree.nodeOffset, count: tree.nodeCount })), headroom);
+            const extra = sum(nodeCounts);
+            this.nodes.grow(encoder, extra + fitReserve(this.nodes, extra, reserve.nodes), resident.map((tree) => ({ offset: tree.nodeOffset, count: tree.nodeCount })), headroom);
             nodeOffsets = allocateGrown(this.nodes, nodeCounts);
         }
         if (triangleOffsets === null) {
-            this.triangles.grow(encoder, sum(triangleCounts), resident.map((tree) => ({ offset: tree.triangleOffset, count: tree.triangleCount })));
+            const extra = sum(triangleCounts);
+            this.triangles.grow(encoder, extra + fitReserve(this.triangles, extra, reserve.triangles), resident.map((tree) => ({ offset: tree.triangleOffset, count: tree.triangleCount })));
             triangleOffsets = allocateGrown(this.triangles, triangleCounts);
         }
 
@@ -1351,6 +1402,31 @@ export class SceneTrees {
             // The tree's own sizes, at the scene's offsets (a GPU tree's range also carries its offsets in the batch's buffers).
             this.recordPlacement(tree, size, nodeOffset, triangleOffset, replaced.get(tree.slot) ?? null);
         });
+    }
+
+    /**
+     * With `gpuMaxBatchBytes`, the room a growth also asks for: the meshes whose
+     * GPU build is still running and that have no tree yet. Their triangles
+     * are known exactly; their nodes are estimated at the nodes per triangle of
+     * the GPU trees placed now. Without a cap (or with nothing pending), none:
+     * today's growth.
+     */
+    private capReserve(arrived: readonly ArrivedTree[], sizes: readonly TreeSize[]): { nodes: number; triangles: number } {
+        if (this.maxBatchBytes === undefined) return { nodes: 0, triangles: 0 };
+        const arriving = new Set(arrived.map((tree) => tree.slot));
+        let triangles = 0;
+        for (const state of this.meshes.values()) {
+            if (state.gpu === 'building' && !this.placed.has(state.slot) && !arriving.has(state.slot)) triangles += state.triangleCount;
+        }
+        let gpuNodes = 0;
+        let gpuTriangles = 0;
+        arrived.forEach((tree, index) => {
+            if (tree.source !== 'gpu') return;
+            gpuNodes += sizes[index].nodeCount;
+            gpuTriangles += sizes[index].triangleCount;
+        });
+        const nodesPerTriangle = gpuTriangles > 0 ? gpuNodes / gpuTriangles : 1;
+        return { nodes: Math.ceil(triangles * nodesPerTriangle), triangles };
     }
 
     /**
@@ -1598,6 +1674,17 @@ function allocateGrown(storage: GrowableStorage, counts: readonly number[]): num
         if (offset === null) throw new Error('@pmndrs/bvh: trace buffer allocation failed after growing');
         return offset;
     });
+}
+
+/** `reserve` if the storage can grow by `extra + reserve` within the device's limits, else 0 (the reservation is only a hint). */
+function fitReserve(storage: GrowableStorage, extra: number, reserve: number): number {
+    if (reserve <= 0) return 0;
+    try {
+        storage.checkGrowth(extra + reserve);
+        return reserve;
+    } catch {
+        return 0;
+    }
 }
 
 function treeSize(tree: ArrivedTree): TreeSize {

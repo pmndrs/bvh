@@ -48,9 +48,30 @@ export {
     type TinyBvhLayoutBuild,
     type TinyBvhLayoutOptions,
 } from './tinybvh.ts';
-export { GpuHplocBatch, GpuHplocBuilder, HPLOC_STAGES, planGpuHplocBatches, type HplocStage } from './gpu-hploc.ts';
+export {
+    GpuHplocBatch,
+    GpuHplocBuilder,
+    GpuHplocScratchPool,
+    HPLOC_STAGES,
+    hplocBatchBytes,
+    hplocScratchPoolBytes,
+    planGpuHplocBatches,
+    type HplocBatchPlanOptions,
+    type HplocStage,
+} from './gpu-hploc.ts';
 export { HPLOC_STAT } from './gpu-hploc-wgsl.ts';
-export { GpuLbvhBatch, GpuLbvhBuilder, LBVH_STAGES, planGpuLbvhBatches, type LbvhStage } from './gpu-lbvh.ts';
+export {
+    geometryTotals,
+    GpuLbvhBatch,
+    GpuLbvhBuilder,
+    LBVH_STAGES,
+    lbvhBatchBytes,
+    planGpuLbvhBatches,
+    type BatchBytes,
+    type BatchPlanOptions,
+    type BatchTotals,
+    type LbvhStage,
+} from './gpu-lbvh.ts';
 export { LBVH_STAT } from './gpu-lbvh-wgsl.ts';
 
 // CPU twins of the GPU builders: the same trees, built in plain TypeScript, as references.

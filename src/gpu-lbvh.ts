@@ -73,7 +73,7 @@ import {
     LBVH_WORKGROUP_SIZE,
     lbvhWgsl,
 } from './gpu-lbvh-wgsl.ts';
-import { createRadixSort, createRadixSortPipelines, radixPassCount, sortTileTable, type RadixSort, type RadixSortPipelines } from './gpu-radix-sort.ts';
+import { createRadixSort, createRadixSortPipelines, RADIX_BINS, radixPassCount, SORT_TILE_WORDS, sortTilesOf, sortTileTable, type RadixSort, type RadixSortPipelines } from './gpu-radix-sort.ts';
 import { createScanBindGroups, createScanPipelines, encodeScan, SCAN_PARAMS_BYTES, scanParams, scanTileSumWords, type ScanBindGroups } from './gpu-scan.ts';
 import { dispatchWorkgroups2d } from './gpu-workgroup-scan.ts';
 import { checkTriangleFlags, isGpuMeshBuffers, meshTriangleCount, type GpuBuildOptions, type GpuMeshGeometry, type GpuMeshTreeRange, type GpuTreeBuffers } from './mesh-input.ts';
@@ -198,21 +198,52 @@ export function positionBytes(geometry: GpuMeshGeometry): number {
 /**
  * Splits meshes into batches whose buffers this device can bind, in order.
  * A mesh too big for any batch comes back in `tooBig`; callers build it on the CPU.
+ *
+ * `maxBatchBytes` (optional, default none) also caps each batch's own GPU
+ * memory: its inputs, scratch and outputs ({@link lbvhBatchBytes}). A mesh
+ * bigger than the cap on its own still builds, alone in its batch.
  */
-export function planGpuLbvhBatches(device: GPUDevice, geometries: readonly GpuMeshGeometry[]): { batches: number[][]; tooBig: number[] } {
-    return planMeshBatches(device, geometries, LARGEST_BYTES_PER_TRIANGLE, GPU_LAYOUT_MAX_TRIANGLES);
+export function planGpuLbvhBatches(device: GPUDevice, geometries: readonly GpuMeshGeometry[], options: BatchPlanOptions = {}): { batches: number[][]; tooBig: number[] } {
+    return planMeshBatches(device, geometries, LARGEST_BYTES_PER_TRIANGLE, GPU_LAYOUT_MAX_TRIANGLES, budgetOf(options, (totals) => lbvhBatchBytes(totals).total));
+}
+
+/** Options of the batch planners. */
+export interface BatchPlanOptions {
+    /**
+     * Each batch's GPU bytes (inputs, scratch and outputs) stay at or under
+     * this, except a single mesh bigger than it, which gets a batch of its own.
+     * Default: no cap (batches as big as the device's buffers allow).
+     */
+    readonly maxBatchBytes?: number;
+}
+
+/** A cap on a batch's bytes, as a function of its totals. */
+export interface BatchBudget {
+    readonly maxBatchBytes: number;
+    readonly batchBytes: (totals: BatchTotals) => number;
+}
+
+/** The planner's budget for `options`, or undefined when there is no cap. Throws on a cap that isn't a positive number. */
+export function budgetOf(options: BatchPlanOptions, batchBytes: (totals: BatchTotals) => number): BatchBudget | undefined {
+    const cap = options.maxBatchBytes;
+    if (cap === undefined) return undefined;
+    if (!(cap > 0)) throw new RangeError(`maxBatchBytes must be a positive number of bytes, got ${cap}`);
+    return { maxBatchBytes: cap, batchBytes };
 }
 
 /**
  * The planner of {@link planGpuLbvhBatches} for any GPU builder: its largest
  * buffer holds `bytesPerTriangle` per triangle, and a mesh of more than
- * `maxMeshTriangles` triangles is too big for it whatever the device.
+ * `maxMeshTriangles` triangles is too big for it whatever the device. With a
+ * `budget`, a batch also closes before a mesh that would take its bytes past
+ * the cap (a mesh over the cap on its own still gets a batch, alone).
  */
 export function planMeshBatches(
     device: GPUDevice,
     geometries: readonly GpuMeshGeometry[],
     bytesPerTriangle: number,
     maxMeshTriangles: number,
+    budget?: BatchBudget,
 ): { batches: number[][]; tooBig: number[] } {
     const limit = bufferLimit(device);
     const batches: number[][] = [];
@@ -220,6 +251,7 @@ export function planMeshBatches(
     let current: number[] = [];
     let triangles = 0;
     let positions = 0;
+    let totals = NO_MESHES;
     geometries.forEach((geometry, index) => {
         const meshTriangles = Math.max(1, meshTriangleCount(geometry));
         const meshPositions = positionBytes(geometry);
@@ -227,15 +259,20 @@ export function planMeshBatches(
             tooBig.push(index);
             return;
         }
-        if ((triangles + meshTriangles) * bytesPerTriangle > limit || positions + meshPositions > limit) {
+        const meshTotals = budget ? geometryTotals([geometry]) : NO_MESHES;
+        const overLimit = (triangles + meshTriangles) * bytesPerTriangle > limit || positions + meshPositions > limit;
+        const overBudget = budget !== undefined && current.length > 0 && budget.batchBytes(addBatchTotals(totals, meshTotals)) > budget.maxBatchBytes;
+        if (overLimit || overBudget) {
             batches.push(current);
             current = [];
             triangles = 0;
             positions = 0;
+            totals = NO_MESHES;
         }
         current.push(index);
         triangles += meshTriangles;
         positions += meshPositions;
+        totals = addBatchTotals(totals, meshTotals);
     });
     if (current.length > 0) batches.push(current);
     return { batches, tooBig };
@@ -484,6 +521,136 @@ export function buildTables(meshes: readonly MeshPlacement[]): {
     return { tables, tilesOffset, tileCount: tiles.length / LBVH_TILE_WORDS, sortTilesOffset, sortTable };
 }
 
+/**
+ * What a batch's buffer sizes depend on. Every field is a sum over the batch's
+ * meshes, so a planner can add meshes one at a time ({@link addBatchTotals}).
+ */
+export interface BatchTotals {
+    readonly meshes: number;
+    readonly triangles: number;
+    /** Radix-tree inner nodes: `max(1, triangles - 1)` per mesh. */
+    readonly inner: number;
+    /** Vertex bytes in the batch's positions (each mesh's rounded up to 4). */
+    readonly positionBytes: number;
+    /** Index bytes in the batch's indices (each mesh's rounded up to 4). */
+    readonly indexBytes: number;
+    /** Words of triangle flags (meshes with flags only). */
+    readonly flagWords: number;
+    /** Workgroup tiles: `ceil(triangles / LBVH_WORKGROUP_SIZE)` per mesh. */
+    readonly tiles: number;
+    /** Sort tiles: `ceil(triangles / SORT_TILE_KEYS)` per mesh. */
+    readonly sortTiles: number;
+}
+
+const NO_MESHES: BatchTotals = { meshes: 0, triangles: 0, inner: 0, positionBytes: 0, indexBytes: 0, flagWords: 0, tiles: 0, sortTiles: 0 };
+
+export function addBatchTotals(a: BatchTotals, b: BatchTotals): BatchTotals {
+    return {
+        meshes: a.meshes + b.meshes,
+        triangles: a.triangles + b.triangles,
+        inner: a.inner + b.inner,
+        positionBytes: a.positionBytes + b.positionBytes,
+        indexBytes: a.indexBytes + b.indexBytes,
+        flagWords: a.flagWords + b.flagWords,
+        tiles: a.tiles + b.tiles,
+        sortTiles: a.sortTiles + b.sortTiles,
+    };
+}
+
+/** The totals of meshes placed in one batch. */
+export function batchTotals(meshes: readonly MeshPlacement[]): BatchTotals {
+    return meshes.reduce(
+        (totals, mesh) =>
+            addBatchTotals(totals, {
+                meshes: 1,
+                triangles: mesh.triangleCount,
+                inner: mesh.innerCount,
+                positionBytes: align4(positionBytes(mesh.geometry)),
+                indexBytes: align4(indexBytes(mesh)),
+                flagWords: mesh.hasFlags ? mesh.triangleCount : 0,
+                tiles: Math.ceil(mesh.triangleCount / LBVH_WORKGROUP_SIZE),
+                sortTiles: sortTilesOf(mesh.triangleCount),
+            }),
+        NO_MESHES,
+    );
+}
+
+/** The totals of these geometries in one batch. */
+export function geometryTotals(geometries: readonly GpuMeshGeometry[]): BatchTotals {
+    return batchTotals(placeMeshes(geometries));
+}
+
+/** Bytes a buffer asked for `bytes` gets: rounded up to 4, at least 16. */
+export const allocatedBytes = (bytes: number): number => Math.max(16, align4(bytes));
+
+/** Words of the tables buffer: the mesh table, the workgroup tiles, the sort tiles (at least one). */
+export function tableWords(totals: BatchTotals): number {
+    return totals.meshes * LBVH_MESH_WORDS + totals.tiles * LBVH_TILE_WORDS + Math.max(1, totals.sortTiles) * SORT_TILE_WORDS;
+}
+
+/** The bytes of a batch's buffers by name, split into what the batch frees (`scratch`, with its inputs) and what it hands out (`outputs`). */
+export interface BatchBytes<Name extends string = string> {
+    /** Each buffer's bytes as allocated. */
+    readonly buffers: Readonly<Record<Name, number>>;
+    /** Inputs, scratch and uniforms: freed with the batch (or held in a scratch pool). */
+    readonly scratch: number;
+    /** Output nodes, triangles and parents: handed to the caller. */
+    readonly outputs: number;
+    readonly total: number;
+}
+
+/** The buffers a batch hands to its caller; every other buffer is scratch. */
+export const OUTPUT_BUFFERS: readonly string[] = ['outNodes', 'outTriangles', 'outParents'];
+
+/** Sums requested sizes into {@link BatchBytes}. */
+export function summarizeBatchBuffers<Name extends string>(requested: Readonly<Record<Name, number>>): BatchBytes<Name> {
+    const buffers = Object.fromEntries(Object.entries<number>(requested).map(([name, bytes]) => [name, allocatedBytes(bytes)])) as Record<Name, number>;
+    let scratch = 0;
+    let outputs = 0;
+    for (const [name, bytes] of Object.entries<number>(buffers)) {
+        if (OUTPUT_BUFFERS.includes(name)) outputs += bytes;
+        else scratch += bytes;
+    }
+    return { buffers, scratch, outputs, total: scratch + outputs };
+}
+
+/** The LBVH batch's buffers, as {@link GpuLbvhBatch} asks for them (before {@link allocatedBytes}). */
+export function lbvhBatchBuffers(totals: BatchTotals) {
+    const { meshes, triangles, inner } = totals;
+    const sortOffsetWords = totals.sortTiles * RADIX_BINS;
+    const rankScanRecord = 1 + radixPassCount(LBVH_MORTON_BITS) + 1;
+    return {
+        positions: totals.positionBytes,
+        indices: Math.max(4, totals.indexBytes),
+        flags: Math.max(1, totals.flagWords) * 4,
+        // Every mesh's stats, then the climb's queue count.
+        stats: meshes * LBVH_STATS_BYTES + 16,
+        outNodes: inner * GPU_LAYOUT_NODE_BYTES,
+        outTriangles: triangles * GPU_LAYOUT_TRIANGLE_BYTES,
+        outParents: inner * 4,
+        continueArgs: 16,
+        tables: tableWords(totals) * 4,
+        primitiveBoxes: triangles * 32,
+        keysA: triangles * 4,
+        valuesA: triangles * 4,
+        // After the sort, also the climb's queue: a count, then at most one arrival per inner node.
+        keysB: (triangles + 1) * 4,
+        valuesB: triangles * 4,
+        sortOffsets: sortOffsetWords * 4,
+        tileSums: Math.max(scanTileSumWords(sortOffsetWords), scanTileSumWords(inner + 1)) * 4,
+        // Slots, then exchange words and heights (gpu-lbvh-wgsl.ts, lbvhScratch).
+        scratch: inner * (LBVH_SCRATCH_NODE_WORDS + LBVH_STATE_WORDS) * 4,
+        nodeInfo: inner * LBVH_NODE_INFO_WORDS * 4,
+        rank: (inner + 1) * 4,
+        params: (rankScanRecord + 1) * UNIFORM_STRIDE,
+    };
+}
+
+/** GPU bytes an LBVH batch of these totals holds while it builds, by buffer. */
+export function lbvhBatchBytes(totals: BatchTotals): BatchBytes<keyof ReturnType<typeof lbvhBatchBuffers>> {
+    return summarizeBatchBuffers(lbvhBatchBuffers(totals));
+}
+
 type BatchBuffer = 'positions' | 'indices' | 'flags' | 'stats' | 'outNodes' | 'outTriangles' | 'outParents';
 
 /** One batch of mesh builds: inputs, scratch and outputs, recorded into one compute pass. */
@@ -521,7 +688,6 @@ export class GpuLbvhBatch {
         this.meshCount = geometries.length;
         this.meshes = placeMeshes(geometries);
         const last = this.meshes[this.meshes.length - 1];
-        const triangleTotal = last.triangleStart + last.triangleCount;
         const innerTotal = last.innerStart + last.innerCount;
         const { tables, tilesOffset, tileCount, sortTilesOffset, sortTable } = buildTables(this.meshes);
         this.tileCount = tileCount;
@@ -533,41 +699,38 @@ export class GpuLbvhBatch {
             if (owned) this.owned.push(buffer);
             return buffer;
         };
-        const lastPositionEnd = last.positionByteStart + align4(positionBytes(last.geometry));
-        const lastIndexEnd = this.meshes.reduce((end, mesh) => Math.max(end, mesh.indexByteStart + align4(indexBytes(mesh))), 4);
-        const lastFlagEnd = this.meshes.reduce((end, mesh) => Math.max(end, mesh.flagsWordStart + (mesh.hasFlags ? mesh.triangleCount : 0)), 1);
+        // Sizes from lbvhBatchBuffers, which the planner's byte cap also uses.
+        const sizes = lbvhBatchBuffers(batchTotals(this.meshes));
         this.buffers = {
-            positions: make('positions', lastPositionEnd, storage),
-            indices: make('indices', lastIndexEnd, storage),
-            flags: make('flags', lastFlagEnd * 4, storage),
-            // Every mesh's stats, then the climb's queue count.
-            stats: make('stats', this.meshCount * LBVH_STATS_BYTES + 16, USAGE.STORAGE | USAGE.COPY_SRC),
-            outNodes: make('nodes', innerTotal * GPU_LAYOUT_NODE_BYTES, output, false),
-            outTriangles: make('triangles', triangleTotal * GPU_LAYOUT_TRIANGLE_BYTES, output, false),
-            outParents: make('parents', innerTotal * 4, output, false),
+            positions: make('positions', sizes.positions, storage),
+            indices: make('indices', sizes.indices, storage),
+            flags: make('flags', sizes.flags, storage),
+            stats: make('stats', sizes.stats, USAGE.STORAGE | USAGE.COPY_SRC),
+            outNodes: make('nodes', sizes.outNodes, output, false),
+            outTriangles: make('triangles', sizes.outTriangles, output, false),
+            outParents: make('parents', sizes.outParents, output, false),
         };
-        this.continueArgs = make('climb second round', 16, USAGE.STORAGE | USAGE.INDIRECT);
+        this.continueArgs = make('climb second round', sizes.continueArgs, USAGE.STORAGE | USAGE.INDIRECT);
         const scratch = {
-            tables: make('tables', tables.byteLength, storage),
-            primitiveBoxes: make('primitive boxes', triangleTotal * 32, storage),
-            keysA: make('keys a', triangleTotal * 4, storage),
-            valuesA: make('values a', triangleTotal * 4, storage),
-            // After the sort, also the climb's queue: a count, then at most one arrival per inner node.
-            keysB: make('keys b', (triangleTotal + 1) * 4, storage),
-            valuesB: make('values b', triangleTotal * 4, storage),
-            sortOffsets: make('sort offsets', sortTable.offsetWords * 4, storage),
-            tileSums: make('scan tile sums', Math.max(scanTileSumWords(sortTable.offsetWords), scanTileSumWords(innerTotal + 1)) * 4, storage),
-            // Slots, then exchange words and heights (gpu-lbvh-wgsl.ts, lbvhScratch).
-            scratch: make('inner-node scratch', innerTotal * (LBVH_SCRATCH_NODE_WORDS + LBVH_STATE_WORDS) * 4, storage),
-            nodeInfo: make('inner-node info', innerTotal * LBVH_NODE_INFO_WORDS * 4, storage),
-            rank: make('inner-node rank', (innerTotal + 1) * 4, storage),
+            tables: make('tables', sizes.tables, storage),
+            primitiveBoxes: make('primitive boxes', sizes.primitiveBoxes, storage),
+            keysA: make('keys a', sizes.keysA, storage),
+            valuesA: make('values a', sizes.valuesA, storage),
+            keysB: make('keys b', sizes.keysB, storage),
+            valuesB: make('values b', sizes.valuesB, storage),
+            sortOffsets: make('sort offsets', sizes.sortOffsets, storage),
+            tileSums: make('scan tile sums', sizes.tileSums, storage),
+            scratch: make('inner-node scratch', sizes.scratch, storage),
+            nodeInfo: make('inner-node info', sizes.nodeInfo, storage),
+            rank: make('inner-node rank', sizes.rank, storage),
         };
+        if (tables.byteLength !== sizes.tables || sortTable.offsetWords * 4 !== sizes.sortOffsets) throw new Error('lbvhBatchBuffers is out of step with buildTables');
         device.queue.writeBuffer(scratch.tables, 0, tables);
         uploadBatchGeometry(device.queue, this.meshes, this.buffers);
 
         const passes = radixPassCount(LBVH_MORTON_BITS);
         const rankScanRecord = 1 + passes + 1;
-        const params = make('params', (rankScanRecord + 1) * UNIFORM_STRIDE, USAGE.UNIFORM | USAGE.COPY_DST);
+        const params = make('params', sizes.params, USAGE.UNIFORM | USAGE.COPY_DST);
         const paramsData = new ArrayBuffer(LBVH_PARAMS_BYTES);
         // LbvhParams, field by field (gpu-lbvh-wgsl.ts).
         const words = new Uint32Array(paramsData);

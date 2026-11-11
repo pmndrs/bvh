@@ -1,5 +1,5 @@
 {
-    "description": "SceneTrees on Intel Sponza: GPU first trees then tinybvh swapped in, gpuTreeOutputs copy and adopt and copy with merged static instances; memory (GPU-tree state, peak, settled) and times (first trees, tinybvh built). Gate: the GPU walk matches the CPU reference in the GPU-tree state and settled. Needs BVH_ASSETS_DIR and BVH_MANIFESTS_DIR.",
+    "description": "SceneTrees on Intel Sponza: GPU first trees then tinybvh swapped in, gpuTreeOutputs copy and adopt and copy with merged static instances, and copy with gpuMaxBatchBytes of 512, 256 and 128 MiB; memory (GPU-tree state, peak, settled) and times (first trees, tinybvh built). Gate: the GPU walk matches the CPU reference in the GPU-tree state and settled. Needs BVH_ASSETS_DIR and BVH_MANIFESTS_DIR.",
     "timeoutMs": 900000,
     "manual": true
 }

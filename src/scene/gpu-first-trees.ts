@@ -12,6 +12,19 @@
  * into more batches only when one doesn't fit the device's buffers
  * (`planGpuHplocBatches`).
  *
+ * **A cap on a batch's bytes** (`maxBatchBytes`, off by default: the P9
+ * peak-memory lever, docs/design/bvh-builders.md "Build peak memory"). The
+ * meshes are split into batches of at most that many GPU bytes each (inputs,
+ * scratch and outputs), built one after another: one scratch pool
+ * (`GpuHplocScratchPool`) is allocated at the largest batch's size and freed
+ * after the last, and each batch starts only once the previous batch's
+ * outputs are let go (copied into the scene's buffers and released, or
+ * adopted). So the peak is about the scene's storage plus one batch, not the
+ * whole scene's scratch and outputs at once. The batches after the first wait
+ * for the caller's updates (`SceneTrees.update` copies a batch out, and the
+ * next update releases it), so the caller must keep calling it. A mesh bigger
+ * than the cap builds alone. Undo: leave `maxBatchBytes` unset.
+ *
  * **Its own submit, and one small readback** of the stats (node count, depth,
  * refused or not: a few words per mesh), never the trees. The readback must
  * come after the build on the queue, and the caller's encoder may be
@@ -28,7 +41,7 @@
  * declared fallback).
  */
 
-import { GpuHplocBuilder, planGpuHplocBatches } from '../gpu-hploc.ts';
+import { GpuHplocBuilder, planGpuHplocBatches, type GpuHplocBatch, type GpuHplocScratchPool } from '../gpu-hploc.ts';
 import type { GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import type { GpuMeshGeometry, GpuMeshTreeRange, GpuTreeBuffers } from '../mesh-input.ts';
 
@@ -43,6 +56,16 @@ export interface GpuTreeRequest {
 export interface GpuTreeBuildOptions {
     /** Read every usable tree's layout back too (deforming meshes' refit needs it), once, after the stats. Default false. */
     readonly readLayouts?: boolean;
+    /**
+     * Cap each batch's GPU bytes (inputs, scratch and outputs) and build the
+     * batches one after another, each once the previous one's outputs are let
+     * go (see the file comment). Default: no cap, every batch in one submit.
+     */
+    readonly maxBatchBytes?: number;
+    /** Asked before each capped batch after the first: true stops the rest (they come back refused). */
+    readonly cancelled?: () => boolean;
+    /** Called when the builds' GPU bytes change (a capped batch allocated, the pool freed), so the caller can sample its peak. */
+    readonly onMemoryChange?: () => void;
 }
 
 /**
@@ -57,6 +80,9 @@ export class GpuTreeOutputs {
     private destroyed = false;
     /** The node and triangle buffers became a storage's own (`GrowableStorage.adopt`): only the parents are left here. */
     private adopted = false;
+    private resolveLetGo: () => void = () => {};
+    /** Resolves once the buffers are destroyed or adopted: what a capped build waits for before its next batch. */
+    readonly letGo: Promise<void> = new Promise((resolve) => (this.resolveLetGo = resolve));
 
     constructor(trees: GpuTreeBuffers, users: number) {
         this.trees = trees;
@@ -107,12 +133,14 @@ export class GpuTreeOutputs {
         if (this.destroyed || this.adopted) return;
         this.adopted = true;
         this.trees.parents.destroy();
+        this.resolveLetGo();
     }
 
     /** Frees the buffers whatever still uses them (the scene is being disposed). Adopted buffers are left to their storage. */
     destroy(): void {
         if (this.destroyed) return;
         this.destroyed = true;
+        this.resolveLetGo();
         if (this.adopted) return;
         this.trees.destroy();
     }
@@ -150,10 +178,20 @@ export interface GpuTreeBatchResult {
 export interface GpuTreeBuilds {
     /** Meshes too big for any batch on this device (or for H-PLOC): they wait for tinybvh. */
     readonly notBuilt: readonly GpuRefusedTree[];
-    /** One promise per batch. They never reject: a failed batch reports its meshes as refused. */
+    /** One promise per batch, in order. They never reject: a failed batch reports its meshes as refused. */
     readonly batches: readonly Promise<GpuTreeBatchResult>[];
-    /** GPU bytes the batches hold while they build (inputs, scratch, outputs), until their stats are read. */
+    /**
+     * GPU bytes the batches hold while they build (inputs, scratch, outputs),
+     * until their stats are read. Read it again as batches finish: a capped
+     * build's changes batch by batch (its pool, plus the batch building).
+     */
     readonly buildingBytes: number;
+    /**
+     * Slots whose geometry is read after `build` returns (a capped build's
+     * later batches upload theirs when they start): their arrays must not be
+     * moved into a worker before then.
+     */
+    readonly readsGeometryLater?: ReadonlySet<number>;
 }
 
 /** Builds first trees for many meshes at once. `SceneTrees`' only GPU builder is H-PLOC ({@link GpuFirstTrees}); tests give a stand-in. */
@@ -186,13 +224,25 @@ export class GpuFirstTrees implements FirstTreeBuilder {
 
     build(requests: readonly GpuTreeRequest[], options: GpuTreeBuildOptions = {}): GpuTreeBuilds {
         const geometries = requests.map((request) => request.geometry);
-        const plan = planGpuHplocBatches(this.device, geometries);
+        const plan = planGpuHplocBatches(this.device, geometries, { maxBatchBytes: options.maxBatchBytes });
         const limitBytes = Math.min(this.device.limits.maxStorageBufferBindingSize, this.device.limits.maxBufferSize);
         const notBuilt = plan.tooBig.map((index) => ({
             slot: requests[index].slot,
             generation: requests[index].generation,
             reason: `too big for a GPU build on this device (buffers of at most ${limitBytes} bytes)`,
         }));
+        if (options.maxBatchBytes !== undefined) {
+            const sequence = this.buildInSequence(plan.batches.map((indices) => indices.map((index) => requests[index])), options);
+            // Not a spread: that would read buildingBytes once, and it changes batch by batch.
+            return {
+                notBuilt,
+                batches: sequence.batches,
+                get buildingBytes() {
+                    return sequence.buildingBytes;
+                },
+                readsGeometryLater: sequence.readsGeometryLater,
+            };
+        }
 
         // Every batch goes into one encoder and one submit; each then reads its own stats back.
         const encoder = this.device.createCommandEncoder({ label: this.label });
@@ -213,31 +263,106 @@ export class GpuFirstTrees implements FirstTreeBuilder {
         const submittedAt = performance.now();
         this.device.queue.submit([encoder.finish()]);
 
-        const batches = recorded.map(async ({ members, finish }): Promise<GpuTreeBatchResult> => {
-            let trees: GpuTreeBuffers;
-            try {
-                trees = await finish();
-            } catch (error) {
-                const failure = `the GPU mesh tree build failed: ${describe(error)}`;
-                return { built: [], refused: refuseAll(members, failure), buildMs: performance.now() - submittedAt, failure };
-            }
-            const buildMs = performance.now() - submittedAt;
-            // A failed layout readback leaves the trees usable for tracing; only the refit goes without.
-            let layouts: (GpuLayoutMeshBvh | null)[] = [];
-            if (options.readLayouts) layouts = await this.hploc.readLayouts(trees).catch(() => []);
-            const usable = trees.meshes.filter((tree) => tree.problem === null).length;
-            const outputs = new GpuTreeOutputs(trees, usable);
-            const built: GpuBuiltTree[] = [];
-            const refused: GpuRefusedTree[] = [];
-            trees.meshes.forEach((tree, index) => {
-                const { slot, generation } = members[index];
-                if (tree.problem === null) built.push({ slot, generation, outputs, tree, layout: layouts[index] ?? null });
-                else refused.push({ slot, generation, reason: tree.problem });
-            });
-            return { built, refused, buildMs, failure: null };
-        });
+        const batches = recorded.map(async ({ members, finish }) => (await this.collect(members, finish, submittedAt, options)).result);
         for (const { members, reason } of failed) batches.push(Promise.resolve({ built: [], refused: refuseAll(members, reason), buildMs: 0, failure: reason }));
         return { notBuilt, batches, buildingBytes };
+    }
+
+    /**
+     * The capped path: the batches one after another, each with its own submit
+     * and stats readback, on one scratch pool, each once the previous batch's
+     * outputs are let go.
+     */
+    private buildInSequence(groups: readonly (readonly GpuTreeRequest[])[], options: GpuTreeBuildOptions): Omit<GpuTreeBuilds, 'notBuilt'> {
+        if (groups.length === 0) return { batches: [], buildingBytes: 0 };
+        let pool: GpuHplocScratchPool;
+        try {
+            pool = this.hploc.createScratchPool(groups.map((members) => members.map((member) => member.geometry)));
+        } catch (error) {
+            const failure = `the GPU mesh tree build could not start: ${describe(error)}`;
+            return { batches: groups.map((members) => Promise.resolve({ built: [], refused: refuseAll(members, failure), buildMs: 0, failure })), buildingBytes: 0 };
+        }
+        let outputsBuilding = 0;
+        type Step = { result: GpuTreeBatchResult; outputs: GpuTreeOutputs | null };
+        // Uploads, records and submits one batch at once (synchronously: the first batch's arrays are read before build returns).
+        const start = (index: number, members: readonly GpuTreeRequest[]): Promise<Step> => {
+            const refused = (failure: string): Promise<Step> => Promise.resolve({ result: { built: [], refused: refuseAll(members, failure), buildMs: 0, failure }, outputs: null });
+            if (index > 0 && options.cancelled?.()) return refused('the GPU mesh tree build was cancelled');
+            let batch: GpuHplocBatch;
+            try {
+                batch = this.hploc.createBatch(
+                    members.map((member) => member.geometry),
+                    {},
+                    pool,
+                );
+            } catch (error) {
+                return refused(`the GPU mesh tree build could not start: ${describe(error)}`);
+            }
+            outputsBuilding = batch.outputBytes;
+            options.onMemoryChange?.();
+            const encoder = this.device.createCommandEncoder({ label: `${this.label} batch ${index}` });
+            batch.encode(encoder);
+            const submittedAt = performance.now();
+            this.device.queue.submit([encoder.finish()]);
+            // Once finish returns, the outputs are the caller's (counted as theirs), so they stop counting here first.
+            return this.collect(members, () => batch.finish().finally(() => (outputsBuilding = 0)), submittedAt, options);
+        };
+        const batches: Promise<GpuTreeBatchResult>[] = [];
+        let previous: Promise<GpuTreeOutputs | null> = Promise.resolve(null);
+        for (const [index, members] of groups.entries()) {
+            // Each batch after the first waits until the one before it has let go of its outputs.
+            const step =
+                index === 0
+                    ? start(0, members)
+                    : previous.then(async (outputs) => {
+                          if (outputs) await outputs.letGo;
+                          return start(index, members);
+                      });
+            batches.push(step.then(({ result }) => result));
+            previous = step.then(({ outputs }) => outputs);
+        }
+        // The last batch's stats are read, so the GPU is done with the pool.
+        void previous.then(() => {
+            pool.destroy();
+            options.onMemoryChange?.();
+        });
+        return {
+            batches,
+            get buildingBytes() {
+                return pool.bytes + outputsBuilding;
+            },
+            readsGeometryLater: new Set(groups.slice(1).flatMap((members) => members.map((member) => member.slot))),
+        };
+    }
+
+    /** Reads a submitted batch's stats (and layouts when asked) and splits its trees into built and refused. */
+    private async collect(
+        members: readonly GpuTreeRequest[],
+        finish: () => Promise<GpuTreeBuffers>,
+        submittedAt: number,
+        options: GpuTreeBuildOptions,
+    ): Promise<{ result: GpuTreeBatchResult; outputs: GpuTreeOutputs | null }> {
+        let trees: GpuTreeBuffers;
+        try {
+            trees = await finish();
+        } catch (error) {
+            const failure = `the GPU mesh tree build failed: ${describe(error)}`;
+            return { result: { built: [], refused: refuseAll(members, failure), buildMs: performance.now() - submittedAt, failure }, outputs: null };
+        }
+        const buildMs = performance.now() - submittedAt;
+        // A failed layout readback leaves the trees usable for tracing; only the refit goes without.
+        let layouts: (GpuLayoutMeshBvh | null)[] = [];
+        if (options.readLayouts) layouts = await this.hploc.readLayouts(trees).catch(() => []);
+        const usable = trees.meshes.filter((tree) => tree.problem === null).length;
+        const outputs = new GpuTreeOutputs(trees, usable);
+        const built: GpuBuiltTree[] = [];
+        const refused: GpuRefusedTree[] = [];
+        trees.meshes.forEach((tree, index) => {
+            const { slot, generation } = members[index];
+            if (tree.problem === null) built.push({ slot, generation, outputs, tree, layout: layouts[index] ?? null });
+            else refused.push({ slot, generation, reason: tree.problem });
+        });
+        return { result: { built, refused, buildMs, failure: null }, outputs };
     }
 }
 

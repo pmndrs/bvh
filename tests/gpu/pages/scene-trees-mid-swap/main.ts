@@ -25,13 +25,18 @@
  * `mergeStaticInstances` off and on (on: each instance gets its own copy of
  * its mesh and two of every three are static, as the trace-oracle's merged
  * variants do, so the merged groups' GPU trees get their identity from the
- * GPU pass and their tinybvh trees from the CPU one).
+ * GPU pass and their tinybvh trees from the CPU one). The `-capped` variants
+ * set `gpuMaxBatchBytes` to 4 KiB, so every mesh is a GPU batch of its
+ * own, built one after another on one scratch pool (a case with several
+ * meshes must build in more than one batch); they update once per frame
+ * until the first trees are in, as the cap needs.
  *
  * URL option: `?sharedRays=100000` shrinks the seam cases.
  */
 
 import { SceneTrees } from '../../../../src/scene/scene-trees.ts';
 import { GpuFirstTrees } from '../../../../src/scene/gpu-first-trees.ts';
+import { planGpuHplocBatches } from '../../../../src/gpu-hploc.ts';
 import { createBvhWorkerPool } from '../../../../src/worker/pool.ts';
 import { assembleTraceScene, type TraceSceneInstance } from '../../../../src/trace/scene-assembly.ts';
 import { buildMeshBvhWithTinyBvh } from '../../../../src/trace/mesh-bvh-topology.ts';
@@ -47,13 +52,20 @@ interface Variant {
     readonly name: string;
     readonly gpuTreeOutputs: 'copy' | 'adopt';
     readonly merged: boolean;
+    readonly maxBatchBytes?: number;
 }
+
+/** Smaller than any one-mesh batch (its uniforms alone are 2.8 kB), so every mesh is a batch of its own. */
+const SMALL_CAP = 4 * 1024;
 
 const VARIANTS: readonly Variant[] = [
     { name: 'copy', gpuTreeOutputs: 'copy', merged: false },
     { name: 'copy-merged', gpuTreeOutputs: 'copy', merged: true },
     { name: 'adopt', gpuTreeOutputs: 'adopt', merged: false },
     { name: 'adopt-merged', gpuTreeOutputs: 'adopt', merged: true },
+    { name: 'copy-capped', gpuTreeOutputs: 'copy', merged: false, maxBatchBytes: SMALL_CAP },
+    { name: 'copy-merged-capped', gpuTreeOutputs: 'copy', merged: true, maxBatchBytes: SMALL_CAP },
+    { name: 'adopt-capped', gpuTreeOutputs: 'adopt', merged: false, maxBatchBytes: SMALL_CAP },
 ];
 
 /** Each instance its own mesh copy, two of every three static (the trace-oracle's merged variants). */
@@ -76,6 +88,8 @@ await runGpuTest(
         const pool = createBvhWorkerPool({ size: 4 });
         assert(pool.usesWorkers, 'the worker pool fell back to building inline in a browser');
         const failures: string[] = [];
+        // Capped variants in which some case built in more than one batch (each must have one).
+        const cappedCasesWithBatches = new Set<string>();
         const results: Record<string, unknown> = {};
         let totalRays = 0;
 
@@ -91,6 +105,7 @@ await runGpuTest(
                     label: `${oracleCase.name} ${variant.name}`,
                     holdRefinements: true,
                     gpuTreeOutputs: variant.gpuTreeOutputs,
+                    gpuMaxBatchBytes: variant.maxBatchBytes,
                     mergeStaticInstances: variant.merged,
                     workers: pool,
                     firstTreeBuilder: firstTrees,
@@ -118,9 +133,28 @@ await runGpuTest(
                     return counts;
                 };
 
-                frame();
-                await scene.whenBuilt();
-                frame();
+                if (variant.maxBatchBytes === undefined) {
+                    frame();
+                    await scene.whenBuilt();
+                    frame();
+                } else {
+                    // Each capped batch after the first starts once an update has copied the one before out: update until built.
+                    let built = false;
+                    void scene.whenBuilt().then(() => (built = true));
+                    frame();
+                    while (!built) {
+                        await device.queue.onSubmittedWorkDone();
+                        await new Promise((resolve) => setTimeout(resolve, 0));
+                        frame();
+                    }
+                    frame();
+                    const { gpuBatches } = scene.counts;
+                    results[`${oracleCase.name} ${variant.name} batches`] = gpuBatches;
+                    if (gpuBatches > 1) cappedCasesWithBatches.add(variant.name);
+                    // Unmerged, the scene builds exactly the case's meshes: as many batches as the planner makes of them.
+                    const planned = planGpuHplocBatches(device, meshes, { maxBatchBytes: SMALL_CAP }).batches.length;
+                    if (!variant.merged && gpuBatches !== planned) failures.push(`${oracleCase.name} ${variant.name}: ${gpuBatches} GPU batches, planned ${planned}`);
+                }
                 const first = await check('gpu');
                 if (first.onTinybvhTrees > 0 || first.onGpuTrees === 0) failures.push(`${oracleCase.name} ${variant.name}: the first trees were ${first.onGpuTrees} GPU and ${first.onTinybvhTrees} tinybvh`);
                 if (variant.merged && first.mergedGroups === 0) failures.push(`${oracleCase.name} ${variant.name}: nothing merged`);
@@ -141,6 +175,9 @@ await runGpuTest(
         }
         pool.dispose();
         kernel.destroy();
+        for (const variant of VARIANTS) {
+            if (variant.maxBatchBytes !== undefined && !cappedCasesWithBatches.has(variant.name)) failures.push(`${variant.name}: no case built in more than one GPU batch`);
+        }
         if (failures.length > 0) throw new Error(failures.slice(0, 10).join(' | '));
         return { cases: cases.length, variants: VARIANTS.length, totalRays, ...results };
     },
