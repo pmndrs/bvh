@@ -8,23 +8,43 @@
     "sideEffects": false,
     "packageManager": "pnpm@10.23.0",
     "exports": {
-        ".": "./src/index.ts"
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js",
+            "default": "./dist/index.js"
+        }
     },
     "scripts": {
+        "build": "node scripts/build.mjs && node scripts/verify-artifacts.mjs",
+        "verify:dist": "node scripts/verify-artifacts.mjs",
+        "lint": "eslint .",
         "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
         "test": "vitest run",
         "test:gpu": "node tests/gpu/run.ts",
         "test:gpu:page": "node tests/gpu/run.ts --filter",
-        "bvh:wasm": "node native/build-wasm.ts"
+        "bvh:wasm": "node native/build-wasm.ts",
+        "prepublishOnly": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
     },
     "devDependencies": {
+        "@eslint/js": "^9.39.5",
         "@types/node": "24.19.2",
         "@types/three": "0.187.0",
         "@webgpu/types": "^0.1.64",
+        "eslint": "^9.39.5",
+        "globals": "^17.14.0",
         "three": "0.187.0",
         "three-mesh-bvh": "0.9.18",
         "typescript": "^5.7.0",
+        "typescript-eslint": "^8.72.2",
         "vite": "^6.1.0",
         "vitest": "^3.0.0"
-    }
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "files": [
+        "dist",
+        "licenses",
+        "THIRD_PARTY.md",
+        "README.md"
+    ]
 }

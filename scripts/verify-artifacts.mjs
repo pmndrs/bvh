@@ -1,0 +1,60 @@
+// Fails the build when dist/ is not what the package promises: every `exports`
+// target exists, no relative `.ts` import is left, and the files that embed
+// third-party code still carry their licence text (a build step can drop
+// comments; the /*! */ headers must survive).
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const root = resolve(import.meta.dirname, '..');
+const dist = resolve(root, 'dist');
+const problems = [];
+
+const manifest = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
+for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    for (const target of Object.values(conditions)) {
+        if (!existsSync(resolve(root, target))) problems.push(`exports["${subpath}"] points at missing ${target}`);
+    }
+}
+for (const file of ['README.md', 'THIRD_PARTY.md', 'licenses/tinybvh.txt', 'licenses/emscripten-runtime.txt', 'licenses/hiprt.txt']) {
+    if (!existsSync(resolve(root, file))) problems.push(`missing ${file}`);
+}
+
+/** Built file -> text its licence comment must still contain. */
+const requiredLicenseText = {
+    'tinybvh-wasm.js': ['Copyright (c) 2024 Jacco Bikker', 'Copyright (c) 2010-2014 Emscripten authors', 'Rich Felker'],
+    'gpu-lbvh-wgsl.js': ['hiprt', 'Permission is hereby granted, free of charge'],
+    'gpu-hploc-wgsl.js': ['tinybvh', 'Permission is hereby granted, free of charge'],
+};
+for (const [name, lines] of Object.entries(requiredLicenseText)) {
+    const file = resolve(dist, name);
+    if (!existsSync(file)) {
+        problems.push(`missing dist/${name}`);
+        continue;
+    }
+    const text = readFileSync(file, 'utf8');
+    if (!text.startsWith('/*!')) problems.push(`dist/${name} lost its leading /*! licence comment`);
+    for (const line of lines) if (!text.includes(line)) problems.push(`dist/${name} lacks the licence text "${line}"`);
+}
+
+// Any built file embedding WebAssembly (base64 of "\0asm", version 1) must carry the wasm licences.
+const embeddedWasmMarker = 'AGFzbQEAAAA';
+for (const entry of existsSync(dist) ? readdirSync(dist, { recursive: true, withFileTypes: true }) : []) {
+    if (!entry.isFile()) continue;
+    const file = resolve(entry.parentPath, entry.name);
+    const text = readFileSync(file, 'utf8');
+    if (entry.name.endsWith('.js') && text.includes(embeddedWasmMarker)) {
+        for (const line of requiredLicenseText['tinybvh-wasm.js']) {
+            if (!text.includes(line)) problems.push(`${file} embeds WebAssembly but lacks the licence text "${line}"`);
+        }
+    }
+    if (/\.(js|d\.ts)$/.test(entry.name) && /(?:from\s*|import\s*\(\s*)["']\.{1,2}\/[^"']*\.ts["']/.test(text)) {
+        problems.push(`${file} still imports a relative .ts file`);
+    }
+    if (/\.test\.(js|d\.ts)$/.test(entry.name)) problems.push(`${file} is a test file in dist`);
+}
+
+if (problems.length) {
+    console.error(problems.join('\n'));
+    process.exit(1);
+}
+console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl and gpu-hploc-wgsl, no .ts imports, no tests.');
