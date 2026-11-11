@@ -131,7 +131,7 @@ ddgi's own scene-copy `INSTANCE_FLAG` (`scene/layout.ts`: `live`, `contributesTo
 
 **If ddgi doesn't need masks yet,** it can build its module with `rayMasks: false`: the walk then has no mask test and ignores the mask bits, so records without them still work, and nothing else changes. This is the same walk with the mask code compiled out, not a second walk. `bvhTraceClosestMasked`/`bvhTraceAnyMasked` don't exist in that module, and `candidate.rayMask` is all ones.
 
-The batch kernel (`batchKernelWgsl`, and `TraceBatchKernel` in `tests/gpu/trace-gpu.ts`) takes one mask per batch, from a uniform at group 1 binding 2 (`BATCH_PARAMS_BYTES`), only when masks are on. No per-ray mask buffer.
+The batch kernel (`batchKernelWgsl`, and `TraceBatchKernel` in `src/trace/trace-gpu.ts`, exported from the package) takes one mask per batch, from a uniform at group 1 binding 2 (`BATCH_PARAMS_BYTES`), only when masks are on. No per-ray mask buffer.
 
 ## 6. Merging static instances (`mergeStaticInstances`, optional)
 

@@ -4,6 +4,7 @@
 export * from './layout.ts';
 export * from './rays.ts';
 export * from './wgsl.ts';
+export * from './trace-gpu.ts';
 export * from './triangle-packing.ts';
 export * from './triangle-filter.ts';
 export * from './mesh-bvh.ts';

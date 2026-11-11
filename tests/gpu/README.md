@@ -33,4 +33,4 @@ node tests/gpu/pages/trace-bench/surface-to-csv.ts out.json [more.json ...] [--a
 ## Not here
 
 - `platform-bench.ts` and the `platform` tracer of `trace-bench` compared against ddgi's own platform tracer; the `platform*` variants of `trace-oracle` and the createGI/technique version of `trace-inline` tested ddgi's platform. They live on in webgpu-ddgi.
-- `trace-gpu.ts` here (batch kernel and scene upload for the pages) is a port of ddgi-core's file of the same name; it is not part of `src/`.
+- The batch kernel and scene upload the pages use (`TraceBatchKernel`, `uploadTraceScene`) are in `src/trace/trace-gpu.ts`.
