@@ -2,17 +2,19 @@
 /**
  * Reads a test scene's meshes in Node, for the CPU tools in this folder: every
  * model part of the scene's manifest, each mesh in object space (instances
- * don't matter to a mesh tree). Needs the downloaded models (`pnpm assets:fetch`).
+ * don't matter to a mesh tree). Needs the downloaded models (see tests/gpu/README.md).
  */
 
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import type { ModelPart, SceneManifest } from '../../scenes/src/manifest.ts';
-import { extractGltfGeometry, parseGlb, type BenchMeshGeometry, type GltfJson } from '../gpu/pages/trace-bench/gltf-geometry.ts';
+import type { ModelPart, SceneManifest } from '../tests/gpu/scene-manifest.ts';
+import { extractGltfGeometry, parseGlb, type BenchMeshGeometry, type GltfJson } from '../tests/gpu/pages/trace-bench/gltf-geometry.ts';
 
-const REPOSITORY_ROOT = resolve(import.meta.dirname, '..', '..');
-/** Folders searched for downloaded models, in order (as the trace bench does). */
-const DOWNLOAD_FOLDERS = ['assets/downloads', 'assets/downloads.bak'];
+const REPOSITORY_ROOT = resolve(import.meta.dirname, '..');
+/** As the GPU pages' server: BVH_ASSETS_DIR and BVH_MANIFESTS_DIR (tests/gpu/README.md), defaulting to the sibling webgpu-ddgi checkout. */
+const ASSETS_DIR = resolve(REPOSITORY_ROOT, process.env.BVH_ASSETS_DIR ?? '../webgpu-ddgi/assets');
+const MANIFESTS_DIR = resolve(REPOSITORY_ROOT, process.env.BVH_MANIFESTS_DIR ?? '../webgpu-ddgi/scenes/manifests');
+const DOWNLOAD_FOLDERS = ['downloads'];
 
 export interface SceneMesh {
     /** `model path` and the mesh's number in that model, for messages. */
@@ -21,17 +23,17 @@ export interface SceneMesh {
 }
 
 function readManifest(sceneId: string): SceneManifest {
-    const file = join(REPOSITORY_ROOT, 'scenes', 'manifests', `${sceneId}.json`);
+    const file = join(MANIFESTS_DIR, `${sceneId}.json`);
     if (!existsSync(file)) throw new Error(`no manifest ${file}`);
     return JSON.parse(readFileSync(file, 'utf8')) as SceneManifest;
 }
 
 function findModelFile(part: ModelPart): string {
     for (const folder of DOWNLOAD_FOLDERS) {
-        const file = join(REPOSITORY_ROOT, folder, part.asset, part.path);
+        const file = join(ASSETS_DIR, folder, part.asset, part.path);
         if (existsSync(file)) return file;
     }
-    throw new Error(`model ${part.asset}/${part.path} not found; run "pnpm assets:fetch --only ${part.asset}"`);
+    throw new Error(`model ${part.asset}/${part.path} not found; see tests/gpu/README.md for BVH_ASSETS_DIR`);
 }
 
 /** Every mesh of a model file, in object space. */

@@ -13,9 +13,9 @@
  * Not a recorded number; the trace-bench-lbvh and trace-bench-hploc pages are.
  */
 
-import { GpuHplocBuilder, HPLOC_STAGES } from '../../../../packages/bvh/src/gpu-hploc.ts';
-import { GpuLbvhBuilder, LBVH_STAGES } from '../../../../packages/bvh/src/gpu-lbvh.ts';
-import type { GpuMeshGeometry } from '../../../../packages/bvh/src/mesh-input.ts';
+import { GpuHplocBuilder, HPLOC_STAGES } from '../../../../src/gpu-hploc.ts';
+import { GpuLbvhBuilder, LBVH_STAGES } from '../../../../src/gpu-lbvh.ts';
+import type { GpuMeshGeometry } from '../../../../src/mesh-input.ts';
 import { loadBenchScene } from '../trace-bench/scene-source.ts';
 import { median } from '../trace-bench/statistics.ts';
 import { assert, runGpuTest } from '../../client.ts';

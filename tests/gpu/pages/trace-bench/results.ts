@@ -102,22 +102,6 @@ export interface GpuBuildResult extends OursBuildResult {
     hplocMatchMeshesRefused?: number;
 }
 
-/** The `platform` tracer: the scene described through `createGI` and its scene API (T1.3). */
-export interface PlatformBuildResult {
-    /** Creating every mesh, material and instance through the scene API (CPU: checking and packing). */
-    describeMs: number;
-    /** From the first scene call until every tree is placed and the top level is built. */
-    readyMs: number;
-    usesWorker: boolean;
-    /** GPU bytes of the platform's scene copy (vertices and tables). */
-    bytesSceneCopy: number;
-    /** GPU bytes of the tracer's buffers (allocated, so with room to grow). */
-    bytesAcceleration: number;
-    bytesNodes: number;
-    bytesTriangles: number;
-    bytesTopLevel: number;
-}
-
 export interface TmbvhBuildResult {
     meshCount: number;
     /** Wall time to build every mesh's tree on the main thread (SAH), one after another. */
@@ -183,8 +167,6 @@ export interface SceneResult {
     oursLbvh?: GpuBuildResult | null;
     /** The GPU H-PLOC's trees (B2). Missing before B2. */
     oursHploc?: GpuBuildResult | null;
-    /** The same scene through the platform API. Missing before T1.3. */
-    platform?: PlatformBuildResult | null;
     tmbvh: TmbvhBuildResult | null;
     modes: ModeResult[];
     agreement: AgreementResult[];

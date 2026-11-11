@@ -5,7 +5,7 @@
  * batch, twice:
  *
  * 1. **Default** (B1's 30-bit cubic codes, SAH leaf collapse): each tree goes
- *    through the layout checker (packages/bvh/src/layout-check.ts), and its SAH
+ *    through the layout checker (src/layout-check.ts), and its SAH
  *    cost and node count are compared with the CPU twin's (hploc-cpu.ts), which
  *    builds the same tree but for float rounding.
  * 2. **Against tinybvh** (tinybvh's 63-bit codes and tie rule, one-triangle
@@ -24,11 +24,11 @@
  * The ray oracle for H-PLOC trees is the trace-oracle page (variant `watertight-hploc`).
  */
 
-import { GpuHplocBuilder, type HplocOptions } from '../../../../packages/bvh/src/gpu-hploc.ts';
-import { buildHplocOnCpu } from '../../../../packages/bvh/src/hploc-cpu.ts';
-import { checkGpuLayout, treeSahCost } from '../../../../packages/bvh/src/layout-check.ts';
-import { createTinyBvhBuilder, type TinyBvhBuilder } from '../../../../packages/bvh/src/tinybvh.ts';
-import type { MeshInput } from '../../../../packages/bvh/src/mesh-input.ts';
+import { GpuHplocBuilder, type HplocOptions } from '../../../../src/gpu-hploc.ts';
+import { buildHplocOnCpu } from '../../../../src/hploc-cpu.ts';
+import { checkGpuLayout, treeSahCost } from '../../../../src/layout-check.ts';
+import { createTinyBvhBuilder, type TinyBvhBuilder } from '../../../../src/tinybvh.ts';
+import type { MeshInput } from '../../../../src/mesh-input.ts';
 import { assert, runGpuTest } from '../../client.ts';
 import { randomSoup, treeCases, type TreeCase } from '../bvh-shared/tree-cases.ts';
 

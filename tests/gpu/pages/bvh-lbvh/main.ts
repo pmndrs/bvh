@@ -10,18 +10,18 @@
  *    tile boundaries, a grid with 16-bit indices, all-equal triangles, a flat
  *    mesh, flags, a mesh already on the GPU with interleaved vertices, a large
  *    soup) built in one batch, read back, and run through the layout checker
- *    (packages/bvh/src/layout-check.ts). Each tree's SAH cost is compared with
+ *    (src/layout-check.ts). Each tree's SAH cost is compared with
  *    the CPU twin's (lbvh-cpu.ts) and with tinybvh's (B0).
  *
  * The ray oracle for B1 trees is the trace-oracle page (variant `watertight-lbvh`).
  */
 
-import { createRadixSort, createRadixSortPipelines, sortTileTable } from '../../../../packages/bvh/src/gpu-radix-sort.ts';
-import { createScanBindGroups, createScanPipelines, encodeScan, scanParams, scanTileSumWords } from '../../../../packages/bvh/src/gpu-scan.ts';
-import { GpuLbvhBuilder } from '../../../../packages/bvh/src/gpu-lbvh.ts';
-import { checkGpuLayout, treeSahCost } from '../../../../packages/bvh/src/layout-check.ts';
-import { buildLbvhOnCpu } from '../../../../packages/bvh/src/lbvh-cpu.ts';
-import { createTinyBvhBuilder } from '../../../../packages/bvh/src/tinybvh.ts';
+import { createRadixSort, createRadixSortPipelines, sortTileTable } from '../../../../src/gpu-radix-sort.ts';
+import { createScanBindGroups, createScanPipelines, encodeScan, scanParams, scanTileSumWords } from '../../../../src/gpu-scan.ts';
+import { GpuLbvhBuilder } from '../../../../src/gpu-lbvh.ts';
+import { checkGpuLayout, treeSahCost } from '../../../../src/layout-check.ts';
+import { buildLbvhOnCpu } from '../../../../src/lbvh-cpu.ts';
+import { createTinyBvhBuilder } from '../../../../src/tinybvh.ts';
 import { assert, runGpuTest } from '../../client.ts';
 import { randomSource, storageBuffer, treeCases } from '../bvh-shared/tree-cases.ts';
 

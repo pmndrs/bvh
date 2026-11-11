@@ -1,4 +1,4 @@
 {
-    "description": "Inline tracing from a technique kernel (T1.3): createGI, scene API, a test technique whose kernel (tracer 3 + scene copy 2 + own 3 storage buffers) calls giTraceClosest/giTraceAny, against the CPU reference on the oracle scenes; a 9th storage buffer must give a GILimitError.",
+    "description": "Inline tracing from the page's own kernel: the trace module in group 0, three own storage buffers in group 1, giTraceClosest/giTraceAny called inline, against the CPU reference on the oracle scenes.",
     "timeoutMs": 300000
 }

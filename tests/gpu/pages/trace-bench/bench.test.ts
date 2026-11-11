@@ -9,10 +9,10 @@ import {
     createCpuTracer,
     HIT_RECORD_BYTES,
     RAY_FLOATS,
-} from '../../../../packages/ddgi-core/src/platform/trace/index.ts';
-import { buildReferenceScene, traceClosestReference } from '../../../../packages/bvh/src/trace/reference-tracer.ts';
-import { addToTally, compareClosest, newTally } from '../../../../packages/bvh/src/trace/oracle-compare.ts';
-import { createRandom, randomRays, randomTriangleSoup } from '../../../../packages/bvh/src/trace/oracle-fixtures.ts';
+} from '../../../../src/trace/index.ts';
+import { buildReferenceScene, traceClosestReference } from '../../../../src/trace/reference-tracer.ts';
+import { addToTally, compareClosest, newTally } from '../../../../src/trace/oracle-compare.ts';
+import { createRandom, randomRays, randomTriangleSoup } from '../../../../src/trace/oracle-fixtures.ts';
 import { BenchConfigError, parseBenchConfig, type BenchProfileName } from './config.ts';
 import { browserFromUserAgent, deviceNameFromAdapter, formatValue, repeatedRunRows, traceBenchRows } from './csv-rows.ts';
 import { extractGltfGeometry, modelTransformMatrix, parseGlb, type GltfJson } from './gltf-geometry.ts';
@@ -54,7 +54,7 @@ describe('config', () => {
         const config = parseBenchConfig('', defaults);
         expect(config.raysPerProbe).toBe(64);
         expect(config.scenes).toEqual(['furnished-room']);
-        expect(config.tracers).toEqual(['ours-tinybvh', 'ours-tmbuild', 'platform', 'tmbvh']);
+        expect(config.tracers).toEqual(['ours-tinybvh', 'ours-tmbuild', 'tmbvh']);
     });
 
     it('lets the URL override the profile', () => {

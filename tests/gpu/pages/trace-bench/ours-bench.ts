@@ -9,18 +9,17 @@ import {
     MAX_LEAF_PRIMITIVES,
     HIT_RECORD_BYTES,
     RAY_FLOATS,
-    TraceBatchKernel,
-    uploadTraceScene,
     type MeshBvh,
     type MeshBvhBuilder,
     type TraceInstance,
     type TraceSceneData,
-} from '../../../../packages/ddgi-core/src/platform/trace/index.ts';
-import { GpuHplocBuilder } from '../../../../packages/bvh/src/gpu-hploc.ts';
-import { GpuLbvhBuilder } from '../../../../packages/bvh/src/gpu-lbvh.ts';
-import type { GpuMeshGeometry } from '../../../../packages/bvh/src/mesh-input.ts';
-import { treeSahCost } from '../../../../packages/bvh/src/layout-check.ts';
-import { createTinyBvhBuilder, type TinyBvhBuilder } from '../../../../packages/bvh/src/tinybvh.ts';
+} from '../../../../src/trace/index.ts';
+import { TraceBatchKernel, uploadTraceScene } from '../../trace-gpu.ts';
+import { GpuHplocBuilder } from '../../../../src/gpu-hploc.ts';
+import { GpuLbvhBuilder } from '../../../../src/gpu-lbvh.ts';
+import type { GpuMeshGeometry } from '../../../../src/mesh-input.ts';
+import { treeSahCost } from '../../../../src/layout-check.ts';
+import { createTinyBvhBuilder, type TinyBvhBuilder } from '../../../../src/tinybvh.ts';
 import { GPU_BUILD_LOADED_MS, GPU_BUILD_LOADED_RUNS, GPU_BUILD_TIMED_RUNS, TOP_LEVEL_REBUILD_RUNS, type TracerId } from './config.ts';
 import { measureDispatches, type DispatchTimer } from './dispatch-timer.ts';
 import type { BenchInstance, BenchMeshGeometry } from './gltf-geometry.ts';

@@ -19,9 +19,9 @@
  * done in well under a minute.
  */
 
-import { createTinyBvhBuilder, type GpuLayoutMeshBvh, type TinyBvhBuilder } from '../../packages/bvh/src/index.ts';
-import type { MeshBvh } from '../../packages/bvh/src/trace/mesh-bvh.ts';
-import { buildMeshBvhFromTopology } from '../../packages/bvh/src/trace/mesh-bvh-topology.ts';
+import { createTinyBvhBuilder, type GpuLayoutMeshBvh, type TinyBvhBuilder } from '../src/index.ts';
+import type { MeshBvh } from '../src/trace/mesh-bvh.ts';
+import { buildMeshBvhFromTopology } from '../src/trace/mesh-bvh-topology.ts';
 import { readSceneMeshes } from './scene-meshes.ts';
 
 const DEFAULT_SCENES = ['sponza', 'bistro-exterior', 'bistro-interior'];

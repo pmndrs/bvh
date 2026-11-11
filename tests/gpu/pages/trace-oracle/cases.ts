@@ -18,7 +18,7 @@ import {
     type MeshGeometry,
     type TraceRay,
     type TraceSceneInstance,
-} from '../../../../packages/ddgi-core/src/platform/trace/index.ts';
+} from '../../../../src/trace/index.ts';
 import {
     createRandom,
     randomAffine,
@@ -28,7 +28,7 @@ import {
     toFloat32Ray,
     type Random,
     type Vector3,
-} from '../../../../packages/bvh/src/trace/oracle-fixtures.ts';
+} from '../../../../src/trace/oracle-fixtures.ts';
 
 export { unpackRay };
 

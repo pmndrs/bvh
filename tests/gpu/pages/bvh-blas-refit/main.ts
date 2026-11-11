@@ -9,18 +9,18 @@
  * interleaved buffer, the refit runs, and the tree is read back:
  *
  * - its triangles and boxes must be the deformed mesh's exactly
- *   (packages/bvh/src/layout-check.ts: corners bit for bit, every box the
+ *   (src/layout-check.ts: corners bit for bit, every box the
  *   exact box of what is below it), with the shape unchanged;
  * - the marker words around it must be untouched;
  * - the refit's stats must show no gave-up reads.
  */
 
-import { GpuLbvhBuilder } from '../../../../packages/bvh/src/gpu-lbvh.ts';
-import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, type GpuLayoutMeshBvh } from '../../../../packages/bvh/src/gpu-layout.ts';
-import { GpuMeshRefit } from '../../../../packages/bvh/src/gpu-mesh-refit.ts';
-import { checkGpuLayout } from '../../../../packages/bvh/src/layout-check.ts';
-import { createTinyBvhBuilder } from '../../../../packages/bvh/src/tinybvh.ts';
-import type { MeshInput } from '../../../../packages/bvh/src/mesh-input.ts';
+import { GpuLbvhBuilder } from '../../../../src/gpu-lbvh.ts';
+import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, type GpuLayoutMeshBvh } from '../../../../src/gpu-layout.ts';
+import { GpuMeshRefit } from '../../../../src/gpu-mesh-refit.ts';
+import { checkGpuLayout } from '../../../../src/layout-check.ts';
+import { createTinyBvhBuilder } from '../../../../src/tinybvh.ts';
+import type { MeshInput } from '../../../../src/mesh-input.ts';
 import { assert, runGpuTest } from '../../client.ts';
 
 /** Nodes and triangles in front of the mesh in the shared buffers, and words of marker after. */
