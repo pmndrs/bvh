@@ -65,7 +65,7 @@ jobs:
   gpu-swiftshader:
     name: GPU pages (headless Chrome, SwiftShader)
     runs-on: ubuntu-latest
-    # Verified 2026-11-11: all three pages pass on SwiftShader in about 5.5 minutes in total.
+    # The three pages run with BVH_PAGE_QUERY=profile=ci, trace-oracle's reduced ray counts (every variant and case still runs); the full profile is for real GPUs.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4.2.2
