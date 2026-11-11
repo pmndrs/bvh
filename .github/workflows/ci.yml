@@ -87,4 +87,6 @@ jobs:
           # `subgroups`, so bvh-lbvh-fallback exercises the tinybvh fallback.
           BVH_CHROME_FLAGS: --no-sandbox --use-webgpu-adapter=swiftshader --use-angle=swiftshader --enable-unsafe-swiftshader
           BVH_ALLOW_SOFTWARE_ADAPTER: '1'
+          # The reduced trace-oracle profile: every variant and case, fewer rays (tests/gpu/pages/trace-oracle/main.ts).
+          BVH_PAGE_QUERY: profile=ci
         run: pnpm test:gpu:page bvh-lbvh-fallback,trace-inline,trace-oracle

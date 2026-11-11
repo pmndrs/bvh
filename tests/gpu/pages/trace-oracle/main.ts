@@ -57,7 +57,11 @@
  * The default device limits are used on purpose: the oracle scenes are tiny and
  * the core has to work there.
  *
- * URL option: `?sharedRays=100000` shrinks the shared-edge scenes for a quick look.
+ * URL options: `?sharedRays=100000` shrinks the shared-edge scenes for a quick look.
+ * `?profile=ci` is the reduced profile for software adapters (SwiftShader in CI, passed as
+ * `BVH_PAGE_QUERY=profile=ci`): every variant, case, pass and seam fixture still runs, with
+ * 10x fewer rays in the shared-edge and seam scenes. The pass rules are the same. No
+ * `profile` (or `profile=full`) is the full profile, which real GPUs run.
  */
 
 import {
@@ -191,6 +195,10 @@ const DEFAULT_SHARED_EDGE_RAYS = 1_000_000;
 
 /** Rays per seam scene (split and one-ulp seams, plain and transformed). */
 const SEAM_RAYS = 200_000;
+
+/** The reduced profile for software adapters: rays per shared-edge scene and per seam scene. */
+const CI_SHARED_EDGE_RAYS = 100_000;
+const CI_SEAM_RAYS = 20_000;
 
 /** Rays the CPU port of the walk traces per case, to report the stack depth it needs. */
 const STACK_PROBE_RAYS = 2000;
@@ -427,7 +435,11 @@ function summarize(result: CaseResult, stackUsed: number, scene: TraceSceneData,
     };
 }
 
-const sharedRays = Number(new URLSearchParams(location.search).get('sharedRays')) || DEFAULT_SHARED_EDGE_RAYS;
+const pageQuery = new URLSearchParams(location.search);
+const profile = pageQuery.get('profile') ?? 'full';
+assert(profile === 'full' || profile === 'ci', `unknown profile "${profile}" (use full or ci)`);
+const sharedRays = Number(pageQuery.get('sharedRays')) || (profile === 'ci' ? CI_SHARED_EDGE_RAYS : DEFAULT_SHARED_EDGE_RAYS);
+const seamRays = profile === 'ci' ? CI_SEAM_RAYS : SEAM_RAYS;
 
 await runGpuTest(async ({ device, log }) => {
     const builder = createMeshBvhBuilder({ worker: 'auto' });
@@ -516,7 +528,7 @@ await runGpuTest(async ({ device, log }) => {
         const seams: SharedEdgeReport[] = [];
         for (const seam of ['split', 'ulp'] as const) {
             for (const transformed of [false, true]) {
-                const report = await runSharedEdgeCase(device, kernel, builder, sharedEdgeCase(SEAM_RAYS, transformed, seam), variant);
+                const report = await runSharedEdgeCase(device, kernel, builder, sharedEdgeCase(seamRays, transformed, seam), variant);
                 seams.push(report);
                 log(`[${variant.name}] ${report.name}: ${report.slipped} of ${report.rays} rays slipped (${report.slippedAny} any-hit)`);
                 // Split seams hold everywhere. A one-ulp seam leaks (the double-precision reference
@@ -611,7 +623,11 @@ await runGpuTest(async ({ device, log }) => {
         if (!byTest[variant.name]) continue;
         slippedTotals[variant.name] = byTest[variant.name].sharedEdges.reduce((sum, report) => sum + report.slipped, 0);
     }
+    log(`profile ${profile}: ${sharedRays} rays per shared-edge scene, ${seamRays} per seam scene`);
     return {
+        profile,
+        sharedRaysPerScene: sharedRays,
+        seamRaysPerScene: seamRays,
         skipped,
         sharedEdgeRaysPerTest: byTest[VARIANTS[0].name].sharedEdges.reduce((sum, report) => sum + report.rays, 0),
         slippedTotals,
