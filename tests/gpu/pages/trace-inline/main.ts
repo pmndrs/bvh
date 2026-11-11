@@ -3,7 +3,8 @@
  * (`traceModuleWgsl`, group 0: nodes, triangles, top level) is placed in front of a
  * kernel that calls `giTraceClosest` and `giTraceAny` itself, with three storage
  * buffers of its own in group 1 (rays in, hits out, any-hit answers out). That is
- * 3 + 3 = 6 storage buffers, inside the default per-stage limit of 8.
+ * 3 + 3 = 6 storage buffers, inside the default per-stage limit of 8. The kernel supplies the walk's
+ * triangle filter hook as "none" (`NO_TRIANGLE_FILTER_WGSL`: every triangle blocks).
  *
  * The answers are checked against the CPU reference on the oracle scenes, mirrored
  * boxes and thin walls included, plus rays at shared edges. Default device limits,
@@ -22,6 +23,7 @@ import {
     type TraceSceneData,
 } from '../../../../src/trace/index.ts';
 import type { TracedHit } from '../../../../src/trace/oracle-compare.ts';
+import { NO_TRIANGLE_FILTER_WGSL } from '../../../../src/trace/triangle-filter.ts';
 import { assert, runGpuTest } from '../../client.ts';
 import { RAY_BYTES, uploadTraceScene } from '../../trace-gpu.ts';
 import { buildOracleCases, FULL_SIZES, sharedEdgeCase, type OracleCase } from '../trace-oracle/cases.ts';
@@ -167,7 +169,7 @@ await runGpuTest(async ({ device, log }) => {
         label: 'trace-inline',
         layout: 'auto',
         compute: {
-            module: device.createShaderModule({ label: 'trace-inline', code: `${traceModuleWgsl({ group: 0, firstBinding: 0 })}\n${KERNEL_WGSL}` }),
+            module: device.createShaderModule({ label: 'trace-inline', code: `${traceModuleWgsl({ group: 0, firstBinding: 0 })}\n${NO_TRIANGLE_FILTER_WGSL}\n${KERNEL_WGSL}` }),
             entryPoint: 'main',
         },
     });
