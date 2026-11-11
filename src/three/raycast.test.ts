@@ -273,7 +273,9 @@ describe('acceleratedRaycast', () => {
         const position = geometry.attributes.position;
         for (let i = 0; i < position.count; i++) position.setXYZ(i, position.getX(i) * 2, position.getY(i) * 0.5, position.getZ(i));
         position.needsUpdate = true;
-        geometry.computeBoundingSphere(); // three culls by it
+        // three culls by both; the tree's setBoundingBox box is stale until refit, as three-mesh-bvh's.
+        geometry.computeBoundingSphere();
+        geometry.computeBoundingBox();
         const { problems, total } = compareRays(mesh, 52, 200);
         expect(problems).toEqual([]);
         expect(total).toBeGreaterThan(30);

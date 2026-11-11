@@ -15,7 +15,7 @@
 import { describe, expect, it } from 'vitest';
 import { createTinyBvhBuilder } from '../index.ts';
 import { wgslNameProblems } from '../wgsl-names.ts';
-import { createCpuTracer } from './cpu-traversal.ts';
+import { createCpuTracer, CPU_TRACE_BACK_SIDE, CPU_TRACE_DOUBLE_SIDE, CPU_TRACE_FRONT_SIDE } from './cpu-traversal.ts';
 import {
     BVH_QUERY_ANY,
     BVH_QUERY_CLOSEST,
@@ -162,6 +162,37 @@ describe('writeTriangleFilterFlags', () => {
 });
 
 describe('the CPU walk with a triangle filter against the filtered reference', () => {
+    it('filterEveryTriangle asks the filter about unflagged triangles too, and the CPU-only side option culls before it', () => {
+        const { scene, flaggedCount } = flaggedScene(STACKED, () => false);
+        expect(flaggedCount).toBe(0);
+        const asked: TriangleCandidate[] = [];
+        const passFront: TrianglePasses = (candidate) => {
+            asked.push(candidate);
+            return candidate.instance === 0;
+        };
+        const rays = gridRays(-1);
+        // Without filterEveryTriangle, unflagged triangles never reach the filter: the front quad blocks.
+        const plain = createCpuTracer(scene, { triangleFilter: passFront });
+        for (const ray of rays) expect(plain.closest(ray)?.instanceIndex).toBe(0);
+        expect(asked).toHaveLength(0);
+        // With it, every hit asks: the front quad lets the ray through to the one behind, which blocks.
+        const every = createCpuTracer(scene, { triangleFilter: passFront, filterEveryTriangle: true });
+        for (const ray of rays) expect(every.closest(ray)?.instanceIndex).toBe(1);
+        expect(asked.length).toBe(rays.length * 2);
+        expect(asked.every((candidate) => candidate.frontFace)).toBe(true);
+        // Side culling: from behind (+z rays) both quads are back faces. Front only: no hit, and the
+        // filter isn't asked about culled triangles. Back only: the nearer quad (instance 1).
+        asked.length = 0;
+        const fromBehind = gridRays(1);
+        for (const ray of fromBehind) {
+            expect(every.closest(ray, { side: CPU_TRACE_FRONT_SIDE })).toBeNull();
+            expect(plain.closest(ray, { side: CPU_TRACE_BACK_SIDE })?.instanceIndex).toBe(1);
+            expect(plain.closest(ray, { side: CPU_TRACE_DOUBLE_SIDE })?.instanceIndex).toBe(1);
+        }
+        expect(asked).toHaveLength(0);
+        for (const ray of rays) expect(plain.closest(ray, { side: CPU_TRACE_BACK_SIDE })).toBeNull();
+    });
+
     it('lets rays through a filtered-out front quad to the one behind it', () => {
         const { scene, flaggedCount } = flaggedScene(STACKED, (meshIndex) => meshIndex === 0);
         expect(flaggedCount).toBe(QUAD_TRIANGLES);
