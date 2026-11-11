@@ -39,6 +39,12 @@
  * positions (tinybvh's trees: its optimizer moves nodes, not triangles), the
  * constructor puts the triangle records in depth-first order, in place: the
  * same tree, with each subtree one run, as {@link CpuMeshBvh.traverse} needs.
+ *
+ * **Ownership.** `new CpuMeshBvh(layout)` takes the layout's buffers as its
+ * own storage: the reorder above and {@link CpuMeshBvh.refit} write them in
+ * place (nodes and triangles together, so the tree stays valid). Pass a copy
+ * if the caller keeps using the same buffers elsewhere, for example a GPU
+ * upload it will redo from them later.
  */
 
 import { GPU_LAYOUT_EMPTY_CHILD, GPU_LAYOUT_MAX_LEAF_PRIMITIVES, GPU_LAYOUT_NO_PARENT, GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_NODE_WORD, GPU_LAYOUT_NODE_WORDS, GPU_LAYOUT_TRIANGLE_BYTES, GPU_LAYOUT_TRIANGLE_WORD, type GpuLayoutMeshBvh } from '../gpu-layout.ts';
