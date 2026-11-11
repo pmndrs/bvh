@@ -98,7 +98,10 @@ export function sameHit(a: CpuHit | null, b: CpuHit | null): boolean {
         const normalClose = a.normal.every((value, axis) => Math.abs(value - b.normal[axis]) <= 1e-3);
         return a.frontFace === b.frontFace && normalClose;
     }
-    return Math.abs(a.t - b.t) <= 1e-6 * Math.max(1, b.t);
+    // Another triangle at the same distance: an exact tie, or a hit at a shared edge (the oracle's
+    // "ambiguous": f32 walks may take either neighbour there, and both are right).
+    const margin = (hit: CpuHit) => Math.min(hit.u, hit.v, 1 - hit.u - hit.v);
+    return Math.abs(a.t - b.t) <= 1e-6 * Math.max(1, b.t) || Math.min(margin(a), margin(b)) < 1e-4;
 }
 
 export interface Disagreement {

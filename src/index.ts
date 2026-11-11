@@ -88,3 +88,22 @@ export { checkGpuLayout, treeSahCost, type LayoutCheckMergedIdentity, type Layou
 // The tracer's layout, the WGSL walk (closest/any) and its CPU port, the oracle,
 // tinybvh trees in the tracer's layout, the top-level builder and the worker wrappers (BX.2).
 export * from './trace/index.ts';
+
+// A scene's trees on one device: GPU H-PLOC trees first, tinybvh's from the worker pool swapped in
+// mesh by mesh, the GPU top level (or the CPU one without subgroups), runtime adds and removals,
+// merged static groups, and memory stats.
+export {
+    GPU_TREE_MAX_DEPTH,
+    SceneTrees,
+    type GpuTreeOutputsMode,
+    type SceneInstanceChange,
+    type SceneInstanceDescriptor,
+    type SceneMeshStatus,
+    type SceneTreeCounts,
+    type SceneTreeEvent,
+    type SceneTreesMemory,
+    type SceneTreesOptions,
+    type SceneTreesTimeline,
+    type TreeBuilder,
+} from './scene/scene-trees.ts';
+export { GpuFirstTrees, GpuTreeOutputs, type FirstTreeBuilder, type GpuBuiltTree, type GpuTreeBatchResult, type GpuTreeBuilds, type GpuTreeRequest } from './scene/gpu-first-trees.ts';

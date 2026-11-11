@@ -604,6 +604,17 @@ export class GpuHplocBatch {
         }
     }
 
+    /** GPU bytes the batch holds until `finish` or `destroy`: its inputs, scratch and uniforms (not the outputs). */
+    get scratchBytes(): number {
+        return this.destroyed ? 0 : this.owned.reduce((sum, buffer) => sum + buffer.size, 0);
+    }
+
+    /** GPU bytes of the output trees (nodes, triangles, parents), which `finish` hands to the caller. */
+    get outputBytes(): number {
+        const { outNodes, outTriangles, outParents } = this.buffers;
+        return outNodes.size + outTriangles.size + outParents.size;
+    }
+
     /** Frees the scratch, the inputs and the uniforms. Trees handed out by `finish` are not touched. */
     destroy(): void {
         if (this.destroyed) return;
