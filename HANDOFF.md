@@ -2,61 +2,65 @@
 
 This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `packages/bvh`. The full plan is [docs/design/bvh-package-split.md](docs/design/bvh-package-split.md): the decisions (D1–D8), the target layout, phases P0–P9, examples, docs and tasks BX.0–BX.20. Read it first.
 
-## Update 2026-11-11, latest: `@pmndrs/bvh/three` (stages 1-3)
+## Current state (end of 2026-11-11). Read this first; the sections further down are history.
 
-`src/three/` is the `./three` subpath (three is an optional peer; ESLint allows three only there). See [docs/three.md](docs/three.md).
-- `bvhSceneFromObject3D` and `SceneTreesObject3DSync` turn three objects into SceneTrees/buildTraceScene inputs and keep them in step.
-- `BvhTraceNodes` puts the walk in three's node system. It is checked on the M5 by `tests/gpu/pages/three-trace`.
-- `computeBoundsTree`/`acceleratedRaycast` are CPU raycasts that match three's. They run at three-mesh-bvh's speed in Node (`bench/three-raycast.ts`).
-- `BvhTraceNodes` sets three's backend buffer for its storage attributes, which is internal to three 0.187. Recheck it when three is upgraded.
+**Dennis's decisions:**
+- **Source of truth:** this repo, for BVH and walk code. webgpu-ddgi's copy is frozen until P3, and its split point is `d288adf`.
+- **Commits:** local only, never pushed. Opus writes the code and does the reviews; Sonnet or Haiku take the mechanical tasks.
+- **Walk API:**
+  - WGSL names use `bvh*`.
+  - Filter hook: `bvhTrianglePasses(BvhCandidate)`, where the candidate includes `query` and `rayMask`. ddgi's materials stay in ddgi.
+  - 8-bit instance masks, compiled out with `rayMasks: false`.
+- **`mergeStaticInstances`** comes before the release. It stays off by default until the RTX 3060 has been measured.
+- **Package scope:** it should serve every project that needs a BVH, not just ddgi. See "Consumers" below.
 
-## Update 2026-11-11, later: scene trees moved in (branch of BX.21)
+**On `main`** (306 tests; lint, typecheck, build and the licence check pass; every correctness page passes on the Apple M5):
+- **Ported from ddgi `main` after the split:** shared refit kernels, and the Metal watertight fix `bvhEdgeFunction`. On the M5, rays slipping through shared edges went from 4,513 per 2M to 0.
+- **GPU page runner:** `pnpm test:gpu`, `pnpm test:gpu:page <name>`; see `tests/gpu/README.md`. Scene pages need `BVH_ASSETS_DIR=~/Developer/webgpu-ddgi-radiance-cache/assets` and `BVH_MANIFESTS_DIR=~/Developer/webgpu-ddgi-radiance-cache/scenes/manifests`.
+- **Walk API for 0.1**, at `GPU_LAYOUT_VERSION` 2 (unreleased):
+  - names, filter and masks as above;
+  - `BvhHit.normal` and `BvhHit.material` (material + 1 in instance flags bits 16-31);
+  - a 40-byte hit record by default, or 24 bytes with `hitNormal: false`.
+- **`mergeStaticInstances`:** a merged world-space tree with exact hit identity. Triangle word 11 holds the source instance, flag bit 1 flips the face, and instance bit 3 marks a merged instance. App triangle flags may use bit 0 only.
+  - Measured on the package under the radiance-cache lane's bench lock: Sponza surface rays 1.85x closest-hit, 1.36x any-hit; Bistro interior 1.22x and 1.11x.
+  - Pages: `trace-bench-surface-*`. Rows are in `bench/results/trace.csv`.
+- **`SceneTrees`** (`src/scene/`):
+  - GPU H-PLOC trees first, then tinybvh trees from `@pmndrs/bvh/worker` swapped in per mesh;
+  - growable storage;
+  - `GpuTopLevel`;
+  - meshes and instances added or removed at runtime, merged static groups, deforming meshes.
+  - On Sponza: first trees in 100-118 ms, every tinybvh tree in about 370 ms. Peak memory is 1,483 MB, during the H-PLOC build itself.
+- **`@pmndrs/bvh/three`** (three is a peer, `>=0.187.0 <0.188.0`); see `docs/three.md`:
+  - `bvhSceneFromObject3D` and `SceneTreesObject3DSync`;
+  - `BvhTraceNodes`, for TSL and `wgslFn`. It binds through three internals, collected in `threeInternals`, and checks that binding at run time;
+  - `computeBoundsTree` and `acceleratedRaycast`, which run at three-mesh-bvh's speed.
+- **Packaging:**
+  - `tsc` builds `dist/`;
+  - `scripts/verify-artifacts.mjs` checks that the licence text, the worker URLs and `/three` survive the build;
+  - ESLint enforces the engine-free core: only `src/three` may import three;
+  - CI is in `.github/workflows/ci.yml`. Its `wasm` and SwiftShader jobs have never run, because nothing has been pushed.
+- **Docs:**
+  - `docs/DIVERGENCES.md`: 32 rows, plus 8 items marked "needs Dennis";
+  - `docs/MIGRATING-FROM-DDGI.md` (P3);
+  - `docs/MIGRATING-FROM-REFLECTIONS-BRANCH.md`;
+  - `docs/three.md`;
+  - `docs/design/trace.md`.
 
-ddgi's scene-tree management is in the package now, engine-free:
-- `src/trace/trace-gpu.ts`: `TraceBatchKernel`, `uploadTraceScene` (from `tests/gpu/`), exported.
-- `@pmndrs/bvh/worker` (`src/worker/`): `createBvhWorkerPool` (single-threaded workers, size, transferables, AbortSignal, inline fallback), plus the old one-worker wrappers. The build now rewrites `new URL('./x.ts')` worker URLs to `.js` (they pointed at missing files in `dist/` before).
-- `src/trace/top-level-gpu.ts`: `GpuTopLevel` (own instance table, gather `bvhTopLevelGather`, refit, shapes from the worker), material via `materialCode`, mask bits 8-15.
-- `src/scene/`: `SceneTrees` (GPU H-PLOC first trees, tinybvh swapped in from the pool, growable storage, GPU or CPU top level, runtime adds/removals, `mergeStaticInstances` with a GPU identity pass for merged GPU trees, deforming meshes with GPU refit and drift rebuilds, events, memory stats); `gpuTreeOutputs: 'copy' | 'adopt'`.
-- Pages: `bvh-top-level-gpu`, `scene-trees-mid-swap` (the generic mid-swap oracle), `scene-trees-runtime`, `scene-trees-deforming`, `scene-trees-sponza` (manual).
+**Consumers** (from a survey of ~/Developer on 2026-11-11):
+- **ddgi and its rc-\* copies:** still on the frozen copy. They switch at P3.
+- **reflections:** linked to the old-API branch `reflections-integration`. It can move to `main`; see its migration doc.
+- **Denoiser, upscaler, ddgi-research:** use three-mesh-bvh `/webgpu`. They can switch through `/three`, as `docs/three.md` describes.
+- **three-bvh-csg, homefig, drei, three-gpu-pathtracer:** need CPU queries (P8).
 
-Sponza on the M5 (`scene-trees-sponza`, 132 meshes, 5.74 M triangles, pool of 4): first GPU trees 100-118 ms, every tinybvh tree built 366-369 ms (1.30 s with the merged group on one worker). Memory: `copy` 1,106 MB with the GPU trees in use, 470 MB settled; `adopt` 614 MB in use, 614 MB settled (the batch's node buffer, 351 MB, stays). The peak, 1,483 MB in every mode, is during the H-PLOC build itself (its scratch plus outputs), which ddgi's numbers didn't count; `copy` stays the default.
-
-## Update 2026-11-11 (read this first; the sections below are the 2026-11-10 state)
-
-**Decisions (Dennis):**
-- This repo is the source of truth for BVH and walk code. webgpu-ddgi's copy is frozen until P3.
-- ddgi's material check became a generic filter hook. ddgi's materials stay in ddgi.
-- The WGSL names go from `gi*` to `bvh*`.
-- The filter is `bvhTrianglePasses(BvhCandidate)`, and the candidate carries `query` and `rayMask`.
-- 8-bit instance masks, with a `rayMasks: false` build that removes them.
-- Local commits only, never push.
-
-**Done on `main`:**
-- `pnpm install`, `typecheck` and `test` work: 205 tests.
-- The ddgi `main` changes after the split point `d288adf` are ported: shared refit kernels, and the Metal watertight fix (`bvhEdgeFunction`).
-- The GPU page runner is ported (`pnpm test:gpu`, `pnpm test:gpu:page <name>`; see `tests/gpu/README.md`). All correctness pages and the oracle pass on an Apple M5: shared-edge slips went from 4,513 per 2M rays to 0.
-- `THIRD_PARTY.md` and the docs paths are cleaned up, and `trace.md` is trimmed to the walk and layout.
-- New docs:
-  - `docs/DIVERGENCES.md`: 32 rows, plus 8 "needs Dennis" items;
-  - `docs/MIGRATING-FROM-DDGI.md`: the P3 checklist.
-- The walk API is final for 0.1, with `GPU_LAYOUT_VERSION` 2. Masked and unmasked runs show no measurable difference in the quick bench, but that bench is noisy.
-
-**Hit normal and per-instance material (ported from `reflections-integration` 9aaaa11 onto the 0.1 API):**
-- `BvhHit` gained `material: u32` (`BVH_NO_MATERIAL` for none) and `normal: vec3f` (world geometric normal of the authored front side, unit). Both are worked out once per closest hit after the walk (`bvhFinishClosest`), from the kept instance record and triangle slot: for an instance, the object-space edge cross through the transpose of the world-to-object rows; for a merged triangle, the world-space cross, negated on flags bit 1.
-- `material?: number` (0-65534, else `RangeError`) on `TraceInstance`/`TraceSceneInstance`, stored as material + 1 in instance flags bits 16-31. Merged triangles carry their source's in triangle flags bits 16-31 (`StaticMergeGroup.sourceMaterials`, written by assembly). It isn't a grouping key, and a changed material fails re-assembly. `checkTriangleFlags` still allows bit 0 only. Layout version stays 2.
-- `batchKernelWgsl(mode, { hitNormal })`: the 40-byte `BvhHitRecord` by default (`HIT_RECORD_BYTES`, `HIT_RECORD_WORD` with `material` 6 and `normal` 7-9). With `false`, the 24-byte `BvhHitRecordCompact` has no material (no padding to hold it): `HIT_RECORD_COMPACT_BYTES`, `HIT_RECORD_COMPACT_WORD`, `hitRecordBytes()`.
-- CPU walk, reference and `compareClosest` (cosine >= 0.9999) compare both. `trace-oracle` (all variants, merged included, plus a `-compact` variant) and `trace-inline` check them, and both pass on the Apple M5.
-- For the reflections project: `docs/MIGRATING-FROM-REFLECTIONS-BRANCH.md`.
-
-**Still open in P2:**
-- `TraceBatchKernel` and `uploadTraceScene` were copied into `tests/gpu/trace-gpu.ts`. They belong in `src/trace/`.
-- `src/trace/index.ts` still uses `export *`.
-- `/worker` isn't its own subpath yet.
-- The batch helpers in `gpu-lbvh.ts` need a neutral file.
-- The two layout files should be folded into one.
-- The library build, ESLint, CI and `0.1.0-alpha`.
-- `bvh:wasm --check` needs the pinned emsdk, which isn't installed.
-- Scene pages need the converted assets: `BVH_ASSETS_DIR=~/Developer/webgpu-ddgi-radiance-cache/assets`.
+**Open:**
+- **RTX 3060 and Intel:** none of today's work has run on them. The radiance-cache lane runs its RTX pass for the merged tree.
+- **The 40-byte hit record's cost:** not measured.
+- **The `LICENSE` file:** missing, and the holder (Dennis Smolek or Poimandres) is undecided.
+- **`bvh:wasm --check`:** needs the pinned emsdk, which isn't downloaded.
+- **Peak memory:** smaller H-PLOC batches are the next lever to measure.
+- **Still to do in `/three`:** draw ranges and groups that don't start on a multiple of 3, skinned and morphed meshes, a CPU scene raycast, a helper, and Windows compile cost.
+- **API tidy:** `export *` in `src/trace/index.ts`, the batch helpers in `gpu-lbvh.ts`, and folding the two layout files into one.
+- **Next phases:** Babylon (P6), the P4 examples and docs site, the comparison suite (P5), and CPU queries (P8).
 
 ## Where things stood on 2026-11-10
 
