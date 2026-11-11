@@ -11,6 +11,7 @@ export {
     type BvhWorkerPoolOptions,
     type BvhWorkerPoolStats,
 } from './pool.ts';
+export { generateCpuMeshBvh } from './generate.ts';
 export { createMeshBvhBuilder, type MeshBvhBuilder, type MeshBvhBuilderConfig } from '../trace/mesh-bvh-async.ts';
 export { createTopLevelBuilder, type TopLevelBuilder, type TopLevelBuilderConfig, type TopLevelResult } from '../trace/top-level-async.ts';
 export type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from '../trace/mesh-bvh.ts';

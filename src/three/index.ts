@@ -18,8 +18,27 @@ export {
 } from './scene.ts';
 export { SceneTreesObject3DSync, type Object3DSyncCounts, type SceneTreesTarget } from './scene-trees-sync.ts';
 
-// CPU raycasts (Q1): three-mesh-bvh-style drop-ins over the CPU walk.
-export { acceleratedRaycast, BvhBoundsTree, computeBoundsTree, disposeBoundsTree, prepareBoundsTrees, type BvhBoundsTreeOptions } from './raycast.ts';
+// CPU raycasts (Q1) and the CPU tree: three-mesh-bvh-style drop-ins over the core's CpuMeshBvh.
+export {
+    acceleratedRaycast,
+    AVERAGE,
+    BvhBoundsTree,
+    buildOptionsFromThreeMeshBvh,
+    CENTER,
+    computeBoundsTree,
+    deserializeBoundsTree,
+    disposeBoundsTree,
+    getTriangleHitPointInfo,
+    meshInputFromGeometry,
+    prepareBoundsTrees,
+    SAH,
+    setBoundsTree,
+    type BvhBoundsTreeHit,
+    type BvhBoundsTreeOptions,
+    type BvhHitPointInfo,
+    type BvhSplitStrategy,
+} from './raycast.ts';
+export { GenerateMeshBvhWorker, type GenerateMeshBvhWorkerOptions } from './generate.ts';
 
 // The walk in three's node system (three-mesh-bvh's BVHComputeData pattern), for TSL and wgslFn.
 export { BvhTraceNodes, bvhTraceHitStruct, type BvhTraceBufferSource, type BvhTraceNodesOptions, type BvhTslNode } from './trace-nodes.ts';

@@ -133,10 +133,21 @@ export interface CpuTracerOptions {
     readonly triangleFilter?: TrianglePasses;
     /** As the trace module's `rayMasks` option. Default true. */
     readonly rayMasks?: boolean;
+    /**
+     * Ask `triangleFilter` about every triangle, flagged or not, as if each had
+     * `TRIANGLE_FLAG_FILTER` set. The CPU mesh tree (`CpuMeshBvh`) uses it for
+     * side culling and all-hit queries without writing the flag into a layout
+     * it may share. Default false. Not in the WGSL walk.
+     */
+    readonly filterEveryTriangle?: boolean;
 }
 
-export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions = {}): CpuTracer {
+/** The parts of a {@link TraceSceneData} the walk reads. */
+export type CpuTraceScene = Pick<TraceSceneData, 'nodes' | 'triangles' | 'topLevel'>;
+
+export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions = {}): CpuTracer {
     const triangleFilter = options.triangleFilter;
+    const filterEveryTriangle = options.filterEveryTriangle ?? false;
     const rayMasks = options.rayMasks ?? true;
     const nodeFloats = new Float32Array(scene.nodes);
     const nodeWords = new Uint32Array(scene.nodes);
@@ -274,7 +285,7 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
                     const frontFace = hit.frontFace !== ((triangleWords[base + TRIANGLE_WORD.flags] & TRIANGLE_FLAG_FLIP_FRONT_FACE) !== 0);
                     // As the WGSL leaf test: a flagged triangle's filter may let the ray through,
                     // and then nothing is recorded and closestT stays.
-                    const consult = (triangleWords[base + TRIANGLE_WORD.flags] & TRIANGLE_FLAG_FILTER) !== 0;
+                    const consult = filterEveryTriangle || (triangleWords[base + TRIANGLE_WORD.flags] & TRIANGLE_FLAG_FILTER) !== 0;
                     if (
                         consult &&
                         triangleFilter &&
