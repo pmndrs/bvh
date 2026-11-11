@@ -2,7 +2,37 @@
 
 This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `packages/bvh`. The full plan is [docs/design/bvh-package-split.md](docs/design/bvh-package-split.md): the decisions (D1–D8), the target layout, phases P0–P9, examples, docs and tasks BX.0–BX.20. Read it first.
 
-## Where things stand
+## Update 2026-11-11 (read this first; the sections below are the 2026-11-10 state)
+
+**Decisions (Dennis):**
+- This repo is the source of truth for BVH and walk code. webgpu-ddgi's copy is frozen until P3.
+- ddgi's material check became a generic filter hook. ddgi's materials stay in ddgi.
+- The WGSL names go from `gi*` to `bvh*`.
+- The filter is `bvhTrianglePasses(BvhCandidate)`, and the candidate carries `query` and `rayMask`.
+- 8-bit instance masks, with a `rayMasks: false` build that removes them.
+- Local commits only, never push.
+
+**Done on `main`:**
+- `pnpm install`, `typecheck` and `test` work: 205 tests.
+- The ddgi `main` changes after the split point `d288adf` are ported: shared refit kernels, and the Metal watertight fix (`bvhEdgeFunction`).
+- The GPU page runner is ported (`pnpm test:gpu`, `pnpm test:gpu:page <name>`; see `tests/gpu/README.md`). All correctness pages and the oracle pass on an Apple M5: shared-edge slips went from 4,513 per 2M rays to 0.
+- `THIRD_PARTY.md` and the docs paths are cleaned up, and `trace.md` is trimmed to the walk and layout.
+- New docs:
+  - `docs/DIVERGENCES.md`: 32 rows, plus 8 "needs Dennis" items;
+  - `docs/MIGRATING-FROM-DDGI.md`: the P3 checklist.
+- The walk API is final for 0.1, with `GPU_LAYOUT_VERSION` 2. Masked and unmasked runs show no measurable difference in the quick bench, but that bench is noisy.
+
+**Still open in P2:**
+- `TraceBatchKernel` and `uploadTraceScene` were copied into `tests/gpu/trace-gpu.ts`. They belong in `src/trace/`.
+- `src/trace/index.ts` still uses `export *`.
+- `/worker` isn't its own subpath yet.
+- The batch helpers in `gpu-lbvh.ts` need a neutral file.
+- The two layout files should be folded into one.
+- The library build, ESLint, CI and `0.1.0-alpha`.
+- `bvh:wasm --check` needs the pinned emsdk, which isn't installed.
+- Scene pages need the converted assets: `BVH_ASSETS_DIR=~/Developer/webgpu-ddgi-radiance-cache/assets`.
+
+## Where things stood on 2026-11-10
 
 - **P1 is done (BX.1 and BX.2), but not tested after BX.2.**
   - BX.1 (`e181f68`): renamed the shared types into `src/mesh-input.ts`, curated `src/index.ts`, added `GPU_LAYOUT_VERSION` and `serializeLayout`/`deserializeLayout`. It was tested in webgpu-ddgi on an RTX 3060: the unit tests and the GPU pages passed, and both oracles reported 0 mismatches.
