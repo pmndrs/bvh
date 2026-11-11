@@ -123,7 +123,14 @@ let frontFace = triangleHit.frontFacing != ((triangle.flags & BVH_TRIANGLE_FLAG_
 | Sponza | 1.86x | 1.39x |
 | Bistro interior | 1.24x | 1.13x |
 
-Source: `docs/design/radiance-cache-speed.md` (lever 20) and `tools/gpu/pages/trace-bench/surface-rays-bench.ts` (`TreeLayout = 'merged'`) in webgpu-ddgi-radiance-cache. That bench matched hits only approximately (0.999 agreement). Here hit identity is exact (instance, triangle, side), while `t` agrees to rounding, so on a near-tie the merged walk may pick the other triangle. The radiance-cache team re-runs its surface-ray benches against this branch.
+Source: `docs/design/radiance-cache-speed.md` (lever 20) and `tools/gpu/pages/trace-bench/surface-rays-bench.ts` (`TreeLayout = 'merged'`) in webgpu-ddgi-radiance-cache. That bench matched hits only approximately (0.999 agreement). Here hit identity is exact (instance, triangle, side), while `t` agrees to rounding, so on a near-tie the merged walk may pick the other triangle. **This package, re-measured (2026-11-11, `c36b263`, Apple M5 Pro, Chrome 157, the radiance-cache team's bench lock, 3 runs of 5 paired rounds each).** Pages `trace-bench-surface-sponza` and `trace-bench-surface-bistro-interior`; the rows are in `bench/results/trace.csv` (`surface-rays/paired/...`). The table gives the median over runs of each run's paired median, merged over instanced:
+
+| Scene | Surface, closest | Surface, any | Air grid, closest | Air grid, any |
+| --- | --- | --- | --- | --- |
+| Sponza | 1.85x (1.83–1.93) | 1.36x (1.33–1.44) | 1.49x | 1.20x |
+| Bistro interior | 1.22x (1.21–1.24) | 1.11x (1.10–1.11) | 1.19x | 1.31x |
+
+These match RC5.4 within noise, so the package keeps the gain. On Sponza, steps per surface ray drop from 113.8 to 70.3, and instance entries from 9.8 to 1.0. The RTX 3060 hasn't been measured yet, so the option stays off by default until it is.
 
 ## Why the triangle test is watertight
 
