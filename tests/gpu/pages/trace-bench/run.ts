@@ -356,7 +356,7 @@ async function runScene(context: BenchContext, sceneId: string): Promise<SceneRe
 
 function describeMode(sceneId: string, mode: ModeResult): string {
     return (
-        `${sceneId}: ${mode.tracer} ${mode.mode}: ${mode.timing.medianMs.toFixed(3)} ms median over ${mode.timing.samplesMs.length}, ` +
+        `${sceneId}: ${mode.tracer} ${mode.mode}${mode.rayMasks ? ' (masked)' : ''}: ${mode.timing.medianMs.toFixed(3)} ms median over ${mode.timing.samplesMs.length}, ` +
         `${mode.mraysPerSecond.toFixed(1)} Mrays/s (${mode.timingSource})`
     );
 }

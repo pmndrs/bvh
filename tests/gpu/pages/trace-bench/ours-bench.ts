@@ -394,8 +394,17 @@ export interface TimingPlan {
     timed: number;
 }
 
-function summarizeMode(tracer: TracerId, mode: TraceMode, rays: number, timer: DispatchTimer, timing: Awaited<ReturnType<typeof measureDispatches>>): ModeResult {
-    return { tracer, mode, rays, timing, timingSource: timer.source, mraysPerSecond: megaRaysPerSecond(rays, timing.medianMs) };
+function summarizeMode(
+    tracer: TracerId,
+    mode: TraceMode,
+    rays: number,
+    timer: DispatchTimer,
+    timing: Awaited<ReturnType<typeof measureDispatches>>,
+    rayMasks = false,
+): ModeResult {
+    const result: ModeResult = { tracer, mode, rays, timing, timingSource: timer.source, mraysPerSecond: megaRaysPerSecond(rays, timing.medianMs) };
+    if (rayMasks) result.rayMasks = true;
+    return result;
 }
 
 /** Pulls `t` out of an array of `BvhHitRecord`s. */
@@ -421,7 +430,10 @@ export async function runOursTracer(
 ): Promise<OursTracerRun> {
     const resources = new Resources();
     try {
-        const kernel = await TraceBatchKernel.create(device, { label: tracer });
+        // The numbers compared with other tracers come from a build without ray masks, as the earlier
+        // measurements did. A second kernel with masks (all-ones mask) measures what the masks cost.
+        const kernel = await TraceBatchKernel.create(device, { label: tracer, rayMasks: false });
+        const maskedKernel = await TraceBatchKernel.create(device, { label: `${tracer} masked`, rayMasks: true });
         const scene = resources.add(uploadTraceScene(device, data, tracer));
 
         const hits = resources.add(
@@ -443,6 +455,15 @@ export async function runOursTracer(
         );
         modes.push(summarizeMode(tracer, 'closest', rays.closestCount, timer, closestTiming));
         const hitRecords = await readBuffer(device, hits, rays.closestCount * HIT_RECORD_BYTES);
+        const maskedClosestTiming = await measureDispatches(
+            () =>
+                timer.time((encoder, timestampWrites) =>
+                    maskedKernel.encode(encoder, scene, { mode: 'closest', rays: rays.closestRays, results: hits, count: rays.closestCount, mask: 0xff, timestampWrites }),
+                ),
+            plan.warmups,
+            plan.timed,
+        );
+        modes.push(summarizeMode(tracer, 'closest', rays.closestCount, timer, maskedClosestTiming, true));
 
         let blocked: Uint32Array | null = null;
         if (rays.shadowRays && rays.shadowCount > 0) {
@@ -464,6 +485,15 @@ export async function runOursTracer(
             );
             modes.push(summarizeMode(tracer, 'any', rays.shadowCount, timer, anyTiming));
             blocked = new Uint32Array(await readBuffer(device, occlusion, rays.shadowCount * 4));
+            const maskedAnyTiming = await measureDispatches(
+                () =>
+                    timer.time((encoder, timestampWrites) =>
+                        maskedKernel.encode(encoder, scene, { mode: 'any', rays: shadowRays, results: occlusion, count: rays.shadowCount, mask: 0xff, timestampWrites }),
+                    ),
+                plan.warmups,
+                plan.timed,
+            );
+            modes.push(summarizeMode(tracer, 'any', rays.shadowCount, timer, maskedAnyTiming, true));
         }
         return { modes, hitRecords, closestT: extractHitDistances(hitRecords), blocked };
     } finally {
@@ -487,7 +517,7 @@ export async function estimateNsPerRay(device: GPUDevice, timer: DispatchTimer, 
     const resources = new Resources();
     try {
         const count = sampleRays.length / RAY_FLOATS;
-        const kernel = await TraceBatchKernel.create(device, { label: 'ours calibrate' });
+        const kernel = await TraceBatchKernel.create(device, { label: 'ours calibrate', rayMasks: false });
         const scene = resources.add(uploadTraceScene(device, data, 'ours calibrate'));
         const rays = resources.add(uploadRays(device, 'calibration rays', sampleRays));
         const hits = resources.add(
@@ -519,7 +549,7 @@ export async function traceClosestOnce(
 ): Promise<ArrayBuffer> {
     const resources = new Resources();
     try {
-        const kernel = await TraceBatchKernel.create(device, { label: 'ours prepare' });
+        const kernel = await TraceBatchKernel.create(device, { label: 'ours prepare', rayMasks: false });
         const scene = resources.add(uploadTraceScene(device, data, 'ours prepare'));
         const hits = resources.add(
             device.createBuffer({

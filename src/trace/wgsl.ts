@@ -354,6 +354,15 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
 `;
 }
 
+/** The old API took the slot `{ group, firstBinding }` as its first argument; in plain JS that would be silently misread. */
+function rejectOldPositionalCall(name: string, options: object | null | undefined): void {
+    if (options !== null && typeof options === 'object' && ('group' in options || 'firstBinding' in options)) {
+        throw new TypeError(
+            `${name}: got 'group' or 'firstBinding' in the options. The slot is no longer positional; pass { traceSlot: { group, firstBinding } }.`,
+        );
+    }
+}
+
 /** Options of {@link traceModuleWgsl}. */
 export interface TraceModuleOptions {
     /** Where the module's three bindings land. Default: group 0, bindings 0-2. */
@@ -386,6 +395,7 @@ const DEFAULT_TRACE_SLOT: BindingSlot = { group: 0, firstBinding: 0 };
  * `bvhTrianglePasses` for flagged triangles (triangle-filter.ts).
  */
 export function traceModuleWgsl(options: TraceModuleOptions = {}): string {
+    rejectOldPositionalCall('traceModuleWgsl', options);
     const slot = options.traceSlot ?? DEFAULT_TRACE_SLOT;
     const rayMasks = options.rayMasks ?? true;
     const triangleFilter = options.triangleFilter === undefined ? DEFAULT_TRIANGLE_FILTER_WGSL : options.triangleFilter;
@@ -666,7 +676,7 @@ fn bvhInstanceMask(instance: BvhInstance) -> u32 {
 `;
 
 const MASKED_TRACE_WGSL = /* wgsl */ `
-// Nearest hit; flagged triangles the filter lets through are skipped. Every instance is visible.
+// Nearest hit; flagged triangles the filter lets through are skipped. Walks with all-ones, so an instance whose mask is 0 is never hit (as in DXR).
 fn bvhTraceClosest(ray: BvhRay) -> BvhHit {
     return bvhWalkClosest(ray, BVH_RAY_MASK_ALL);
 }
@@ -813,7 +823,13 @@ export const BATCH_PARAMS_WORD = { rayMask: 0 } as const;
  * filter, and the batch's own group 1 (rays, results, and with ray masks the
  * batch's mask). The entry point is `bvhBatch`.
  */
-export function batchKernelWgsl(mode: 'closest' | 'any', options: BatchKernelOptions = {}): string {
+export function batchKernelWgsl(mode: 'closest' | 'any', options: BatchKernelOptions = {}, ...extra: unknown[]): string {
+    if (extra.length > 0) {
+        throw new TypeError(
+            'batchKernelWgsl(mode, options) takes two arguments; the old (mode, slot, filter) form is gone. Pass { traceSlot: { group, firstBinding }, triangleFilter } instead.',
+        );
+    }
+    rejectOldPositionalCall('batchKernelWgsl', options);
     const rayMasks = options.rayMasks ?? true;
     return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks })}
 ${batchEntryWgsl(mode, 1, rayMasks)}`;

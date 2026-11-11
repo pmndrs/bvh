@@ -4,7 +4,7 @@
  * converter script and its test share them.
  *
  * Metric names are `<group>/<what>_<unit>`, with the tracer and mode in the
- * group, for example `ours-tinybvh/closest/mrays_per_s` or `tmbvh/build_ms_total`.
+ * group, for example `ours-tinybvh/closest/mrays_per_s` (`closest-masked` for our kernel built with ray masks) or `tmbvh/build_ms_total`.
  */
 
 import type { AgreementResult, ModeResult, SceneResult, SyntheticResult, TraceBenchData } from './results.ts';
@@ -17,7 +17,7 @@ export interface MetricRow {
 }
 
 function modeRows(scene: string, mode: ModeResult): MetricRow[] {
-    const prefix = `${mode.tracer}/${mode.mode}`;
+    const prefix = `${mode.tracer}/${mode.mode}${mode.rayMasks ? '-masked' : ''}`;
     return [
         { scene, metric: `${prefix}/mrays_per_s`, value: mode.mraysPerSecond },
         { scene, metric: `${prefix}/gpu_ms_median`, value: mode.timing.medianMs },

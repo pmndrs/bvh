@@ -117,7 +117,7 @@ ddgi's GPU pass (`gi/triangle-flags`) writes the same bit of the same word, so i
 | 8-15 | the instance mask (`INSTANCE_MASK_SHIFT`, `INSTANCE_MASK_BITS`): 8 bits as in DXR |
 | 16-31 | reserved, 0 |
 
-A masked trace skips an instance whose `(instanceMask & rayMask) == 0` at the top level, before entering its tree. `bvhTraceClosest` and `bvhTraceAny` use all ones. `buildTopLevel` and `assembleTraceScene` write `0xff` (visible to every ray) unless the instance gives `mask` (0-255; anything else is a `RangeError`).
+A masked trace skips an instance whose `(instanceMask & rayMask) == 0` at the top level, before entering its tree. `bvhTraceClosest` and `bvhTraceAny` use all ones, so **an instance whose mask is 0 is never hit** by them either (as in DXR) unless masks are compiled out with `rayMasks: false`, where every instance is visible. The cost with masks on is one shift, AND and compare per instance leaf, not per triangle. `buildTopLevel` and `assembleTraceScene` write `0xff` (visible to every ray) unless the instance gives `mask` (0-255; anything else is a `RangeError`).
 
 **What ddgi must change:** every place ddgi writes instance records itself must write the mask bits, or, with masks on, every instance has mask 0 and no ray sees it:
 

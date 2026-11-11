@@ -446,6 +446,18 @@ describe('the triangle filter and ray masks in the WGSL walk', () => {
         expect(masked).toContain('bvhTraceAnyMasked(bvhBatchRays[rayIndex], bvhBatchParams.rayMask)');
     });
 
+    it('throws a TypeError, naming traceSlot, on the old positional slot and filter arguments', () => {
+        const old = { group: 0, firstBinding: 0 } as never;
+        expect(() => traceModuleWgsl(old)).toThrow(TypeError);
+        expect(() => traceModuleWgsl(old)).toThrow(/traceSlot/);
+        expect(() => traceModuleWgsl({ firstBinding: 3 } as never)).toThrow(/traceSlot/);
+        expect(() => batchKernelWgsl('closest', old)).toThrow(TypeError);
+        expect(() => batchKernelWgsl('closest', old)).toThrow(/traceSlot/);
+        const call = batchKernelWgsl as (...args: unknown[]) => string;
+        expect(() => call('any', {}, 'fn bvhTrianglePasses() {}')).toThrow(TypeError);
+        expect(() => call('any', { group: 1, firstBinding: 0 }, undefined)).toThrow(/traceSlot/);
+    });
+
     it('keeps every name it declares in the bvh namespace', () => {
         for (const rayMasks of [true, false]) {
             const module = traceModuleWgsl({ rayMasks, triangleFilter: null });

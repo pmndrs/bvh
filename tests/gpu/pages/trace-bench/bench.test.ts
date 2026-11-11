@@ -286,6 +286,13 @@ describe('CSV rows', () => {
         expect(metrics).toContain('device limit/max_storage_buffer_binding_size_bytes');
     });
 
+    it('names the extra masked pass <mode>-masked', () => {
+        const masked = { ...data, scenes: data.scenes.map((scene) => ({ ...scene, modes: scene.modes.map((mode) => ({ ...mode, rayMasks: true })) })) } as unknown as TraceBenchData;
+        const metrics = traceBenchRows(masked).map((row) => row.metric);
+        expect(metrics).toContain('ours-wt/closest-masked/mrays_per_s');
+        expect(metrics).not.toContain('ours-wt/closest/mrays_per_s');
+    });
+
     it('says how many probes were traced and whether the grid was thinned', () => {
         const rows = traceBenchRows(data);
         const value = (metric: string) => rows.find((row) => row.metric === metric)?.value;
