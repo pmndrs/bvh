@@ -66,9 +66,13 @@ import {
     BvhMatrix4,
     OrientedBox,
     sphereIntersectsBox,
+    triangleClosestPointToPoint,
+    triangleDistanceToTriangle,
     triangleIntersectsTriangle,
     transformPoint,
+    BvhVector3,
     type BvhBox3Like,
+    type BvhVector3Like,
     type BvhMatrix4Like,
     type BvhQueryTriangle,
     type BvhSphereLike,
@@ -222,6 +226,23 @@ export interface BvhBvhcastCallbacks<Triangle = BvhQueryTriangle> {
      */
     intersectsTriangles?(triangle1: Triangle, triangle2: Triangle, i1: number, i2: number, depth1: number, nodeIndex1: number, depth2: number, nodeIndex2: number): unknown;
 }
+
+/**
+ * What {@link CpuMeshBvh.closestPointToPoint} and
+ * {@link CpuMeshBvh.closestPointToGeometry} write: three-mesh-bvh's
+ * `HitPointInfo`. `Point` is a {@link BvhVector3} here, a three `Vector3` in
+ * `@pmndrs/bvh/three`.
+ */
+export interface BvhClosestPoint<Point extends BvhVector3Like = BvhVector3Like> {
+    /** The closest point, in the tree's space (for `target2` of `closestPointToGeometry`, the other geometry's). */
+    point: Point;
+    distance: number;
+    /** The triangle's original index (in the input's index order). */
+    faceIndex: number;
+}
+
+/** A target to fill: an existing `point` is written in place (any `x`, `y`, `z` object), a missing one is made. */
+export type BvhClosestPointTarget<Point extends BvhVector3Like = BvhVector3Like> = Partial<BvhClosestPoint<Point>>;
 
 /** Per-vertex data for {@link CpuMeshBvh.getTriangleHitPointInfo}: `itemSize` numbers per vertex. */
 export interface BvhVertexAttribute {
@@ -853,6 +874,197 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
     /** {@link shapecast} with the core's types, whatever an adapter made of `shapecast`: the derived queries use it. */
     private coreShapecast(callbacks: BvhShapecastCallbacks): boolean {
         return CpuMeshBvh.prototype.shapecast.call(this, callbacks);
+    }
+
+    /**
+     * three-mesh-bvh's `closestPointToPoint` (0.9.18), step for step: a
+     * {@link shapecast} visiting the nearer box first (`boundsTraverseOrder`:
+     * squared distance from the point to the box), entering only boxes nearer
+     * than the best so far and than `maxThreshold`, and testing each triangle
+     * with three's `Triangle.closestPointToPoint`. Stops at the first
+     * triangle nearer than `minThreshold` (set both thresholds equal to ask
+     * "is anything within this distance?"). Returns `target` with `point`,
+     * `distance` and `faceIndex` (the original triangle), or null, leaving
+     * `target` alone, when no box is nearer than `maxThreshold`.
+     *
+     * As in three-mesh-bvh, `maxThreshold` culls boxes, not triangles: a
+     * triangle in a box nearer than it may still be returned past it.
+     */
+    closestPointToPoint(point: BvhVec3Like, target: BvhClosestPointTarget = {}, minThreshold = 0, maxThreshold = Infinity): BvhClosestPoint | null {
+        const [px, py, pz] = readVec3(point);
+        const query = new BvhVector3(px, py, pz);
+        const temp = new BvhVector3();
+        const best = new BvhVector3();
+        const minThresholdSq = minThreshold * minThreshold;
+        const maxThresholdSq = maxThreshold * maxThreshold;
+        let closestDistanceSq = Infinity;
+        let closestTriangle = -1;
+        this.coreShapecast({
+            boundsTraverseOrder: (box) => {
+                // three: temp.copy(point).clamp(box.min, box.max); temp.distanceToSquared(point)
+                const dx = Math.max(box.min.x, Math.min(box.max.x, px)) - px;
+                const dy = Math.max(box.min.y, Math.min(box.max.y, py)) - py;
+                const dz = Math.max(box.min.z, Math.min(box.max.z, pz)) - pz;
+                return dx * dx + dy * dy + dz * dz;
+            },
+            intersectsBounds: (_box, _isLeaf, score) => score! < closestDistanceSq && score! < maxThresholdSq,
+            intersectsTriangle: (triangle, triangleIndex) => {
+                triangleClosestPointToPoint(triangle.a, triangle.b, triangle.c, query, temp);
+                const dx = px - temp.x;
+                const dy = py - temp.y;
+                const dz = pz - temp.z;
+                const distanceSq = dx * dx + dy * dy + dz * dz;
+                if (distanceSq < closestDistanceSq) {
+                    best.copy(temp);
+                    closestDistanceSq = distanceSq;
+                    closestTriangle = triangleIndex;
+                }
+                return distanceSq < minThresholdSq;
+            },
+        });
+        if (closestDistanceSq === Infinity) return null;
+        return this.writeClosestPoint(target, best, Math.sqrt(closestDistanceSq), closestTriangle);
+    }
+
+    /**
+     * three-mesh-bvh's `closestPointToGeometry` (0.9.18), step for step: the
+     * closest points between this tree's triangles and `other`'s, `other`
+     * placed by `geometryToBvh` (its space to this tree's; default identity).
+     * A {@link shapecast} of this tree ordered by the distance from `other`'s
+     * box (as an {@link OrientedBox}) to each box; for each leaf, a shapecast
+     * of `other`'s tree ordered by the distance from that leaf's box (moved
+     * into `other`'s space) to its boxes, or, when `other` is a mesh
+     * (`{ positions, indices }`), every triangle of it. Pairs are measured with
+     * `ExtendedTriangle.distanceToTriangle`, and the cast stops at a pair
+     * nearer than `minThreshold`; boxes no nearer than the best so far or than
+     * `maxThreshold` are skipped.
+     *
+     * `target1` gets the point on this tree, the distance and this tree's
+     * triangle; `target2` (pass null to skip it) the point on `other`, in
+     * `other`'s space, the distance measured there, and `other`'s triangle.
+     * Both triangle indices are original indices (three-mesh-bvh 0.9.18's
+     * indirect mode returns tree positions here instead). Returns `target1`, or
+     * null with the targets untouched when nothing is nearer than
+     * `maxThreshold`. The box scores are taken in each tree's own space, as in
+     * three-mesh-bvh, so a `geometryToBvh` with scale skews the culling (not
+     * the distances).
+     */
+    closestPointToGeometry(
+        other: CpuMeshBvh<unknown> | MeshInput,
+        geometryToBvh?: BvhMatrix4Like | null,
+        target1: BvhClosestPointTarget = {},
+        target2: BvhClosestPointTarget | null = {},
+        minThreshold = 0,
+        maxThreshold = Infinity,
+    ): BvhClosestPoint | null {
+        const toBvh = new BvhMatrix4().copy(geometryToBvh ?? IDENTITY_MATRIX);
+        const toOther = new BvhMatrix4();
+        invertMatrix(toBvh, toOther);
+        const otherTree = other instanceof CpuMeshBvh ? other : null;
+        const bounds = otherTree ? otherTree.layout.bounds : meshBounds(other as MeshInput);
+        // three-mesh-bvh's obb (the other geometry's box, in this space) and obb2 (this tree's current leaf, in the other's).
+        const obb = new OrientedBox().set({ x: bounds[0], y: bounds[1], z: bounds[2] }, { x: bounds[3], y: bounds[4], z: bounds[5] }, toBvh);
+        const obb2 = new OrientedBox().set({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }, toOther);
+        const toBvhElements = toBvh.elements;
+        const triangle = trianglePool.pop() ?? new ExtendedTriangle();
+        const triangle2 = trianglePool.pop() ?? new ExtendedTriangle();
+        const temp1 = new BvhVector3();
+        const temp2 = target2 ? new BvhVector3() : null;
+        const best1 = new BvhVector3();
+        const best2 = new BvhVector3();
+        let closestDistance = Infinity;
+        let closestTriangle = -1;
+        let closestOtherTriangle = -1;
+
+        /** `other`'s triangle (in `triangle2`, moved into this space) against this leaf's range. True stops the cast. */
+        const measure = (offset: number, count: number, otherTriangleIndex: number): boolean => {
+            for (let i = offset, end = offset + count; i < end; i++) {
+                this.readTriangleInto(i, triangle);
+                const distance = triangleDistanceToTriangle(triangle, triangle2, temp1, temp2);
+                if (distance < closestDistance) {
+                    best1.copy(temp1);
+                    if (temp2) best2.copy(temp2);
+                    closestDistance = distance;
+                    closestTriangle = i;
+                    closestOtherTriangle = otherTriangleIndex;
+                }
+                if (distance < minThreshold) return true;
+            }
+            return false;
+        };
+        const moveTriangle2 = (): void => {
+            for (const point of triangle2.points) transformPoint(point, toBvhElements);
+            triangle2.needsUpdate = true;
+        };
+
+        try {
+            this.coreShapecast({
+                boundsTraverseOrder: (box) => obb.distanceToBox(box),
+                intersectsBounds: (_box, _isLeaf, score) => score! < closestDistance && score! < maxThreshold,
+                intersectsRange: (offset, count, _contained, _depth, _nodeIndex, box) => {
+                    if (otherTree) {
+                        // The leaf just entered, in the other tree's space (three-mesh-bvh saves it in intersectsBounds; same box).
+                        obb2.min.copy(box.min);
+                        obb2.max.copy(box.max);
+                        obb2.needsUpdate = true;
+                        return otherTree.coreShapecast({
+                            boundsTraverseOrder: (otherBox) => obb2.distanceToBox(otherBox),
+                            intersectsBounds: (_otherBox, _otherIsLeaf, score) => score! < closestDistance && score! < maxThreshold,
+                            intersectsRange: (otherOffset, otherCount) => {
+                                for (let i2 = otherOffset, end2 = otherOffset + otherCount; i2 < end2; i2++) {
+                                    otherTree.readTriangleInto(i2, triangle2);
+                                    moveTriangle2();
+                                    if (measure(offset, count, otherTree.resolveTriangleIndex(i2))) return true;
+                                }
+                                return false;
+                            },
+                        });
+                    }
+                    const { positions, indices } = other as MeshInput;
+                    const otherCount = indices ? Math.floor(indices.length / 3) : Math.floor(positions.length / 9);
+                    for (let i2 = 0; i2 < otherCount; i2++) {
+                        for (let corner = 0; corner < 3; corner++) {
+                            const vertex = indices ? indices[i2 * 3 + corner] : i2 * 3 + corner;
+                            triangle2.points[corner].set(positions[vertex * 3], positions[vertex * 3 + 1], positions[vertex * 3 + 2]);
+                        }
+                        moveTriangle2();
+                        if (measure(offset, count, i2)) return true;
+                    }
+                    return false;
+                },
+            });
+        } finally {
+            trianglePool.push(triangle, triangle2);
+        }
+        if (closestDistance === Infinity) return null;
+        const result = this.writeClosestPoint(target1, best1, closestDistance, this.resolveTriangleIndex(closestTriangle));
+        if (target2) {
+            // Both points into the other's space; the distance is measured there.
+            transformPoint(best2, toOther.elements);
+            transformPoint(best1, toOther.elements);
+            const distance = Math.hypot(best1.x - best2.x, best1.y - best2.y, best1.z - best2.z);
+            this.writeClosestPoint(target2, best2, distance, closestOtherTriangle);
+        }
+        return result;
+    }
+
+    /** Fills a closest-point target: its `point` in place, or a new one from {@link createPoint}. */
+    private writeClosestPoint(target: BvhClosestPointTarget, point: BvhVector3Like, distance: number, faceIndex: number): BvhClosestPoint {
+        if (target.point) {
+            target.point.x = point.x;
+            target.point.y = point.y;
+            target.point.z = point.z;
+        } else {
+            target.point = this.createPoint(point.x, point.y, point.z);
+        }
+        target.distance = distance;
+        target.faceIndex = faceIndex;
+        return target as BvhClosestPoint;
+    }
+
+    /** The point a closest-point query makes when its target has none. Engine adapters override it (a three `Vector3`). */
+    protected createPoint(x: number, y: number, z: number): BvhVector3Like {
+        return new BvhVector3(x, y, z);
     }
 
     /**

@@ -115,6 +115,8 @@ export {
     CpuMeshBvh,
     type BvhBoxTarget,
     type BvhBvhcastCallbacks,
+    type BvhClosestPoint,
+    type BvhClosestPointTarget,
     type BvhRayIntersection,
     type BvhRayLike,
     type BvhRaycastHit,

@@ -38,6 +38,9 @@ export {
     snapshotGeometry,
     type BvhBoundsTreeHit,
     type BvhBoundsTreeOptions,
+    type BvhClosestPointInfo,
+    // three-mesh-bvh's name for it.
+    type BvhClosestPointInfo as HitPointInfo,
     type BvhGeometrySnapshot,
     type BvhHitPointInfo,
     type BvhHitPointInfoTarget,
