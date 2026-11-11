@@ -41,8 +41,8 @@ export function failureMessages(messages: BrowserMessage[]): BrowserMessage[] {
  * Returns a sentence describing the mismatch, or null when the adapter is
  * acceptable. With no GPU requested, anything is acceptable.
  */
-export function adapterMismatch(wanted: GpuChoice | null, adapter: AdapterSummary): string | null {
-    if (adapter.isFallbackAdapter) {
+export function adapterMismatch(wanted: GpuChoice | null, adapter: AdapterSummary, allowSoftware = false): string | null {
+    if (adapter.isFallbackAdapter && !allowSoftware) {
         return `Chrome gave a software fallback adapter (${adapter.vendor}/${adapter.architecture}), not a real GPU.`;
     }
     if (wanted === null) return null;
@@ -83,6 +83,8 @@ export interface PageEvidence {
     expectMessage: string | RegExp | null;
     /** The GPU the run asked for; the page's own adapter must be that one too. */
     wantedGpu: GpuChoice | null;
+    /** The run opted in to a software (fallback) adapter; the page's own adapter may be one too. */
+    allowSoftware?: boolean;
 }
 
 /** Collects every reason a page counts as failed; none means it passed. */
@@ -98,7 +100,7 @@ export function failureReasons(evidence: PageEvidence): string[] {
         for (const error of evidence.report.deviceErrors) addUnlessKnown(reasons, 'GPU device error', error);
         // The page may have made its own adapter (a three.js renderer, say); it must be the requested GPU too.
         if (evidence.report.adapter) {
-            const mismatch = adapterMismatch(evidence.wantedGpu, evidence.report.adapter);
+            const mismatch = adapterMismatch(evidence.wantedGpu, evidence.report.adapter, evidence.allowSoftware ?? false);
             if (mismatch) reasons.push(`The page's own adapter is wrong: ${mismatch}`);
         }
     }
