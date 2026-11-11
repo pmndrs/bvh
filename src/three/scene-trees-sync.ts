@@ -39,19 +39,25 @@
  *   (`setDeformBounds`, from `BvhPosePass.bounds`, with `deformSlack`
  *   room so it changes rarely). Hidden objects aren't posed. Without a
  *   renderer (or with `deforming: false`) they are read in their rest pose.
+ *   Each pose variant's pipeline is compiled (`BvhPosePass.prepare`) when
+ *   its first mesh is added, so the first `update()` doesn't compile it. A
+ *   replaced skeleton (or a new bone count) gets a new pass at the next
+ *   `update()`. An `InstancedMesh` with a `morphTexture` and more than one
+ *   instance is refused (warned once, read in its rest pose): the pass
+ *   gives every instance `morphTargetInfluences`.
  *
  * `BvhHit.instance` is the SceneTrees instance's `instanceIndex`, which the
  * sync sets to its handle: {@link SceneTreesObject3DSync.sourceOf} maps it to
  * the three object, instance and group.
  */
 
-import type { BatchedMesh, InstancedMesh, Mesh, Object3D } from 'three';
+import type { BatchedMesh, InstancedMesh, Mesh, Object3D, Skeleton } from 'three';
 import { Matrix4 } from 'three';
 import type { MeshGeometry } from '../trace/mesh-bvh.ts';
 import type { Mat4 } from '../trace/top-level.ts';
 import type { SceneInstanceChange, SceneInstanceDescriptor, SceneMeshOptions } from '../scene/scene-trees.ts';
 import type { MeshRefitVertices } from '../gpu-mesh-refit.ts';
-import { BvhPosePass, poseVertices, threeDeforms, type BvhPosePassLike } from './deform.ts';
+import { BvhPosePass, poseVertices, skinningSkeletonOf, threeDeforms, type BvhPosePassLike } from './deform.ts';
 import {
     deviceFromRenderer,
     effectivelyVisible,
@@ -137,7 +143,7 @@ interface TrackedMesh {
     users: number;
     /** A posed mesh's pose (its object's), the vertices its refit reads, and their index buffer (indexed geometry). */
     readonly pose: TrackedPose | null;
-    readonly vertices: MeshRefitVertices | null;
+    vertices: MeshRefitVertices | null;
     readonly indexBuffer: GPUBuffer | null;
 }
 
@@ -145,7 +151,10 @@ interface TrackedMesh {
 interface TrackedPose {
     readonly object: Mesh;
     readonly geometry: Mesh['geometry'];
-    readonly pass: BvhPosePassLike;
+    pass: BvhPosePassLike;
+    /** The skeleton and bone count the pass was made for: a change makes a new pass. */
+    skeleton: Skeleton | null;
+    bones: number;
     readonly box: Float32Array;
     readonly meshes: Set<TrackedMesh>;
 }
@@ -173,8 +182,14 @@ interface TrackedObject {
     matrices: number;
 }
 
-/** `box` holds `needed`, and isn't more than twice the size `needed` gets with its slack on any axis. */
+function finiteBox(box: ArrayLike<number>): boolean {
+    for (let k = 0; k < 6; k++) if (!Number.isFinite(box[k])) return false;
+    return true;
+}
+
+/** `box` holds `needed`, and isn't more than twice the size `needed` gets with its slack on any axis. A box that isn't finite never fits. */
 function fits(box: ArrayLike<number>, needed: ArrayLike<number>, slack: number): boolean {
+    if (!finiteBox(box) || !finiteBox(needed)) return false;
     const pad = slack * Math.max(needed[3] - needed[0], needed[4] - needed[1], needed[5] - needed[2]);
     for (let k = 0; k < 3; k++) {
         if (needed[k] < box[k] || needed[k + 3] > box[k + 3]) return false;
@@ -219,6 +234,9 @@ export class SceneTreesObject3DSync {
     private readonly byHandle = new Map<number, TrackedInstance>();
     private readonly objects = new Map<Mesh, TrackedObject>();
     private readonly warned = new WeakSet<Object3D>();
+    private readonly warnedMorphTexture = new WeakSet<Object3D>();
+    /** Pose variants whose pipeline compile was started (`BvhPosePass.prepare`). */
+    private readonly prepared = new Set<string>();
     private readonly poses = new Map<Mesh, TrackedPose>();
     private readonly scratchBox = new Float32Array(6);
     private disposed = false;
@@ -248,7 +266,19 @@ export class SceneTreesObject3DSync {
         if (option === false) return false;
         if (!this.options.renderer && !this.options.createPosePass) return false;
         if ((mesh as unknown as { isInstancedMesh?: boolean; isBatchedMesh?: boolean }).isBatchedMesh) return false;
-        return threeDeforms(mesh) && (typeof option !== 'function' || option(mesh));
+        if (!threeDeforms(mesh) || (typeof option === 'function' && !option(mesh))) return false;
+        const instanced = mesh as unknown as InstancedMesh;
+        if (instanced.isInstancedMesh && instanced.morphTexture && instanced.count > 1) {
+            // Per-instance morphs: the pass would give every instance morphTargetInfluences.
+            if (!this.warnedMorphTexture.has(mesh)) {
+                this.warnedMorphTexture.add(mesh);
+                console.warn(
+                    `@pmndrs/bvh/three: "${mesh.name || mesh.type}" (id ${mesh.id}) is an InstancedMesh with per-instance morphs (morphTexture), which BvhPosePass doesn't read; it is read in its rest pose`,
+                );
+            }
+            return false;
+        }
+        return true;
     }
 
     /** The key of a walked instance's mesh: a posed object's meshes are its own. */
@@ -457,9 +487,19 @@ export class SceneTreesObject3DSync {
         const slack = this.options.deformSlack ?? 0.25;
         for (const pose of this.poses.values()) {
             if (pose.meshes.size === 0 || !effectivelyVisible(pose.object)) continue;
+            if (!this.samePoseInputs(pose)) {
+                if (!threeDeforms(pose.object)) continue; // no longer deforms: the next sync() reads it in its rest pose
+                this.renewPass(pose);
+            }
             pose.pass.update();
             posed++;
             const needed = pose.pass.bounds(this.scratchBox);
+            if (!finiteBox(needed)) {
+                const object = pose.object;
+                throw new Error(
+                    `@pmndrs/bvh/three: the pose box of "${object.name || object.type}" (id ${object.id}) is not finite (${Array.from(needed).join(', ')}): NaN or infinite bone matrices, bind matrices or influences?`,
+                );
+            }
             if (!fits(pose.box, needed, slack)) {
                 padBox(needed, slack, pose.box);
                 for (const mesh of pose.meshes) this.trees.setDeformBounds!(mesh.handle, pose.box);
@@ -504,10 +544,12 @@ export class SceneTreesObject3DSync {
         let pose = this.poses.get(object);
         if (pose && pose.geometry !== object.geometry) pose = undefined; // its old meshes go at the end of this sync, and their pass with them
         if (!pose) {
-            const pass = this.options.createPosePass ? this.options.createPosePass(object) : new BvhPosePass(this.options.renderer, object);
-            pass.update();
+            const pass = this.createPass(object);
+            // The first box needs the skeleton's matrices, not a dispatch: the pass runs at the first update().
+            skinningSkeletonOf(object)?.update();
             const box = padBox(pass.bounds(new Float32Array(6)), this.options.deformSlack ?? 0.25, new Float32Array(6));
-            pose = { object, geometry: object.geometry, pass, box, meshes: new Set() };
+            const skeleton = skinningSkeletonOf(object);
+            pose = { object, geometry: object.geometry, pass, skeleton, bones: skeleton?.bones.length ?? 0, box, meshes: new Set() };
             this.poses.set(object, pose);
         }
         const source = { geometry: instance.geometry, start: instance.range.start, count: instance.range.count };
@@ -527,6 +569,33 @@ export class SceneTreesObject3DSync {
         const mesh: TrackedMesh = { key, handle, source, users: 0, pose, vertices: poseVertices(pose.pass, instance.geometry, source.start, source.count, indexBuffer), indexBuffer };
         pose.meshes.add(mesh);
         return mesh;
+    }
+
+    /** A pose pass for `object`, with its variant's pipeline compile started (once per variant). */
+    private createPass(object: Mesh): BvhPosePassLike {
+        const pass = this.options.createPosePass ? this.options.createPosePass(object) : new BvhPosePass(this.options.renderer, object);
+        const variant = pass.variant;
+        if (pass.prepare && (variant === undefined || !this.prepared.has(variant))) {
+            if (variant !== undefined) this.prepared.add(variant);
+            pass.prepare().catch((error: unknown) => console.warn('@pmndrs/bvh/three: compiling a pose pass ahead of time failed; it compiles at its first update', error));
+        }
+        return pass;
+    }
+
+    /** Whether the object still has the skeleton (and bone count) its pass was made for. */
+    private samePoseInputs(pose: TrackedPose): boolean {
+        const skeleton = skinningSkeletonOf(pose.object);
+        return skeleton === pose.skeleton && (skeleton?.bones.length ?? 0) === pose.bones;
+    }
+
+    /** A new pass for a pose whose skeleton was replaced: its meshes refit from the new pass's buffer. */
+    private renewPass(pose: TrackedPose): void {
+        const pass = this.createPass(pose.object);
+        pose.pass.dispose();
+        pose.pass = pass;
+        pose.skeleton = skinningSkeletonOf(pose.object);
+        pose.bones = pose.skeleton?.bones.length ?? 0;
+        for (const mesh of pose.meshes) mesh.vertices = poseVertices(pass, mesh.source.geometry, mesh.source.start, mesh.source.count, mesh.indexBuffer);
     }
 
     /** A mesh left the SceneTrees: its index buffer goes, and its pose pass with its pose's last mesh. */

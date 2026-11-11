@@ -31,10 +31,17 @@
  * poses them on the CPU; use their own raycast, or the GPU path). Points,
  * lines and sprites are not read.
  *
- * **Moving objects.** {@link BvhSceneRaycaster.update} reads the scene again:
- * when only transforms, visibility, layers or instance counts' matrices
- * changed it rebuilds the top level only; new geometry or ranges get their
- * trees (each geometry and range is built once and kept while used).
+ * **Moving objects.** A raycast sees the scene as of the last
+ * {@link BvhSceneRaycaster.update}: after moving, showing, hiding, adding or
+ * removing objects, changing instance matrices or counts, or editing a
+ * geometry's positions or index (with `needsUpdate`), call
+ * `scene.updateMatrixWorld()` and then `update()`. It reads the scene again:
+ * when only transforms, visibility, layers or instance matrices changed it
+ * rebuilds the top level only; new geometry or ranges get their trees (each
+ * geometry and range is built once and kept while used), and a geometry whose
+ * position attribute or index changed (object or version) gets its tree
+ * rebuilt. A raycast that finds a geometry edited since `update()` warns once
+ * (it still answers from the last `update()`); moved objects aren't detected.
  */
 
 import { BackSide, type BufferGeometry, DoubleSide, FrontSide, Vector3, type BatchedMesh, type Frustum, type Intersection, type Material, type Mesh, type Object3D, type Raycaster } from 'three';
@@ -44,7 +51,7 @@ import { buildMeshBvhWithTinyBvh } from '../trace/mesh-bvh-topology.ts';
 import type { MeshBvh } from '../trace/mesh-bvh.ts';
 import type { TraceSceneInstance } from '../trace/scene-assembly.ts';
 import { invertAffineInto } from '../trace/top-level.ts';
-import { intersectionFields, preparedBoundsTreeBuilder } from './raycast.ts';
+import { intersectionFields, positionVersionOf, preparedBoundsTreeBuilder } from './raycast.ts';
 import { meshGeometryOf, rayMaskFromLayers, threeFaceIndex, walkObject3D, type BvhSceneFromObject3DOptions, type BvhThreeMeshSource, type BvhThreeSource } from './scene.ts';
 
 export interface BvhSceneRaycasterOptions extends BvhSceneFromObject3DOptions {
@@ -64,11 +71,47 @@ interface SceneEntry {
 
 const scratchRows = new Float64Array(12);
 
+/** What a mesh's tree was built from: the position attribute and index, and their versions. */
+interface MeshVersions {
+    readonly geometry: BufferGeometry;
+    readonly position: object | undefined;
+    readonly positionVersion: number;
+    readonly index: object | null;
+    readonly indexVersion: number;
+}
+
+function versionsOf(geometry: BufferGeometry): MeshVersions {
+    const position = geometry.getAttribute('position') as Parameters<typeof positionVersionOf>[0] | undefined;
+    const index = geometry.index;
+    return { geometry, position, positionVersion: position ? positionVersionOf(position) : 0, index, indexVersion: index ? index.version : 0 };
+}
+
+/** Whether the geometry still has the position attribute and index (and versions) `versions` saw. */
+function current(versions: MeshVersions): boolean {
+    const geometry = versions.geometry;
+    const position = geometry.getAttribute('position') as Parameters<typeof positionVersionOf>[0] | undefined;
+    const index = geometry.index;
+    return position === versions.position && (position ? positionVersionOf(position) : 0) === versions.positionVersion && index === versions.index && (index ? index.version : 0) === versions.indexVersion;
+}
+
+/** Small ids for attribute objects, for tree keys. */
+const objectIds = new WeakMap<object, number>();
+let nextObjectId = 1;
+function objectId(object: object | null | undefined): number {
+    if (!object) return 0;
+    let id = objectIds.get(object);
+    if (id === undefined) objectIds.set(object, (id = nextObjectId++));
+    return id;
+}
+
 /** The CPU scene of a three scene; see the file comment. */
 export class BvhSceneRaycaster {
     private bvh: CpuSceneBvh | null = null;
     private entries: SceneEntry[] = [];
     private meshKeys: string[] = [];
+    /** Per mesh, what its tree was built from: a raycast compares it to the geometry. */
+    private meshVersions: MeshVersions[] = [];
+    private staleWarned = false;
     private readonly trees = new Map<string, MeshBvh>();
     private readonly builder: TinyBvhBuilder;
 
@@ -98,9 +141,11 @@ export class BvhSceneRaycaster {
     }
 
     /**
-     * Reads the scene again (call `updateMatrixWorld()` first). Rebuilds only the
-     * top level when the meshes are the same; builds trees for new geometry or
-     * ranges and drops unused ones. Returns whether meshes changed.
+     * Reads the scene again (call `updateMatrixWorld()` first): needed after
+     * objects move or change and after geometry edits (see the file comment).
+     * Rebuilds only the top level when the meshes are the same; builds trees
+     * for new geometry or ranges, or edited positions or index, and drops
+     * unused ones. Returns whether meshes changed.
      */
     update(): boolean {
         const includeHidden = this.options.includeHidden ?? true;
@@ -108,6 +153,7 @@ export class BvhSceneRaycaster {
         const meshIndex = new Map<string, number>();
         const meshKeys: string[] = [];
         const meshSources: BvhThreeMeshSource[] = [];
+        const meshVersions: MeshVersions[] = [];
         const instances: TraceSceneInstance[] = [];
         const entries: SceneEntry[] = [];
         for (const instance of walked) {
@@ -115,7 +161,10 @@ export class BvhSceneRaycaster {
             if (mesh === undefined) {
                 mesh = meshKeys.length;
                 meshIndex.set(instance.meshKey, mesh);
-                meshKeys.push(instance.meshKey);
+                // The tree's key: the geometry and range, and what its positions and index are now.
+                const versions = versionsOf(instance.geometry);
+                meshKeys.push(`${instance.meshKey}|${objectId(versions.position)}.${versions.positionVersion}|${objectId(versions.index)}.${versions.indexVersion}`);
+                meshVersions.push(versions);
                 meshSources.push({ geometry: instance.geometry, start: instance.range.start, count: instance.range.count });
             }
             const batched = instance.object as unknown as BatchedMesh;
@@ -132,6 +181,8 @@ export class BvhSceneRaycaster {
         }
         const sameMeshes = this.bvh !== null && meshKeys.length === this.meshKeys.length && meshKeys.every((key, i) => key === this.meshKeys[i]);
         this.entries = entries;
+        this.meshVersions = meshVersions;
+        this.staleWarned = false;
         if (sameMeshes) {
             this.bvh!.setInstances(instances);
             return false;
@@ -141,7 +192,8 @@ export class BvhSceneRaycaster {
             if (!tree) this.trees.set(key, (tree = buildMeshBvhWithTinyBvh(meshGeometryOf(meshSources[i]), this.builder)));
             return tree;
         });
-        for (const key of [...this.trees.keys()]) if (!meshIndex.has(key)) this.trees.delete(key);
+        const used = new Set(meshKeys);
+        for (const key of [...this.trees.keys()]) if (!used.has(key)) this.trees.delete(key);
         this.meshKeys = meshKeys;
         this.bvh = trees.length > 0 ? new CpuSceneBvh(trees, instances) : null;
         return true;
@@ -154,6 +206,7 @@ export class BvhSceneRaycaster {
     raycast(raycaster: Raycaster, intersects: Intersection[] = []): Intersection[] {
         const bvh = this.bvh;
         if (!bvh) return intersects;
+        if (!this.staleWarned) this.warnIfStale();
         const { origin, direction } = raycaster.ray;
         const length = direction.length();
         if (!(length > 0)) return intersects;
@@ -199,6 +252,18 @@ export class BvhSceneRaycaster {
             out.push(source);
         }
         return out;
+    }
+
+    /** Warns once (until the next update) when a geometry's positions or index changed since update(). */
+    private warnIfStale(): void {
+        for (const versions of this.meshVersions) {
+            if (current(versions)) continue;
+            this.staleWarned = true;
+            console.warn(
+                `@pmndrs/bvh/three: geometry "${versions.geometry.name || versions.geometry.uuid}" changed (positions or index) since BvhSceneRaycaster.update(); raycasts read it as it was until update() runs again`,
+            );
+            return;
+        }
     }
 
     private materialOf(source: BvhThreeSource): Material | null {

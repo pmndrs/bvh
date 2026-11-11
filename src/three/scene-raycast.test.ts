@@ -29,7 +29,7 @@ import {
     type Intersection,
     type Side,
 } from 'three';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createRandom } from '../trace/oracle-fixtures.ts';
 import { prepareBoundsTrees } from './raycast.ts';
 import { BvhSceneRaycaster, raycastScene } from './scene-raycast.ts';
@@ -185,6 +185,47 @@ describe('raycastScene', () => {
         raycaster.set(new Vector3().setFromMatrixPosition(hidden.matrixWorld).add(new Vector3(0, 0, 20)), new Vector3(0, 0, -1));
         expect(raycastScene(picker, raycaster).some((hit) => hit.object === hidden)).toBe(false);
         expect(raycaster.intersectObject(hidden).length).toBeGreaterThan(0);
+    });
+});
+
+describe('BvhSceneRaycaster with edited geometry', () => {
+    it('rebuilds a tree whose positions or index changed at update(), and warns once when a raycast reads one edited since', () => {
+        const geometry = new BoxGeometry(1, 1, 1);
+        const box = new Mesh(geometry, new MeshBasicMaterial());
+        const root = new Group();
+        root.add(box, new Mesh(new SphereGeometry(0.5), new MeshBasicMaterial()).translateX(5));
+        root.updateMatrixWorld(true);
+        const picker = new BvhSceneRaycaster(root);
+        const raycaster = new Raycaster(new Vector3(0, 0, 10), new Vector3(0, 0, -1));
+        const first = () => raycastScene(picker, raycaster).filter((hit) => hit.object === box)[0]?.distance;
+        expect(first()).toBeCloseTo(9.5, 6);
+
+        // Push the +z face out to z = 2 in place.
+        const position = geometry.attributes.position;
+        for (let i = 0; i < position.count; i++) if (position.getZ(i) > 0) position.setZ(i, 2);
+        position.needsUpdate = true;
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+            expect(first()).toBeCloseTo(9.5, 6); // as of the last update()
+            first();
+            expect(warn).toHaveBeenCalledTimes(1);
+            expect(String(warn.mock.calls[0][0])).toMatch(/changed .* since BvhSceneRaycaster.update/);
+            expect(picker.update()).toBe(true);
+            expect(first()).toBeCloseTo(8, 6);
+            expect(raycaster.intersectObject(box)[0].distance).toBeCloseTo(8, 6);
+
+            // A new index (the same positions, fewer triangles: the +z face's two triangles dropped).
+            const index = geometry.index!;
+            const kept: number[] = [];
+            for (let t = 0; t < index.count / 3; t++) if (t !== 8 && t !== 9) kept.push(index.getX(t * 3), index.getX(t * 3 + 1), index.getX(t * 3 + 2));
+            geometry.setIndex(kept);
+            expect(picker.update()).toBe(true);
+            expect(first()).toBe(raycaster.intersectObject(box)[0]?.distance);
+            expect(picker.update()).toBe(false); // nothing changed since
+            expect(warn).toHaveBeenCalledTimes(1);
+        } finally {
+            warn.mockRestore();
+        }
     });
 });
 

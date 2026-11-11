@@ -276,7 +276,8 @@ interface RaycastState {
 /** States per material kept for different draw ranges (a BatchedMesh raycasts each geometry's range); past this the cache starts again. */
 const MAX_STATES_PER_MATERIAL = 256;
 
-function positionVersionOf(attribute: BufferAttribute | InterleavedBufferAttribute): number {
+/** A position attribute's version (an interleaved one's buffer's). */
+export function positionVersionOf(attribute: BufferAttribute | InterleavedBufferAttribute): number {
     const interleaved = attribute as InterleavedBufferAttribute;
     return interleaved.isInterleavedBufferAttribute === true ? interleaved.data.version : (attribute as BufferAttribute).version;
 }
