@@ -4,6 +4,7 @@
 // comments; the /*! */ headers must survive).
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const root = resolve(import.meta.dirname, '..');
 const dist = resolve(root, 'dist');
@@ -68,8 +69,20 @@ if (manifest.exports['./worker'] && ![...workerEntries].some((file) => file.ends
     problems.push('no built file starts the mesh tree worker (dist/trace/mesh-bvh-worker.js)');
 }
 
+// The /three subpath must import in Node with three installed (its peer), and say what it exports.
+if (manifest.exports['./three'] && problems.length === 0) {
+    try {
+        const three = await import(pathToFileURL(resolve(root, manifest.exports['./three'].import)).href);
+        for (const name of ['bvhSceneFromObject3D', 'SceneTreesObject3DSync']) {
+            if (typeof three[name] !== 'function') problems.push(`dist/three does not export ${name}`);
+        }
+    } catch (error) {
+        problems.push(`dist/three does not import in Node: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
 if (problems.length) {
     console.error(problems.join('\n'));
     process.exit(1);
 }
-console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl and gpu-hploc-wgsl, no .ts imports, no tests, worker entries built (' + workerEntries.size + ').');
+console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl and gpu-hploc-wgsl, no .ts imports, no tests, worker entries built (' + workerEntries.size + '), /three imports in Node.');

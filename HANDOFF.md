@@ -2,6 +2,14 @@
 
 This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `packages/bvh`. The full plan is [docs/design/bvh-package-split.md](docs/design/bvh-package-split.md): the decisions (D1–D8), the target layout, phases P0–P9, examples, docs and tasks BX.0–BX.20. Read it first.
 
+## Update 2026-11-11, latest: `@pmndrs/bvh/three` (stages 1-3)
+
+`src/three/` is the `./three` subpath (three is an optional peer; ESLint allows three only there). See [docs/three.md](docs/three.md).
+- `bvhSceneFromObject3D` and `SceneTreesObject3DSync` turn three objects into SceneTrees/buildTraceScene inputs and keep them in step.
+- `BvhTraceNodes` puts the walk in three's node system. It is checked on the M5 by `tests/gpu/pages/three-trace`.
+- `computeBoundsTree`/`acceleratedRaycast` are CPU raycasts that match three's. They run at three-mesh-bvh's speed in Node (`bench/three-raycast.ts`).
+- `BvhTraceNodes` sets three's backend buffer for its storage attributes, which is internal to three 0.187. Recheck it when three is upgraded.
+
 ## Update 2026-11-11, later: scene trees moved in (branch of BX.21)
 
 ddgi's scene-tree management is in the package now, engine-free:
