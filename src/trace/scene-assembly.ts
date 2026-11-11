@@ -96,8 +96,8 @@ export interface TraceSceneMeshPlacement {
 export interface TraceSceneData {
     /** Every mesh's nodes, one after another (quantized: each mesh's frame slot, then its nodes). */
     readonly nodes: ArrayBuffer;
-    /** How `nodes` stores them. `'f32'` unless assembled with `nodeFormat: 'quantized'`. */
-    readonly nodeFormat: GpuLayoutNodeFormat;
+    /** How `nodes` stores them. Default (absent) `'f32'`; assembly sets it, `'quantized'` when assembled with `nodeFormat: 'quantized'`. */
+    readonly nodeFormat?: GpuLayoutNodeFormat;
     /**
      * Every mesh's triangles, one after another. Indexed scenes: 16-byte
      * units, and each mesh's region starts with its header (and a merged

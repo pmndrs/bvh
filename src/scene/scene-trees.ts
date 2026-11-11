@@ -238,6 +238,7 @@ export interface SceneTreesOptions {
      * built `f32` and packed by a compute pass on their way into the storage.
      * Quantized needs `gpuTreeOutputs: 'copy'` (an adopted batch's nodes are
      * `f32`). Independent of `triangleLeaves`.
+     * A coordinate of magnitude 2^100 or more, or a non-finite one, makes a quantized box empty on that axis (hits there are lost).
      */
     readonly nodeFormat?: NodeFormat;
     /**
@@ -1421,6 +1422,16 @@ export class SceneTrees {
         for (const { slot, generation, reason } of result.refused) refuse(slot, generation, reason);
         if (result.failure) this.warn(`@pmndrs/bvh: ${result.failure}, so ${rebuild ? 'the mesh keeps its refit tree' : 'the meshes wait for tinybvh'}`);
         for (const built of result.built) {
+            if (built.outputs.nodeFormat !== 'f32') {
+                // The scene quantizes f32 trees as it copies them in; already-quantized ones can't be copied.
+                const reason = 'the first-tree builder returned quantized nodes; SceneTrees needs f32 GPU trees (it quantizes them itself)';
+                if (this.currentState(built.slot, built.generation)) {
+                    this.warn(`@pmndrs/bvh: ${reason}`);
+                    refuse(built.slot, built.generation, reason);
+                }
+                this.releaseOutputs(built.outputs);
+                continue;
+            }
             const state = this.currentState(built.slot, built.generation);
             if (!state || built.tree.maxDepth > this.gpuMaxDepth) {
                 if (state) refuse(built.slot, built.generation, `the GPU tree is ${built.tree.maxDepth} levels deep, more than gpuMaxDepth (${this.gpuMaxDepth})`);

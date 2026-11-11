@@ -292,6 +292,17 @@ function traceAll(scene: TraceSceneData, traced: readonly TraceRay[], stats = ne
 describe('a quantized scene', () => {
     const traced = rays(21, 4000);
 
+    it('reads a hand-built scene without nodeFormat as f32', async () => {
+        const { meshes, instances } = mixedScene(17);
+        const assembled = await buildTraceScene(meshes, instances, { build: f32 });
+        const { nodeFormat, ...rest } = assembled;
+        expect(nodeFormat).toBe('f32');
+        // As a caller would write it before nodeFormat existed: the field is optional.
+        const handBuilt: TraceSceneData = { ...rest };
+        const few = traced.slice(0, 200);
+        expect(traceAll(handBuilt, few)).toEqual(traceAll(assembled, few));
+    });
+
     for (const mergeStaticInstances of [false, true]) {
         for (const triangleLeaves of ['records', 'indexed'] as const) {
             it(`gives the f32 scene's hits, bit for bit (${mergeStaticInstances ? 'merged' : 'instanced'}, ${triangleLeaves})`, async () => {

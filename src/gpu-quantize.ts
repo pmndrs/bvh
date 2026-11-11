@@ -102,7 +102,7 @@ fn bvhqAxisWord(lo: f32, hi: f32, frame: BvhqAxis) -> u32 {
     if (ceil(high) - high < BVHQ_MARGIN) {
         qMax += 1.0;
     }
-    // Inside the frame by its rule; the clamp only guards a box outside the root's (the layout check reports it).
+    // Inside the frame by its rule. The clamp is only a guard: a child box outside the root's (which no builder or refit produces) is clamped here, where the CPU quantizer throws.
     return u32(clamp(qMin, 0.0, 65535.0)) | (u32(clamp(qMax, 0.0, 65535.0)) << 16u);
 }
 `;
@@ -336,28 +336,40 @@ export function nodeQuantizerFor(device: GPUDevice): GpuNodeQuantizer {
 }
 
 /**
- * A GPU batch's `f32` trees with quantized nodes: a new node buffer holding,
- * per usable mesh, its frame slot and its nodes (packed by the quantize pass,
- * submitted here), and the `f32` node buffer destroyed. Ranges keep their
- * parents where they were (`parentOffset`); `nodeOffset` becomes the root's
- * slot. Meshes with a problem keep their range and get no nodes. Any GPU
- * builder's trees; quantized trees come back as they are.
+ * The quantized node ranges for a batch's `f32` mesh ranges: each usable mesh
+ * gets its frame slot and its nodes, packed in order; a mesh with a problem (or
+ * no nodes) gets `nodeOffset: 0, nodeCount: 0`, so nothing reads past the
+ * quantized buffer's end. Parents stay where they were (`parentOffset`).
  */
-export function quantizeTreeBuffers(device: GPUDevice, trees: GpuTreeBuffers, label: string): GpuTreeBuffers {
-    if (trees.nodeFormat === 'quantized') return trees;
+export function quantizedMeshRanges(source: readonly GpuMeshTreeRange[]): { meshes: GpuMeshTreeRange[]; jobs: QuantizeMesh[]; slots: number } {
     let slots = 0;
     const meshes: GpuMeshTreeRange[] = [];
     const jobs: QuantizeMesh[] = [];
-    for (const mesh of trees.meshes) {
+    for (const mesh of source) {
+        const parentOffset = mesh.parentOffset ?? mesh.nodeOffset;
         if (mesh.problem || mesh.nodeCount < 1) {
-            meshes.push({ ...mesh, parentOffset: mesh.parentOffset ?? mesh.nodeOffset });
+            meshes.push({ ...mesh, nodeOffset: 0, nodeCount: 0, parentOffset });
             continue;
         }
         const root = slots + 1;
         slots += mesh.nodeCount + 1;
         jobs.push({ sourceNodeOffset: mesh.nodeOffset, targetRootSlot: root, nodeCount: mesh.nodeCount });
-        meshes.push({ ...mesh, nodeOffset: root, parentOffset: mesh.parentOffset ?? mesh.nodeOffset });
+        meshes.push({ ...mesh, nodeOffset: root, parentOffset });
     }
+    return { meshes, jobs, slots };
+}
+
+/**
+ * A GPU batch's `f32` trees with quantized nodes: a new node buffer holding,
+ * per usable mesh, its frame slot and its nodes (packed by the quantize pass,
+ * submitted here), and the `f32` node buffer destroyed. Ranges keep their
+ * parents where they were (`parentOffset`); `nodeOffset` becomes the root's
+ * slot. Meshes with a problem get no nodes (`nodeOffset` and `nodeCount` 0). Any GPU
+ * builder's trees; quantized trees come back as they are.
+ */
+export function quantizeTreeBuffers(device: GPUDevice, trees: GpuTreeBuffers, label: string): GpuTreeBuffers {
+    if (trees.nodeFormat === 'quantized') return trees;
+    const { meshes, jobs, slots } = quantizedMeshRanges(trees.meshes);
     const nodes = device.createBuffer({
         label: `${label} quantized nodes`,
         size: Math.max(1, slots) * GPU_LAYOUT_QUANTIZED_NODE_BYTES,

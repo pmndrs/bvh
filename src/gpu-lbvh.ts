@@ -378,16 +378,23 @@ export class GpuLbvhBuilder {
     }
 }
 
-/** Copies every usable tree in shared GPU buffers back into CPU memory, with one readback. Any GPU builder's trees. */
-export async function readTreeLayouts(device: GPUDevice, trees: GpuTreeBuffers, label: string): Promise<(GpuLayoutMeshBvh | null)[]> {
+/** How far a readback of a batch's usable trees reaches into each buffer (nodes, parents, triangles, in elements); problem meshes are skipped. */
+export function treeReadbackExtents(meshes: readonly GpuMeshTreeRange[]): { nodeEnd: number; parentEnd: number; triangleEnd: number } {
     let nodeEnd = 0;
     let parentEnd = 0;
     let triangleEnd = 0;
-    for (const mesh of trees.meshes) {
+    for (const mesh of meshes) {
+        if (mesh.problem) continue;
         nodeEnd = Math.max(nodeEnd, mesh.nodeOffset + mesh.nodeCount);
         parentEnd = Math.max(parentEnd, (mesh.parentOffset ?? mesh.nodeOffset) + mesh.nodeCount);
         triangleEnd = Math.max(triangleEnd, mesh.triangleOffset + mesh.triangleCount);
     }
+    return { nodeEnd, parentEnd, triangleEnd };
+}
+
+/** Copies every usable tree in shared GPU buffers back into CPU memory, with one readback. Any GPU builder's trees. */
+export async function readTreeLayouts(device: GPUDevice, trees: GpuTreeBuffers, label: string): Promise<(GpuLayoutMeshBvh | null)[]> {
+    const { nodeEnd, parentEnd, triangleEnd } = treeReadbackExtents(trees.meshes);
     const quantized = trees.nodeFormat === 'quantized';
     const nodeSize = gpuLayoutNodeBytes(trees.nodeFormat);
     const nodeBytes = nodeEnd * nodeSize;

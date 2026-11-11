@@ -90,6 +90,7 @@ export interface GpuBuildOptions {
      * The node format the tree is written in: `'f32'` (64 bytes, the default)
      * or `'quantized'` (32-byte nodes on a per-mesh grid, the frame slot
      * first; docs/design/compressed-nodes.md).
+     * A coordinate of magnitude 2^100 or more, or a non-finite one, makes a quantized box empty on that axis (hits there are lost).
      */
     readonly nodeFormat?: 'f32' | 'quantized';
 }

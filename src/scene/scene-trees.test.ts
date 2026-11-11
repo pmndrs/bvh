@@ -94,6 +94,8 @@ class StandInGpuBuilder implements FirstTreeBuilder {
     readonly requests: GpuTreeRequest[][] = [];
     private readonly pending: { members: { slot: number; generation: number; geometry: MeshGeometry }[]; resolve: (result: GpuTreeBatchResult) => void }[] = [];
     readonly refuse = new Set<number>();
+    /** Labels the batch's nodes quantized, as a misconfigured custom builder would. */
+    quantizedOutputs = false;
 
     constructor(
         private readonly device: GPUDevice,
@@ -142,7 +144,7 @@ class StandInGpuBuilder implements FirstTreeBuilder {
             triangleOffset += tree.triangleCount;
         });
         const usable = meshes.filter((mesh) => mesh.problem === null).length;
-        const outputs = new GpuTreeOutputs({ nodes, triangles, parents, meshes, triangleLeaves: this.triangleLeaves, destroy: () => [nodes, triangles, parents].forEach((buffer) => buffer.destroy()) }, usable);
+        const outputs = new GpuTreeOutputs({ nodes, triangles, parents, meshes, triangleLeaves: this.triangleLeaves, ...(this.quantizedOutputs ? { nodeFormat: 'quantized' as const } : {}), destroy: () => [nodes, triangles, parents].forEach((buffer) => buffer.destroy()) }, usable);
         batch.resolve({
             built: meshes.flatMap((tree, index) => (tree.problem ? [] : [{ slot: batch.members[index].slot, generation: batch.members[index].generation, outputs, tree, layout: null }])),
             refused: meshes.flatMap((tree, index) => (tree.problem ? [{ slot: batch.members[index].slot, generation: batch.members[index].generation, reason: tree.problem }] : [])),
@@ -348,6 +350,22 @@ describe('SceneTrees', () => {
         expect(scene.meshStatus(lateInstance.mesh).builtBy).toBe('gpu');
         expect(scene.meshStatus(lateInstance.mesh).placement!.nodeOffset).toBeGreaterThan(0);
         expect(disagreements(readScene(scene), await reference([...geometries, late], [...all, lateInstance]), rays)).toEqual([]);
+        scene.dispose();
+    });
+
+    it('refuses a custom builder\'s quantized trees instead of quantizing them again', async () => {
+        const warnings: string[] = [];
+        const { scene, stand, frame } = await setUp({ nodeFormat: 'quantized', holdRefinements: true, warn: (message) => warnings.push(message) });
+        const mesh = scene.addMesh(tessellatedQuad(2, 1));
+        scene.addInstance({ mesh, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] });
+        stand!.quantizedOutputs = true;
+        frame();
+        await stand!.finishBatch();
+        await scene.whenRefined();
+        frame();
+        expect(scene.meshStatus(mesh).builtBy).toBe('tinybvh');
+        expect(scene.meshStatus(mesh).fallbackReason).toMatch(/quantized nodes/);
+        expect(warnings.some((message) => /quantized nodes/.test(message))).toBe(true);
         scene.dispose();
     });
 
