@@ -10,6 +10,7 @@
  */
 
 import {
+    BufferAttribute,
     BackSide,
     BatchedMesh,
     BoxGeometry,
@@ -366,6 +367,47 @@ describe('acceleratedRaycast', () => {
         const { problems, total } = compareRays(root, 73, 1500);
         expect(problems.slice(0, 10)).toEqual([]);
         expect(total).toBeGreaterThan(800);
+    });
+
+    it("builds a shifted tree over just a small range's triangles, and refit(input) refits it from that input", () => {
+        const geometry = new TorusKnotGeometry(0.8, 0.3, 64, 8);
+        const triangles = geometry.index!.count / 3;
+        geometry.clearGroups();
+        geometry.addGroup(0, 3 * 100, 0);
+        geometry.addGroup(3 * 100 + 2, 3 * 150, 1); // starts at 2 mod 3 (at 1 the knot's shifted triangles are degenerate): 150 shifted triangles
+        geometry.addGroup(3 * 250 + 3, Infinity, 0);
+        const materials = [new MeshBasicMaterial({ side: DoubleSide }), new MeshBasicMaterial({ side: DoubleSide })];
+        const tree = computeBoundsTree.call(geometry);
+        const mesh = new Mesh(geometry, materials);
+        mesh.updateMatrixWorld();
+        const random = createRandom(91);
+        const raycaster = new Raycaster();
+        const key = (hits: Omit<Intersection, 'object'>[]) => hits.map((hit) => `${hit.faceIndex}:${hit.face!.a}:${hit.face!.materialIndex}:${hit.distance.toFixed(6)}`);
+        const check = (against: Mesh) => {
+            let hits = 0;
+            for (let r = 0; r < 400; r++) {
+                const origin = new Vector3((random() - 0.5) * 8, (random() - 0.5) * 8, (random() - 0.5) * 8);
+                raycaster.set(origin, new Vector3((random() - 0.5) * 1.5, (random() - 0.5) * 1.5, (random() - 0.5) * 1.5).sub(origin).normalize());
+                const expected = raycaster.intersectObject(against);
+                expect(key(tree.raycast(raycaster.ray, materials))).toEqual(key(expected));
+                hits += expected.filter((hit) => hit.faceIndex! >= 100 && hit.faceIndex! < 250).length; // the shifted group's
+            }
+            return hits;
+        };
+        expect(check(mesh)).toBeGreaterThan(20);
+        const shifted = [...(tree as unknown as { shifted: Map<string, { tree: BvhBoundsTree; triangles: Uint32Array | null }> }).shifted.values()];
+        expect(shifted).toHaveLength(1);
+        expect(shifted[0].tree.triangleCount).toBe(150);
+        expect(shifted[0].tree.triangleCount).toBeLessThan(triangles / 5);
+
+        // Refit to moved positions passed in (the geometry keeps its own): the shifted tree follows the input.
+        const moved = Float32Array.from(geometry.attributes.position.array as Float32Array, (value, i) => (i % 3 === 0 ? value * 1.5 + 0.3 : value));
+        tree.refit({ positions: moved, indices: geometry.index!.array as Uint16Array });
+        const movedGeometry = geometry.clone();
+        movedGeometry.setAttribute('position', new BufferAttribute(moved, 3));
+        const movedMesh = new Mesh(movedGeometry, materials);
+        movedMesh.updateMatrixWorld();
+        expect(check(movedMesh)).toBeGreaterThan(20);
     });
 
     it("raycasts groups off a multiple of 3 through BvhBoundsTree.raycast with an array of materials", () => {
