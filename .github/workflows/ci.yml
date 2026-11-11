@@ -53,7 +53,14 @@ jobs:
         with:
           path: tools/emsdk
           key: emsdk-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/build-wasm.ts') }}
-      - run: pnpm bvh:wasm --check
+      - run: pnpm bvh:wasm --check --out "$RUNNER_TEMP/tinybvh-rebuilt.wasm"
+      - name: Keep the rebuilt .wasm
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: tinybvh-rebuilt-${{ runner.os }}
+          path: ${{ runner.temp }}/tinybvh-rebuilt.wasm
+          if-no-files-found: ignore
 
   gpu-swiftshader:
     name: GPU pages (headless Chrome, SwiftShader)
@@ -80,4 +87,5 @@ jobs:
           # tests/gpu/chrome.ts appends these to Chrome's flags. SwiftShader has no
           # `subgroups`, so bvh-lbvh-fallback exercises the tinybvh fallback.
           BVH_CHROME_FLAGS: --no-sandbox --use-webgpu-adapter=swiftshader --use-angle=swiftshader --enable-unsafe-swiftshader
+          BVH_ALLOW_SOFTWARE_ADAPTER: '1'
         run: pnpm test:gpu:page bvh-lbvh-fallback,trace-inline,trace-oracle
