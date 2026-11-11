@@ -10,6 +10,12 @@
  * buffers (or for the builder), or a GPU build that was refused (gpu-lbvh.ts
  * and gpu-hploc.ts, "Checks"), is built by tinybvh instead, and the result says so.
  *
+ * `maxBatchBytes` (optional, default none) caps each GPU batch's bytes (its
+ * inputs, scratch and outputs) for a lower build peak; the batches are built
+ * one after another, and H-PLOC's share one scratch pool sized from the
+ * largest (docs/design/bvh-builders.md, "Build peak memory"). A mesh bigger
+ * than the cap builds alone.
+ *
  * tinybvh runs on the calling thread here. ddgi-core runs it in a worker
  * (`mesh-bvh-async.ts`); this package stays free of workers and engines.
  */
@@ -17,7 +23,7 @@
 import { GpuHplocBuilder, planGpuHplocBatches } from './gpu-hploc.ts';
 import type { GpuLayoutMeshBvh } from './gpu-layout.ts';
 import { GpuLbvhBuilder, planGpuLbvhBatches } from './gpu-lbvh.ts';
-import type { GpuBuildOptions, GpuMeshGeometry, MeshInput } from './mesh-input.ts';
+import type { GpuBuildOptions, GpuMeshGeometry, GpuTreeBuffers, MeshInput } from './mesh-input.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from './tinybvh.ts';
 
 export type MeshLayoutBuilderKind = 'gpu-hploc' | 'gpu-lbvh' | 'tinybvh';
@@ -47,7 +53,7 @@ export interface MeshLayoutBuilder {
  */
 export async function createMeshLayoutBuilder(
     device: GPUDevice | null,
-    options: { prefer?: MeshLayoutBuilderKind; label?: string } = {},
+    options: { prefer?: MeshLayoutBuilderKind; label?: string; maxBatchBytes?: number } = {},
 ): Promise<MeshLayoutBuilder> {
     let fallbackReason: string | null = null;
     if (options.prefer === 'tinybvh') fallbackReason = 'the CPU builder was asked for';
@@ -75,7 +81,8 @@ export async function createMeshLayoutBuilder(
 
     const kind = options.prefer === 'gpu-lbvh' ? 'gpu-lbvh' : 'gpu-hploc';
     const gpu = kind === 'gpu-lbvh' ? new GpuLbvhBuilder(device, { label: options.label }) : new GpuHplocBuilder(device, { label: options.label });
-    const plan = (geometries: readonly GpuMeshGeometry[]) => (kind === 'gpu-lbvh' ? planGpuLbvhBatches : planGpuHplocBatches)(device, geometries);
+    const planOptions = { maxBatchBytes: options.maxBatchBytes };
+    const plan = (geometries: readonly GpuMeshGeometry[]) => (kind === 'gpu-lbvh' ? planGpuLbvhBatches : planGpuHplocBatches)(device, geometries, planOptions);
     await gpu.prepare();
     return {
         kind,
@@ -87,8 +94,33 @@ export async function createMeshLayoutBuilder(
                 const reason = `the mesh is too big for this builder or this device's GPU buffers (${Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize)} bytes)`;
                 results[index] = { layout: await buildOnCpu(geometries[index], gpuOptions), builtBy: 'tinybvh', fallbackReason: reason };
             }
-            for (const batch of batches.batches) {
-                const trees = await gpu.buildMany(batch.map((index) => geometries[index]), gpuOptions);
+            // Capped H-PLOC batches share one scratch pool, allocated at the largest batch's size and freed after the last.
+            const pool =
+                gpu instanceof GpuHplocBuilder && options.maxBatchBytes !== undefined && batches.batches.length > 1
+                    ? gpu.createScratchPool(batches.batches.map((batch) => batch.map((index) => geometries[index])))
+                    : null;
+            const buildBatch = async (batch: readonly GpuMeshGeometry[]): Promise<GpuTreeBuffers> => {
+                if (!pool || !(gpu instanceof GpuHplocBuilder)) return gpu.buildMany(batch, gpuOptions);
+                const built = gpu.createBatch(batch, gpuOptions, pool);
+                try {
+                    const encoder = device.createCommandEncoder({ label: options.label });
+                    built.encode(encoder);
+                    device.queue.submit([encoder.finish()]);
+                    return await built.finish();
+                } finally {
+                    built.destroy();
+                }
+            };
+            try {
+                for (const batch of batches.batches) {
+                    await buildBatchLayouts(batch, await buildBatch(batch.map((index) => geometries[index])));
+                }
+            } finally {
+                pool?.destroy();
+            }
+            return results as MeshLayoutResult[];
+
+            async function buildBatchLayouts(batch: readonly number[], trees: GpuTreeBuffers): Promise<void> {
                 try {
                     const layouts = await gpu.readLayouts(trees);
                     for (const [at, layout] of layouts.entries()) {
@@ -102,7 +134,6 @@ export async function createMeshLayoutBuilder(
                     trees.destroy();
                 }
             }
-            return results as MeshLayoutResult[];
         },
     };
 }

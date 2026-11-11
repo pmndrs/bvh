@@ -1,4 +1,4 @@
 {
-    "description": "SceneTrees mid-swap oracle: every trace-oracle case (and 1M rays at seams, plain and transformed) on GPU H-PLOC trees, half swapped to tinybvh, and all tinybvh, with gpuTreeOutputs copy and adopt and mergeStaticInstances off and on; the GPU walk over the GPU top level must match the CPU-assembled scene, and rays that must hit must hit.",
+    "description": "SceneTrees mid-swap oracle: every trace-oracle case (and 1M rays at seams, plain and transformed) on GPU H-PLOC trees, half swapped to tinybvh, and all tinybvh, with gpuTreeOutputs copy and adopt and mergeStaticInstances off and on, and capped variants (gpuMaxBatchBytes 4 KiB: a GPU batch per mesh, one after another on one scratch pool; copy, copy-merged, adopt and adopt-merged), loaded with frame(); await whenBuilt(); frame(); the GPU walk over the GPU top level must match the CPU-assembled scene, and rays that must hit must hit.",
     "timeoutMs": 900000
 }

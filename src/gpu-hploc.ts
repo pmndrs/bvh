@@ -29,7 +29,11 @@
  *
  * **Limits.** A batch's largest buffer holds 64 bytes per triangle (the output
  * nodes); {@link planGpuHplocBatches} splits a scene to fit the device. A mesh
- * may have at most {@link HPLOC_MAX_MESH_TRIANGLES} triangles.
+ * may have at most {@link HPLOC_MAX_MESH_TRIANGLES} triangles. A whole batch holds
+ * about 252 bytes per triangle plus its inputs ({@link hplocBatchBytes}); the
+ * planner's `maxBatchBytes` caps that, and {@link GpuHplocScratchPool} shares
+ * one scratch across batches built one after another (bvh-builders.md, "Build
+ * peak memory").
  *
  * **Checks.** As the LBVH: a mesh's tree is refused (`problem` set) on a bad
  * index, a handed-over word still unwritten after the bounded wait, a merge
@@ -43,22 +47,28 @@
 
 import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, type GpuLayoutMeshBvh } from './gpu-layout.ts';
 import {
+    allocatedBytes,
+    batchTotals,
+    budgetOf,
     bufferLimit,
     buildTables,
     checkGeometry,
     checkOptions,
     copyBatchGeometry,
-    indexBytes,
+    geometryTotals,
     MAP_MODE_READ,
     meshResult,
     placeMeshes,
     planMeshBatches,
-    positionBytes,
     readTreeLayouts,
+    summarizeBatchBuffers,
+    tableWords,
     UNIFORM_STRIDE,
     uploadBatchGeometry,
     USAGE,
-    align4,
+    type BatchBytes,
+    type BatchPlanOptions,
+    type BatchTotals,
     type MeshPlacement,
 } from './gpu-lbvh.ts';
 import type { GpuMeshGeometry, GpuTreeBuffers } from './mesh-input.ts';
@@ -75,7 +85,7 @@ import {
     hplocWgsl,
 } from './gpu-hploc-wgsl.ts';
 import type { HplocMortonCodes, HplocOptions } from './hploc-cpu.ts';
-import { createRadixSort, createRadixSortPipelines, radixPassCount, type RadixSort, type RadixSortPipelines } from './gpu-radix-sort.ts';
+import { createRadixSort, createRadixSortPipelines, RADIX_BINS, radixPassCount, type RadixSort, type RadixSortPipelines } from './gpu-radix-sort.ts';
 import { createScanBindGroups, createScanPipelines, encodeScan, SCAN_PARAMS_BYTES, scanParams, scanTileSumWords, type ScanBindGroups } from './gpu-scan.ts';
 import { dispatchWorkgroups2d } from './gpu-workgroup-scan.ts';
 
@@ -91,12 +101,176 @@ const LARGEST_BYTES_PER_TRIANGLE = Math.max(GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TR
 /** Bits of each code word the sorts sort. */
 const SORT_BITS = { 'cubic-30': [30], 'tinybvh-63': [32, 31] } as const satisfies Record<HplocMortonCodes, readonly number[]>;
 
+/** Options of {@link planGpuHplocBatches}. */
+export interface HplocBatchPlanOptions extends BatchPlanOptions {
+    /** The Morton codes the batches will use (`'tinybvh-63'` needs 8 more bytes per triangle). Default `'cubic-30'`. */
+    readonly mortonCodes?: HplocMortonCodes;
+}
+
 /**
  * Splits meshes into batches whose buffers this device can bind, in order. A
  * mesh too big for any batch, or for H-PLOC, comes back in `tooBig`.
+ *
+ * `maxBatchBytes` (optional; default none, today's path) also caps each
+ * batch's GPU bytes while it builds, its inputs, scratch and outputs
+ * ({@link hplocBatchBytes}), so a scene builds in several smaller batches, one
+ * after another, with a lower peak (docs/design/bvh-builders.md, "Build peak
+ * memory"). A mesh bigger than the cap on its own still builds, alone in its
+ * batch.
  */
-export function planGpuHplocBatches(device: GPUDevice, geometries: readonly GpuMeshGeometry[]): { batches: number[][]; tooBig: number[] } {
-    return planMeshBatches(device, geometries, LARGEST_BYTES_PER_TRIANGLE, HPLOC_MAX_MESH_TRIANGLES);
+export function planGpuHplocBatches(device: GPUDevice, geometries: readonly GpuMeshGeometry[], options: HplocBatchPlanOptions = {}): { batches: number[][]; tooBig: number[] } {
+    const mortonCodes = options.mortonCodes ?? 'cubic-30';
+    return planMeshBatches(device, geometries, LARGEST_BYTES_PER_TRIANGLE, HPLOC_MAX_MESH_TRIANGLES, budgetOf(options, (totals) => hplocBatchBytes(totals, mortonCodes).total));
+}
+
+/** Where the climb's scratch and the links buffer put each part, in words (see the batch's constructor). */
+function hplocLayout(totals: BatchTotals) {
+    const { triangles, inner } = totals;
+    // hplocScratch: [climb words per radix-tree node][a record per sorted position (made-node numbers are
+    // representatives, gpu-hploc-wgsl.ts "Numbering")][a stored cluster per sorted position].
+    const recordsOffset = inner * HPLOC_CLIMB_WORDS;
+    const listsOffset = recordsOffset + triangles * HPLOC_RECORD_WORDS;
+    // hplocLinks, all per sorted position: [the node scan, one more at the end][the leaf-run scan, one more]
+    // [2 children per made node][parents: leaves, made nodes][the sorted position at each tree position]. The scans are bound at
+    // offsets, which must be 256-byte aligned.
+    const scanWords = triangles + 1;
+    const leafRunsOffset = Math.ceil(scanWords / 64) * 64;
+    const childrenOffset = leafRunsOffset + scanWords;
+    const parentsOffset = childrenOffset + triangles * 2;
+    const treeOrderOffset = parentsOffset + triangles * 2;
+    // The scratch is cleared in whole vec4s.
+    const scratchQuads = Math.ceil((listsOffset + triangles) / 4);
+    return { recordsOffset, listsOffset, scanWords, leafRunsOffset, childrenOffset, parentsOffset, treeOrderOffset, scratchQuads };
+}
+
+/** Where each uniform record sits in the params buffer (256 bytes apart): LbvhParams, each sort's passes and scan, the two scans, HplocParams. */
+function hplocParamRecords(mortonCodes: HplocMortonCodes) {
+    // A sort's uniforms: one record per pass, then its scan's.
+    const sortRecords = SORT_BITS[mortonCodes].map((bits) => radixPassCount(bits) + 1);
+    const rankScanRecord = 1 + sortRecords.reduce((total, records) => total + records, 0);
+    const leafRunScanRecord = rankScanRecord + 1;
+    const hplocParamsRecord = leafRunScanRecord + 1;
+    return { sortRecords, rankScanRecord, leafRunScanRecord, hplocParamsRecord };
+}
+
+/** The H-PLOC batch's buffers, as {@link GpuHplocBatch} asks for them (before rounding up to 4 bytes, at least 16). */
+export function hplocBatchBuffers(totals: BatchTotals, mortonCodes: HplocMortonCodes = 'cubic-30') {
+    const { meshes, triangles, inner } = totals;
+    const layout = hplocLayout(totals);
+    const sortOffsetWords = totals.sortTiles * RADIX_BINS;
+    return {
+        positions: totals.positionBytes,
+        indices: Math.max(4, totals.indexBytes),
+        flags: Math.max(1, totals.flagWords) * 4,
+        // Every mesh's stats, then the word lbvhStart clears for the LBVH's climb queue (unused here).
+        stats: meshes * LBVH_STATS_BYTES + 16,
+        outNodes: inner * GPU_LAYOUT_NODE_BYTES,
+        outTriangles: triangles * GPU_LAYOUT_TRIANGLE_BYTES,
+        outParents: inner * 4,
+        tables: tableWords(totals) * 4,
+        primitiveBoxes: triangles * 32,
+        keysA: triangles * 4,
+        valuesA: triangles * 4,
+        keysB: triangles * 4,
+        valuesB: triangles * 4,
+        sortOffsets: sortOffsetWords * 4,
+        tileSums: Math.max(scanTileSumWords(sortOffsetWords), scanTileSumWords(triangles + 1)) * 4,
+        codes: mortonCodes === 'tinybvh-63' ? triangles * 8 : 16,
+        deltas: triangles * 8,
+        scratch: layout.scratchQuads * 16,
+        links: (layout.treeOrderOffset + triangles) * 4,
+        params: (hplocParamRecords(mortonCodes).hplocParamsRecord + 1) * UNIFORM_STRIDE,
+    };
+}
+
+export type HplocBatchBuffer = keyof ReturnType<typeof hplocBatchBuffers>;
+/** The buffers a scratch pool holds: every one but the outputs. */
+export type HplocPoolBuffer = Exclude<HplocBatchBuffer, 'outNodes' | 'outTriangles' | 'outParents'>;
+
+/** GPU bytes an H-PLOC batch of these totals holds while it builds, by buffer: its inputs, scratch and uniforms (`scratch`) and its trees (`outputs`). */
+export function hplocBatchBytes(totals: BatchTotals, mortonCodes: HplocMortonCodes = 'cubic-30'): BatchBytes<HplocBatchBuffer> {
+    return summarizeBatchBuffers(hplocBatchBuffers(totals, mortonCodes));
+}
+
+const POOL_USAGE: Record<HplocPoolBuffer, number> = {
+    positions: USAGE.STORAGE | USAGE.COPY_DST,
+    indices: USAGE.STORAGE | USAGE.COPY_DST,
+    flags: USAGE.STORAGE | USAGE.COPY_DST,
+    stats: USAGE.STORAGE | USAGE.COPY_SRC,
+    tables: USAGE.STORAGE | USAGE.COPY_DST,
+    primitiveBoxes: USAGE.STORAGE | USAGE.COPY_DST,
+    keysA: USAGE.STORAGE | USAGE.COPY_DST,
+    valuesA: USAGE.STORAGE | USAGE.COPY_DST,
+    keysB: USAGE.STORAGE | USAGE.COPY_DST,
+    valuesB: USAGE.STORAGE | USAGE.COPY_DST,
+    sortOffsets: USAGE.STORAGE | USAGE.COPY_DST,
+    tileSums: USAGE.STORAGE | USAGE.COPY_DST,
+    codes: USAGE.STORAGE | USAGE.COPY_DST,
+    deltas: USAGE.STORAGE | USAGE.COPY_DST,
+    scratch: USAGE.STORAGE | USAGE.COPY_DST,
+    links: USAGE.STORAGE | USAGE.COPY_DST,
+    params: USAGE.UNIFORM | USAGE.COPY_DST,
+};
+const POOL_BUFFERS = Object.keys(POOL_USAGE) as HplocPoolBuffer[];
+
+/**
+ * The bytes of each buffer of a scratch pool shared by these batches, built
+ * one after another: each buffer at the largest size any batch needs (in
+ * practice the largest batch's, since nearly every buffer grows with its
+ * triangles). Outputs are not pooled: each batch hands its own to the caller.
+ */
+export function hplocScratchPoolBytes(batches: readonly (readonly GpuMeshGeometry[])[], mortonCodes: HplocMortonCodes = 'cubic-30'): Record<HplocPoolBuffer, number> {
+    const sizes = Object.fromEntries(POOL_BUFFERS.map((name) => [name, 0])) as Record<HplocPoolBuffer, number>;
+    for (const geometries of batches) {
+        const { buffers } = hplocBatchBytes(geometryTotals(geometries), mortonCodes);
+        for (const name of POOL_BUFFERS) sizes[name] = Math.max(sizes[name], buffers[name]);
+    }
+    return sizes;
+}
+
+/**
+ * The inputs, scratch and uniforms of H-PLOC batches built one after another
+ * ({@link GpuHplocBuilder.createScratchPool}), allocated once at the largest
+ * batch's size, so a capped load (`maxBatchBytes`) doesn't allocate and free
+ * them per batch. One batch at a time may use it: record, submit and `finish`
+ * a batch before creating the next. Free it with `destroy` after the last.
+ */
+export class GpuHplocScratchPool {
+    readonly mortonCodes: HplocMortonCodes;
+    /** Each buffer's bytes. */
+    readonly sizes: Readonly<Record<HplocPoolBuffer, number>>;
+    private readonly buffers: Record<HplocPoolBuffer, GPUBuffer>;
+    private destroyed = false;
+
+    constructor(device: GPUDevice, sizes: Record<HplocPoolBuffer, number>, mortonCodes: HplocMortonCodes, label: string) {
+        this.mortonCodes = mortonCodes;
+        this.sizes = sizes;
+        this.buffers = Object.fromEntries(
+            POOL_BUFFERS.map((name) => [name, device.createBuffer({ label: `${label} pool ${name}`, size: sizes[name], usage: POOL_USAGE[name] })]),
+        ) as Record<HplocPoolBuffer, GPUBuffer>;
+    }
+
+    /** GPU bytes the pool holds (0 once destroyed). */
+    get bytes(): number {
+        return this.destroyed ? 0 : POOL_BUFFERS.reduce((sum, name) => sum + this.sizes[name], 0);
+    }
+
+    get isDestroyed(): boolean {
+        return this.destroyed;
+    }
+
+    /** The pool's buffer `name`, checked to hold `bytes`. */
+    take(name: HplocPoolBuffer, bytes: number): GPUBuffer {
+        if (this.destroyed) throw new Error('@pmndrs/bvh: the scratch pool was destroyed');
+        if (bytes > this.sizes[name]) throw new RangeError(`the scratch pool's ${name} holds ${this.sizes[name]} bytes, and this batch needs ${bytes}; size the pool from every batch`);
+        return this.buffers[name];
+    }
+
+    destroy(): void {
+        if (this.destroyed) return;
+        this.destroyed = true;
+        for (const name of POOL_BUFFERS) this.buffers[name].destroy();
+    }
 }
 
 /** The steps of a batch's build, in order, as `GpuHplocBatch.encode` can time them. */
@@ -255,7 +429,7 @@ export class GpuHplocBuilder {
      * rebuilds the same trees) and read with `finish`. Throws if the batch is
      * too big for the device (see {@link planGpuHplocBatches}).
      */
-    createBatch(geometries: readonly GpuMeshGeometry[], options: HplocOptions = {}): GpuHplocBatch {
+    createBatch(geometries: readonly GpuMeshGeometry[], options: HplocOptions = {}, pool?: GpuHplocScratchPool): GpuHplocBatch {
         if (!this.pipelines || !this.sortPipelines) throw new Error('@pmndrs/bvh: call prepare() before building');
         if (geometries.length === 0) throw new RangeError('a batch needs at least one mesh');
         const settings = checkHplocOptions(options);
@@ -267,7 +441,21 @@ export class GpuHplocBuilder {
                     `meshes of at most ${HPLOC_MAX_MESH_TRIANGLES} triangles); split them with planGpuHplocBatches`,
             );
         }
-        return new GpuHplocBatch(this.device, this.label, this.pipelines, this.sortPipelines, geometries, settings);
+        if (pool && pool.mortonCodes !== settings.mortonCodes) throw new RangeError(`the scratch pool was made for '${pool.mortonCodes}' codes, not '${settings.mortonCodes}'`);
+        return new GpuHplocBatch(this.device, this.label, this.pipelines, this.sortPipelines, geometries, settings, pool ?? null);
+    }
+
+    /**
+     * A scratch pool for these batches (each a list of meshes, as
+     * {@link planGpuHplocBatches} splits them), to build them one after another
+     * with `createBatch(batch, options, pool)`: their inputs, scratch and
+     * uniforms are allocated once, at the largest batch's size
+     * ({@link hplocScratchPoolBytes}). Free it with `destroy` after the last
+     * batch's `finish`.
+     */
+    createScratchPool(batches: readonly (readonly GpuMeshGeometry[])[], options: Pick<HplocOptions, 'mortonCodes'> = {}): GpuHplocScratchPool {
+        const mortonCodes = options.mortonCodes ?? 'cubic-30';
+        return new GpuHplocScratchPool(this.device, hplocScratchPoolBytes(batches, mortonCodes), mortonCodes, this.label);
     }
 
     /** Copies every usable tree of a batch back into CPU memory (one readback). */
@@ -308,6 +496,7 @@ export class GpuHplocBatch {
         sortPipelines: RadixSortPipelines,
         geometries: readonly GpuMeshGeometry[],
         options: Required<HplocOptions>,
+        pool: GpuHplocScratchPool | null = null,
     ) {
         this.device = device;
         this.label = label;
@@ -323,66 +512,50 @@ export class GpuHplocBatch {
         this.tileCount = tileCount;
         const tinybvhCodes = options.mortonCodes === 'tinybvh-63';
 
-        const storage = USAGE.STORAGE | USAGE.COPY_DST;
+        // Sizes from hplocBatchBuffers, which the planner's byte cap and the scratch pool also use.
+        const totals = batchTotals(this.meshes);
+        const sizes = hplocBatchBuffers(totals, options.mortonCodes);
+        if (tables.byteLength !== sizes.tables || sortTable.offsetWords * 4 !== sizes.sortOffsets) throw new Error('hplocBatchBuffers is out of step with buildTables');
         const output = USAGE.STORAGE | USAGE.COPY_SRC | USAGE.COPY_DST;
         const make = (name: string, bytes: number, usage: number, owned = true): GPUBuffer => {
-            const buffer = device.createBuffer({ label: `${label} ${name}`, size: Math.max(16, align4(bytes)), usage });
+            const buffer = device.createBuffer({ label: `${label} ${name}`, size: allocatedBytes(bytes), usage });
             if (owned) this.owned.push(buffer);
             return buffer;
         };
-        const lastPositionEnd = last.positionByteStart + align4(positionBytes(last.geometry));
-        const lastIndexEnd = this.meshes.reduce((end, mesh) => Math.max(end, mesh.indexByteStart + align4(indexBytes(mesh))), 4);
-        const lastFlagEnd = this.meshes.reduce((end, mesh) => Math.max(end, mesh.flagsWordStart + (mesh.hasFlags ? mesh.triangleCount : 0)), 1);
+        // Inputs, scratch and uniforms: the pool's buffers when there is one (a pooled batch owns none), else the batch's own.
+        const take = (name: HplocPoolBuffer): GPUBuffer => (pool ? pool.take(name, allocatedBytes(sizes[name])) : make(name, sizes[name], POOL_USAGE[name]));
         this.buffers = {
-            positions: make('positions', lastPositionEnd, storage),
-            indices: make('indices', lastIndexEnd, storage),
-            flags: make('flags', lastFlagEnd * 4, storage),
-            // Every mesh's stats, then the word lbvhStart clears for the LBVH's climb queue (unused here).
-            stats: make('stats', this.meshCount * LBVH_STATS_BYTES + 16, USAGE.STORAGE | USAGE.COPY_SRC),
-            outNodes: make('nodes', innerTotal * GPU_LAYOUT_NODE_BYTES, output, false),
-            outTriangles: make('triangles', triangleTotal * GPU_LAYOUT_TRIANGLE_BYTES, output, false),
-            outParents: make('parents', innerTotal * 4, output, false),
+            positions: take('positions'),
+            indices: take('indices'),
+            flags: take('flags'),
+            stats: take('stats'),
+            outNodes: make('nodes', sizes.outNodes, output, false),
+            outTriangles: make('triangles', sizes.outTriangles, output, false),
+            outParents: make('parents', sizes.outParents, output, false),
         };
-        // hplocScratch: [climb words per radix-tree node][a record per sorted position (made-node numbers are
-        // representatives, gpu-hploc-wgsl.ts "Numbering")][a stored cluster per sorted position].
-        const recordsOffset = innerTotal * HPLOC_CLIMB_WORDS;
-        const listsOffset = recordsOffset + triangleTotal * HPLOC_RECORD_WORDS;
-        // hplocLinks, all per sorted position: [the node scan, one more at the end][the leaf-run scan, one more]
-        // [2 children per made node][parents: leaves, made nodes][the sorted position at each tree position]. The scans are bound at
-        // offsets, which must be 256-byte aligned.
-        const scanWords = triangleTotal + 1;
-        const leafRunsOffset = Math.ceil(scanWords / 64) * 64;
-        const childrenOffset = leafRunsOffset + scanWords;
-        const parentsOffset = childrenOffset + triangleTotal * 2;
-        const treeOrderOffset = parentsOffset + triangleTotal * 2;
-        // The scratch is cleared in whole vec4s.
-        const scratchQuads = Math.ceil((listsOffset + triangleTotal) / 4);
+        const { recordsOffset, listsOffset, scanWords, leafRunsOffset, childrenOffset, parentsOffset, treeOrderOffset, scratchQuads } = hplocLayout(totals);
         this.clearWorkgroups = Math.ceil(scratchQuads / LBVH_WORKGROUP_SIZE);
         const scratch = {
-            tables: make('tables', tables.byteLength, storage),
-            primitiveBoxes: make('primitive boxes', triangleTotal * 32, storage),
-            keysA: make('keys a', triangleTotal * 4, storage),
-            valuesA: make('values a', triangleTotal * 4, storage),
-            keysB: make('keys b', triangleTotal * 4, storage),
-            valuesB: make('values b', triangleTotal * 4, storage),
-            sortOffsets: make('sort offsets', sortTable.offsetWords * 4, storage),
-            tileSums: make('scan tile sums', Math.max(scanTileSumWords(sortTable.offsetWords), scanTileSumWords(triangleTotal + 1)) * 4, storage),
-            codes: make('codes', tinybvhCodes ? triangleTotal * 8 : 16, storage),
-            deltas: make('deltas', triangleTotal * 8, storage),
-            scratch: make('climb scratch', scratchQuads * 16, storage),
-            links: make('links', (treeOrderOffset + triangleTotal) * 4, storage),
+            tables: take('tables'),
+            primitiveBoxes: take('primitiveBoxes'),
+            keysA: take('keysA'),
+            valuesA: take('valuesA'),
+            keysB: take('keysB'),
+            valuesB: take('valuesB'),
+            sortOffsets: take('sortOffsets'),
+            tileSums: take('tileSums'),
+            codes: take('codes'),
+            deltas: take('deltas'),
+            scratch: take('scratch'),
+            links: take('links'),
         };
         device.queue.writeBuffer(scratch.tables, 0, tables);
         uploadBatchGeometry(device.queue, this.meshes, this.buffers);
 
         // Uniform records, 256 bytes apart: LbvhParams, each sort's passes and scan, the rank scan, HplocParams.
         const sortBits = SORT_BITS[options.mortonCodes];
-        // A sort's uniforms: one record per pass, then its scan's.
-        const sortRecords = sortBits.map((bits) => radixPassCount(bits) + 1);
-        const rankScanRecord = 1 + sortRecords.reduce((total, records) => total + records, 0);
-        const leafRunScanRecord = rankScanRecord + 1;
-        const hplocParamsRecord = leafRunScanRecord + 1;
-        const params = make('params', (hplocParamsRecord + 1) * UNIFORM_STRIDE, USAGE.UNIFORM | USAGE.COPY_DST);
+        const { sortRecords, rankScanRecord, leafRunScanRecord, hplocParamsRecord } = hplocParamRecords(options.mortonCodes);
+        const params = take('params');
         const lbvhParams = new ArrayBuffer(LBVH_PARAMS_BYTES);
         // LbvhParams, field by field (gpu-lbvh-wgsl.ts).
         const words = new Uint32Array(lbvhParams);
@@ -604,7 +777,7 @@ export class GpuHplocBatch {
         }
     }
 
-    /** GPU bytes the batch holds until `finish` or `destroy`: its inputs, scratch and uniforms (not the outputs). */
+    /** GPU bytes the batch holds until `finish` or `destroy`: its inputs, scratch and uniforms (not the outputs; 0 on a scratch pool, which counts them). */
     get scratchBytes(): number {
         return this.destroyed ? 0 : this.owned.reduce((sum, buffer) => sum + buffer.size, 0);
     }

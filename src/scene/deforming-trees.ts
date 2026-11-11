@@ -194,12 +194,12 @@ export class DeformingTrees {
         for (const mesh of this.meshes.values()) mesh.refit.pollStats();
     }
 
-    /** Records every due refit into one compute pass in `encoder`, then the stats copies whose turn it is. */
-    encode(encoder: GPUCommandEncoder, buffers: { readonly nodes: GPUBuffer; readonly triangles: GPUBuffer }, frame: number): void {
-        if (!this.kernels.ready) return;
+    /** Records every due refit into one compute pass in `encoder`, then the stats copies whose turn it is. Returns whether it recorded a refit (it writes the node buffer). */
+    encode(encoder: GPUCommandEncoder, buffers: { readonly nodes: GPUBuffer; readonly triangles: GPUBuffer }, frame: number): boolean {
+        if (!this.kernels.ready) return false;
         const due: DeformingMesh[] = [];
         for (const mesh of this.meshes.values()) if (mesh.refitDue && mesh.placement && mesh.vertices) due.push(mesh);
-        if (due.length === 0) return;
+        if (due.length === 0) return false;
         const pass = encoder.beginComputePass({ label: this.label });
         for (const mesh of due) {
             mesh.refit.encode(pass, buffers, mesh.vertices!);
@@ -213,6 +213,7 @@ export class DeformingTrees {
             mesh.sampleFrame = frame;
             mesh.nextStatsFrame = frame + STATS_EVERY_FRAMES;
         }
+        return true;
     }
 
     /** The mesh to rebuild this update, if any: the one drifted longest, once held for {@link DRIFT_HOLD_FRAMES}. */
