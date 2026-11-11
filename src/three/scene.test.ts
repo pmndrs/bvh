@@ -124,7 +124,10 @@ function triangleCountOf(mesh: MeshGeometry): number {
 
 /** three's first hit on visible objects (its Raycaster ignores `visible`). */
 function threeFirstHit(raycaster: Raycaster, root: Object3D): Intersection | null {
-    for (const hit of raycaster.intersectObject(root, true)) if (effectivelyVisible(hit.object)) return hit;
+    // three reports a triangle that reads past the index at a NaN distance (and its sort is then unordered): dropped.
+    const hits = raycaster.intersectObject(root, true).filter((hit) => !Number.isNaN(hit.distance));
+    hits.sort((a, b) => a.distance - b.distance);
+    for (const hit of hits) if (effectivelyVisible(hit.object)) return hit;
     return null;
 }
 
@@ -185,6 +188,42 @@ describe('bvhSceneFromObject3D', () => {
         expect(problems).toEqual([]);
         expect(hits).toBeGreaterThan(500);
         expect(ties).toBeLessThan(hits * 0.01);
+    });
+
+    it("finds three's hits on draw ranges and groups off a multiple of 3, overlapping groups and partial tails", async () => {
+        const random = createRandom(31);
+        const root = new Group();
+        for (const [start, count] of [[4, 301], [2, 200], [301, 1e9]]) {
+            const geometry = new SphereGeometry(0.9, 14, 10);
+            geometry.setDrawRange(start, count);
+            root.add(place(new Mesh(geometry, material()), random));
+        }
+        const flat = new TorusKnotGeometry(0.7, 0.25, 30, 6).toNonIndexed();
+        flat.setDrawRange(7, 400);
+        root.add(place(new Mesh(flat, material()), random));
+        const grouped = new TorusKnotGeometry(0.8, 0.3, 32, 6);
+        grouped.clearGroups();
+        grouped.addGroup(0, 100, 0);
+        grouped.addGroup(50, 101, 1);
+        grouped.addGroup(151, 200, 2);
+        grouped.addGroup(352, 9e9, 0);
+        grouped.setDrawRange(1, 600);
+        root.add(place(new Mesh(grouped, [material(), material(), material()]), random));
+        const instanced = new InstancedMesh(new SphereGeometry(0.5, 10, 8), material(), 6);
+        instanced.geometry.setDrawRange(5, 250);
+        for (let i = 0; i < 6; i++) {
+            const dummy = place(new Object3D(), random, 8);
+            dummy.updateMatrix();
+            instanced.setMatrixAt(i, dummy.matrix);
+        }
+        root.add(instanced);
+        root.updateMatrixWorld(true);
+        const scene = bvhSceneFromObject3D(root);
+        expect(scene.meshSources.some((source) => source.start % 3 !== 0)).toBe(true);
+        const { hits, ties, problems } = await compareWithThree(scene, root, 32);
+        expect(problems).toEqual([]);
+        expect(hits).toBeGreaterThan(300);
+        expect(ties).toBeLessThan(hits * 0.03);
     });
 
     it('gives the same hits with every instance static and merged', async () => {
@@ -298,14 +337,21 @@ describe('bvhSceneFromObject3D', () => {
     it("reads the triangle ranges three's raycast reads", () => {
         const geometry = new BoxGeometry(1, 1, 1, 1, 1, 1); // 6 groups of 6 indices
         expect(threeTriangleRanges(geometry, material()).map((r) => [r.start, r.count])).toEqual([[0, 36]]);
+        // three steps 4, 7, ..., 22 (< 24): seven triangles, the last reading indices 22-24.
         geometry.setDrawRange(4, 20);
-        expect(threeTriangleRanges(geometry, material()).map((r) => [r.start, r.count])).toEqual([[4, 18]]);
+        expect(threeTriangleRanges(geometry, material()).map((r) => [r.start, r.count])).toEqual([[4, 21]]);
         const materials = [material(), material(), material()];
-        // Groups 0-5 use materials 0-5; only 0-2 exist, clipped to [4, 24).
+        // Groups 0-5 use materials 0-5; only 0-2 exist, clipped to [4, 24). Group 0 keeps one triangle, 4-6.
         expect(threeTriangleRanges(geometry, materials).map((r) => [r.start, r.count, r.group])).toEqual([
+            [4, 3, 0],
             [6, 6, 1],
             [12, 6, 2],
         ]);
+        // A triangle that would read past the index is dropped: 31, 34 read 31-36, but 34 reads 34-36 (36 is past the end).
+        geometry.setDrawRange(31, 100);
+        expect(threeTriangleRanges(geometry, material()).map((r) => [r.start, r.count])).toEqual([[31, 3]]);
+        geometry.setDrawRange(-4, 9); // three starts at 0 (max(0, start)) and steps 0, 3 (< 5)
+        expect(threeTriangleRanges(geometry, material()).map((r) => [r.start, r.count])).toEqual([[0, 6]]);
         const noGroups = new BufferGeometry().setAttribute('position', new BufferAttribute(new Float32Array(9), 3));
         expect(threeTriangleRanges(noGroups, materials)).toEqual([]);
     });

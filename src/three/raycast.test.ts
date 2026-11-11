@@ -86,8 +86,14 @@ function testScene(seed: number): Group {
 const edgeMargin = (hit: Intersection) => Math.min(hit.barycoord!.x, hit.barycoord!.y, hit.barycoord!.z);
 
 function compareLists(expected: Intersection[], ours: Intersection[], problems: string[], label: string): number {
+    // three reports a triangle that reads past the index (a range's last one) with every corner NaN, at a NaN
+    // distance (its watertight test fails no comparison); there is no such triangle, and we report nothing.
+    // Sorting by a NaN distance leaves three's order undefined, so order isn't compared then.
+    const unordered = expected.some((hit) => Number.isNaN(hit.distance));
+    expected = expected.filter((hit) => !Number.isNaN(hit.distance));
     let edgeOnly = 0;
-    const key = (hit: Intersection) => `${hit.object.id}:${hit.instanceId ?? -1}:${hit.faceIndex}`;
+    // Corners and material too: overlapping groups, and ranges off a multiple of 3, give one faceIndex to two triangles.
+    const key = (hit: Intersection) => `${hit.object.id}:${hit.instanceId ?? -1}:${hit.faceIndex}:${hit.face!.a},${hit.face!.b},${hit.face!.c}:${hit.face!.materialIndex}`;
     const ourByKey = new Map(ours.map((hit) => [key(hit), hit]));
     const expectedKeys = new Set(expected.map(key));
     for (const hit of ours) {
@@ -115,7 +121,7 @@ function compareLists(expected: Intersection[], ours: Intersection[], problems: 
         if (got.object !== want.object) problems.push(`${label}: object differs`);
     }
     // Same order (by distance) where both found the same hits.
-    if (problems.length === 0 && edgeOnly === 0 && ours.map(key).join() !== expected.map(key).join()) {
+    if (!unordered && problems.length === 0 && edgeOnly === 0 && ours.map(key).join() !== expected.map(key).join()) {
         const ties = ours.some((hit, i) => i > 0 && Math.abs(hit.distance - ours[i - 1].distance) < 1e-6);
         if (!ties) problems.push(`${label}: order differs`);
     }
@@ -257,9 +263,132 @@ describe('acceleratedRaycast', () => {
         expect(total).toBeGreaterThan(100);
         expect(local).toHaveBeenCalled();
         // One state per geometry range, each without a per-triangle array.
-        const states = (tree as unknown as { rangeCache: WeakMap<object, { ranges: Uint16Array | null }[]> }).rangeCache.get(batched.material)!;
+        const states = (tree as unknown as { rangeCache: WeakMap<object, { passes: { ranges: Uint16Array | null }[] }[]> }).rangeCache.get(batched.material)!;
         expect(states).toHaveLength(3);
-        expect(states.every((state) => state.ranges === null)).toBe(true);
+        expect(states.every((state) => state.passes.length === 1 && state.passes[0].ranges === null)).toBe(true);
+    });
+
+    /** Meshes whose draw ranges and groups start off a multiple of 3, end mid-triangle, overlap, or run past the index. */
+    function offGridScene(seed: number): { root: Group; geometries: BufferGeometry[] } {
+        const random = createRandom(seed);
+        const root = new Group();
+        const sides: Side[] = [FrontSide, BackSide, DoubleSide];
+        const material = (index: number) => new MeshBasicMaterial({ side: sides[index % 3] });
+        const geometries: BufferGeometry[] = [];
+        const add = (geometry: BufferGeometry, mat: MeshBasicMaterial | MeshBasicMaterial[]) => {
+            geometries.push(geometry);
+            root.add(place(new Mesh(geometry, mat), random));
+        };
+        // Indexed, draw ranges starting at 1 and 2 mod 3, ending mid-triangle; one past the end of the index.
+        for (const [start, count, side] of [[4, 301, 2], [2, 200, 0], [301, 1e9, 1]]) {
+            const geometry = new SphereGeometry(0.9, 14, 10);
+            geometry.setDrawRange(start, count);
+            add(geometry, material(side));
+        }
+        // Non-indexed, starting at 1 mod 3.
+        const flat = new TorusKnotGeometry(0.7, 0.25, 30, 6).toNonIndexed();
+        flat.setDrawRange(7, 400);
+        add(flat, material(2));
+        // Groups off a multiple of 3, overlapping, and one cut by the draw range.
+        const grouped = new TorusKnotGeometry(0.8, 0.3, 32, 6);
+        grouped.clearGroups();
+        grouped.addGroup(0, 100, 0);
+        grouped.addGroup(50, 101, 1); // overlaps the first, starts at 2 mod 3
+        grouped.addGroup(151, 200, 2);
+        grouped.addGroup(352, 9e9, 0);
+        grouped.setDrawRange(1, 600);
+        add(grouped, [0, 1, 2].map((i) => material(i + 2)));
+        // Non-indexed groups.
+        const flatGroups = new SphereGeometry(0.8, 12, 8).toNonIndexed();
+        flatGroups.addGroup(0, 61, 0);
+        flatGroups.addGroup(61, 200, 1);
+        flatGroups.addGroup(200, 400, 0);
+        add(flatGroups, [material(2), material(0)]);
+        root.updateMatrixWorld(true);
+        for (const geometry of geometries) computeBoundsTree.call(geometry);
+        return { root, geometries };
+    }
+
+    it("matches three on draw ranges and groups off a multiple of 3, overlapping groups and partial tails", () => {
+        const { root } = offGridScene(61);
+        const { problems, total } = compareRays(root, 62, 3000);
+        expect(problems.slice(0, 10)).toEqual([]);
+        expect(total).toBeGreaterThan(600);
+        // The shifted trees were made, and without them (tinybvh not loaded) the cast still matches, through three's.
+        const random = createRandom(63);
+        const raycaster = new Raycaster() as Raycaster & { firstHitOnly?: boolean };
+        raycaster.firstHitOnly = true;
+        const firstProblems: string[] = [];
+        let firsts = 0;
+        let ties = 0;
+        for (let r = 0; r < 2000; r++) {
+            randomRay(random, raycaster);
+            raycaster.firstHitOnly = false;
+            Mesh.prototype.raycast = threeRaycast;
+            // Without three's NaN hits (see compareLists), which leave its sort unordered.
+            const all = raycaster
+                .intersectObject(root, true)
+                .filter((hit) => !Number.isNaN(hit.distance))
+                .sort((a, b) => a.distance - b.distance);
+            raycaster.firstHitOnly = true;
+            Mesh.prototype.raycast = acceleratedRaycast;
+            const ours = raycaster.intersectObject(root, true);
+            const closestOf = new Map<string, Intersection>();
+            for (const hit of all) if (!closestOf.has(`${hit.object.id}`)) closestOf.set(`${hit.object.id}`, hit);
+            // Two triangles at the same distance (a shared edge or corner): either is the closest.
+            for (const hit of ours) {
+                const want = closestOf.get(`${hit.object.id}`);
+                if (want && want.faceIndex !== hit.faceIndex && Math.abs(want.distance - hit.distance) <= 1e-9 * Math.max(1, want.distance)) {
+                    closestOf.set(`${hit.object.id}`, hit);
+                    ties++;
+                }
+            }
+            firsts += closestOf.size;
+            compareLists([...closestOf.values()], ours, firstProblems, `ray ${r}`);
+        }
+        Mesh.prototype.raycast = threeRaycast;
+        expect(firstProblems.slice(0, 10)).toEqual([]);
+        expect(firsts).toBeGreaterThan(150);
+        expect(ties).toBeLessThan(firsts * 0.03);
+    });
+
+    it('refits the shifted trees with the tree', () => {
+        const { root, geometries } = offGridScene(71);
+        expect(compareRays(root, 72, 300).problems).toEqual([]);
+        for (const geometry of geometries) {
+            const position = geometry.attributes.position;
+            for (let i = 0; i < position.count; i++) position.setXYZ(i, position.getX(i) * 1.6, position.getY(i) * 0.7, position.getZ(i) + 0.2 * position.getX(i));
+            position.needsUpdate = true;
+            geometry.computeBoundingSphere();
+            geometry.computeBoundingBox();
+            (geometry as BufferGeometry & { boundsTree: BvhBoundsTree }).boundsTree.refit();
+        }
+        const { problems, total } = compareRays(root, 73, 1500);
+        expect(problems.slice(0, 10)).toEqual([]);
+        expect(total).toBeGreaterThan(800);
+    });
+
+    it("raycasts groups off a multiple of 3 through BvhBoundsTree.raycast with an array of materials", () => {
+        const geometry = new TorusKnotGeometry(0.8, 0.3, 32, 6);
+        geometry.clearGroups();
+        geometry.addGroup(1, 300, 0);
+        geometry.addGroup(200, 400, 1);
+        const materials = [new MeshBasicMaterial({ side: DoubleSide }), new MeshBasicMaterial({ side: FrontSide })];
+        const tree = computeBoundsTree.call(geometry);
+        const mesh = new Mesh(geometry, materials);
+        mesh.updateMatrixWorld();
+        const random = createRandom(81);
+        const raycaster = new Raycaster();
+        let hits = 0;
+        for (let r = 0; r < 500; r++) {
+            const origin = new Vector3((random() - 0.5) * 8, (random() - 0.5) * 8, (random() - 0.5) * 8);
+            raycaster.set(origin, new Vector3((random() - 0.5) * 1.5, (random() - 0.5) * 1.5, (random() - 0.5) * 1.5).sub(origin).normalize());
+            const expected = raycaster.intersectObject(mesh);
+            const ours = tree.raycast(raycaster.ray, materials);
+            expect(ours.map((hit) => `${hit.faceIndex}:${hit.face!.a}:${hit.face!.materialIndex}`)).toEqual(expected.map((hit) => `${hit.faceIndex}:${hit.face!.a}:${hit.face!.materialIndex}`));
+            hits += ours.length;
+        }
+        expect(hits).toBeGreaterThan(100);
     });
 
     it("falls back to three's raycast, warning once, after the positions or index changed", () => {

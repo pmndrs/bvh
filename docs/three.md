@@ -29,6 +29,7 @@ The three.js side of the package. It's the only part that imports three, which i
 - **Objects and instances:**
   - Reads `Mesh`, `InstancedMesh` (instances below its `count`), `BatchedMesh` (active instances; `getVisibleAt` too) and `SkinnedMesh` (rest pose; skinning and morph targets aren't applied).
   - Reads the triangles three's `Mesh.raycast` tests: the draw range, and with an array of materials, the groups within it. Each group is its own mesh, so it can carry its own material.
+  - Ranges are read as three steps through them: three indices at a time from the range's start while the index is below its end. A range that starts off a multiple of 3 gives triangles made of neighbouring triangles' corners, and one whose length isn't a multiple of 3 ends in a triangle that reads past it; both are in the mesh, as in three. Overlapping groups are both read. A triangle that would read past the index (or the positions) is dropped: three reports it at a `NaN` distance with `NaN` corners, which no ray can hit (`threeTriangleRanges`).
   - Takes indexed, non-indexed and interleaved positions. Interleaved (or normalized, or non-float) positions are compacted once per geometry and shared by all its groups' meshes.
   - Makes one mesh per geometry and range, shared by every object and instance that uses it.
   - Call `updateMatrixWorld()` first: the world matrices are read as they are.
@@ -99,8 +100,8 @@ raycaster.firstHitOnly = true;                      // optional
 - **Falls back to three's raycast** when the geometry has no tree, for a `SkinnedMesh`, or when there are morph targets.
 - **Queries read the tree's triangles.** `shapecast`, `bvhcast` and `intersects*` hand over the corners stored in the tree, not the geometry's current positions. After editing positions, call `boundsTree.refit()` first (three-mesh-bvh reads the geometry, so it sees edits straight away). `intersectsGeometry` against a bare geometry recomputes that geometry's bounds rather than trusting `geometry.boundingBox`.
 - **Edited geometry:** if the position attribute's version, or the index (object or version), changed since `computeBoundsTree`, the raycast falls back to three's own and warns once. It stays that way until `geometry.boundsTree.refit()` (same index) or `computeBoundsTree` runs again.
-- **Not matched:** a range that starts off a multiple of 3.
-- **Tested:** `src/three/raycast.test.ts` checks it against three on 8,000 random rays.
+- **Ranges off a multiple of 3 and overlapping groups** are matched. A range that starts at index 1 or 2 mod 3 is walked in a second tree over the triangles that start there, built with the tree's options on the first raycast that needs it (it needs tinybvh, loaded by `prepareBoundsTrees`; without it the raycast falls back to three's) and refitted with the tree. Overlapping groups are walked once each, so a triangle in two groups is reported twice, as three does. The one difference: three reports the triangle that reads past the end of the index at a `NaN` distance (and its sort is then out of order); we report nothing there.
+- **Tested:** `src/three/raycast.test.ts` checks it against three on 8,000 random rays, and 5,000 more through ranges and groups off a multiple of 3.
 
 ### The tree object (`geometry.boundsTree`)
 
