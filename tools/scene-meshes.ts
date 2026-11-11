@@ -8,7 +8,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { ModelPart, SceneManifest } from '../tests/gpu/scene-manifest.ts';
-import { extractGltfGeometry, parseGlb, type BenchMeshGeometry, type GltfJson } from '../tests/gpu/pages/trace-bench/gltf-geometry.ts';
+import { extractGltfGeometry, modelTransformMatrix, parseGlb, type BenchInstance, type BenchMeshGeometry, type GltfGeometry, type GltfJson, type Matrix4 } from '../tests/gpu/pages/trace-bench/gltf-geometry.ts';
 
 const REPOSITORY_ROOT = resolve(import.meta.dirname, '..');
 /** As the GPU pages' server: BVH_ASSETS_DIR and BVH_MANIFESTS_DIR (tests/gpu/README.md), defaulting to the sibling webgpu-ddgi checkout. */
@@ -38,18 +38,23 @@ function findModelFile(part: ModelPart): string {
 
 /** Every mesh of a model file, in object space. */
 function readModelMeshes(file: string): BenchMeshGeometry[] {
+    return readModel(file).meshes;
+}
+
+/** A model file's meshes and instances (node transforms under `rootTransform`). */
+function readModel(file: string, rootTransform?: Matrix4): GltfGeometry {
     if (file.toLowerCase().endsWith('.glb')) {
         const bytes = readFileSync(file);
         const { gltf, binary } = parseGlb(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
         if (!binary) throw new Error(`${file} has no binary chunk`);
-        return extractGltfGeometry(gltf, [binary]).meshes;
+        return extractGltfGeometry(gltf, [binary], rootTransform);
     }
     const gltf = JSON.parse(readFileSync(file, 'utf8')) as GltfJson & { buffers?: { uri?: string }[] };
     const buffers = (gltf.buffers ?? []).map((buffer) => {
         if (!buffer.uri || buffer.uri.startsWith('data:')) throw new Error(`${file}: only external buffers are read`);
         return new Uint8Array(readFileSync(join(dirname(file), decodeURIComponent(buffer.uri))));
     });
-    return extractGltfGeometry(gltf, buffers).meshes;
+    return extractGltfGeometry(gltf, buffers, rootTransform);
 }
 
 /** Every mesh of every model part of a scene (manifest id), in manifest order. */
@@ -57,4 +62,19 @@ export function readSceneMeshes(sceneId: string): SceneMesh[] {
     const parts = readManifest(sceneId).parts.filter((part): part is ModelPart => part.kind === 'model');
     if (parts.length === 0) throw new Error(`${sceneId} has no model parts`);
     return parts.flatMap((part) => readModelMeshes(findModelFile(part)).map((geometry, index) => ({ name: `${part.path} mesh ${index}`, geometry })));
+}
+
+/** A scene's meshes and world-space instances, as the trace bench loads them (each part's manifest transform applied). */
+export function readSceneInstances(sceneId: string): { meshes: BenchMeshGeometry[]; instances: BenchInstance[] } {
+    const parts = readManifest(sceneId).parts.filter((part): part is ModelPart => part.kind === 'model');
+    if (parts.length === 0) throw new Error(`${sceneId} has no model parts`);
+    const meshes: BenchMeshGeometry[] = [];
+    const instances: BenchInstance[] = [];
+    for (const part of parts) {
+        const model = readModel(findModelFile(part), modelTransformMatrix(part.transform));
+        const offset = meshes.length;
+        meshes.push(...model.meshes);
+        for (const instance of model.instances) instances.push({ meshIndex: instance.meshIndex + offset, objectToWorld: instance.objectToWorld });
+    }
+    return { meshes, instances };
 }
