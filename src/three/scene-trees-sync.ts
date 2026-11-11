@@ -40,7 +40,13 @@
  *   room so it changes rarely). Hidden objects aren't posed. Without a
  *   renderer (or with `deforming: false`) they are read in their rest pose.
  *   Each pose variant's pipeline is compiled (`BvhPosePass.prepare`) when
- *   its first mesh is added, so the first `update()` doesn't compile it. A
+ *   its first mesh is added, so the first `update()` doesn't compile it.
+ *   Until that compile has settled, `update()` doesn't pose the variant's
+ *   objects (three creates the pipeline asynchronously, and a dispatch
+ *   before it exists fails): they keep their last pose (the rest pose before
+ *   the first), their trees are left as they were, and `poseCounts.waiting`
+ *   counts them. `await sync.ready` to have them posed from the first
+ *   `update()`. A
  *   replaced skeleton (or a new bone count) gets a new pass at the next
  *   `update()`. An `InstancedMesh` with a `morphTexture` and more than one
  *   instance is refused (warned once, read in its rest pose): the pass
@@ -122,6 +128,8 @@ export interface Object3DPoseCounts {
     readonly posed: number;
     /** Deform boxes moved (once per object, for all its meshes). */
     readonly boundsMoved: number;
+    /** Visible posed objects not posed because their pass's pipeline is still compiling (see {@link SceneTreesObject3DSync.ready}). */
+    readonly waiting: number;
 }
 
 /** What one {@link SceneTreesObject3DSync.update} or {@link SceneTreesObject3DSync.sync} pushed. */
@@ -237,11 +245,13 @@ export class SceneTreesObject3DSync {
     private readonly warnedMorphTexture = new WeakSet<Object3D>();
     /** Pose variants whose pipeline compile was started (`BvhPosePass.prepare`). */
     private readonly prepared = new Set<string>();
+    /** Pipeline compiles in flight: by variant, or by pass for a pass with no variant. Each promise settles (never rejects) and removes its entry. */
+    private readonly compiling = new Map<string | BvhPosePassLike, Promise<void>>();
     private readonly poses = new Map<Mesh, TrackedPose>();
     private readonly scratchBox = new Float32Array(6);
     private disposed = false;
     /** What the last {@link pose} posed. */
-    poseCounts: Object3DPoseCounts = { posed: 0, boundsMoved: 0 };
+    poseCounts: Object3DPoseCounts = { posed: 0, boundsMoved: 0, waiting: 0 };
 
     /** Adds every mesh and instance under `root` to `trees` (one {@link sync}). */
     constructor(
@@ -253,6 +263,17 @@ export class SceneTreesObject3DSync {
             throw new Error('@pmndrs/bvh/three: deforming: true needs a renderer (SceneTreesObject3DSync options.renderer) to run the pose passes');
         }
         this.sync();
+    }
+
+    /**
+     * Settles once every pose-pass compile started so far has (a failed one
+     * warns, and its pass compiles at its first update). Until then
+     * {@link update} skips the objects whose pass is compiling; await it
+     * after the constructor (or a {@link sync} that added posed objects) to
+     * have every object posed from the next update. Never rejects.
+     */
+    get ready(): Promise<void> {
+        return Promise.all(this.compiling.values()).then(() => undefined);
     }
 
     /** The pose pass of a posed object (its `buffer` holds the last pose), or null. */
@@ -479,17 +500,24 @@ export class SceneTreesObject3DSync {
      * Runs the pose pass of every visible posed object (skinned and morphed
      * meshes) and hands its vertices to `SceneTrees.setPose`, moving its
      * top-level box when the pose leaves it. {@link update} calls it last.
+     * An object whose pass's pipeline is still compiling is skipped (see {@link ready}).
      */
     pose(): Object3DPoseCounts {
         this.checkLive();
         let posed = 0;
         let boundsMoved = 0;
+        let waiting = 0;
         const slack = this.options.deformSlack ?? 0.25;
         for (const pose of this.poses.values()) {
             if (pose.meshes.size === 0 || !effectivelyVisible(pose.object)) continue;
             if (!this.samePoseInputs(pose)) {
                 if (!threeDeforms(pose.object)) continue; // no longer deforms: the next sync() reads it in its rest pose
                 this.renewPass(pose);
+            }
+            if (this.compiling.has(pose.pass.variant ?? pose.pass)) {
+                // Its pipeline is still compiling: the last pose (and the tree) stay as they are.
+                waiting++;
+                continue;
             }
             pose.pass.update();
             posed++;
@@ -507,7 +535,7 @@ export class SceneTreesObject3DSync {
             }
             for (const mesh of pose.meshes) this.trees.setPose!(mesh.handle, mesh.vertices!);
         }
-        this.poseCounts = { posed, boundsMoved };
+        this.poseCounts = { posed, boundsMoved, waiting };
         return this.poseCounts;
     }
 
@@ -571,13 +599,29 @@ export class SceneTreesObject3DSync {
         return mesh;
     }
 
-    /** A pose pass for `object`, with its variant's pipeline compile started (once per variant). */
+    /**
+     * A pose pass for `object`, with its variant's pipeline compile started
+     * (once per variant). {@link pose} skips the variant's passes until the
+     * compile settles: a dispatch while three's pipeline is pending fails.
+     */
     private createPass(object: Mesh): BvhPosePassLike {
         const pass = this.options.createPosePass ? this.options.createPosePass(object) : new BvhPosePass(this.options.renderer, object);
         const variant = pass.variant;
         if (pass.prepare && (variant === undefined || !this.prepared.has(variant))) {
             if (variant !== undefined) this.prepared.add(variant);
-            pass.prepare().catch((error: unknown) => console.warn('@pmndrs/bvh/three: compiling a pose pass ahead of time failed; it compiles at its first update', error));
+            const key = variant ?? pass;
+            let compile: Promise<void>;
+            try {
+                compile = pass.prepare();
+            } catch (error) {
+                compile = Promise.reject(error);
+            }
+            const settled = compile
+                .catch((error: unknown) => console.warn('@pmndrs/bvh/three: compiling a pose pass ahead of time failed; it compiles at its first update', error))
+                .then(() => {
+                    this.compiling.delete(key);
+                });
+            this.compiling.set(key, settled);
         }
         return pass;
     }

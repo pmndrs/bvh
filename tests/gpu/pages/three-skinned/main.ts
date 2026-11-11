@@ -277,6 +277,7 @@ try {
         const trees = await SceneTrees.create(device, { label: `three-skinned ${triangleLeaves}`, workers: { size: 2 }, triangleLeaves });
         const deformBoxes = recordDeformBoxes(trees);
         const sync = new SceneTreesObject3DSync(trees, scene.root, { renderer });
+        await sync.ready; // the pose passes' pipelines: update() skips posing until they exist
         let boundsMoved = 0;
         const frame = () => {
             sync.update();
@@ -399,6 +400,7 @@ try {
         scene.skinnedMeshes.forEach((mesh, m) => mesh.skeleton.bones[0].position.set(far[m][0], far[m][1], far[m][2]));
         scene.root.updateMatrixWorld(true);
         const sync = new SceneTreesObject3DSync(trees, scene.root, { renderer, deformSlack: 0 });
+        await sync.ready;
         let margin = Infinity;
         let vertices = 0;
         for (let at = 1; at <= 60; at++) {

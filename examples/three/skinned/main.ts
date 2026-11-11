@@ -16,7 +16,7 @@
 
 import { Bone, Float32BufferAttribute, Group, Mesh, MeshBasicMaterial, MeshStandardMaterial, Raycaster, Skeleton, SkinnedMesh, SphereGeometry, Uint16BufferAttribute, Vector2, Vector3, type BufferGeometry, type Intersection } from 'three';
 import { SceneTrees } from '@pmndrs/bvh';
-import { BvhPosePass, SceneTreesObject3DSync } from '@pmndrs/bvh/three';
+import { SceneTreesObject3DSync } from '@pmndrs/bvh/three';
 import { createApp } from '../../shared/app.ts';
 import { cameraRay, GpuRays } from '../../shared/gpu-rays.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
@@ -102,17 +102,10 @@ scene.updateMatrixWorld(true);
 // SceneTrees with the renderer: every SkinnedMesh is posed on the GPU each update.
 const log = new SceneTreesLog();
 const trees = await SceneTrees.create(device, { label: 'skinned', onTree: log.onTree });
-// The sync starts each pose variant's compile (BvhPosePass.prepare) but doesn't wait for it, and a
-// dispatch before three's async pipeline exists fails (setPipeline(undefined)). Make the passes here
-// and await their compiles before the first update (examples/README.md, "Library issues").
-const compiles: Promise<void>[] = [];
-const createPosePass = (mesh: Mesh) => {
-    const pass = new BvhPosePass(renderer, mesh);
-    compiles.push(pass.prepare());
-    return pass;
-};
-const sync = new SceneTreesObject3DSync(trees, world, { renderer, createPosePass });
-await Promise.all(compiles);
+// The pose passes compile asynchronously: until they have, update() leaves each character's tree in its
+// last pose (here, the rest pose) and counts it in poseCounts.waiting. `await sync.ready` would have them
+// posed from the first update; the page doesn't wait, and the first frames' trees are in the rest pose.
+const sync = new SceneTreesObject3DSync(trees, world, { renderer });
 const rays = await GpuRays.create(trees);
 function updateTrees(): number {
     const start = performance.now();
@@ -148,21 +141,21 @@ async function checkAgainstThree(): Promise<number> {
         cameraRay(camera, ndc[i], packed, i);
     }
     const result = await rays.traceClosest(packed);
-    for (const mesh of characters) mesh.skeleton.update();
+    for (const mesh of characters) {
+        mesh.skeleton.update();
+        // three culls a SkinnedMesh's raycast with its boundingSphere, which it computes once (the renderer's
+        // frustum culling does, at the first frame) and never again: refresh it for the current pose. A stale
+        // one made three miss rays that hit the posed surface well inside a triangle.
+        mesh.computeBoundingSphere();
+    }
     const raycaster = new Raycaster();
     let agreed = 0;
-    let grazing = 0;
     for (let i = 0; i < count; i++) {
         raycaster.setFromCamera(ndc[i], camera);
         const theirs: Intersection[] = raycaster.intersectObjects(world.children, false);
         const gpu = result.hit(i);
         const cpu = theirs[0];
-        if (!gpu !== !cpu) {
-            // A ray grazing a silhouette may hit in one pose and miss in the other: the GPU poses in f32,
-            // three in doubles. A few are expected; more means the tree didn't follow the pose.
-            if (++grazing > 2) throw new Error(`ray ${i}: GPU ${gpu ? `hit at ${gpu.t}` : 'missed'}, three's raycast ${cpu ? `hit at ${cpu.distance}` : 'missed'} (${grazing} such rays)`);
-            continue;
-        }
+        if (!gpu !== !cpu) throw new Error(`ray ${i}: GPU ${gpu ? `hit at ${gpu.t}` : 'missed'}, three's raycast ${cpu ? `hit at ${cpu.distance}` : 'missed'}`);
         if (gpu && cpu && Math.abs(gpu.t - cpu.distance) > 1e-3 * Math.max(1, cpu.distance)) throw new Error(`ray ${i}: GPU t ${gpu.t}, three's raycast ${cpu.distance}`);
         if (gpu) agreed++;
     }
