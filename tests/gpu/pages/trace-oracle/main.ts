@@ -16,7 +16,14 @@
  *   builder would fall back to tinybvh, which the variants above already cover;
  * - `watertight-hploc`: the same with the GPU H-PLOC builder (B2);
  * - `watertight-tinybvh-nomasks`: tinybvh trees through a kernel built with
- *   `rayMasks: false`, the walk with its mask code compiled out.
+ *   `rayMasks: false`, the walk with its mask code compiled out;
+ * - `merged-tinybvh`, `merged-hploc`: `mergeStaticInstances`. Each instance
+ *   gets its own copy of its mesh and two of every three are marked static,
+ *   so they merge into world-space meshes (one per flags-and-mask group)
+ *   built by tinybvh or the GPU H-PLOC; the rest stay instances. The
+ *   reference is the case's own instanced scene, so hits must name the source
+ *   instance, its triangle and its authored side. The hook cases also run
+ *   merged (`[hooks-merged]`), with the filter flags in the merged geometry.
  * The variants above trace through the masked batch kernel (the default) with
  * a mask of all ones. Then the hook cases (hooks.ts) run on tinybvh trees, with
  * ray masks on and off: a filter on flagged triangles, a filter that depends on
@@ -31,6 +38,11 @@
 
 import {
     assembleTraceScene,
+    mergeStaticGeometry,
+    TRIANGLE_FLAG_FILTER,
+    type MeshBvh,
+    type MeshGeometry,
+    type TraceSceneInstance,
     createCpuTracer,
     createMeshBvhBuilder,
     HIT_RECORD_BYTES,
@@ -75,6 +87,8 @@ interface OracleVariant {
     treeSource: 'tinybvh' | 'three-mesh-bvh' | 'gpu-lbvh' | 'gpu-hploc';
     /** The batch kernel's `rayMasks`; default true. */
     rayMasks?: boolean;
+    /** Merge static instances (see above). */
+    merged?: boolean;
 }
 
 const VARIANTS: OracleVariant[] = [
@@ -83,6 +97,8 @@ const VARIANTS: OracleVariant[] = [
     { name: 'watertight-lbvh', treeSource: 'gpu-lbvh' },
     { name: 'watertight-hploc', treeSource: 'gpu-hploc' },
     { name: 'watertight-tinybvh-nomasks', treeSource: 'tinybvh', rayMasks: false },
+    { name: 'merged-tinybvh', treeSource: 'tinybvh', merged: true },
+    { name: 'merged-hploc', treeSource: 'gpu-hploc', merged: true },
 ];
 
 /** Rays per hook case and traced mask (hooks.ts); the reference runs once per mask. */
@@ -187,21 +203,51 @@ interface BuiltScene {
     buildMs: number;
 }
 
-async function buildScene(builder: MeshBvhBuilder, oracleCase: OracleCase, variant: OracleVariant): Promise<BuiltScene> {
-    const start = performance.now();
-    let bvhs;
-    if (variant.treeSource === 'three-mesh-bvh') {
-        bvhs = oracleCase.meshes.map((mesh) => buildMeshBvhWithTmbvh(mesh, TMBUILD_LEAF_SIZE).bvh);
-    } else if (variant.treeSource === 'gpu-lbvh' || variant.treeSource === 'gpu-hploc') {
+async function buildTrees(builder: MeshBvhBuilder, meshes: readonly MeshGeometry[], variant: OracleVariant): Promise<MeshBvh[]> {
+    if (variant.treeSource === 'three-mesh-bvh') return meshes.map((mesh) => buildMeshBvhWithTmbvh(mesh, TMBUILD_LEAF_SIZE).bvh);
+    if (variant.treeSource === 'gpu-lbvh' || variant.treeSource === 'gpu-hploc') {
         const gpuBuilder = gpuBuilders.get(variant.treeSource);
         assert(gpuBuilder, `the ${variant.treeSource} builder was not made`);
-        const results = await gpuBuilder.buildLayouts(oracleCase.meshes);
+        const results = await gpuBuilder.buildLayouts(meshes);
         for (const result of results) assert(result.builtBy === variant.treeSource, `a mesh fell back to ${result.builtBy}: ${result.fallbackReason}`);
-        bvhs = results.map((result) => result.layout);
-    } else {
-        bvhs = await Promise.all(oracleCase.meshes.map((mesh) => builder.build(mesh)));
+        return results.map((result) => result.layout);
     }
-    const data = assembleTraceScene(bvhs, oracleCase.instances);
+    return Promise.all(meshes.map((mesh) => builder.build(mesh)));
+}
+
+/**
+ * The case's scene for merging: each instance gets its own copy of its mesh (the same
+ * geometry, so the reference of the instanced case still holds), and two of every
+ * three are static. `flagged` adds the hooks' filter flags to every copy.
+ */
+function unsharedForMerge(meshes: readonly MeshGeometry[], instances: readonly TraceSceneInstance[], flagged?: (original: number) => boolean) {
+    const copies = instances.map((instance) => {
+        const mesh = meshes[instance.meshIndex];
+        if (!flagged) return mesh;
+        const count = mesh.indices ? mesh.indices.length / 3 : mesh.positions.length / 9;
+        return { ...mesh, triangleFlags: Uint32Array.from({ length: count }, (_, t) => (flagged(t) ? TRIANGLE_FLAG_FILTER : 0)) };
+    });
+    return { meshes: copies, instances: instances.map((instance, position) => ({ ...instance, meshIndex: position, static: position % 3 !== 2 })) };
+}
+
+/** Builds a merged scene: the meshes normal instances still use, and one tree per merged group, all by the variant's builder. */
+async function buildMergedScene(builder: MeshBvhBuilder, meshes: readonly MeshGeometry[], instances: readonly TraceSceneInstance[], variant: OracleVariant): Promise<TraceSceneData> {
+    const plan = mergeStaticGeometry(meshes, instances);
+    const needed = meshes.flatMap((mesh, index) => (plan.meshNeeded[index] ? [index] : []));
+    const trees = await buildTrees(builder, [...needed.map((index) => meshes[index]), ...plan.groups.map((group) => group.geometry)], variant);
+    const sourceTrees: (MeshBvh | null)[] = meshes.map(() => null);
+    needed.forEach((index, at) => (sourceTrees[index] = trees[at]));
+    return assembleTraceScene(sourceTrees, instances, {}, { merged: { plan, meshes: trees.slice(needed.length) } });
+}
+
+async function buildScene(builder: MeshBvhBuilder, oracleCase: OracleCase, variant: OracleVariant): Promise<BuiltScene> {
+    const start = performance.now();
+    if (variant.merged) {
+        const unshared = unsharedForMerge(oracleCase.meshes, oracleCase.instances);
+        const data = await buildMergedScene(builder, unshared.meshes, unshared.instances, variant);
+        return { data, buildMs: performance.now() - start };
+    }
+    const data = assembleTraceScene(await buildTrees(builder, oracleCase.meshes, variant), oracleCase.instances);
     return { data, buildMs: performance.now() - start };
 }
 
@@ -345,17 +391,25 @@ await runGpuTest(async ({ device, log }) => {
 
     // The hooks: triangle filters and instance masks, with ray masks on and off.
     const hooks: Record<string, unknown> = {};
-    for (const rayMasks of [true, false]) {
+    for (const [rayMasks, merged] of [[true, false], [false, false], [true, true]] as const) {
         for (const hook of buildHookCases(HOOK_SIZES)) {
             const kernel = await TraceBatchKernel.create(device, { label: hook.name, triangleFilter: hook.filterWgsl, rayMasks });
-            const scene = assembleTraceScene(await Promise.all(hook.base.meshes.map((mesh) => builder.build(mesh))), hook.base.instances);
-            const flagged = writeHookFlags(scene, hook);
+            let scene: TraceSceneData;
+            let flagged: number;
+            if (merged) {
+                const unshared = unsharedForMerge(hook.base.meshes, hook.base.instances, hook.flagged);
+                scene = await buildMergedScene(builder, unshared.meshes, unshared.instances, VARIANTS[0]);
+                flagged = new Uint32Array(scene.triangles).filter((word, at) => at % 12 === 7 && (word & TRIANGLE_FLAG_FILTER) !== 0).length;
+            } else {
+                scene = assembleTraceScene(await Promise.all(hook.base.meshes.map((mesh) => builder.build(mesh))), hook.base.instances);
+                flagged = writeHookFlags(scene, hook);
+            }
             const buffers = uploadTraceScene(device, scene, hook.name);
             try {
                 for (const mask of hookMasks(hook, rayMasks)) {
                     const answers = await traceOnGpu(device, (encoder, batch) => kernel.encode(encoder, buffers, { ...batch, mask }), hook.base.rays);
                     const result = evaluateCase(hook.base, tracerAnswers(answers), await hookReferenceAnswers(hook, mask, rayMasks));
-                    const name = hookPassName(hook, mask, rayMasks);
+                    const name = `${merged ? 'merged ' : ''}${hookPassName(hook, mask, rayMasks)}`;
                     hooks[name] = {
                         rays: result.rays,
                         flaggedTriangles: flagged,
@@ -363,7 +417,7 @@ await runGpuTest(async ({ device, log }) => {
                         any: { matches: result.any.matches, ambiguous: result.any.ambiguous, mismatches: result.any.mismatches },
                     };
                     log(
-                        `[hooks] ${name}: ${result.rays} rays, closest ${result.closest.mismatches} mismatches / ${result.closest.ambiguous} ambiguous, ` +
+                        `[hooks${merged ? '-merged' : ''}] ${name}: ${result.rays} rays, closest ${result.closest.mismatches} mismatches / ${result.closest.ambiguous} ambiguous, ` +
                             `any ${result.any.mismatches} / ${result.any.ambiguous}`,
                     );
                     for (const failure of result.failures) failures.push(`[hooks] ${name}: ${failure}`);
