@@ -141,4 +141,64 @@ describe('createBvhWorkerPool', () => {
         for (const build of builds) await expect(build).rejects.toThrow(/disposed/);
         await expect(pool.build(quad(2))).rejects.toThrow(/disposed/);
     });
+    it('copies views into one shared buffer instead of detaching it, and still moves whole-buffer arrays', async () => {
+        vi.stubGlobal('Worker', FakeWorker);
+        const pool = createBvhWorkerPool({ size: 1, transferInput: true });
+        // Two meshes and their flags viewing one glTF-style BIN buffer.
+        const a = quad(3);
+        const b = quad(4);
+        const triangles = (geometry: MeshGeometry) => geometry.indices!.length / 3;
+        const floats = a.positions.length + b.positions.length;
+        const words = a.indices!.length + b.indices!.length + triangles(a) + triangles(b);
+        const bin = new ArrayBuffer(4 * (floats + words));
+        let offset = 0;
+        const place = <T extends Float32Array | Uint32Array>(Kind: { new (buffer: ArrayBuffer, offset: number, length: number): T }, source: ArrayLike<number>): T => {
+            const view = new Kind(bin, offset, source.length);
+            view.set(source);
+            offset += 4 * source.length;
+            return view;
+        };
+        const inBin = (geometry: MeshGeometry): MeshGeometry => ({
+            positions: place(Float32Array, geometry.positions),
+            indices: place(Uint32Array, geometry.indices!),
+            triangleFlags: place(Uint32Array, new Uint32Array(triangles(geometry))),
+        });
+        const sharedA = inBin(a);
+        const sharedB = inBin(b);
+        const trees = await Promise.all([pool.build(sharedA), pool.build(sharedB)]);
+        expect(trees.map((tree) => tree.triangleCount)).toEqual([18, 32]);
+        expect(bin.byteLength).toBe(4 * (floats + words));
+        expect(sharedB.positions).toEqual(b.positions);
+        // Arrays that cover their whole buffer still move.
+        const whole = quad(2);
+        expect((await pool.build(whole)).triangleCount).toBe(8);
+        expect(whole.positions.length).toBe(0);
+    });
+
+    it('rejects a build whose input cannot be posted and keeps the worker for the next one', async () => {
+        vi.stubGlobal('Worker', FakeWorker);
+        const pool = createBvhWorkerPool({ size: 1 });
+        const detached = quad(3);
+        structuredClone(detached.positions, { transfer: [detached.positions.buffer] });
+        // The first is sent from build(); the second from the worker's answer (onmessage).
+        const first = pool.build(quad(2));
+        const bad = pool.build(detached);
+        const after = pool.build(quad(4));
+        expect((await first).triangleCount).toBe(8);
+        await expect(bad).rejects.toThrow(/could not be sent/);
+        expect((await after).triangleCount).toBe(32);
+        await expect(pool.build(detached)).rejects.toThrow(/could not be sent/);
+        expect(pool.stats).toMatchObject({ queued: 0, running: 0, finished: 4 });
+    });
+
+    it("worker: 'always' rejects the builds on workers too when no worker loads, and stops those workers", async () => {
+        vi.stubGlobal('Worker', FakeWorker);
+        FakeWorker.failToLoad = true;
+        const pool = createBvhWorkerPool({ size: 2, worker: 'always' });
+        const builds = [pool.build(quad(2)), pool.build(quad(3)), pool.build(quad(4))];
+        for (const build of builds) await expect(build).rejects.toThrow(/failed/);
+        expect(FakeWorker.started.length).toBeGreaterThan(0);
+        expect(FakeWorker.started.every((worker) => worker.terminated)).toBe(true);
+        expect(pool.stats).toMatchObject({ queued: 0, running: 0, workers: 0 });
+    });
 });

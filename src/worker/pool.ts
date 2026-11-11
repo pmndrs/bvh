@@ -38,7 +38,9 @@ export interface BvhWorkerPoolOptions {
     readonly worker?: 'auto' | 'never' | 'always';
     /**
      * Move every build's input arrays into the worker instead of copying them;
-     * the caller's arrays are empty afterwards. Default false. A build can
+     * the caller's arrays are empty afterwards. An array that views only part of
+     * its buffer (glTF accessors into one BIN buffer) is copied instead, so the
+     * buffer's other arrays stay usable. Default false. A build can
      * choose for itself with {@link BvhBuildRequest.transferInput}.
      */
     readonly transferInput?: boolean;
@@ -122,6 +124,43 @@ function startWorker(): Worker {
     return new Worker(new URL('../trace/mesh-bvh-worker.ts', import.meta.url), { type: 'module' });
 }
 
+/** Whether a buffer was transferred away. Without ES2024's `detached`, any empty buffer counts (there is nothing to move). */
+function isDetached(buffer: ArrayBuffer): boolean {
+    return (buffer as { detached?: boolean }).detached ?? buffer.byteLength === 0;
+}
+
+/**
+ * The geometry to post and the buffers to transfer with it. A view that covers only part of its
+ * buffer (glTF meshes viewing one shared BIN buffer) is copied into a compact array first, which is
+ * transferred: cloning the view would copy the whole buffer, and transferring it would empty every
+ * other view into it. With `transferInput`, a view that covers its whole `ArrayBuffer` moves into the
+ * worker. Each buffer is listed once, and a detached or shared one never.
+ */
+function postable(geometry: MeshGeometry, transferInput: boolean): { geometry: MeshGeometry; transfer: Transferable[]; moved: boolean } {
+    const transfer = new Set<ArrayBuffer>();
+    let moved = false;
+    const prepare = <T extends Float32Array | Uint16Array | Uint32Array>(view: T): T => {
+        const buffer = view.buffer;
+        if (!(buffer instanceof ArrayBuffer) || isDetached(buffer)) return view;
+        if (view.byteOffset !== 0 || view.byteLength !== buffer.byteLength) {
+            const copy = view.slice() as T;
+            transfer.add(copy.buffer as ArrayBuffer);
+            return copy;
+        }
+        if (transferInput) {
+            transfer.add(buffer);
+            moved = true;
+        }
+        return view;
+    };
+    const posted: MeshGeometry = {
+        positions: prepare(geometry.positions),
+        indices: geometry.indices ? prepare(geometry.indices) : geometry.indices,
+        triangleFlags: geometry.triangleFlags ? prepare(geometry.triangleFlags) : geometry.triangleFlags,
+    };
+    return { geometry: posted, transfer: [...transfer], moved };
+}
+
 export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWorkerPool {
     const mode = options.worker ?? 'auto';
     const size = options.size ?? defaultWorkerPoolSize();
@@ -166,6 +205,16 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
 
     const fallBackToInline = (reason: string): void => {
         if (mode === 'always') {
+            // No fallback: every build the pool holds fails, the ones on a worker included, and the
+            // workers stop. A later build starts a fresh worker.
+            for (const entry of workers.splice(0)) {
+                entry.worker.terminate();
+                if (entry.job) {
+                    finished++;
+                    settle(entry.job, { error: new Error(reason) });
+                }
+                entry.job = null;
+            }
             for (const job of queue.splice(0)) settle(job, { error: new Error(reason) });
             return;
         }
@@ -215,15 +264,20 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
 
     const send = (entry: PoolWorker, job: Job): void => {
         entry.job = job;
-        const request: BuildRequest = { id: entry.nextId++, geometry: job.geometry, options: job.options };
-        const transfer: Transferable[] = [];
-        if (job.transferInput) {
-            transfer.push(job.geometry.positions.buffer);
-            if (job.geometry.indices && job.geometry.indices.buffer !== job.geometry.positions.buffer) transfer.push(job.geometry.indices.buffer);
-            if (job.geometry.triangleFlags) transfer.push(job.geometry.triangleFlags.buffer);
-            job.transferred = true;
+        let moved: boolean;
+        try {
+            const posted = postable(job.geometry, job.transferInput);
+            moved = posted.moved;
+            const request: BuildRequest = { id: entry.nextId++, geometry: posted.geometry, options: job.options };
+            entry.worker.postMessage(request, posted.transfer);
+        } catch (error) {
+            // A detached input, a buffer that can't be cloned: this build fails, the worker stays free.
+            entry.job = null;
+            finished++;
+            settle(job, { error: new Error(`@pmndrs/bvh/worker: the build's input could not be sent to a worker: ${toError(error).message}`) });
+            return;
         }
-        entry.worker.postMessage(request, transfer);
+        job.transferred = moved;
     };
 
     /** Starts queued builds on free workers (starting workers up to the pool's size). */
