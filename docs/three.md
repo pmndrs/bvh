@@ -110,6 +110,7 @@ geometry.computeBoundsTree();
 raycaster.firstHitOnly = true;                      // optional
 ```
 
+- **Types:** `/three` augments three's types as three-mesh-bvh does: `BufferGeometry.boundsTree` (a `BvhBoundsTree`), `computeBoundsTree`, `disposeBoundsTree` and `Raycaster.firstHitOnly`, so the lines above need no casts. A program that imports both libraries gets two declarations of the geometry members with different types (TS2717): `skipLibCheck` (on in most templates) hides it, and the first declaration read gives the type. Our own sources carry `@ts-ignore` there, as our tests import three-mesh-bvh; the emitted `.d.ts` drops it.
 - **What three would return:** the same intersections as three's `Mesh.raycast`:
   - the draw range, and with an array of materials, the groups;
   - `side` (front, back or double);

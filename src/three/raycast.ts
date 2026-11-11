@@ -1039,7 +1039,7 @@ export function acceleratedRaycast(this: Mesh, raycaster: Raycaster, intersects:
     // o_local + t * d_local is the world point o + t * d (d_local is not renormalized), so t is the
     // world distance over |d| (1 for three's normalized rays).
     const toT = 1 / direction.length();
-    const firstHitOnly = (raycaster as Raycaster & { firstHitOnly?: boolean }).firstHitOnly === true;
+    const firstHitOnly = raycaster.firstHitOnly === true;
     const hits = tree.raycastLocal(localOrigin, localDirection, raycaster.near * toT, raycaster.far * toT, material, this.geometry.drawRange, firstHitOnly);
     if (!hits) {
         threeRaycast.call(this, raycaster, intersects); // a range off a multiple of 3, and tinybvh isn't loaded for its tree
@@ -1055,3 +1055,37 @@ export function acceleratedRaycast(this: Mesh, raycaster: Raycaster, intersects:
         intersects.push({ distance, point: worldPoint.clone(), object: this, ...intersectionFields(this.geometry, hit.triangle, hit.firstIndex, hit.u, hit.v, localDir, hit.materialIndex) });
     }
 }
+
+/**
+ * three's types with what the drop-ins add, in three-mesh-bvh's shape, so
+ * `geometry.computeBoundsTree()`, `geometry.boundsTree` and
+ * `raycaster.firstHitOnly` typecheck once `@pmndrs/bvh/three` is imported.
+ * three-mesh-bvh declares the same members with its own types: a program
+ * that imports both (while migrating, or comparing the two as our tests do)
+ * gets two declarations of `boundsTree`, `computeBoundsTree` and
+ * `disposeBoundsTree` with different types, which TypeScript refuses
+ * (TS2717). The `@ts-ignore`s keep such a program of our sources compiling
+ * (the tests compare against three-mesh-bvh); the first declaration read
+ * gives the type. The emitted `.d.ts` drops them: a consumer importing both
+ * needs `skipLibCheck`.
+ */
+/* eslint-disable @typescript-eslint/ban-ts-comment -- @ts-expect-error would fail in a program without three-mesh-bvh */
+declare module 'three' {
+    interface BufferGeometry {
+        /** The tree {@link computeBoundsTree} (or {@link setBoundsTree}) gave this geometry. */
+        // @ts-ignore TS2717 next to three-mesh-bvh's augmentation (see above)
+        boundsTree?: BvhBoundsTree;
+        /** Set it to {@link computeBoundsTree}: `BufferGeometry.prototype.computeBoundsTree = computeBoundsTree`. */
+        // @ts-ignore TS2717 next to three-mesh-bvh's augmentation
+        computeBoundsTree: typeof computeBoundsTree;
+        /** Set it to {@link disposeBoundsTree}. */
+        // @ts-ignore TS2717 next to three-mesh-bvh's augmentation
+        disposeBoundsTree: typeof disposeBoundsTree;
+    }
+
+    interface Raycaster {
+        /** {@link acceleratedRaycast} (and `raycastScene`): only the closest hit. Default false, every hit. */
+        firstHitOnly?: boolean;
+    }
+}
+/* eslint-enable @typescript-eslint/ban-ts-comment */

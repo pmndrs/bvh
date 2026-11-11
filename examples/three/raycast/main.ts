@@ -144,8 +144,7 @@ async function traceBatch(): Promise<void> {
 
 // CPU rates: a few milliseconds per frame for each raycast, the counts averaged over a second.
 const raycaster = new Raycaster();
-// three-mesh-bvh's flag; /three has no type augmentation for it (see examples/README.md).
-(raycaster as Raycaster & { firstHitOnly?: boolean }).firstHitOnly = true;
+raycaster.firstHitOnly = true; // three-mesh-bvh's flag, typed by /three's augmentation of three
 const rates = { three: { rays: 0, ms: 0 }, accelerated: { rays: 0, ms: 0 } };
 let nextRay = 0;
 let rateStart = performance.now();

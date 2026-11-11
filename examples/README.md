@@ -51,7 +51,6 @@ Measured on the Apple M5 (Chrome, headless, `pnpm examples:smoke`), default scen
 
 ## Public-API gaps the examples ran into
 
-- No `declare module 'three'` augmentation in `/three`: `raycaster.firstHitOnly`, `geometry.boundsTree` and `geometry.computeBoundsTree` need casts (three-mesh-bvh ships one).
 - `SceneTrees` keeps no CPU copy of its trees, so there is no SAH cost per tree for the overlay; and its GPU build time (`counts.gpuBuildMs`) is submit-to-stats wall time, not timestamps. `SceneTrees.update(encoder)` takes no timestamp writes, so the top-level refit's GPU time can't be shown (the instances page shows CPU ms of sync + update).
 - `SceneTreesObject3DSync` doesn't list its mesh handles; the pages collect them from `onTree` events.
 - The GPU walk's step counters (the counted walk the benches use) aren't public, so the inspector's heat map is a CPU walk over the same tree.
