@@ -56,6 +56,21 @@ import { createCpuTracer, CPU_TRACE_BACK_SIDE, CPU_TRACE_DOUBLE_SIDE, CPU_TRACE_
 import { buildMeshBvhWithTinyBvh } from '../trace/mesh-bvh-topology.ts';
 import { buildTopLevel, IDENTITY_TRANSFORM, type TopLevelBvh } from '../trace/top-level.ts';
 import type { TriangleCandidate } from '../trace/triangle-filter.ts';
+import {
+    BvhBox3,
+    ExtendedTriangle,
+    invertMatrix,
+    BvhMatrix4,
+    OrientedBox,
+    sphereIntersectsBox,
+    triangleIntersectsTriangle,
+    transformPoint,
+    type BvhBox3Like,
+    type BvhMatrix4Like,
+    type BvhQueryTriangle,
+    type BvhSphereLike,
+    type ExtendedTriangleState,
+} from './shapes.ts';
 
 const TRIANGLE_WORDS = GPU_LAYOUT_TRIANGLE_BYTES / 4;
 const CORNER_WORDS = [GPU_LAYOUT_TRIANGLE_WORD.vertex0, GPU_LAYOUT_TRIANGLE_WORD.vertex1, GPU_LAYOUT_TRIANGLE_WORD.vertex2] as const;
@@ -159,6 +174,50 @@ export interface BvhTraverseCallbacks {
     intersectsRange(offset: number, count: number, contained: boolean, depth: number, nodeIndex: number, box: Float32Array): unknown;
     /** Scores a box, once per child; of two siblings the lower score is visited first (left first on a tie). Without it, left before right. */
     boundsTraverseOrder?(box: Float32Array): number;
+}
+
+/**
+ * The callbacks of {@link CpuMeshBvh.shapecast}: three-mesh-bvh's `shapecast`
+ * callbacks (0.9.18), with its argument order and meaning. `Box` is what the
+ * boxes come as (a {@link BvhBox3} here, a three `Box3` in
+ * `@pmndrs/bvh/three`), `Triangle` what the triangles come as
+ * (an {@link ExtendedTriangle} here, the three-flavoured one there). Both are
+ * scratch objects, valid only during the call.
+ */
+export interface BvhShapecastCallbacks<Triangle = BvhQueryTriangle, Box = BvhBox3Like> {
+    /** As {@link BvhTraverseCallbacks.intersectsBounds}, with the box as `Box`. */
+    intersectsBounds(box: Box, isLeaf: boolean, score: number | undefined, depth: number, nodeIndex: number): unknown;
+    /**
+     * Each triangle of an entered leaf or a contained box, in tree order:
+     * `triangleIndex` is the original index, `contained` whether a box above
+     * it was reported contained. A truthy return stops the cast.
+     */
+    intersectsTriangle?(triangle: Triangle, triangleIndex: number, contained: boolean, depth: number): unknown;
+    /**
+     * A range of tree positions, before its triangles are handed to
+     * `intersectsTriangle`; a truthy return stops the cast (and skips them).
+     * Without `intersectsTriangle` it decides alone. With neither, a cast
+     * stops at the first contained box (three-mesh-bvh's default).
+     */
+    intersectsRange?(offset: number, count: number, contained: boolean, depth: number, nodeIndex: number, box: Box): unknown;
+    /** As {@link BvhTraverseCallbacks.boundsTraverseOrder}. */
+    boundsTraverseOrder?(box: Box): number;
+}
+
+/**
+ * The callbacks of {@link CpuMeshBvh.bvhcast}: three-mesh-bvh's (0.9.18).
+ * Offsets and indices are **tree positions** in each tree (three-mesh-bvh's
+ * indirect mode): map them with each tree's `resolveTriangleIndex`.
+ */
+export interface BvhBvhcastCallbacks<Triangle = BvhQueryTriangle> {
+    /** Two leaves whose boxes overlap (the other's moved into this tree's space). A truthy return stops the cast. */
+    intersectsRanges?(offset1: number, count1: number, offset2: number, count2: number, depth1: number, nodeIndex1: number, depth2: number, nodeIndex2: number): unknown;
+    /**
+     * Every pair of triangles of two such leaves: `triangle1` from this tree,
+     * `triangle2` from the other moved by `matrixToLocal`; `i1`, `i2` tree
+     * positions. A truthy return stops the cast.
+     */
+    intersectsTriangles?(triangle1: Triangle, triangle2: Triangle, i1: number, i2: number, depth1: number, nodeIndex1: number, depth2: number, nodeIndex2: number): unknown;
 }
 
 /** Per-vertex data for {@link CpuMeshBvh.getTriangleHitPointInfo}: `itemSize` numbers per vertex. */
@@ -594,6 +653,169 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
     }
 
     /**
+     * three-mesh-bvh's `shapecast` (0.9.18): {@link traverse}, with each
+     * leaf's triangles handed to `intersectsTriangle` as an
+     * {@link ExtendedTriangle} (a scratch object, reloaded per triangle, with
+     * `needsUpdate` set) and the original triangle index. Boxes come as
+     * {@link BvhBox3}. Returns true when a callback stopped the cast.
+     */
+    shapecast(callbacks: BvhShapecastCallbacks): boolean {
+        const triangle = trianglePool.pop() ?? new ExtendedTriangle();
+        try {
+            return this.shapecastWith(callbacks, triangle, new BvhBox3());
+        } finally {
+            trianglePool.push(triangle);
+        }
+    }
+
+    /**
+     * The one shapecast: {@link shapecast} with the caller's scratch triangle
+     * and box (an engine adapter passes its own types; they only need `x`,
+     * `y`, `z` corners and `min` / `max` points).
+     */
+    protected shapecastWith<T extends ExtendedTriangleState, B extends BvhBox3Like>(callbacks: BvhShapecastCallbacks<T, B>, triangle: T, box: B): boolean {
+        const { intersectsBounds, intersectsTriangle, intersectsRange, boundsTraverseOrder } = callbacks;
+        const fill = (array: Float32Array): B => {
+            box.min.x = array[0];
+            box.min.y = array[1];
+            box.min.z = array[2];
+            box.max.x = array[3];
+            box.max.y = array[4];
+            box.max.z = array[5];
+            return box;
+        };
+        let range: BvhTraverseCallbacks['intersectsRange'];
+        if (intersectsTriangle) {
+            range = (offset, count, contained, depth, nodeIndex, array) => {
+                if (intersectsRange && intersectsRange.call(callbacks, offset, count, contained, depth, nodeIndex, fill(array))) return true;
+                for (let position = offset, end = offset + count; position < end; position++) {
+                    this.readTriangleInto(position, triangle);
+                    if (intersectsTriangle.call(callbacks, triangle, this.resolveTriangleIndex(position), contained, depth)) return true;
+                }
+                return false;
+            };
+        } else if (intersectsRange) {
+            range = (offset, count, contained, depth, nodeIndex, array) => intersectsRange.call(callbacks, offset, count, contained, depth, nodeIndex, fill(array));
+        } else {
+            range = (_offset, _count, contained) => contained;
+        }
+        return this.traverse({
+            intersectsBounds: (array, isLeaf, score, depth, nodeIndex) => intersectsBounds.call(callbacks, fill(array), isLeaf, score, depth, nodeIndex),
+            intersectsRange: range,
+            boundsTraverseOrder: boundsTraverseOrder ? (array) => boundsTraverseOrder.call(callbacks, fill(array)) : undefined,
+        });
+    }
+
+    /** Loads the corners at a tree position into a triangle (as the tree stores them) and sets its `needsUpdate`. */
+    readTriangleInto(treePosition: number, triangle: ExtendedTriangleState): void {
+        const floats = this.triangleFloats;
+        const base = treePosition * TRIANGLE_WORDS;
+        const points = triangle.points;
+        for (let corner = 0; corner < 3; corner++) {
+            const word = base + CORNER_WORDS[corner];
+            const point = points[corner];
+            point.x = floats[word];
+            point.y = floats[word + 1];
+            point.z = floats[word + 2];
+        }
+        triangle.needsUpdate = true;
+    }
+
+    /**
+     * Whether any triangle touches the box `box` placed by `boxToMesh` (into
+     * this tree's space; default identity), three-mesh-bvh's `intersectsBox`:
+     * an {@link OrientedBox} shapecast. A three `Box3` and `Matrix4` pass.
+     */
+    intersectsBox(box: BvhBox3Like, boxToMesh?: BvhMatrix4Like | null): boolean {
+        const obb = new OrientedBox().set(box.min, box.max, boxToMesh);
+        return this.coreShapecast({
+            intersectsBounds: (bounds) => obb.intersectsBox(bounds),
+            intersectsTriangle: (triangle) => obb.intersectsTriangle(triangle),
+        });
+    }
+
+    /** Whether any triangle touches the sphere (three-mesh-bvh's `intersectsSphere`). A three `Sphere` passes. */
+    intersectsSphere(sphere: BvhSphereLike): boolean {
+        return this.coreShapecast({
+            intersectsBounds: (bounds) => sphereIntersectsBox(sphere, bounds),
+            intersectsTriangle: (triangle) => triangle.intersectsSphere(sphere),
+        });
+    }
+
+    /**
+     * Whether any triangle touches a triangle of `other` placed by
+     * `geometryToBvh` (into this tree's space; default identity),
+     * three-mesh-bvh's `intersectsGeometry`. `other` is a tree (fast) or a
+     * mesh (`{ positions, indices }`, every triangle tested against the
+     * leaves its bounding box reaches).
+     */
+    intersectsGeometry(other: CpuMeshBvh<unknown> | MeshInput, geometryToBvh?: BvhMatrix4Like | null): boolean {
+        const toBvh = new BvhMatrix4().copy(geometryToBvh ?? IDENTITY_MATRIX);
+        const inverse = new BvhMatrix4();
+        invertMatrix(toBvh, inverse);
+        const otherBounds = other instanceof CpuMeshBvh ? other.getBoundingBox() : meshBounds(other);
+        const obb = new OrientedBox().set({ x: otherBounds[0], y: otherBounds[1], z: otherBounds[2] }, { x: otherBounds[3], y: otherBounds[4], z: otherBounds[5] }, toBvh);
+        const thisTriangle = trianglePool.pop() ?? new ExtendedTriangle();
+        const otherTriangle = trianglePool.pop() ?? new ExtendedTriangle();
+        try {
+            if (other instanceof CpuMeshBvh) {
+                // three-mesh-bvh's: each leaf of this tree, as a box in the other's space, shapecast against the other tree.
+                const leafBox = new OrientedBox();
+                return this.traverse({
+                    intersectsBounds: (array) => obb.intersectsBox(boxOfArray(array)),
+                    intersectsRange: (offset, count, _contained, _depth, _nodeIndex, array) => {
+                        leafBox.set({ x: array[0], y: array[1], z: array[2] }, { x: array[3], y: array[4], z: array[5] }, inverse);
+                        return other.coreShapecast({
+                            intersectsBounds: (bounds) => leafBox.intersectsBox(bounds),
+                            intersectsTriangle: (triangle) => {
+                                for (const point of triangle.points) transformPoint(point, toBvh.elements);
+                                triangle.needsUpdate = true;
+                                for (let position = offset, end = offset + count; position < end; position++) {
+                                    this.readTriangleInto(position, thisTriangle);
+                                    if (triangleIntersectsTriangle(triangle, thisTriangle)) return true;
+                                }
+                                return false;
+                            },
+                        });
+                    },
+                });
+            }
+            // A mesh: this tree's triangles moved into its space, against each of its triangles.
+            const { positions, indices } = other;
+            const otherCount = indices ? Math.floor(indices.length / 3) : Math.floor(positions.length / 9);
+            return this.traverse({
+                intersectsBounds: (array) => obb.intersectsBox(boxOfArray(array)),
+                intersectsRange: (offset, count) => {
+                    for (let position = offset, end = offset + count; position < end; position++) {
+                        this.readTriangleInto(position, thisTriangle);
+                        for (const point of thisTriangle.points) transformPoint(point, inverse.elements);
+                        thisTriangle.needsUpdate = true;
+                        for (let triangle = 0; triangle < otherCount; triangle++) {
+                            for (let corner = 0; corner < 3; corner++) {
+                                const vertex = indices ? indices[triangle * 3 + corner] : triangle * 3 + corner;
+                                const point = otherTriangle.points[corner];
+                                point.x = positions[vertex * 3];
+                                point.y = positions[vertex * 3 + 1];
+                                point.z = positions[vertex * 3 + 2];
+                            }
+                            otherTriangle.needsUpdate = true;
+                            if (triangleIntersectsTriangle(thisTriangle, otherTriangle)) return true;
+                        }
+                    }
+                    return false;
+                },
+            });
+        } finally {
+            trianglePool.push(thisTriangle, otherTriangle);
+        }
+    }
+
+    /** {@link shapecast} with the core's types, whatever an adapter made of `shapecast`: the derived queries use it. */
+    private coreShapecast(callbacks: BvhShapecastCallbacks): boolean {
+        return CpuMeshBvh.prototype.shapecast.call(this, callbacks);
+    }
+
+    /**
      * Refits the boxes to moved vertices, keeping the tree's shape (as the GPU
      * refit does, `refitOnCpu`): the triangle records get the new corners,
      * then every box is recomputed bottom up. `input` replaces the source
@@ -789,4 +1011,32 @@ function readSlotBox(floats: Float32Array, slot: number, box: Float32Array): voi
     box[3] = floats[base + 4];
     box[4] = floats[base + 5];
     box[5] = floats[base + 6];
+}
+
+/** Scratch triangles for shapecasts (a cast may run inside another's callback, so each takes its own). */
+const trianglePool: ExtendedTriangle[] = [];
+
+const IDENTITY_MATRIX: readonly number[] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+const arrayBox = new BvhBox3();
+
+/** A box array `[min..., max...]` as the scratch {@link BvhBox3} (for a test that calls no user code). */
+function boxOfArray(array: ArrayLike<number>): BvhBox3 {
+    arrayBox.min.set(array[0], array[1], array[2]);
+    arrayBox.max.set(array[3], array[4], array[5]);
+    return arrayBox;
+}
+
+/** The box around every position of a mesh (three's `computeBoundingBox`: all vertices, indexed or not). */
+function meshBounds(input: MeshInput): Float64Array {
+    const out = new Float64Array([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity]);
+    const positions = input.positions;
+    for (let i = 0; i + 2 < positions.length; i += 3) {
+        for (let axis = 0; axis < 3; axis++) {
+            const value = positions[i + axis];
+            if (value < out[axis]) out[axis] = value;
+            if (value > out[3 + axis]) out[3 + axis] = value;
+        }
+    }
+    return out;
 }

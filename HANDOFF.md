@@ -14,7 +14,7 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
 - **`mergeStaticInstances`** comes before the release. It stays off by default until the RTX 3060 has been measured.
 - **Package scope:** it should serve every project that needs a BVH, not just ddgi. See "Consumers" below.
 
-**On `main`** (321 tests; lint, typecheck, build and the licence check pass; every correctness page passes on the Apple M5):
+**On `main`** (363 tests; lint, typecheck, build and the licence check pass; every correctness page passes on the Apple M5):
 - **Ported from ddgi `main` after the split:** shared refit kernels, and the Metal watertight fix `bvhEdgeFunction`. On the M5, rays slipping through shared edges went from 4,513 per 2M to 0.
 - **GPU page runner:** `pnpm test:gpu`, `pnpm test:gpu:page <name>`; see `tests/gpu/README.md`. Scene pages need `BVH_ASSETS_DIR=~/Developer/webgpu-ddgi-radiance-cache/assets` and `BVH_MANIFESTS_DIR=~/Developer/webgpu-ddgi-radiance-cache/scenes/manifests`.
 - **Walk API for 0.1**, at `GPU_LAYOUT_VERSION` 2 (unreleased):
@@ -35,7 +35,7 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
   - `BvhTraceNodes`, for TSL and `wgslFn`. It binds through three internals, collected in `threeInternals`, and checks that binding at run time;
   - `computeBoundsTree` and `acceleratedRaycast`, which run at three-mesh-bvh's speed. `computeBoundsTree` takes three-mesh-bvh's options (`strategy`, the three leaf-size names, `maxDepth`, `setBoundingBox`, `indirect`, `onProgress`; mapping in `docs/three.md`, "Build options");
   - `geometry.boundsTree` is a `BvhBoundsTree`: the core `CpuMeshBvh` with three's types (`raycast`/`raycastFirst` on a three `Ray`, `refit()`, `resolveTriangleIndex`, `serialize`, `getBoundingBox`, `estimateMemoryInBytes`), plus `getTriangleHitPointInfo` and `GenerateMeshBvhWorker.generate(geometry, options)` over the worker pool.
-- **CPU queries** (`src/query/`, exported from the root; PARITY items 1, 3 and 5): `CpuMeshBvh` over one tree in our layout. `raycast` and `raycastFirst` run the one CPU walk (`createCpuTracer`, now with `filterEveryTriangle` for side culling and all hits); `traverse` is the box walk shapecast, `bvhcast` and closest point will use; `refit` uses `refitOnCpu`. `/worker` has `generateCpuMeshBvh`. `docs/PARITY.md` now counts 20 have, 6 partial, 22 missing.
+- **CPU queries** (`src/query/`, exported from the root; PARITY items 1, 2, 3 and 5): `CpuMeshBvh` over one tree in our layout. `raycast` and `raycastFirst` run the one CPU walk (`createCpuTracer`, now with `filterEveryTriangle` for side culling and all hits); `traverse` is the box walk; `shapecast` (three-mesh-bvh's contract, `ExtendedTriangle` per triangle, original indices), `intersectsBox`, `intersectsSphere` and `intersectsGeometry` run on it; `refit` uses `refitOnCpu`. `src/query/shapes.ts` is three-mesh-bvh's `ExtendedTriangle` / `OrientedBox` math, engine-free, bit-for-bit equal to it; `/three` exports three-typed `ExtendedTriangle` (a `Triangle`) and `OrientedBox` over the same functions. `/worker` has `generateCpuMeshBvh`. `docs/PARITY.md` now counts 24 have, 6 partial, 18 missing.
 - **Packaging:**
   - `tsc` builds `dist/`;
   - `scripts/verify-artifacts.mjs` checks that the licence text, the worker URLs and `/three` survive the build;
@@ -52,7 +52,7 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
 - **ddgi and its rc-\* copies:** still on the frozen copy. They switch at P3.
 - **reflections:** linked to the old-API branch `reflections-integration`. It can move to `main`; see its migration doc.
 - **Denoiser, upscaler, ddgi-research:** use three-mesh-bvh `/webgpu`. They can switch through `/three`, as `docs/three.md` describes.
-- **three-bvh-csg, homefig, drei, three-gpu-pathtracer:** drei and pathtracer's CPU side have what they use. csg needs shapecast and `bvhcast`; homefig needs shapecast (PARITY order items 2 and 4).
+- **three-bvh-csg, homefig, drei, three-gpu-pathtracer:** drei and pathtracer's CPU side have what they use. homefig's controller has what it uses (shapecast, `ExtendedTriangle.closestPointToSegment`); csg has `ExtendedTriangle` and needs `bvhcast` (PARITY order item 4).
 
 **Open:**
 - **RTX 3060 and Intel:** none of today's work has run on them. The radiance-cache lane runs its RTX pass for the merged tree.
@@ -62,7 +62,7 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
 - **Peak memory:** BX.19's breakdown is in `docs/design/memory.md`. Smaller H-PLOC batches only lower the peak if they are built one after another (`GpuFirstTrees` creates every batch before the submit); the rest of the levers are BX.20.
 - **Still to do in `/three`:** draw ranges and groups that don't start on a multiple of 3, skinned and morphed meshes, a CPU scene raycast, a helper, and Windows compile cost.
 - **API tidy:** `export *` in `src/trace/index.ts`, the batch helpers in `gpu-lbvh.ts`, and folding the two layout files into one.
-- **Next phases:** Babylon (P6), the P4 examples and docs site, the comparison suite (P5), and the rest of CPU queries (P8): shapecast with `ExtendedTriangle`, then `bvhcast`, then closest point, all on `CpuMeshBvh.traverse`.
+- **Next phases:** Babylon (P6), the P4 examples and docs site, the comparison suite (P5), and the rest of CPU queries (P8): `bvhcast`, then closest point, on `CpuMeshBvh.traverse`.
 - **Needs Dennis (CPU tree):** `setBoundingBox` defaults to false (three-mesh-bvh: true); `strategy` CENTER/AVERAGE build the SAH tree; `maxDepth` is accepted, not honoured; no `MeshBVH` alias is exported (`BvhBoundsTree` takes the same constructor arguments).
 
 ## Where things stood on 2026-11-10

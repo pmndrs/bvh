@@ -66,11 +66,28 @@ import {
     type Intersection,
     type InterleavedBufferAttribute,
     type Material,
+    type Matrix4,
     type Raycaster,
 } from 'three';
 import type { GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import type { MeshInput } from '../mesh-input.ts';
-import { barycoordOnTriangle, BVH_BACK_SIDE, BVH_DOUBLE_SIDE, BVH_FRONT_SIDE, clampLeafPrimitives, CpuMeshBvh, readVec3, type BvhRayIntersection, type BvhRayLike, type BvhRaycastOptions, type BvhTriangleAccept, type CpuMeshBvhBuildOptions } from '../query/cpu-mesh-bvh.ts';
+import {
+    barycoordOnTriangle,
+    BVH_BACK_SIDE,
+    BVH_DOUBLE_SIDE,
+    BVH_FRONT_SIDE,
+    clampLeafPrimitives,
+    CpuMeshBvh,
+    readVec3,
+    type BvhRayIntersection,
+    type BvhRayLike,
+    type BvhRaycastOptions,
+    type BvhShapecastCallbacks,
+    type BvhTriangleAccept,
+    type CpuMeshBvhBuildOptions,
+} from '../query/cpu-mesh-bvh.ts';
+import type { BvhMatrix4Like } from '../query/shapes.ts';
+import { ExtendedTriangle } from './shapes.ts';
 import { deserializeLayout } from '../serialize.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
 import { invertAffineInto } from '../trace/top-level.ts';
@@ -327,6 +344,31 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
         this.positionVersion = positionVersionOf(position);
         this.staleWarned = false;
         this.updateOwnBoundingBox();
+    }
+
+    /**
+     * three-mesh-bvh's `shapecast` with three's types: boxes as a `Box3`,
+     * triangles as `ExtendedTriangle` (a three `Triangle`), the triangle's
+     * original index. The core's cast underneath (`CpuMeshBvh.shapecast`).
+     */
+    override shapecast(callbacks: BvhShapecastCallbacks<ExtendedTriangle, Box3>): boolean {
+        const triangle = threeTrianglePool.pop() ?? new ExtendedTriangle();
+        try {
+            return this.shapecastWith(callbacks, triangle, new Box3());
+        } finally {
+            threeTrianglePool.push(triangle);
+        }
+    }
+
+    /**
+     * three-mesh-bvh's `intersectsGeometry(geometry, geometryToBvh)`: against
+     * the geometry's own tree when it has one of ours (`geometry.boundsTree`),
+     * else against its triangles. A tree or `{ positions, indices }` pass too.
+     */
+    override intersectsGeometry(other: BufferGeometry | CpuMeshBvh<unknown> | MeshInput, geometryToBvh?: Matrix4 | BvhMatrix4Like | null): boolean {
+        if (other instanceof CpuMeshBvh || !('isBufferGeometry' in other)) return super.intersectsGeometry(other, geometryToBvh);
+        const tree = (other as unknown as WithBoundsTree).boundsTree;
+        return super.intersectsGeometry(tree instanceof CpuMeshBvh ? tree : meshInputFromGeometry(other), geometryToBvh);
     }
 
     /** A `geometry.boundingBox` this tree set follows the refitted tree. */
@@ -587,6 +629,9 @@ export function getTriangleHitPointInfo(point: Vector3, geometry: BufferGeometry
 export function deserializeBoundsTree(bytes: ArrayBuffer | ArrayBufferView, geometry: BufferGeometry, options: BvhBoundsTreeOptions = {}): BvhBoundsTree {
     return new BvhBoundsTree(geometry, { ...options, layout: deserializeLayout(bytes) });
 }
+
+/** Scratch triangles for {@link BvhBoundsTree.shapecast} (casts may nest). */
+const threeTrianglePool: ExtendedTriangle[] = [];
 
 /** `geometry.boundsTree`, whoever made it (three-mesh-bvh types it as its own). */
 type WithBoundsTree = { boundsTree?: unknown };
