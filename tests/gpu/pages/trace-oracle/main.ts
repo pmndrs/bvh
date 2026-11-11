@@ -57,7 +57,11 @@
  * The default device limits are used on purpose: the oracle scenes are tiny and
  * the core has to work there.
  *
- * URL option: `?sharedRays=100000` shrinks the shared-edge scenes for a quick look.
+ * URL options: `?sharedRays=100000` shrinks the shared-edge scenes for a quick look.
+ * `?profile=ci` is the reduced profile for software adapters (SwiftShader in CI, passed as
+ * `BVH_PAGE_QUERY=profile=ci`): every variant, case, pass and seam fixture still runs, with
+ * 10x fewer rays in the shared-edge and seam scenes and fewer in the cases and hooks. The pass rules are the same. No
+ * `profile` (or `profile=full`) is the full profile, which real GPUs run.
  */
 
 import {
@@ -180,6 +184,10 @@ const QUANTIZED_INDEXED_HOOK_VARIANT: OracleVariant = { name: 'quantized-indexed
 /** Rays per hook case and traced mask (hooks.ts); the reference runs once per mask. */
 const HOOK_SIZES = { randomRays: 8000, thinBoxRays: 1200 };
 
+/** The reduced profile's ray counts for the ordinary cases and the hook cases (the CPU reference is brute force). */
+const CI_CASE_SIZES = { randomRays: 2000, thinBoxRays: 2400 };
+const CI_HOOK_SIZES = { randomRays: 1000, thinBoxRays: 600 };
+
 /** The GPU builders (B1 LBVH, B2 H-PLOC), made once the device is known. */
 const gpuBuilders = new Map<'gpu-lbvh' | 'gpu-hploc', MeshLayoutBuilder>();
 
@@ -191,6 +199,10 @@ const DEFAULT_SHARED_EDGE_RAYS = 1_000_000;
 
 /** Rays per seam scene (split and one-ulp seams, plain and transformed). */
 const SEAM_RAYS = 200_000;
+
+/** The reduced profile for software adapters: rays per shared-edge scene and per seam scene. */
+const CI_SHARED_EDGE_RAYS = 100_000;
+const CI_SEAM_RAYS = 20_000;
 
 /** Rays the CPU port of the walk traces per case, to report the stack depth it needs. */
 const STACK_PROBE_RAYS = 2000;
@@ -427,7 +439,13 @@ function summarize(result: CaseResult, stackUsed: number, scene: TraceSceneData,
     };
 }
 
-const sharedRays = Number(new URLSearchParams(location.search).get('sharedRays')) || DEFAULT_SHARED_EDGE_RAYS;
+const pageQuery = new URLSearchParams(location.search);
+const profile = pageQuery.get('profile') ?? 'full';
+assert(profile === 'full' || profile === 'ci', `unknown profile "${profile}" (use full or ci)`);
+const sharedRays = Number(pageQuery.get('sharedRays')) || (profile === 'ci' ? CI_SHARED_EDGE_RAYS : DEFAULT_SHARED_EDGE_RAYS);
+const caseSizes = profile === 'ci' ? CI_CASE_SIZES : FULL_SIZES;
+const hookSizes = profile === 'ci' ? CI_HOOK_SIZES : HOOK_SIZES;
+const seamRays = profile === 'ci' ? CI_SEAM_RAYS : SEAM_RAYS;
 
 await runGpuTest(async ({ device, log }) => {
     const builder = createMeshBvhBuilder({ worker: 'auto' });
@@ -454,8 +472,15 @@ await runGpuTest(async ({ device, log }) => {
     let deepestStackUsed = 0;
     let deepestRequired = 0;
 
+    const phaseSeconds: Record<string, number> = {};
+    let phaseStart = performance.now();
+    const endPhase = (name: string) => {
+        const now = performance.now();
+        phaseSeconds[name] = Math.round((now - phaseStart) / 100) / 10;
+        phaseStart = now;
+    };
     // The brute-force answers are the slow part of the page, so compute them once per case.
-    const cases = buildOracleCases(FULL_SIZES);
+    const cases = buildOracleCases(caseSizes);
     const references = [];
     for (const oracleCase of cases) references.push(await computeReferenceAnswersYielding(oracleCase));
 
@@ -464,6 +489,7 @@ await runGpuTest(async ({ device, log }) => {
     const materialHitsByVariant = new Map<string, number>();
     const seamReports = new Map<string, SharedEdgeReport[]>();
     const seamLeaks: Record<string, { slipped: number; slippedAny: number; referenceMisses: number }> = {};
+    endPhase('references');
     for (const variant of VARIANTS) {
         const gpuBuilder = variant.treeSource === 'gpu-lbvh' || variant.treeSource === 'gpu-hploc' ? gpuBuilders.get(variant.treeSource) : undefined;
         if (gpuBuilder && gpuBuilder.kind === 'tinybvh') {
@@ -516,7 +542,7 @@ await runGpuTest(async ({ device, log }) => {
         const seams: SharedEdgeReport[] = [];
         for (const seam of ['split', 'ulp'] as const) {
             for (const transformed of [false, true]) {
-                const report = await runSharedEdgeCase(device, kernel, builder, sharedEdgeCase(SEAM_RAYS, transformed, seam), variant);
+                const report = await runSharedEdgeCase(device, kernel, builder, sharedEdgeCase(seamRays, transformed, seam), variant);
                 seams.push(report);
                 log(`[${variant.name}] ${report.name}: ${report.slipped} of ${report.rays} rays slipped (${report.slippedAny} any-hit)`);
                 // Split seams hold everywhere. A one-ulp seam leaks (the double-precision reference
@@ -528,6 +554,7 @@ await runGpuTest(async ({ device, log }) => {
             }
         }
         seamReports.set(variant.name, seams);
+        endPhase(variant.name);
         kernel.destroy();
     }
     // The one-ulp seams must behave as with records: the same slips, ray for ray.
@@ -562,7 +589,7 @@ await runGpuTest(async ({ device, log }) => {
     ] as const;
     for (const [rayMasks, merged, indexed, quantized] of hookPasses) {
         const format = quantized ? (indexed ? QUANTIZED_INDEXED_HOOK_VARIANT : QUANTIZED_HOOK_VARIANT) : indexed ? INDEXED_HOOK_VARIANT : VARIANTS[0];
-        for (const hook of buildHookCases(HOOK_SIZES)) {
+        for (const hook of buildHookCases(hookSizes)) {
             const kernel = await TraceBatchKernel.create(device, { label: hook.name, triangleFilter: hook.filterWgsl, rayMasks, triangleLeaves: format.triangleLeaves, nodeFormat: format.nodeFormat });
             let scene: TraceSceneData;
             let flagged: number;
@@ -600,6 +627,7 @@ await runGpuTest(async ({ device, log }) => {
             }
         }
     }
+    endPhase('hooks');
     builder.dispose();
     // The material comparison only means something if hits carry materials.
     for (const [name, count] of materialHitsByVariant) if (count === 0) failures.push(`[${name}] no closest hit reported a material`);
@@ -611,7 +639,14 @@ await runGpuTest(async ({ device, log }) => {
         if (!byTest[variant.name]) continue;
         slippedTotals[variant.name] = byTest[variant.name].sharedEdges.reduce((sum, report) => sum + report.slipped, 0);
     }
+    log(`profile ${profile}: ${sharedRays} rays per shared-edge scene, ${seamRays} per seam scene, ${caseSizes.randomRays}/${caseSizes.thinBoxRays} per random/thin-box case, ${hookSizes.randomRays}/${hookSizes.thinBoxRays} per hook case`);
     return {
+        profile,
+        phaseSeconds,
+        sharedRaysPerScene: sharedRays,
+        seamRaysPerScene: seamRays,
+        caseSizes,
+        hookSizes,
         skipped,
         sharedEdgeRaysPerTest: byTest[VARIANTS[0].name].sharedEdges.reduce((sum, report) => sum + report.rays, 0),
         slippedTotals,
