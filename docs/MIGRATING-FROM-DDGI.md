@@ -131,7 +131,17 @@ ddgi's own scene-copy `INSTANCE_FLAG` (`scene/layout.ts`: `live`, `contributesTo
 
 The batch kernel (`batchKernelWgsl`, and `TraceBatchKernel` in `tests/gpu/trace-gpu.ts`) takes one mask per batch, from a uniform at group 1 binding 2 (`BATCH_PARAMS_BYTES`), only when masks are on. No per-ray mask buffer.
 
-## 6. Checklist for the switch
+## 6. Merging static instances (`mergeStaticInstances`, optional)
+
+Off by default, and nothing changes when it stays off. It targets the surface-ray slowdown that RC5.4 found (lever 20 in ddgi-radiance-cache's `radiance-cache-speed.md`). To enable it in ddgi:
+
+1. Mark never-moving instances `static: true` in the `TraceSceneInstance`s ddgi builds from its scene copy. Instances that ddgi can move, hide or toggle at runtime must stay `static: false`, because a merged instance can't move.
+2. Call `mergeStaticGeometry(meshes, instances)`. Build each `plan.groups[g].geometry` with the same builder as the other meshes: the GPU H-PLOC first, then tinybvh when the swap comes. Assemble with `assembleTraceScene(meshes, instances, {}, { merged: { plan, meshes: groupTrees } })`. At the tinybvh swap, assemble again with tinybvh's group trees. Meshes with `plan.meshNeeded[i] === 0` need no tree of their own.
+3. **ddgi's GPU top level** (`trace/top-level-gpu.ts`, the gather) writes records itself. It must write one record per merged group, with the identity transform, `INSTANCE_FLAG.merged` (bit 3, `| 8u`) and the group's mask, and no records for the merged sources. Their slots must not be refitted. Leave bits 16-31 of the flags at 0.
+4. **ddgi's triangle-flags pass** (`gi/triangle-flags`) must keep bit 1 when it rewrites a merged mesh's flags word (OR in bit 0, don't overwrite). Its per-mesh ranges for merged sources are gone: flag the merged geometry before the build (`triangleFlags` per source triangle, which `mergeStaticGeometry` copies), or flag by source instance on the merged range (`TraceSceneData.mergedGroups`).
+5. Hits, filter candidates and `frontFace` name the source instance and its triangle as before, so the material lookups don't change. When the per-instance material lands, it will be copied into each merged triangle's flags bits 16-31. Material is not a grouping key.
+
+## 7. Checklist for the switch
 
 1. Replace ddgi's `platform/trace/wgsl.ts` walk with `traceModuleWgsl({ traceSlot, triangleFilter: null, rayMasks })`; rename the callers' `giTrace*`, `GiRay`, `GiHit`.
 2. Add the `bvhTrianglePasses` wrapper to `material-test-wgsl.ts`; replace `NO_MATERIALS_WGSL` with `DEFAULT_TRIANGLE_FILTER_WGSL`.
@@ -139,3 +149,4 @@ The batch kernel (`batchKernelWgsl`, and `TraceBatchKernel` in `tests/gpu/trace-
 4. Move the CPU tracer and reference calls to the options objects; wrap the material rules as a `TrianglePasses`.
 5. Rebuild any serialized trees.
 6. Run ddgi's oracle and material pages; both must report 0 mismatches.
+7. Optionally, turn on `mergeStaticInstances` (section 6) and re-run the surface-ray benches.
