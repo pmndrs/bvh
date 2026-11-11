@@ -2,6 +2,25 @@
 
 This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `packages/bvh`. The full plan is [docs/design/bvh-package-split.md](docs/design/bvh-package-split.md): the decisions (D1–D8), the target layout, phases P0–P9, examples, docs and tasks BX.0–BX.20. Read it first.
 
+## Rules the work runs under (from Dennis)
+
+- **The core and three matter most.** Other tools of Dennis's need this BVH, and they shouldn't have to pull it out of the GI repo.
+- **Engine-free core**, with three and Babylon behind subpaths. Babylon is "it works" only (D5). WebGL2 isn't a target.
+- **Feature-forward WebGPU:**
+  - `subgroups` first, with one declared fallback (tinybvh on the CPU);
+  - no parallel GPU paths.
+- **Faithful port first.** Ports of tinybvh's H-PLOC and HIPRT's LBVH stay as published. Any speed change is a measured lever, with a note on why and how to undo it.
+- **Licensed code only.** Nothing is ported from repos without a licence (D8).
+- **Hardware:**
+  - RTX 3060 and M5 Pro are the targets;
+  - the Intel UHD is for correctness only;
+  - benches run on a loaded GPU;
+  - no build may take minutes.
+- **Correctness gates, not timing gates**, at this prototype stage.
+- **Models:** Opus for code and review, Sonnet or Haiku for small tasks, docs and tests.
+- **Git:** commit locally; pushing `main` is fine; no npm publish, tags or releases.
+- **Levers:** a flexible setting with a measured win may become the default (the 256 MiB cap).
+
 ## Current state (end of 2026-11-12). Read this first.
 
 Everything below is on `main` and local only (nothing has been pushed). The earlier "Update" paragraphs are folded in here; the file had no history sections below this one when it was rewritten.
