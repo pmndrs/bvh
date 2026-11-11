@@ -98,7 +98,7 @@ The commit messages are ddgi's and refer to ddgi task ids (T0.10, B0, …), so r
    - `tsconfig.json` leaves `tests/` and `tools/` out until this is done.
 3. **`native/build-wasm.ts`** now treats this repo's root as both the package root and the repository root.
    - The generated header line in `src/tinybvh-wasm.ts` still says `packages/bvh/native/build-wasm.ts`. If you change that string in the generator, regenerate the file, or `pnpm bvh:wasm --check` will report a difference.
-   - The `.wasm` has only been compared on Windows. The plan has the check run on Ubuntu and macOS in CI.
+   - The committed `.wasm` is the Linux build; CI reproduces it on Ubuntu and macOS. A Windows build differs in two `__FILE__` path-separator bytes only (see `docs/design/bvh-builders.md`).
 4. **`THIRD_PARTY.md` is ddgi's whole file.** Keep only these rows:
    - tinybvh;
    - tinybvh's `BuildHPLOC`;
