@@ -817,6 +817,34 @@ export class SceneTrees {
         this.deforming.posed(mesh, vertices);
     }
 
+    /**
+     * A deforming mesh's new deform box: the box (`[minX, minY, minZ, maxX,
+     * maxY, maxZ]`, object space) every pose from now on stays in, which the
+     * top level holds for its instances. For poses that leave the box given at
+     * {@link addMesh} (a skinned character walking: `@pmndrs/bvh/three`'s sync
+     * sets it from the skeleton each update). Every instance of the mesh is
+     * refit into the top level at the next {@link update}. Without subgroups
+     * (poses are skipped) it does nothing.
+     */
+    setDeformBounds(mesh: number, bounds: ArrayLike<number>): void {
+        this.checkLive();
+        const state = this.meshes.get(mesh);
+        if (!state || state.group >= 0) throw new RangeError(`SceneTrees.setDeformBounds: no mesh ${mesh}`);
+        if (!state.deforming) throw new RangeError(`SceneTrees.setDeformBounds: mesh ${mesh} was not added as deforming`);
+        for (let k = 0; k < 3; k++) {
+            if (!(bounds[k] <= bounds[k + 3])) throw new RangeError(`SceneTrees.setDeformBounds: [${Array.from(bounds).join(', ')}] is not a box`);
+        }
+        if (!this.deforming?.setDeformBox(mesh, bounds)) return;
+        const placed = this.placed.get(mesh);
+        if (placed) {
+            const moved: PlacedTree = { ...placed, bounds: Array.from({ length: 6 }, (_, k) => bounds[k]) };
+            this.placed.set(mesh, moved);
+            this.gpuTopLevel?.setMeshTree(mesh, moved);
+        }
+        for (const [slot, instance] of this.instances) if (instance.mesh === mesh) this.dirtyInstances.add(slot);
+        this.cpuTopLevelStale = true;
+    }
+
     /** Deforming meshes' refits, drift rebuilds, and poses skipped without subgroups. */
     get deformingCounts(): DeformingTreeCounts & { readonly posesSkipped: number } {
         return { ...(this.deforming?.counts ?? { refitting: 0, refits: 0, driftRebuilds: 0 }), posesSkipped: this.posesSkipped };

@@ -27,8 +27,9 @@ The three.js side of the package. It's the only part that imports three, which i
 ## Scenes (`bvhSceneFromObject3D`)
 
 - **Objects and instances:**
-  - Reads `Mesh`, `InstancedMesh` (instances below its `count`), `BatchedMesh` (active instances; `getVisibleAt` too) and `SkinnedMesh` (rest pose; skinning and morph targets aren't applied).
+  - Reads `Mesh`, `InstancedMesh` (instances below its `count`), `BatchedMesh` (active instances; `getVisibleAt` too) and `SkinnedMesh` (rest pose; skinning and morph targets aren't applied by `bvhSceneFromObject3D`; the sync poses them on the GPU, below).
   - Reads the triangles three's `Mesh.raycast` tests: the draw range, and with an array of materials, the groups within it. Each group is its own mesh, so it can carry its own material.
+  - Ranges are read as three steps through them: three indices at a time from the range's start while the index is below its end. A range that starts off a multiple of 3 gives triangles made of neighbouring triangles' corners, and one whose length isn't a multiple of 3 ends in a triangle that reads past it; both are in the mesh, as in three. Overlapping groups are both read. A triangle that would read past the index (or the positions) is dropped: three reports it at a `NaN` distance with `NaN` corners, which no ray can hit (`threeTriangleRanges`).
   - Takes indexed, non-indexed and interleaved positions. Interleaved (or normalized, or non-float) positions are compacted once per geometry and shared by all its groups' meshes.
   - Makes one mesh per geometry and range, shared by every object and instance that uses it.
   - Call `updateMatrixWorld()` first: the world matrices are read as they are.
@@ -40,6 +41,27 @@ The three.js side of the package. It's the only part that imports three, which i
 - **`sync.update()` cost:** it skips an object whose `matrixWorld`, effective visibility, layers and `instanceMatrix.version` (a `BatchedMesh`'s matrices texture version) are unchanged, without allocating. Set `instanceMatrix.needsUpdate = true` after `setMatrixAt`, as three needs anyway. A `BatchedMesh`'s per-instance visibility is still compared each frame, since three gives it no version.
 - **Failures:** `sync.sync()` walks and plans before it changes anything, so a throwing `material` callback leaves everything as it was. Each `SceneTrees` call updates the sync's records along with it, so a later `sync()` picks up where a failed one stopped.
 - **Without SceneTrees:** `buildTraceScene(scene.meshes, scene.instances, { build, mergeStaticInstances })` builds it all at once. `uploadTraceScene` then gives buffers that `BvhTraceNodes` takes as `{ buffers }`.
+
+## Skinned and morphed meshes (`BvhPosePass`)
+
+```ts
+const sync = new SceneTreesObject3DSync(trees, scene, { renderer }); // the renderer runs the pose passes
+// each frame, after the mixer and scene.updateMatrixWorld():
+sync.update();               // transforms, then every visible posed object's pass, then SceneTrees.setPose
+trees.update(encoder); submit; bvh.update();
+```
+
+- **Which meshes:** with a `renderer`, every `SkinnedMesh` and every mesh with position morph targets (`threeDeforms(mesh)`), unless `deforming: false` or a `(mesh) => boolean` says otherwise. Without a renderer they stay in their rest pose, as before. `BatchedMesh` is never posed, nor an `InstancedMesh` with per-instance morphs (`morphTexture`) and more than one instance: the pass would give every instance `morphTargetInfluences`, so the sync warns once and reads it in its rest pose.
+- **Their own meshes:** a posed object gets its own deforming SceneTrees mesh per triangle range (not shared with other objects on the geometry, since each has its own pose). Its instances never merge.
+- **The pass** (`BvhPosePass`, `src/three/deform.ts`) is a TSL compute pass with three r187's math in three's order: morphs as `morphReference` does them (`p *= base`, then `p += target * influence` for each non-zero influence), then skinning as `getSkinnedPosition` does it (`bindMatrixInverse * sum(bone * weight * (bindMatrix * p))`, after `skeleton.update()`). It writes one `vec4` per vertex into a buffer of ours, which `SceneTrees.setPose` refits the tree from (`GpuMeshRefit`): nothing is read back. On the M5 the posed vertices match three's CPU pose (`getVertexPosition`, `applyBoneTransform`) to 6.4e-7.
+- **Compile cost:** one shader per variant (skinned, morphed, both). Counts are uniforms, the morph loop is a `Loop` over a uniform, the storage arrays are runtime-sized, so every posed mesh of a variant shares one pipeline and the WGSL is the same on every load. `pass.prepare()` compiles it with `compileComputeAsync`; the sync calls it for the first mesh of each variant when the mesh is added (and adds it without a dispatch), so the first `update()` doesn't compile.
+- **The top-level box follows the pose:** SceneTrees keeps one box per deforming mesh in its top level. The sync sets it (`SceneTrees.setDeformBounds`) from `pass.bounds()`, a box that holds the pose computed from the skeleton on the CPU (per bone, the box of the vertices it moves, carried through the bone matrix: 16 corner transforms per bone). It only moves when the pose leaves the box or the box grows past twice the padded pose; `deformSlack` (default 0.25 of the largest extent, on every side) sets the room. A walking character's root motion is followed. Negative skin weights fall back to a box from every vertex on the CPU, with the kernel's own formula (its `bindMatrixInverse` translation counts once per unit of weight sum, as on the GPU; three's `getVertexPosition` counts it once). The box has room for the kernel's f32 rounding: `(8 + targets) · 2⁻²³` of the largest coordinate the kernel sees (16 roundings plus 2 per morph target, each at most half an ulp), on top of `1e-4` of the extent, and its ends are rounded outward to f32, so a character 5,000 units from the origin (f32 steps of 4.9e-4) stays inside it. A box that isn't finite (NaN bone matrices) throws from `sync.update()` rather than keeping the old one.
+- **A replaced skeleton** (another object, or another bone count) gets a new pass at the next `sync.update()`; the old pass throws from `update()` and `bounds()` (`pass.current()` says whether it still matches).
+- **Inputs are read once:** the rest positions, skin indices and weights and morph targets are packed at the pass's creation (through the attributes, so interleaved and normalized ones work). A new geometry object gets a new pass at `sync.sync()`; editing those attributes in place is not followed.
+- **Not read:** `InstancedMesh.morphTexture` (per-instance morphs: refused, see above), morphed normals (the walk uses geometric normals).
+- **Hidden objects aren't posed.** `sync.pose()` runs the passes alone; `sync.poseCounts` says how many ran and how many boxes moved; `sync.posePassOf(object)` gives the pass (its `buffer` holds the last pose).
+- **CPU picking on posed meshes stays on three's raycast** (`acceleratedRaycast` falls back for a `SkinnedMesh` or morph targets): three poses each vertex on the CPU there, so it's exact and linear in the vertex count. three-mesh-bvh's `StaticGeometryGenerator` route (pose on the CPU, then build or refit a tree) costs the same CPU pose per frame plus a refit, and only pays off for many raycasts per frame on one pose; it isn't here yet (PARITY 6.3).
+- **Tested:** `src/three/deform.test.ts` (the box holds three's CPU pose and an f32 emulation of the kernel over random frames: relative and absolute morphs, root motion, weights across 3-4 bones, a bind matrix that isn't the identity, characters thousands of units from the origin, negative weights that don't sum to 1; `dispose()` releases every attribute; the sync's bookkeeping, a replaced skeleton, a NaN box, `morphTexture`, one compile per variant), and the GPU page `three-skinned` (below), which also reads the posed buffer back and checks every vertex lies in the box `setDeformBounds` got.
 
 ## In three's node system (`BvhTraceNodes`)
 
@@ -99,8 +121,29 @@ raycaster.firstHitOnly = true;                      // optional
 - **Falls back to three's raycast** when the geometry has no tree, for a `SkinnedMesh`, or when there are morph targets.
 - **Queries read the tree's triangles.** `shapecast`, `bvhcast` and `intersects*` hand over the corners stored in the tree, not the geometry's current positions. After editing positions, call `boundsTree.refit()` first (three-mesh-bvh reads the geometry, so it sees edits straight away). `intersectsGeometry` against a bare geometry recomputes that geometry's bounds rather than trusting `geometry.boundingBox`.
 - **Edited geometry:** if the position attribute's version, or the index (object or version), changed since `computeBoundsTree`, the raycast falls back to three's own and warns once. It stays that way until `geometry.boundsTree.refit()` (same index) or `computeBoundsTree` runs again.
-- **Not matched:** a range that starts off a multiple of 3.
-- **Tested:** `src/three/raycast.test.ts` checks it against three on 8,000 random rays.
+- **Ranges off a multiple of 3 and overlapping groups** are matched. A range that starts at index 1 or 2 mod 3 is walked in a second tree over the triangles that start there, built with the tree's options on the first raycast that needs it (it needs tinybvh, loaded by `prepareBoundsTrees`; without it the raycast falls back to three's) and refitted with the tree (`refit()` from the geometry, `refit(input)` from that input). It holds only the shifted ranges' triangles (a 150-triangle group gets a 150-triangle tree), or every triangle of its shift when the ranges hold half of them or more; plain f32 positions are used in place, and otherwise only the vertices those triangles use are copied. Up to 16 subset trees are kept per geometry. Overlapping groups are walked once each, so a triangle in two groups is reported twice, as three does. The one difference: three reports the triangle that reads past the end of the index at a `NaN` distance (and its sort is then out of order); we report nothing there.
+- **Tested:** `src/three/raycast.test.ts` checks it against three on 8,000 random rays, and 5,000 more through ranges and groups off a multiple of 3.
+
+### A whole scene at once (`BvhSceneRaycaster`, `raycastScene`)
+
+three-mesh-bvh's `ObjectBVH`: one walk over the scene's top level and its mesh trees, in place of a raycast per object.
+
+```ts
+await prepareBoundsTrees();
+const picker = new BvhSceneRaycaster(scene);          // a tree per geometry and range, and the top level
+scene.updateMatrixWorld(); picker.update();           // when objects moved: the top level only
+const hits = raycastScene(picker, raycaster);         // what raycaster.intersectObject(scene, true) returns
+const seen = picker.intersectsFrustum(frustum, camera.layers); // { object, instanceId, group } per object or instance
+```
+
+- **What it returns:** three's `intersectObject(root, true)` with three's own `Mesh.raycast`: the same triangles (ranges and groups as in "Scenes"), `side`, `near`/`far`, `instanceId` and `batchId`, and the same fields, sorted. Hidden objects are hit too, as three's `Raycaster` hits them (`includeHidden: false` skips them); a `BatchedMesh`'s hidden instances are skipped, as three skips them. `raycaster.firstHitOnly` returns the one closest hit over the scene.
+- **Differs from three:** layers 8-31 (the instance mask holds layers 0-7; `layers: false` ignores layers), skinned and morphed meshes (rest pose here; three poses them on the CPU), and three's `NaN`-distance hit past the end of an index (not reported). Points, lines and sprites aren't read.
+- **`update()`** walks the scene again. With the same meshes it rebuilds only the top level (`CpuSceneBvh.setInstances`); new geometry or ranges get their trees, a geometry whose position attribute or index changed (object or version, so set `needsUpdate`) gets its tree rebuilt, and trees nobody uses are dropped. It returns whether meshes changed.
+- **When to call `update()`:** raycasts and frustum queries see the scene as of the last `update()`. Call `scene.updateMatrixWorld()` and `update()` after objects move, show or hide, are added or removed, after instance matrices or counts change, and after geometry edits. A raycast that finds a geometry edited since warns once (and answers from the old tree); moved objects aren't detected.
+- **Frustum culling:** `intersectsFrustum(frustum, layers?)` walks the top level with three's `Frustum.intersectsBox` test on each node's box: a subtree outside a plane is skipped, one inside every plane is taken whole. It returns the objects and instances whose world box (the walk's own, the mesh tree's box through the instance's matrix) meets the frustum.
+- **Engine-free core:** `CpuSceneBvh` (`src/query/cpu-scene.ts`, from the root): `raycast(ray, { firstHitOnly, mask, accept })`, `intersectsFrustum(planes, { mask })`, `intersectsBox(box, { mask })`, `setInstances(instances)`, over any builder's trees.
+- **Not over `SceneTrees`:** its trees live on the GPU (no CPU copy), so the CPU scene is built from the same three objects. CPU picking over a `SceneTrees` scene would need its trees read back or kept on the CPU too; that is a memory lever we don't have yet.
+- **Tested:** `src/three/scene-raycast.test.ts` (10,000 rays against three's `intersectObject`, before and after moves, all hits and closest; 300 camera frustums against brute force over each object's world box) and `src/query/cpu-scene.test.ts` (brute force over every triangle of every instance, masks, `setInstances`; frustums and boxes against every world box).
 
 ### The tree object (`geometry.boundsTree`)
 

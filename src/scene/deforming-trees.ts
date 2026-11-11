@@ -128,6 +128,14 @@ export class DeformingTrees {
         return this.meshes.get(slot)?.deformBox ?? null;
     }
 
+    /** A deforming mesh's new deform box (`SceneTrees.setDeformBounds`); false for a mesh it doesn't know. */
+    setDeformBox(slot: number, box: ArrayLike<number>): boolean {
+        const mesh = this.meshes.get(slot);
+        if (!mesh) return false;
+        for (let k = 0; k < 6; k++) mesh.deformBox[k] = box[k];
+        return true;
+    }
+
     /** A deforming mesh was added. */
     meshAdded(slot: number, triangleCount: number, deformBox: ArrayLike<number>): void {
         this.meshes.set(slot, {

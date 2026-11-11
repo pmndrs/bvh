@@ -11,7 +11,9 @@
  * - **Triangles.** The ones three's own `Mesh.raycast` tests: the draw range,
  *   and with an array of materials the geometry groups within it (a group
  *   whose material is missing is skipped, and an array of materials without
- *   groups has no triangles, as in three). Indexed and non-indexed geometry;
+ *   groups has no triangles, as in three). Ranges that start off a multiple
+ *   of 3, end mid-triangle or overlap are read as three steps through them
+ *   ({@link threeTriangleRanges}). Indexed and non-indexed geometry;
  *   positions are read through the attribute, so interleaved, normalized and
  *   non-float positions work.
  * - **Meshes.** One mesh per geometry and triangle range, shared by every
@@ -92,7 +94,7 @@ export interface BvhThreeMeshSource {
     readonly geometry: BufferGeometry;
     /** First index (vertex, for non-indexed geometry) of the range, as three's `drawRange.start` and `group.start`. */
     readonly start: number;
-    /** Indices (vertices) in the range, a multiple of 3. */
+    /** Indices (vertices) in the range, a multiple of 3; `start` need not be (see `threeTriangleRanges`). */
     readonly count: number;
 }
 
@@ -164,6 +166,18 @@ interface TriangleRange {
 /**
  * The triangle ranges three's `Mesh.raycast` tests (`_computeIntersections`):
  * the draw range, or with an array of materials each group within it.
+ *
+ * Matched step for step, including ranges that don't start or end on a
+ * multiple of 3: three steps `j = start, start + 3, ...` while `j < end`, and
+ * tests the triangle of indices `j, j + 1, j + 2`, so a range that isn't a
+ * whole number of triangles ends in a triangle that reads past it (into the
+ * next group, or past the draw range), and one that starts off a multiple of 3
+ * tests triangles made of neighbouring triangles' corners. A triangle that
+ * would read past the index (or, without one, the positions) is dropped:
+ * three reads `undefined` there and never hits it. Each range's `count` is
+ * therefore a multiple of 3. Overlapping groups give overlapping ranges, as
+ * three tests (and reports) such triangles once per group. A group whose
+ * material is missing is skipped (three throws on it).
  */
 export function threeTriangleRanges(
     geometry: BufferGeometry,
@@ -173,23 +187,28 @@ export function threeTriangleRanges(
     const position = geometry.getAttribute('position');
     if (!position) return [];
     const total = geometry.index ? geometry.index.count : position.count;
-    const drawStart = Math.max(0, drawRange.start);
-    const drawEnd = Math.min(total, drawRange.start + drawRange.count);
-    const whole = (start: number, end: number) => Math.max(0, Math.floor((end - start) / 3) * 3);
+    /** three's loop from `start` while `j < end`, without the triangles that read outside `[0, total)`. */
+    const span = (start: number, end: number): { start: number; count: number } => {
+        let first = start;
+        if (first < 0) first += Math.ceil(-first / 3) * 3; // indices below 0 read undefined: never hit
+        if (end <= first) return { start: first, count: 0 };
+        let triangles = Math.ceil((end - first) / 3);
+        if (first + triangles * 3 > total) triangles = Math.max(0, Math.floor((total - first) / 3));
+        return { start: first, count: triangles * 3 };
+    };
+    const drawEnd = drawRange.start + drawRange.count;
     if (Array.isArray(material)) {
         const ranges: TriangleRange[] = [];
         geometry.groups.forEach((group, index) => {
             const groupMaterial = material[group.materialIndex ?? 0];
             if (!groupMaterial) return;
-            const start = Math.max(group.start, drawStart);
-            const end = Math.min(total, group.start + group.count, drawEnd);
-            const count = whole(start, end);
+            const { start, count } = span(Math.max(group.start, drawRange.start), Math.min(total, group.start + group.count, drawEnd));
             if (count > 0) ranges.push({ start, count, group: index, materialIndex: group.materialIndex ?? 0, threeMaterial: groupMaterial });
         });
         return ranges;
     }
-    const count = whole(drawStart, drawEnd);
-    return count > 0 ? [{ start: drawStart, count, group: -1, materialIndex: -1, threeMaterial: material ?? null }] : [];
+    const { start, count } = span(Math.max(0, drawRange.start), Math.min(total, drawEnd));
+    return count > 0 ? [{ start, count, group: -1, materialIndex: -1, threeMaterial: material ?? null }] : [];
 }
 
 /** The version of a position attribute's data (an interleaved attribute's is its buffer's). */
