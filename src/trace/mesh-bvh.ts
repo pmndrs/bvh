@@ -17,7 +17,7 @@ export interface MeshGeometry {
     readonly indices?: Uint16Array | Uint32Array | null;
     /**
      * Optional per-triangle bit flags, indexed by the original triangle number
-     * (see `TRIANGLE_FLAG_ALPHA_TEST`). Defaults to 0.
+     * (see `TRIANGLE_FLAG_FILTER`). Defaults to 0.
      */
     readonly triangleFlags?: Uint32Array | null;
 }

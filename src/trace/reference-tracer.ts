@@ -12,6 +12,12 @@
  * rounding distance of a triangle edge or of the ray's own `tMin`/`tMax`, so
  * results carry an `ambiguous` flag and comparisons only accept a difference
  * when it is set.
+ *
+ * The triangle filter (triangle-filter.ts): given one, a triangle it lets the
+ * ray through at a candidate hit is skipped, as if it weren't there. The
+ * reference has no flags, so it asks the filter about every triangle; the
+ * walk only asks about flagged ones, and agreeing with this shows the flags
+ * cover every triangle the filter can let through.
  */
 
 import type { MeshGeometry } from './mesh-bvh.ts';
@@ -21,6 +27,7 @@ import type { TraceRay } from './rays.ts';
 
 export type { TraceRay } from './rays.ts';
 import type { TraceSceneInstance } from './scene-assembly.ts';
+import type { TriangleFilter } from './triangle-filter.ts';
 
 
 export interface ReferenceHit {
@@ -50,12 +57,20 @@ export interface ReferenceScene {
     readonly triangleIndices: Uint32Array;
     /** 1 for triangles of a mirrored instance, whose world-space winding is the reverse of the authored one. */
     readonly mirrored: Uint8Array;
+    /** Asked about every candidate hit; true lets the ray through. Undefined: every triangle blocks. */
+    readonly triangleFilter?: TriangleFilter;
+}
+
+export interface ReferenceSceneOptions {
+    /** The same filter the walk is given; the reference applies it to every triangle. */
+    readonly triangleFilter?: TriangleFilter;
 }
 
 /** Transforms every triangle of every traceable instance to world space. */
 export function buildReferenceScene(
     meshes: readonly MeshGeometry[],
     instances: readonly TraceSceneInstance[],
+    options: ReferenceSceneOptions = {},
 ): ReferenceScene {
     let total = 0;
     const traceable = instances.filter((instance) => {
@@ -102,7 +117,7 @@ export function buildReferenceScene(
             slot++;
         }
     }
-    return { triangleCount: total, geometry, instanceIndices, triangleIndices, mirrored };
+    return { triangleCount: total, geometry, instanceIndices, triangleIndices, mirrored, triangleFilter: options.triangleFilter };
 }
 
 /** Möller-Trumbore in doubles. Writes `t, u, v, determinant` to `out` and returns false when the ray misses the triangle's plane region. */
@@ -145,6 +160,18 @@ function edgeMargin(u: number, v: number): number {
     return Math.min(u, v, 1 - u - v);
 }
 
+/**
+ * Whether the scene's filter lets the ray through `triangle` at a candidate
+ * hit. The side is the authored one: the world-space winding test, flipped
+ * back for a mirrored instance (as `frontFace` below).
+ */
+function filterPasses(scene: ReferenceScene, triangle: number, t: number, u: number, v: number, determinant: number): boolean {
+    const filter = scene.triangleFilter;
+    if (!filter) return false;
+    const frontFace = determinant > 0 !== (scene.mirrored[triangle] === 1);
+    return filter(scene.instanceIndices[triangle], scene.triangleIndices[triangle], { t, u, v, frontFace });
+}
+
 function nearIntervalEnd(t: number, ray: TraceRay): boolean {
     const slack = REFERENCE_TOLERANCE * Math.max(1, Math.abs(t));
     return Math.abs(t - ray.tMin) <= slack || Math.abs(t - ray.tMax) <= slack;
@@ -168,6 +195,7 @@ export function traceClosestReference(scene: ReferenceScene, ray: TraceRay): Ref
         const v = scratch[2];
         const determinant = scratch[3];
         if (edgeMargin(u, v) < 0 || t < ray.tMin || t > ray.tMax) continue;
+        if (filterPasses(scene, triangle, t, u, v, determinant)) continue;
         hitTimes.push(t);
         if (t < bestT) {
             bestT = t;
@@ -223,6 +251,7 @@ export function traceAnyReference(scene: ReferenceScene, ray: TraceRay): Referen
         const inside = margin >= 0 && t >= ray.tMin && t <= ray.tMax;
         const nearMiss = margin >= -REFERENCE_TOLERANCE && t >= ray.tMin - slack && t <= ray.tMax + slack;
         if (!nearMiss) continue;
+        if (filterPasses(scene, triangle, t, u, v, scratch[3])) continue;
         if (inside) blocked = true;
         if (inside && margin >= REFERENCE_TOLERANCE && !nearIntervalEnd(t, ray)) {
             robustlyBlocked = true;

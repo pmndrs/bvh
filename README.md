@@ -2,18 +2,20 @@
 
 BVH builders for WebGPU that don't depend on any engine. You give it triangles, and it gives you a bounding volume hierarchy in one fixed GPU layout that a WGSL ray walk can read: built on the CPU (tinybvh in WebAssembly) or on the GPU (LBVH or H-PLOC), and refit on the GPU when things move.
 
-DDGI (`@pmndrs/ddgi`) is its first user. The package imports nothing from DDGI, from GI code or from any engine, so picking, a path tracer or another GI technique can use it too.
+DDGI (`@pmndrs/ddgi`, in [webgpu-ddgi](https://github.com/DennisSmolek/webgpu-ddgi)) is its first user. The package imports nothing from DDGI, from GI code or from any engine, so picking, a path tracer or another GI technique can use it too.
 
-**Status.** For now it lives in this repo and ships bundled inside `@pmndrs/ddgi`; it is being split out into its own repo, [pmndrs/bvh](https://github.com/pmndrs/bvh) (the plan: [docs/design/bvh-package-split.md](../../docs/design/bvh-package-split.md)). Import it only from its root, `@pmndrs/bvh`: `src/index.ts` is the whole public API. ddgi-core uses the CPU builder, the GPU refit, and, since M2's "fast first GI" (T2.12), the GPU H-PLOC for the first trees of a scene as it loads: one batch for all meshes, its trees copied into the tracer's buffers after a small stats readback, then replaced mesh by mesh by tinybvh's from a worker (ddgi-core's `trace/gpu-mesh-trees.ts` and `trace/ray-queries.ts`). The LBVH isn't used by ddgi-core.
+**Status.** This repo, [pmndrs/bvh](https://github.com/pmndrs/bvh), was split out of webgpu-ddgi, where it lived in `packages/bvh` (the plan: [docs/design/bvh-package-split.md](docs/design/bvh-package-split.md)); until ddgi switches to the published package it still bundles its own copy. Import it only from its root, `@pmndrs/bvh`: `src/index.ts` is the whole public API. ddgi-core uses the CPU builder, the GPU refit, and, since M2's "fast first GI" (T2.12), the GPU H-PLOC for the first trees of a scene as it loads: one batch for all meshes, its trees copied into the tracer's buffers after a small stats readback, then replaced mesh by mesh by tinybvh's from a worker (ddgi-core's `gpu-mesh-trees.ts` and `ray-queries.ts`, in webgpu-ddgi). The LBVH isn't used by ddgi-core.
 
-How the builders work inside: [docs/design/bvh-builders.md](../../docs/design/bvh-builders.md). The plan and its stages: [docs/design/bvh-framework.md](../../docs/design/bvh-framework.md).
+How the builders work inside: [docs/design/bvh-builders.md](docs/design/bvh-builders.md). The plan and its stages: [docs/design/bvh-framework.md](docs/design/bvh-framework.md).
+
+Every way our code differs from its sources (tinybvh, HIPRT, the watertight test), and why: [docs/DIVERGENCES.md](docs/DIVERGENCES.md).
 
 ## The builder contract
 
 Every builder follows the same contract, so one can replace another without changing the code that traces rays.
 
 - **In:** one mesh, or many: vertex positions (`x, y, z` floats) and, optionally, three indices per triangle and a flags word per triangle. CPU arrays (`MeshInput`) work for every builder. The GPU builders also take buffers already on the GPU (`GpuMeshBuffers`), for example the output of a skinning pass.
-- **Options:** the largest leaf (1 to 8 triangles, default 8) and, for the GPU builders, the SAH costs. H-PLOC has two more (see [bvh-builders.md](../../docs/design/bvh-builders.md#gpu-h-ploc-stage-b2)).
+- **Options:** the largest leaf (1 to 8 triangles, default 8) and, for the GPU builders, the SAH costs. H-PLOC has two more (see [bvh-builders.md](docs/design/bvh-builders.md#gpu-h-ploc-stage-b2)).
 - **Out:** the tree in the shared GPU layout (`GpuLayoutMeshBvh` on the CPU, `GpuTreeBuffers` on the GPU):
   - 64-byte nodes with two child boxes each (the Aila–Laine layout), node 0 the root;
   - 48-byte triangles in tree order, each with its original index and flags;
@@ -191,11 +193,11 @@ The package is MIT. It contains or ports code from:
 - **HIPRT** by AMD (MIT): the LBVH kernels and Morton codes, ported to WGSL. Text: `licenses/hiprt.txt`.
 - **Emscripten's runtime**, linked into the `.wasm`: Emscripten's code and musl (MIT), dlmalloc (public domain), LLVM libc++ and compiler-rt (Apache 2.0 with LLVM Exceptions). Text: `licenses/emscripten-runtime.txt`.
 
-The `.wasm` carries its licence texts in a `/*! */` comment that bundlers keep, and the `@pmndrs/ddgi` build fails if a built file loses them. Sources and commits are in [THIRD_PARTY.md](../../THIRD_PARTY.md).
+The `.wasm` carries its licence texts in a `/*! */` comment that bundlers keep, and ddgi's build fails if a built file loses them. Sources and commits are in [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Working on the package
 
 - Unit tests: `pnpm test` (the CPU twins, the layout checker, the batch planner, the WGSL names).
 - GPU pages: `pnpm test:gpu --filter bvh-` and `--filter trace-oracle`, on both GPUs.
-- Rebuild the `.wasm` with `pnpm bvh:wasm`, or check it with `pnpm bvh:wasm --check`; [bvh-builders.md](../../docs/design/bvh-builders.md#rebuilding-the-wasm) has the toolchain.
+- Rebuild the `.wasm` with `pnpm bvh:wasm`, or check it with `pnpm bvh:wasm --check`; [bvh-builders.md](docs/design/bvh-builders.md#rebuilding-the-wasm) has the toolchain.
 - Port only MIT or Apache-2.0 code, and add its licence to `licenses/` and THIRD_PARTY.md.

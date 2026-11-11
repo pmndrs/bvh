@@ -1,6 +1,6 @@
 /*!
  * Parts of the WGSL below are ported from HIPRT (hiprt/impl/MortonCode.h and
- * hiprt/impl/LbvhBuilderKernels.h); its licence (packages/bvh/licenses/hiprt.txt):
+ * hiprt/impl/LbvhBuilderKernels.h); its licence (licenses/hiprt.txt):
  *
  * MIT License
  *
