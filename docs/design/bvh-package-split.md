@@ -18,6 +18,8 @@ The examples should make three cases obvious:
 2. **Workers.** Builds off the main thread, CPU and GPU, with a frame-time graph showing the main thread stays smooth.
 3. **Against three-mesh-bvh.** Its classic examples rebuilt on our trees, with the same rays and scenes.
 
+> Paths in the sections below describe webgpu-ddgi as it was when this plan was written, unless they are in the target layout. This repo's current layout is in the root README and HANDOFF.md.
+
 ## Where things stand (2026-11-09, `webgpu-ddgi@m2` 5de856b)
 
 **In `packages/bvh` today**

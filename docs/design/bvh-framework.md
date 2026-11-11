@@ -5,7 +5,7 @@ Status: **package and H-PLOC target decided by Dennis 2026-11-04** (see "Decided
 - [research/bvh-libraries.md](../../research/bvh-libraries.md) (code we can port);
 - [research/webgpu-compute-for-bvh.md](../../research/webgpu-compute-for-bvh.md) (what WebGPU allows).
 
-It extends [trace.md](trace.md), which covers the T0.10 spike. How the builders work inside is in [bvh-builders.md](bvh-builders.md), how to use the package in [packages/bvh/README.md](../../packages/bvh/README.md), and an outline for splitting it out in [bvh-package-split.md](bvh-package-split.md). Decisions it relies on are in [DECISIONS](../DECISIONS.md) (2026-11-04):
+It extends [trace.md](trace.md), which covers the layout and the walk. How the builders work inside is in [bvh-builders.md](bvh-builders.md), how to use the package in [README.md](../../README.md), and an outline for splitting it out in [bvh-package-split.md](bvh-package-split.md). Decisions it relies on are in [DECISIONS](../DECISIONS.md) (2026-11-04):
 - BVH work on the GPU where possible;
 - subgroups first, with one declared fallback;
 - three.js is the only adapter until v1.
@@ -69,7 +69,7 @@ The speed limits above are planning numbers. Like any threshold, changing one is
 ## Decided (Dennis, 2026-11-04)
 
 1. **Its own package, in this repo for now.**
-   - `packages/bvh`, published later as `@pmndrs/bvh`, probably under pmndrs/bvh.
+   - `packages/bvh` in webgpu-ddgi, published later as `@pmndrs/bvh`; since the split it lives in this repo (pmndrs/bvh).
    - It is engine-free, has no DDGI or GI dependencies, and ddgi-core depends on it.
    - It ships through `/ddgi` until it's split out.
    - Dennis: "if its useful enough I might even say to make it pmndrs/bvh... I think that will be the plan, but lets keep it in the repo for now for simplicity sake."
