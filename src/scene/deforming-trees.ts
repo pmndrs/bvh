@@ -50,6 +50,9 @@ export const STATS_EVERY_FRAMES = 15;
 export interface DeformingTreePlacement {
     readonly nodeWordOffset: number;
     readonly triangleWordOffset: number;
+    /** Indexed scenes: the mesh's first vertex in the positions buffer, and the buffer's layout. */
+    readonly vertexBase?: number;
+    readonly positionLayout?: 'vec4' | 'packed';
 }
 
 export interface DeformingTreeCounts {
@@ -195,7 +198,7 @@ export class DeformingTrees {
     }
 
     /** Records every due refit into one compute pass in `encoder`, then the stats copies whose turn it is. Returns whether it recorded a refit (it writes the node buffer). */
-    encode(encoder: GPUCommandEncoder, buffers: { readonly nodes: GPUBuffer; readonly triangles: GPUBuffer }, frame: number): boolean {
+    encode(encoder: GPUCommandEncoder, buffers: { readonly nodes: GPUBuffer; readonly triangles: GPUBuffer; readonly positions?: GPUBuffer | null }, frame: number): boolean {
         if (!this.kernels.ready) return false;
         const due: DeformingMesh[] = [];
         for (const mesh of this.meshes.values()) if (mesh.refitDue && mesh.placement && mesh.vertices) due.push(mesh);

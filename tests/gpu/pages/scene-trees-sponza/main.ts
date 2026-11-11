@@ -51,7 +51,7 @@ const mb = (bytes: number) => Math.round((bytes / MB) * 10) / 10;
 const RAYS = 20000;
 
 function summary(memory: SceneTreesMemory) {
-    return { total: mb(memory.total), nodes: mb(memory.nodes), nodesInUse: mb(memory.nodesInUse), triangles: mb(memory.triangles), topLevel: mb(memory.topLevel), gpuBuildOutputs: mb(memory.gpuBuildOutputs), retired: mb(memory.retired), peak: mb(memory.peak) };
+    return { total: mb(memory.total), nodes: mb(memory.nodes), nodesInUse: mb(memory.nodesInUse), triangles: mb(memory.triangles), trianglesInUse: mb(memory.trianglesInUse), positions: mb(memory.positions), topLevel: mb(memory.topLevel), gpuBuildOutputs: mb(memory.gpuBuildOutputs), retired: mb(memory.retired), peak: mb(memory.peak) };
 }
 
 const startTime = performance.now();
@@ -67,10 +67,15 @@ try {
     adapter = requested.adapter;
     const device = requested.device;
     deviceErrors = watchDevice(device);
-    const variants = (new URLSearchParams(location.search).get('variants') ?? 'copy,adopt,copy-merged,copy-default,copy-cap512,copy-cap256,copy-cap128').split(',');
+    const variants = (new URLSearchParams(location.search).get('variants') ?? 'copy,adopt,copy-merged,copy-default,copy-cap512,copy-cap256,copy-cap128,indexed-copy-default,indexed-packed-copy-default,indexed-copy-merged').split(',');
     const scene = await loadBenchScene('sponza', 'scene');
     log(`sponza: ${scene.meshes.length} meshes, ${scene.instances.length} instances, ${scene.uniqueTriangles} triangles (load ${Math.round(scene.loadMs)} ms)`);
-    const kernel = await TraceBatchKernel.create(device);
+    // `indexed` variants (docs/design/indexed-leaves.md): triangleLeaves 'indexed', with `packed` positions when the name says so.
+    const kernels = {
+        records: await TraceBatchKernel.create(device),
+        vec4: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4' }),
+        packed: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed' }),
+    };
     const box = scene.geometryBounds;
     const rays = randomRays(createRandom(9), RAYS, [box.min[0], box.min[1], box.min[2], box.max[0], box.max[1], box.max[2]], 0);
     // The reference: tinybvh trees assembled on the CPU (built once, here on the main thread).
@@ -113,6 +118,10 @@ try {
         // `-cap<MB>` sets a cap, `-default` leaves it out (256 MiB), and the rest turn it off (Infinity: one batch).
         const isDefault = variant.endsWith('-default');
         const capMB = isDefault ? String(DEFAULT_GPU_MAX_BATCH_BYTES / MB) : /-cap(\d+)/.exec(variant)?.[1];
+        const indexed = variant.startsWith('indexed');
+        const positionLayout = variant.includes('packed') ? 'packed' : 'vec4';
+        const kernel = indexed ? kernels[positionLayout] : kernels.records;
+        const leaves = indexed ? ('indexed' as const) : ('records' as const);
         const trees = await SceneTrees.create(device, {
             gpuMaxBatchBytes: isDefault ? undefined : capMB ? Number(capMB) * MB : Infinity,
             label: `sponza ${variant}`,
@@ -120,6 +129,7 @@ try {
             gpuTreeOutputs: variant.startsWith('adopt') ? 'adopt' : 'copy',
             mergeStaticInstances: variant.includes('merged'),
             workers: pool,
+            ...(indexed ? { triangleLeaves: 'indexed' as const, positionLayout } : {}),
         });
         const meshes = scene.meshes.map((mesh) => trees.addMesh(mesh));
         scene.instances.forEach((instance, index) => trees.addInstance({ mesh: meshes[instance.meshIndex], instanceIndex: index, objectToWorld: instance.objectToWorld, static: true }));
@@ -167,10 +177,10 @@ try {
         // The lever's promise: the peak is the storage plus one batch (the scratch pool and one batch's outputs), not more.
         let peakBoundMB: number | null = null;
         if (capMB) {
-            const plan = planGpuHplocBatches(device, scene.meshes, { maxBatchBytes: Number(capMB) * MB });
+            const plan = planGpuHplocBatches(device, scene.meshes, { maxBatchBytes: Number(capMB) * MB, triangleLeaves: leaves });
             const groups = plan.batches.map((batch) => batch.map((index) => scene.meshes[index]));
             const pool = Object.values<number>(hplocScratchPoolBytes(groups)).reduce((sum, bytes) => sum + bytes, 0);
-            const largestOutputs = Math.max(...groups.map((group) => hplocBatchBytes(geometryTotals(group)).outputs));
+            const largestOutputs = Math.max(...groups.map((group) => hplocBatchBytes(geometryTotals(group), 'cubic-30', leaves).outputs));
             // Storage as the GPU trees left it (with its reservation), plus 5% for retired buffers and rounding.
             const bound = (gpuTreesMemory.resident + pool + largestOutputs) * 1.05;
             peakBoundMB = mb(bound);
@@ -196,7 +206,7 @@ try {
         pool.dispose();
         await device.queue.onSubmittedWorkDone();
     }
-    kernel.destroy();
+    for (const kernel of Object.values(kernels)) kernel.destroy();
     await drainDevice(device);
     reportGpuTest({ status: failures.length ? 'fail' : 'pass', message: failures.join(' | ') || undefined, data: results, adapter, deviceErrors, startTime, logLines });
 } catch (error) {

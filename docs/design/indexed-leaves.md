@@ -1,6 +1,25 @@
 # Indexed leaves (P9 lever 2)
 
-Design only; nothing in `src/` changes. Today each tree-ordered triangle is a 48-byte record: three copied corners, the original index, flags and padding (`src/gpu-layout.ts:72-89`, written by `packTriangles`, `src/trace/triangle-packing.ts:74-95`). On Sponza the records are 263.0 of the 448.1 MiB we add beyond the app's geometry ([memory.md](memory.md)).
+## Status (2026-11-12): built, off by default
+
+Dennis's answers to section 7: option B (16-byte record, our own positions); `vec4f` positions by default with packed `f32` as a compile-time variant; merged groups indexed with a side table; a variant flag inside `GPU_LAYOUT_VERSION` 2; an exact-bit weld at load, on by default, with an opt-in tolerance weld; records stay the default until the RTX 3060 is measured.
+
+**What is in.** One walk, with the triangle source compiled in as `rayMasks` is:
+
+- `triangleLeaves: 'records' | 'indexed'` and `positionLayout: 'vec4' | 'packed'` on `traceModuleWgsl`, `batchKernelWgsl`, `TraceBatchKernel`, `assembleTraceScene`/`buildTraceScene`, `SceneTrees`; `BvhTraceNodes` reads them from its source. Only `bvhLoadTriangle` (and the merged-hit lookups) differ; the walk's text is identical (a unit test compares it).
+- The record: `vec4u(i0, i1, i2, id | filter << 28 | flip << 29)` (`GPU_LAYOUT_INDEXED_TRIANGLE_WORD`). Vertex indices stay **mesh-relative in the scene too**: each mesh's region starts with a 16-byte header (`GPU_LAYOUT_MESH_HEADER_WORD`: vertex base, and for a merged group its side and source table distances) at `triangleOffset - 1`, which the walk reads once per instance entered. This differs from section 1 ("the scene adds the vertex base"): records written by any builder are placed and moved (growable storage, swaps, GPU copies) without rewriting them, and the cost is 16 bytes per mesh and one load per instance entry.
+- Merged groups: word 3 holds the source triangle, filter and flip; a 4-byte side table per triangle (source slot, material code) and a source table (slot to `instanceIndex`) sit before the header. The plan now caps a group at 65,536 sources (`MAX_MERGED_SOURCES`).
+- Builders: tinybvh (converted on the way out of the WASM, `indexedTrianglesFromRecordWords`; no WASM change), the topology builder, the LBVH and H-PLOC CPU twins, the GPU H-PLOC (`lbvhWriteTriangle`, `LbvhParams` grew to 48 bytes). The **GPU LBVH stays on records**: its emit reads leaf boxes back from the records and has no binding left for positions (8 per stage); `createMeshLayoutBuilder` converts its trees after the readback.
+- `checkGpuLayout` checks the indices and word 3, then the rest on the same tree with its corners copied out. Serialization writes the format in header word 7 (0 records, 1 indexed; old files have 0); a reader refuses another value. `CpuMeshBvh` takes an indexed tree with its `source` and expands it to records in the constructor (documented: CPU trees stay 48 bytes per triangle).
+- Weld: `weldExactBits` (on in `assembleTraceScene`/`SceneTrees`, `weld: false` turns it off; never on deforming meshes, whose poses are copied vertex for vertex), `weldWithinTolerance`/`weldPositions` (`buildTraceScene({ weldTolerance })`, opt-in, before the build, either format).
+- Deforming meshes: `GpuMeshRefit` copies the pose into the mesh's range of the scene's positions (`meshRefitCopyVertices`) and refits the boxes from there; the triangles are not written.
+- `SceneTrees`: positions storage (growable, a range per mesh, placed when its builds start), headers and side tables, `buffers.positions`, `memory.positions`. Indexed needs `gpuTreeOutputs: 'copy'` (an adopted batch has no headers).
+
+**Measured** (Apple M5; the RTX 3060 is still to do): see "Measured" at the end.
+
+---
+
+Design (2026-11-11), kept as written. Today each tree-ordered triangle is a 48-byte record: three copied corners, the original index, flags and padding (`src/gpu-layout.ts:72-89`, written by `packTriangles`, `src/trace/triangle-packing.ts:74-95`). On Sponza the records are 263.0 of the 448.1 MiB we add beyond the app's geometry ([memory.md](memory.md)).
 
 The risk to beat: "reading corners through an index buffer cost 10-30% of trace speed" ([trace.md](trace.md):40, DIVERGENCES W4). That read went record, then the app's index, then positions: three dependent loads. The format below needs two.
 

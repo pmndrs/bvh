@@ -69,6 +69,7 @@ renderer.compute(kernel); // or render
 ```
 
 - **Buffers:** the storage nodes are bound to SceneTrees' own `GPUBuffer`s, with no copy. `BvhTraceNodes` sets three's backend buffer for each node before three first uses it. That's three's internals, not its API. They're listed in one place, `threeInternals` in `src/three/trace-nodes.ts`.
+- **Indexed leaves:** a `SceneTrees` made with `triangleLeaves: 'indexed'` (docs/design/indexed-leaves.md) has a fourth buffer, its positions. `BvhTraceNodes` reads the format from its source (`triangleLeaves`, `positionLayout`), binds the fourth storage node (`bvh.storage.positions`) and compiles the walk for it; nothing else changes for the caller.
 - **Checked:** once three has used a storage node, `bvh.update()` checks that three still binds our buffer. If a three version looks buffers up differently, `update()` throws an error naming that version as unsupported. Without the check, the walk would read a 16-byte placeholder.
 - **Disposal:** `renderer.dispose()` and a stand-in attribute's `dispose()` don't destroy SceneTrees' buffers. `BvhTraceNodes` wraps the renderer's `backend.destroyAttribute` so a throwaway buffer takes our buffer's place before three destroys it.
 - **When buffers are replaced:** `bvh.update()` swaps in a new attribute bound to the new buffer, and three makes new bind groups. Nothing recompiles. **Call `bvh.update()` after every `SceneTrees.update` that may grow a buffer, and before three uses the nodes again.** Otherwise three keeps binding the old buffer, which SceneTrees has replaced.

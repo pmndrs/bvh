@@ -91,6 +91,30 @@ describe('BvhTraceNodes', () => {
         expect(() => bvh.update()).toThrow(/disposed/);
     });
 
+    it('binds an indexed source four buffers, the positions too, and rebinds them on a new version', () => {
+        const { renderer, backend } = fakeRenderer();
+        for (const positionLayout of ['vec4', 'packed'] as const) {
+            const source = {
+                version: 1,
+                triangleLeaves: 'indexed' as const,
+                positionLayout,
+                buffers: { nodes: buffer('n1'), triangles: buffer('t1'), topLevel: buffer('l1'), positions: buffer('p1') as GPUBuffer | null },
+            };
+            const bvh = new BvhTraceNodes(renderer, source);
+            expect(bvh.triangleLeaves).toBe('indexed');
+            const bound = () => [bvh.storage.nodes, bvh.storage.triangles, bvh.storage.topLevel, bvh.storage.positions!].map((node) => backend.get(node.value as object).buffer);
+            expect(bound()).toEqual([source.buffers.nodes, source.buffers.triangles, source.buffers.topLevel, source.buffers.positions]);
+            source.buffers = { ...source.buffers, positions: buffer('p2') };
+            source.version = 2;
+            expect(bvh.update()).toBe(true);
+            expect(bound()[3]).toBe(source.buffers.positions);
+            bvh.dispose();
+            expect(() => new BvhTraceNodes(renderer, { ...source, buffers: { ...source.buffers, positions: null } })).toThrow(/positions buffer/);
+        }
+        const records = new BvhTraceNodes(renderer, { buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } });
+        expect(records.storage.positions).toBeNull();
+    });
+
     it("survives three's disposal: renderer.dispose() (Attributes.dispose) and a stand-in's dispose()", () => {
         const { renderer, backend, created, attributes, use } = fakeRenderer();
         const source = { version: 1, buffers: { nodes: buffer('n1'), triangles: buffer('t1'), topLevel: buffer('l1') } };

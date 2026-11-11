@@ -25,6 +25,20 @@ import { assembleTraceScene, buildTraceScene, meshRefitPlacement, type TraceScen
 import { writeTriangleFilterFlags, type TrianglePasses } from './triangle-filter.ts';
 import type { TraceRay } from './rays.ts';
 import { TRACE_MODULE_ENTRIES, traceModuleEntries, traceModuleWgsl } from './wgsl.ts';
+import { hplocBatchBytes } from '../gpu-hploc.ts';
+import { geometryTotals, lbvhBatchBytes } from '../gpu-lbvh.ts';
+
+describe('GPU batch sizes', () => {
+    it('count 16 bytes per triangle of output with indexed leaves, so more triangles fit a capped batch', () => {
+        const totals = geometryTotals([tessellatedQuad(40, 1), tessellatedQuad(10, 1)]);
+        const triangles = totals.triangles;
+        for (const bytes of [(leaves: 'records' | 'indexed') => hplocBatchBytes(totals, 'cubic-30', leaves), (leaves: 'records' | 'indexed') => lbvhBatchBytes(totals, leaves)]) {
+            expect(bytes('records').buffers.outTriangles).toBe(triangles * 48);
+            expect(bytes('indexed').buffers.outTriangles).toBe(triangles * 16);
+            expect(bytes('records').total - bytes('indexed').total).toBe(triangles * 32);
+        }
+    });
+});
 
 describe('the indexed walk module', () => {
     it('declares a fourth binding, the positions, read as vec4f or packed f32, around the same walk', () => {

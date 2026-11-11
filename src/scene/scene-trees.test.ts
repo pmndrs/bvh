@@ -16,7 +16,7 @@
 import { describe, expect, it } from 'vitest';
 import { createFakeGpu, type FakeBinding, type FakeBuffer, type FakeGpu } from '../../tests/support/fake-gpu.ts';
 import { createCpuTracer, type CpuHit } from '../trace/cpu-traversal.ts';
-import { INSTANCE_FLAG, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS, TRIANGLE_WORD, TRIANGLE_WORDS } from '../trace/layout.ts';
+import { INDEXED_FLAG_SHIFT, INDEXED_ID_MASK, INSTANCE_FLAG, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS, TRIANGLE_WORD, TRIANGLE_WORDS } from '../trace/layout.ts';
 import { MERGED_INSTANCE_INDEX } from '../trace/static-merge.ts';
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
 import type { MeshGeometry } from '../trace/mesh-bvh.ts';
@@ -54,13 +54,38 @@ function mergedIdentityStandIn(bindings: ReadonlyMap<number, FakeBinding>): void
     }
 }
 
+/** The indexed merged-identity WGSL (`bvhMergedIdentityIndexed`), line by line on the CPU. */
+function mergedIdentityIndexedStandIn(bindings: ReadonlyMap<number, FakeBinding>): void {
+    const triangles = new Uint32Array(bindings.get(0)!.buffer.bytes.buffer);
+    const sources = new Uint32Array(bindings.get(1)!.buffer.bytes.buffer);
+    const [wordOffset, count, sourceCount, sideWordOffset] = new Uint32Array(bindings.get(2)!.buffer.bytes.buffer);
+    for (let slot = 0; slot < count; slot++) {
+        const word = wordOffset + slot * 4 + 3;
+        const merged = triangles[word] & INDEXED_ID_MASK;
+        let low = 0;
+        let high = sourceCount;
+        while (high - low > 1) {
+            const middle = (low + high) >> 1;
+            if (sources[middle * MERGED_SOURCE_WORDS] <= merged) low = middle;
+            else high = middle;
+        }
+        const at = low * MERGED_SOURCE_WORDS;
+        const flags = (triangles[word] >>> INDEXED_FLAG_SHIFT) | (sources[at + 2] & 2);
+        triangles[word] = ((merged - sources[at]) | (flags << INDEXED_FLAG_SHIFT)) >>> 0;
+        triangles[sideWordOffset + slot] = (low | (sources[at + 2] & 0xffff0000)) >>> 0;
+    }
+}
+
 /** A first-tree builder that answers when the test says so; each `build` is one batch. */
 class StandInGpuBuilder implements FirstTreeBuilder {
     readonly requests: GpuTreeRequest[][] = [];
     private readonly pending: { members: { slot: number; generation: number; geometry: MeshGeometry }[]; resolve: (result: GpuTreeBatchResult) => void }[] = [];
     readonly refuse = new Set<number>();
 
-    constructor(private readonly device: GPUDevice) {}
+    constructor(
+        private readonly device: GPUDevice,
+        private readonly triangleLeaves: 'records' | 'indexed' = 'records',
+    ) {}
 
     async prepare(): Promise<void> {
         await buildMeshBvhAsync({ positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]) });
@@ -84,26 +109,27 @@ class StandInGpuBuilder implements FirstTreeBuilder {
     async finishBatch(index = 0): Promise<void> {
         const batch = this.pending.splice(index, 1)[0];
         if (!batch) throw new Error('no batch is waiting');
-        const trees = await Promise.all(batch.members.map((member) => buildMeshBvhAsync(member.geometry, { maxLeafPrimitives: 1 })));
+        const trees = await Promise.all(batch.members.map((member) => buildMeshBvhAsync(member.geometry, { maxLeafPrimitives: 1, triangleLeaves: this.triangleLeaves })));
+        const bytes = this.triangleLeaves === 'indexed' ? 16 : 48;
         // As H-PLOC's outputs: room for one node per triangle, the used nodes packed at the front.
         const triangleTotal = trees.reduce((sum, tree) => sum + tree.triangleCount, 0);
         const usage = 0x4 | 0x8 | 0x80;
         const nodes = this.device.createBuffer({ label: 'stand-in nodes', size: triangleTotal * 64, usage });
-        const triangles = this.device.createBuffer({ label: 'stand-in triangles', size: triangleTotal * 48, usage });
+        const triangles = this.device.createBuffer({ label: 'stand-in triangles', size: triangleTotal * bytes, usage });
         const parents = this.device.createBuffer({ label: 'stand-in parents', size: triangleTotal * 4, usage });
         const meshes: GpuMeshTreeRange[] = [];
         let nodeOffset = 0;
         let triangleOffset = 0;
         trees.forEach((tree, index) => {
             this.device.queue.writeBuffer(nodes, nodeOffset * 64, tree.nodes, 0, tree.nodeCount * 64);
-            this.device.queue.writeBuffer(triangles, triangleOffset * 48, tree.triangles, 0, tree.triangleCount * 48);
+            this.device.queue.writeBuffer(triangles, triangleOffset * bytes, tree.triangles, 0, tree.triangleCount * bytes);
             const refused = this.refuse.has(batch.members[index].slot);
             meshes.push({ nodeOffset, nodeCount: tree.nodeCount, triangleOffset, triangleCount: tree.triangleCount, leafCount: tree.leafCount, maxDepth: tree.maxDepth, bounds: tree.bounds, problem: refused ? 'refused by the test' : null });
             nodeOffset += tree.nodeCount;
             triangleOffset += tree.triangleCount;
         });
         const usable = meshes.filter((mesh) => mesh.problem === null).length;
-        const outputs = new GpuTreeOutputs({ nodes, triangles, parents, meshes, destroy: () => [nodes, triangles, parents].forEach((buffer) => buffer.destroy()) }, usable);
+        const outputs = new GpuTreeOutputs({ nodes, triangles, parents, meshes, triangleLeaves: this.triangleLeaves, destroy: () => [nodes, triangles, parents].forEach((buffer) => buffer.destroy()) }, usable);
         batch.resolve({
             built: meshes.flatMap((tree, index) => (tree.problem ? [] : [{ slot: batch.members[index].slot, generation: batch.members[index].generation, outputs, tree, layout: null }])),
             refused: meshes.flatMap((tree, index) => (tree.problem ? [{ slot: batch.members[index].slot, generation: batch.members[index].generation, reason: tree.problem }] : [])),
@@ -120,8 +146,8 @@ interface Instance extends SceneInstanceDescriptor {
 }
 
 async function setUp(options: Partial<SceneTreesOptions> & { stand?: boolean } = {}) {
-    const gpu: FakeGpu = createFakeGpu({}, { kernels: { bvhMergedIdentity: mergedIdentityStandIn } });
-    const stand = options.stand === false ? null : new StandInGpuBuilder(gpu.device);
+    const gpu: FakeGpu = createFakeGpu({}, { kernels: { bvhMergedIdentity: mergedIdentityStandIn, bvhMergedIdentityIndexed: mergedIdentityIndexedStandIn } });
+    const stand = options.stand === false ? null : new StandInGpuBuilder(gpu.device, options.triangleLeaves);
     const events: SceneTreeEvent[] = [];
     const scene = await SceneTrees.create(gpu.device, { ...options, firstTreeBuilder: stand ?? undefined, onTree: (event) => events.push(event) });
     const frame = () => {
@@ -134,16 +160,16 @@ async function setUp(options: Partial<SceneTreesOptions> & { stand?: boolean } =
 
 /** The scene's buffers as the fake GPU holds them, for the CPU walk. */
 function readScene(scene: SceneTrees): TraceSceneData {
-    const { nodes, triangles, topLevel } = scene.buffers;
+    const { nodes, triangles, topLevel, positions } = scene.buffers;
     const bytes = (buffer: GPUBuffer) => (buffer as unknown as FakeBuffer).bytes.slice().buffer;
     const top = bytes(topLevel);
     const header = new Uint32Array(top, 0, 4);
     return {
         nodes: bytes(nodes),
         triangles: bytes(triangles),
-        triangleLeaves: 'records',
-        positions: new ArrayBuffer(0),
-        positionLayout: 'vec4',
+        triangleLeaves: scene.triangleLeaves,
+        positions: positions ? bytes(positions) : new ArrayBuffer(0),
+        positionLayout: scene.positionLayout,
         vertexCount: 0,
         topLevel: { buffer: top, instanceCount: header[TOP_HEADER_WORD.instanceCount], nodeCount: header[TOP_HEADER_WORD.nodeCount] } as TopLevelBvh,
         meshes: [],
@@ -646,6 +672,71 @@ async function setUpCapped(options: Partial<SceneTreesOptions> = {}) {
 function withinTime<T>(promise: Promise<T>, what: string, ms = 5000): Promise<T> {
     return Promise.race([promise, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${what} did not resolve (deadlock?)`)), ms))]);
 }
+
+describe('SceneTrees with indexed leaves', () => {
+    for (const positionLayout of ['vec4', 'packed'] as const) {
+        it(`GPU trees first, tinybvh swapped in, merged groups with their side tables, runtime adds and removals: the same hits as records (${positionLayout})`, async () => {
+            const { scene, stand, frame } = await setUp({ holdRefinements: true, mergeStaticInstances: true, triangleLeaves: 'indexed', positionLayout });
+            const { geometries, instances, rays } = sceneOf(5);
+            const twin: Instance = { mesh: -1, meshIndex: 4, instanceIndex: 200, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1] };
+            const all = [...instances, twin];
+            const { meshes } = addAll(scene, geometries, all);
+            frame();
+            expect(scene.counts.mergedGroups).toBe(1);
+            const expected = await reference(geometries, all);
+            await stand!.finishBatch();
+            frame();
+            expect(scene.counts).toMatchObject({ onGpuTrees: 2, onTinybvhTrees: 0 });
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+            await scene.whenRefined();
+            scene.releaseRefinements((mesh) => mesh === -1);
+            frame();
+            expect(scene.groupStatus(0).builtBy).toBe('tinybvh');
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+            scene.releaseRefinements();
+            frame();
+            expect(scene.counts).toMatchObject({ onGpuTrees: 0, onTinybvhTrees: 2, swaps: 2 });
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+
+            // A mesh added later, then removed; its positions range is freed and reused.
+            const late = tessellatedQuad(4, 0.5);
+            const lateInstance: Instance = { mesh: scene.addMesh(late), meshIndex: 5, instanceIndex: 300, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, -3, 1] };
+            const lateHandle = scene.addInstance(lateInstance);
+            frame();
+            await stand!.finishBatch();
+            frame();
+            expect(disagreements(readScene(scene), await reference([...geometries, late], [...all, lateInstance]), rays)).toEqual([]);
+            const memory = scene.memory;
+            expect(memory.positions).toBeGreaterThan(0);
+            expect(memory.total).toBe(memory.resident + memory.transient);
+            scene.removeInstance(lateHandle);
+            scene.removeMesh(lateInstance.mesh);
+            frame();
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+            expect(scene.meshStatus(meshes[4]).builtBy).toBe('tinybvh');
+            scene.dispose();
+        });
+    }
+
+    it('is smaller than records, welds by exact bits, and refuses the adopt lever', async () => {
+        const sizes = [];
+        for (const triangleLeaves of ['records', 'indexed'] as const) {
+            const { scene, frame } = await setUp({ stand: false, triangleLeaves });
+            const { geometries, instances, rays } = sceneOf(4);
+            addAll(scene, geometries, instances);
+            frame();
+            await scene.whenRefined();
+            frame();
+            expect(disagreements(readScene(scene), await reference(geometries, instances), rays)).toEqual([]);
+            sizes.push(scene.memory.trianglesInUse);
+            scene.dispose();
+        }
+        // Meshes of 3-6 cells a side, two triangles a cell: 16 bytes each and a 16-byte header per mesh, against 48.
+        const triangles = (9 + 16 + 25 + 36) * 2;
+        expect(sizes).toEqual([triangles * 48, triangles * 16 + 4 * 16]);
+        await expect(setUp({ stand: false, triangleLeaves: 'indexed', gpuTreeOutputs: 'adopt' })).rejects.toThrow(/gpuTreeOutputs: 'copy'/);
+    });
+});
 
 describe('SceneTrees with gpuMaxBatchBytes (the real queue, a stand-in H-PLOC)', () => {
     for (const variant of [

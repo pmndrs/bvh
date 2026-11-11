@@ -34,6 +34,11 @@
  * `frame(); await whenBuilt(); frame()`: with a cap the batches go on between
  * updates, so that is enough for every first tree to be a GPU tree.
  *
+ * The `indexed-*` variants run the same with `triangleLeaves: 'indexed'`
+ * (`vec4` positions, `packed` in the capped ones), copy only: GPU trees
+ * written indexed by H-PLOC, tinybvh's converted in the worker, merged groups'
+ * side tables from the GPU and the CPU identity pass.
+ *
  * URL option: `?sharedRays=100000` shrinks the seam cases.
  */
 
@@ -56,6 +61,8 @@ interface Variant {
     readonly gpuTreeOutputs: 'copy' | 'adopt';
     readonly merged: boolean;
     readonly maxBatchBytes?: number;
+    /** Indexed leaves (docs/design/indexed-leaves.md), with this position layout; absent: records. */
+    readonly indexed?: 'vec4' | 'packed';
 }
 
 /** Smaller than any one-mesh batch (its uniforms alone are 2.8 kB), so every mesh is a batch of its own. */
@@ -73,6 +80,11 @@ const VARIANTS: readonly Variant[] = [
     { name: 'copy-merged-capped', gpuTreeOutputs: 'copy', merged: true, maxBatchBytes: SMALL_CAP },
     { name: 'adopt-capped', gpuTreeOutputs: 'adopt', merged: false, maxBatchBytes: SMALL_CAP },
     { name: 'adopt-merged-capped', gpuTreeOutputs: 'adopt', merged: true, maxBatchBytes: SMALL_CAP },
+    // Indexed leaves: copy only (an adopted batch has no mesh headers).
+    { name: 'indexed-copy', gpuTreeOutputs: 'copy', merged: false, indexed: 'vec4' },
+    { name: 'indexed-copy-merged', gpuTreeOutputs: 'copy', merged: true, indexed: 'vec4' },
+    { name: 'indexed-copy-capped', gpuTreeOutputs: 'copy', merged: false, maxBatchBytes: SMALL_CAP, indexed: 'packed' },
+    { name: 'indexed-copy-merged-capped', gpuTreeOutputs: 'copy', merged: true, maxBatchBytes: SMALL_CAP, indexed: 'packed' },
 ];
 
 /** Each instance its own mesh copy, two of every three static (the trace-oracle's merged variants). */
@@ -89,9 +101,14 @@ await runGpuTest(
         const sharedRays = Number(new URLSearchParams(location.search).get('sharedRays') ?? 1_000_000);
         const cases: OracleCase[] = [...buildOracleCases(FULL_SIZES), sharedEdgeCase(sharedRays, false), sharedEdgeCase(sharedRays, true)];
         const tinyBvh = await createTinyBvhBuilder();
-        const kernel = await TraceBatchKernel.create(device);
+        const kernels = {
+            records: await TraceBatchKernel.create(device),
+            vec4: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4' }),
+            packed: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed' }),
+        };
         const firstTrees = new GpuFirstTrees(device, { label: 'mid-swap' });
-        await firstTrees.prepare();
+        const indexedFirstTrees = new GpuFirstTrees(device, { label: 'mid-swap indexed', triangleLeaves: 'indexed' });
+        await Promise.all([firstTrees.prepare(), indexedFirstTrees.prepare()]);
         const pool = createBvhWorkerPool({ size: 4 });
         assert(pool.usesWorkers, 'the worker pool fell back to building inline in a browser');
         const failures: string[] = [];
@@ -115,8 +132,10 @@ await runGpuTest(
                     gpuMaxBatchBytes: variant.maxBatchBytes,
                     mergeStaticInstances: variant.merged,
                     workers: pool,
-                    firstTreeBuilder: firstTrees,
+                    firstTreeBuilder: variant.indexed ? indexedFirstTrees : firstTrees,
+                    ...(variant.indexed ? { triangleLeaves: 'indexed' as const, positionLayout: variant.indexed } : {}),
                 });
+                const kernel = kernels[variant.indexed ?? 'records'];
                 const handles = meshes.map((mesh) => scene.addMesh(mesh));
                 for (const instance of instances) scene.addInstance({ ...instance, mesh: handles[instance.meshIndex] });
                 const frame = () => {
@@ -127,7 +146,7 @@ await runGpuTest(
                 const check = async (state: string) => {
                     await device.queue.onSubmittedWorkDone();
                     const gpu = await traceOnGpu(device, kernel, scene.traceBuffers, rays);
-                    const gpuScene = await readScene(device, scene.buffers);
+                    const gpuScene = await readScene(device, scene.buffers, { triangleLeaves: scene.triangleLeaves, positionLayout: scene.positionLayout });
                     const comparison = compareWithReference(rays, gpu, gpuScene, reference);
                     let misses = 0;
                     if (oracleCase.everyRayMustHit) for (let index = 0; index < rays.length; index++) if (gpu.closest(index) === null || !gpu.any(index)) misses++;
@@ -171,7 +190,7 @@ await runGpuTest(
             }
         }
         pool.dispose();
-        kernel.destroy();
+        for (const kernel of Object.values(kernels)) kernel.destroy();
         for (const variant of VARIANTS) {
             if (variant.maxBatchBytes === SMALL_CAP && !cappedCasesWithBatches.has(variant.name)) failures.push(`${variant.name}: no case built in more than one GPU batch`);
         }

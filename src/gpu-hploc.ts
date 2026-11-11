@@ -30,7 +30,8 @@
  * **Limits.** A batch's largest buffer holds 64 bytes per triangle (the output
  * nodes); {@link planGpuHplocBatches} splits a scene to fit the device. A mesh
  * may have at most {@link HPLOC_MAX_MESH_TRIANGLES} triangles. A whole batch holds
- * about 252 bytes per triangle plus its inputs ({@link hplocBatchBytes}); the
+ * about 252 bytes per triangle plus its inputs ({@link hplocBatchBytes}; 32 fewer
+ * with `triangleLeaves: 'indexed'`, whose triangles take 16 bytes, not 48); the
  * planner's `maxBatchBytes` caps that, and {@link GpuHplocScratchPool} shares
  * one scratch across batches built one after another (bvh-builders.md, "Build
  * peak memory").

@@ -58,9 +58,14 @@ import { traceModuleWgsl } from '../trace/wgsl.ts';
 
 /** Where the trace buffers come from: a `SceneTrees` (buffers and version), or fixed buffers (`uploadTraceScene`). */
 export interface BvhTraceBufferSource {
-    readonly buffers: { readonly nodes: GPUBuffer; readonly triangles: GPUBuffer; readonly topLevel: GPUBuffer };
+    /** `positions`: an indexed scene's fourth buffer (docs/design/indexed-leaves.md); null or absent for records. */
+    readonly buffers: { readonly nodes: GPUBuffer; readonly triangles: GPUBuffer; readonly topLevel: GPUBuffer; readonly positions?: GPUBuffer | null };
     /** Changes whenever a buffer is replaced. Fixed buffers may omit it. */
     readonly version?: number;
+    /** The source's triangle format (`SceneTrees.triangleLeaves`, `TraceSceneBuffers.triangleLeaves`); absent means records. */
+    readonly triangleLeaves?: 'records' | 'indexed';
+    /** An indexed source's position layout; absent means `'vec4'`. */
+    readonly positionLayout?: 'vec4' | 'packed';
 }
 
 export interface BvhTraceNodesOptions {
@@ -168,21 +173,45 @@ export const bvhTraceHitStruct = new StructTypeNode(
     'BvhTraceHit',
 );
 
-const BUFFERS = [
-    { name: 'bvhTraceNodes', key: 'nodes', type: 'vec4', array: () => new Float32Array(4) },
-    { name: 'bvhTraceTriangles', key: 'triangles', type: 'vec4', array: () => new Float32Array(4) },
-    { name: 'bvhTraceTopLevel', key: 'topLevel', type: 'uvec4', array: () => new Uint32Array(4) },
-] as const;
+type BufferKey = 'nodes' | 'triangles' | 'topLevel' | 'positions';
+type BufferName = 'bvhTraceNodes' | 'bvhTraceTriangles' | 'bvhTraceTopLevel' | 'bvhTracePositions';
+interface BufferSpec {
+    readonly name: BufferName;
+    readonly key: BufferKey;
+    readonly type: 'vec4' | 'uvec4' | 'float';
+    readonly itemSize: number;
+    readonly array: () => Float32Array | Uint32Array;
+}
 
-/** The walk's text without its three binding declarations: three declares the storage nodes instead. */
-function moduleWithoutBindings(options: BvhTraceNodesOptions): string {
-    const text = traceModuleWgsl({ triangleFilter: options.triangleFilter, rayMasks: options.rayMasks });
+/** The storage nodes of a format: three, or with indexed leaves four (the triangles read as `vec4u`, then the positions). */
+function buffersOf(triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4' | 'packed'): readonly BufferSpec[] {
+    const indexed = triangleLeaves === 'indexed';
+    return [
+        { name: 'bvhTraceNodes', key: 'nodes', type: 'vec4', itemSize: 4, array: () => new Float32Array(4) },
+        indexed
+            ? { name: 'bvhTraceTriangles', key: 'triangles', type: 'uvec4', itemSize: 4, array: () => new Uint32Array(4) }
+            : { name: 'bvhTraceTriangles', key: 'triangles', type: 'vec4', itemSize: 4, array: () => new Float32Array(4) },
+        { name: 'bvhTraceTopLevel', key: 'topLevel', type: 'uvec4', itemSize: 4, array: () => new Uint32Array(4) },
+        ...(indexed
+            ? [
+                  positionLayout === 'packed'
+                      ? { name: 'bvhTracePositions' as const, key: 'positions' as const, type: 'float' as const, itemSize: 1, array: () => new Float32Array(4) }
+                      : { name: 'bvhTracePositions' as const, key: 'positions' as const, type: 'vec4' as const, itemSize: 4, array: () => new Float32Array(4) },
+              ]
+            : []),
+    ];
+}
+
+/** The walk's text without its binding declarations: three declares the storage nodes instead. */
+function moduleWithoutBindings(options: BvhTraceNodesOptions, triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4' | 'packed'): string {
+    const text = traceModuleWgsl({ triangleFilter: options.triangleFilter, rayMasks: options.rayMasks, triangleLeaves, positionLayout });
     let removed = 0;
-    const stripped = text.replace(/^@group\(\d+\) @binding\(\d+\) var<storage, read> bvhTrace(?:Nodes|Triangles|TopLevel): array<vec4[fu]>;$/gm, () => {
+    const stripped = text.replace(/^@group\(\d+\) @binding\(\d+\) var<storage, read> bvhTrace(?:Nodes|Triangles|TopLevel|Positions): array<(?:vec4[fu]|f32)>;$/gm, () => {
         removed++;
         return '';
     });
-    if (removed !== 3) throw new Error(`@pmndrs/bvh/three: expected the walk's three bindings, found ${removed}`);
+    const expected = triangleLeaves === 'indexed' ? 4 : 3;
+    if (removed !== expected) throw new Error(`@pmndrs/bvh/three: expected the walk's ${expected} bindings, found ${removed}`);
     return stripped;
 }
 
@@ -192,15 +221,18 @@ class BvhTraceModuleNode extends CodeNode {
     bvhTraceNodes: StorageNode;
     bvhTraceTriangles: StorageNode;
     bvhTraceTopLevel: StorageNode;
+    /** Indexed leaves only. */
+    bvhTracePositions: StorageNode | null;
 
     constructor(
         private readonly text: string,
-        storages: Readonly<Record<'bvhTraceNodes' | 'bvhTraceTriangles' | 'bvhTraceTopLevel', StorageNode>>,
+        storages: Readonly<Partial<Record<BufferName, StorageNode>>>,
     ) {
         super('', [], 'wgsl');
-        this.bvhTraceNodes = storages.bvhTraceNodes;
-        this.bvhTraceTriangles = storages.bvhTraceTriangles;
-        this.bvhTraceTopLevel = storages.bvhTraceTopLevel;
+        this.bvhTraceNodes = storages.bvhTraceNodes!;
+        this.bvhTraceTriangles = storages.bvhTraceTriangles!;
+        this.bvhTraceTopLevel = storages.bvhTraceTopLevel!;
+        this.bvhTracePositions = storages.bvhTracePositions ?? null;
     }
 
     generate(builder: NodeBuilder): string {
@@ -208,8 +240,9 @@ class BvhTraceModuleNode extends CodeNode {
             bvhTraceNodes: this.bvhTraceNodes.build(builder, 'property') as string,
             bvhTraceTriangles: this.bvhTraceTriangles.build(builder, 'property') as string,
             bvhTraceTopLevel: this.bvhTraceTopLevel.build(builder, 'property') as string,
+            ...(this.bvhTracePositions ? { bvhTracePositions: this.bvhTracePositions.build(builder, 'property') as string } : {}),
         };
-        const code = this.text.replace(/\bbvhTrace(?:Nodes|Triangles|TopLevel)\b/g, (name) => names[name]);
+        const code = this.text.replace(/\bbvhTrace(?:Nodes|Triangles|TopLevel|Positions)\b/g, (name) => names[name]);
         const nodeCode = (builder as unknown as { getCodeFromNode(node: Node, type: string): { code: string } }).getCodeFromNode(this, this.getNodeType(builder));
         nodeCode.code = code;
         return code;
@@ -241,8 +274,12 @@ function helper(code: string, includes: Node[]) {
  *   // each frame: sync.update(); sceneTrees.update(encoder); submit; bvh.update(); renderer.compute(...)
  */
 export class BvhTraceNodes {
-    /** The storage nodes, for reading the layout directly. */
-    readonly storage: { readonly nodes: StorageNode; readonly triangles: StorageNode; readonly topLevel: StorageNode };
+    /** The storage nodes, for reading the layout directly (`positions` only for indexed leaves). */
+    readonly storage: { readonly nodes: StorageNode; readonly triangles: StorageNode; readonly topLevel: StorageNode; readonly positions: StorageNode | null };
+    /** The source's triangle format, compiled into the walk. */
+    readonly triangleLeaves: 'records' | 'indexed';
+    readonly positionLayout: 'vec4' | 'packed';
+    private readonly specs: readonly BufferSpec[];
     /** The walk (`bvhTraceClosest`, `bvhTraceAny`, `BvhRay`, `BvhHit`, ...): include it in a `wgslFn` to call it from WGSL. */
     readonly module: Node;
     readonly rayMasks: boolean;
@@ -272,16 +309,19 @@ export class BvhTraceNodes {
         }
         threeInternals.check(this.renderer);
         this.rayMasks = options.rayMasks ?? true;
+        this.triangleLeaves = source.triangleLeaves ?? 'records';
+        this.positionLayout = source.positionLayout ?? 'vec4';
+        this.specs = buffersOf(this.triangleLeaves, this.positionLayout);
         this.bound = source.buffers;
         this.boundVersion = source.version;
-        const storages = {} as Record<(typeof BUFFERS)[number]['name'], StorageNode>;
-        for (const { name, key, type, array } of BUFFERS) {
-            const node = storage(this.standIn(this.bound[key], array()), type, 0).toReadOnly() as unknown as StorageNode;
+        const storages: Partial<Record<BufferName, StorageNode>> = {};
+        for (const { name, key, type, itemSize, array } of this.specs) {
+            const node = storage(this.standIn(this.bufferOf(this.bound, key), array(), itemSize), type, 0).toReadOnly() as unknown as StorageNode;
             node.setName(name);
             storages[name] = node;
         }
-        this.storage = { nodes: storages.bvhTraceNodes, triangles: storages.bvhTraceTriangles, topLevel: storages.bvhTraceTopLevel };
-        this.module = new BvhTraceModuleNode(moduleWithoutBindings(options), storages);
+        this.storage = { nodes: storages.bvhTraceNodes!, triangles: storages.bvhTraceTriangles!, topLevel: storages.bvhTraceTopLevel!, positions: storages.bvhTracePositions ?? null };
+        this.module = new BvhTraceModuleNode(moduleWithoutBindings(options, this.triangleLeaves, this.positionLayout), storages);
         const includes = [bvhTraceHitStruct, this.module];
         this.traceClosest = helper(closestWgsl('bvhThreeTraceClosest', false), includes);
         this.traceAny = helper(anyWgsl('bvhThreeTraceAny', false), includes);
@@ -308,12 +348,16 @@ export class BvhTraceNodes {
         this.checkBindings();
         const buffers = this.source.buffers;
         const changed =
-            this.source.version !== this.boundVersion || buffers.nodes !== this.bound.nodes || buffers.triangles !== this.bound.triangles || buffers.topLevel !== this.bound.topLevel;
+            this.source.version !== this.boundVersion ||
+            buffers.nodes !== this.bound.nodes ||
+            buffers.triangles !== this.bound.triangles ||
+            buffers.topLevel !== this.bound.topLevel ||
+            (buffers.positions ?? null) !== (this.bound.positions ?? null);
         if (!changed) return false;
-        for (const { key, array } of BUFFERS) {
-            const node = this.storage[key];
+        for (const { key, itemSize, array } of this.specs) {
+            const node = this.storage[key]!;
             const old = node.value as StorageBufferAttribute;
-            node.value = this.standIn(buffers[key], array());
+            node.value = this.standIn(this.bufferOf(buffers, key), array(), itemSize);
             this.retire(old);
         }
         this.bound = buffers;
@@ -324,10 +368,10 @@ export class BvhTraceNodes {
     /** Each stand-in three used still has our buffer, and three made none of its own. */
     private checkBindings(): void {
         const backend = this.renderer.backend;
-        for (const { key } of BUFFERS) {
-            const attribute = this.storage[key].value as StorageBufferAttribute;
+        for (const { key } of this.specs) {
+            const attribute = this.storage[key]!.value as StorageBufferAttribute;
             if (this.verified.has(attribute) || !threeInternals.usedByThree(this.renderer, attribute)) continue;
-            const ours = this.bound[key];
+            const ours = this.bufferOf(this.bound, key);
             if (threeInternals.bufferOf(backend, attribute) !== ours || threeInternals.otherBuffer(backend, attribute, ours)) {
                 throw unsupported(`did not bind the ${key} buffer BvhTraceNodes set (backend.get(attribute).buffer)`);
             }
@@ -338,17 +382,24 @@ export class BvhTraceNodes {
     /** Releases the stand-in attributes. The source's buffers are not destroyed (they are the source's). */
     dispose(): void {
         if (this.disposed) return;
-        for (const { key } of BUFFERS) this.retire(this.storage[key].value as StorageBufferAttribute);
+        for (const { key } of this.specs) this.retire(this.storage[key]!.value as StorageBufferAttribute);
         this.disposed = true;
     }
 
     /** A `StorageBufferAttribute` whose GPU buffer is `buffer`: three takes the backend's buffer as made, never creates one, and never destroys it. */
-    private standIn(buffer: GPUBuffer, array: Float32Array | Uint32Array): StorageBufferAttribute {
-        const attribute = new StorageBufferAttribute(array, 4);
+    private standIn(buffer: GPUBuffer, array: Float32Array | Uint32Array, itemSize = 4): StorageBufferAttribute {
+        const attribute = new StorageBufferAttribute(array, itemSize);
         attribute.name = buffer.label;
         threeInternals.bind(this.renderer.backend, attribute, buffer);
         threeInternals.guardDestroy(this.renderer.backend, attribute);
         return attribute;
+    }
+
+    /** One of the source's buffers; an indexed source must have its positions. */
+    private bufferOf(buffers: BvhTraceBufferSource['buffers'], key: BufferKey): GPUBuffer {
+        const buffer = buffers[key];
+        if (!buffer) throw new Error(`@pmndrs/bvh/three: an indexed trace source needs its ${key} buffer`);
+        return buffer;
     }
 
     /** Lets three forget an attribute: the destroy guard swaps a throwaway in for our buffer, which three then destroys. */

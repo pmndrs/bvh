@@ -245,6 +245,8 @@ export class GpuFirstTrees implements FirstTreeBuilder {
     private readonly device: GPUDevice;
     private readonly hploc: HplocBatchBuilder;
     private readonly label: string;
+    /** The trees' triangle format, for every batch. */
+    private readonly buildOptions: { readonly triangleLeaves?: 'indexed' };
     /** Capped batches not started yet, in order (every build's: one batch builds at a time). */
     private readonly queue: QueuedBatch[] = [];
     /** A capped batch is building, or its outputs are not let go yet. */
@@ -256,7 +258,8 @@ export class GpuFirstTrees implements FirstTreeBuilder {
     private current: { readonly owner: object; readonly bytes: () => number } | null = null;
 
     /** `hploc` is for tests: an H-PLOC builder stand-in. */
-    constructor(device: GPUDevice, options: { readonly label?: string; readonly hploc?: HplocBatchBuilder } = {}) {
+    constructor(device: GPUDevice, options: { readonly label?: string; readonly hploc?: HplocBatchBuilder; readonly triangleLeaves?: 'records' | 'indexed' } = {}) {
+        this.buildOptions = options.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' } : {};
         this.device = device;
         this.label = `${options.label ?? 'bvh'} mesh trees`;
         this.hploc = options.hploc ?? new GpuHplocBuilder(device, { label: this.label });
@@ -273,7 +276,7 @@ export class GpuFirstTrees implements FirstTreeBuilder {
 
     build(requests: readonly GpuTreeRequest[], options: GpuTreeBuildOptions = {}): GpuTreeBuilds {
         const geometries = requests.map((request) => request.geometry);
-        const plan = planGpuHplocBatches(this.device, geometries, { maxBatchBytes: options.maxBatchBytes });
+        const plan = planGpuHplocBatches(this.device, geometries, { maxBatchBytes: options.maxBatchBytes, ...this.buildOptions });
         const limitBytes = Math.min(this.device.limits.maxStorageBufferBindingSize, this.device.limits.maxBufferSize);
         const notBuilt = plan.tooBig.map((index) => ({
             slot: requests[index].slot,
@@ -292,7 +295,7 @@ export class GpuFirstTrees implements FirstTreeBuilder {
         for (const indices of plan.batches) {
             const members = indices.map((index) => requests[index]);
             try {
-                const batch = this.hploc.createBatch(members.map((member) => member.geometry));
+                const batch = this.hploc.createBatch(members.map((member) => member.geometry), this.buildOptions);
                 batch.encode(encoder);
                 buildingBytes += batch.scratchBytes + batch.outputBytes;
                 recorded.push({ members, finish: () => batch.finish() });
@@ -394,7 +397,7 @@ export class GpuFirstTrees implements FirstTreeBuilder {
             const geometries = members.map((member) => member.geometry);
             const pool = this.poolFor(geometries);
             this.poolOwner = owner;
-            batch = this.hploc.createBatch(geometries, {}, pool);
+            batch = this.hploc.createBatch(geometries, this.buildOptions, pool);
             const building = batch;
             this.current = { owner, bytes: () => building.outputBytes };
             options.onMemoryChange?.();

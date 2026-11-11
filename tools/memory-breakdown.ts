@@ -67,7 +67,7 @@ interface BatchBytes {
 const make = (bytes: number): number => Math.max(16, align4(bytes));
 
 /** `GpuHplocBatch`'s constructor (src/gpu-hploc.ts "createBuffer"), formula for formula. Default `cubic-30` codes. */
-function hplocBatch(geometries: readonly Geometry[], codes: 'cubic-30' | 'tinybvh-63' = 'cubic-30'): BatchBytes {
+function hplocBatch(geometries: readonly Geometry[], codes: 'cubic-30' | 'tinybvh-63' = 'cubic-30', triangleBytes = GPU_LAYOUT_TRIANGLE_BYTES): BatchBytes {
     const meshes = placeMeshes(geometries);
     const last = meshes[meshes.length - 1];
     const T = last.triangleStart + last.triangleCount;
@@ -91,7 +91,7 @@ function hplocBatch(geometries: readonly Geometry[], codes: 'cubic-30' | 'tinybv
         'triangle flags (input)': make(lastFlagEnd * 4),
         stats: make(meshes.length * LBVH_STATS_BYTES + 16),
         'output nodes': make(I * GPU_LAYOUT_NODE_BYTES),
-        'output triangles': make(T * GPU_LAYOUT_TRIANGLE_BYTES),
+        'output triangles': make(T * triangleBytes),
         'output parents': make(I * 4),
         tables: make(tables.byteLength),
         'primitive boxes': make(T * 32),
@@ -317,6 +317,37 @@ async function main(): Promise<void> {
     console.log(`  ours (tinybvh, leaves of up to 8): nodes ${mib(ours.nodes)} MiB (${ours.nodeCount} nodes, ${ours.averageLeafTriangles.toFixed(2)} triangles per leaf), triangle records ${mib(ours.triangles)}, parents (CPU only) ${mib(ours.parentsCpu)}, top level ${mib(ours.topLevel)}`);
     scene = undefined as never;
 
+    // Indexed leaves (docs/design/indexed-leaves.md): the same tinybvh trees with 16-byte triangles and the scene's own
+    // positions, welded by exact bits (the default) or not, as vec4f (the default) or packed f32; instanced and merged.
+    const indexedOut: Record<string, { nodes: number; triangles: number; positions: number; topLevel: number; vertices: number; total: number }> = {};
+    for (const [name, options] of [
+        ['instanced, vec4, welded', { positionLayout: 'vec4' as const, weld: true, merge: false }],
+        ['instanced, vec4, unwelded', { positionLayout: 'vec4' as const, weld: false, merge: false }],
+        ['instanced, packed, welded', { positionLayout: 'packed' as const, weld: true, merge: false }],
+        ['merged, vec4, welded', { positionLayout: 'vec4' as const, weld: true, merge: true }],
+    ] as const) {
+        const built = await buildTraceScene(geometries, sceneInstances, {
+            build: (g) => buildMeshBvhWithTinyBvh(g, tinyBvh, { triangleLeaves: 'indexed' }),
+            triangleLeaves: 'indexed',
+            positionLayout: options.positionLayout,
+            weld: options.weld,
+            mergeStaticInstances: options.merge,
+        });
+        const entry = {
+            nodes: built.nodes.byteLength,
+            triangles: built.triangles.byteLength,
+            positions: built.positions.byteLength,
+            topLevel: built.topLevel.buffer.byteLength,
+            vertices: built.vertexCount,
+            total: built.byteLength,
+        };
+        indexedOut[name] = entry;
+        console.log(
+            `  indexed (${name}): nodes ${mib(entry.nodes)} MiB, triangles ${mib(entry.triangles)}, positions ${mib(entry.positions)} (${entry.vertices} vertices), top level ${mib(entry.topLevel)}; total ${mib(entry.total)} MiB`,
+        );
+    }
+    out.indexed = indexedOut;
+
     // Leaf size trend: tinybvh at the layout's allowed leaf sizes.
     const leafTrend: Record<number, { nodes: number; nodeBytes: number; leaves: number; triangles: number }> = {};
     for (const maxLeaf of [1, 2, 4, 8]) {
@@ -387,6 +418,9 @@ async function main(): Promise<void> {
 
     // GPU build batches: all meshes in one batch (a large-limit device), and at the planner's limits.
     const oneBatchHploc = hplocBatch(geometries);
+    const oneBatchHplocIndexed = hplocBatch(geometries, 'cubic-30', 16);
+    out.gpuBatchHplocIndexed = oneBatchHplocIndexed;
+    console.log(`  H-PLOC one batch, indexed leaves: outputs ${mib(oneBatchHplocIndexed.outputs)} MiB, total ${mib(oneBatchHplocIndexed.inputs + oneBatchHplocIndexed.scratch + oneBatchHplocIndexed.outputs)} MiB, ${((oneBatchHplocIndexed.inputs + oneBatchHplocIndexed.scratch + oneBatchHplocIndexed.outputs) / oneBatchHplocIndexed.triangles).toFixed(1)} bytes per triangle (records ${((oneBatchHploc.inputs + oneBatchHploc.scratch + oneBatchHploc.outputs) / oneBatchHploc.triangles).toFixed(1)})`);
     const oneBatchLbvh = lbvhBatch(geometries);
     out.gpuBatchHploc = oneBatchHploc;
     out.gpuBatchLbvh = oneBatchLbvh;
