@@ -37,12 +37,27 @@ BVH_ASSETS_DIR=../webgpu-ddgi/assets pnpm examples:dev
 
 ## three.js examples
 
-| Page | Shows |
-| --- | --- |
-| `three/raycast` | `acceleratedRaycast` against three's `Mesh.raycast` (rays/s live), and a GPU batch of up to a million rays in one dispatch through `SceneTrees` + `TraceBatchKernel` |
+| Page | Shows | Smoke check |
+| --- | --- | --- |
+| `three/raycast` | `acceleratedRaycast` against three's `Mesh.raycast` (rays/s of each, live), pointer picking with either, and a GPU batch (4k to 1M rays) in one dispatch through `SceneTrees` + `TraceBatchKernel`, its hits drawn as points | 64 rays agree with three's raycast; the batch hits |
+| `three/pathtracer` | A TSL compute path tracer over `BvhTraceNodes`: `traceClosest` per bounce in a `Loop` with a uniform bound, `traceAny` sun shadows, `hit.material` into a fixed-capacity palette, progressive accumulation. Compiled with `compileComputeAsync`; the shader text is the same for any scene | rays counted (one atomic per pixel) |
+| `three/skinned` | Nine `SkinnedMesh` characters: `BvhPosePass` skins on the GPU, `SceneTrees.setPose` refits; refits, drift rebuilds and moved boxes counted; GPU picking on the moving surface | 48 GPU picks agree with three's CPU-skinned raycast on a frozen pose |
+| `three/instances` | 6,000 `InstancedMesh` + 3,000 `BatchedMesh` instances moving every frame (`?instanced=`, `?batched=`), top-level refit each frame, GPU picking, `setColorAt` highlight | 64 rays at instances: each hit lies inside the hit instance's current bounds |
+| `three/load-gltf` | Fast first: GPU H-PLOC trees, then tinybvh from a `/worker` pool swapped in; a per-mesh timeline; rays traced on the first trees and after the swap. Materials are compiled with `compileAsync` while the trees build | every mesh has a tree; GPU first trees were used |
+| `three/inspector` | tinybvh, GPU H-PLOC and GPU LBVH on one mesh: build CPU ms and GPU timestamps, SAH, depth, nodes, bytes; leaf size, `triangleLeaves`, `nodeFormat`; `MeshBVHHelper` at a depth; a CPU heat map of nodes per ray; a table of every build | six builds (3 builders × records/f32 and indexed/quantized), heat map |
+| `three/sdf` | Not built: the library has no SDF generation (a gap) | |
+
+Measured on the Apple M5 (Chrome, headless, `pnpm examples:smoke`), default scenes: the GPU batch traces 65k rays in about 1.9 ms (35 Mrays/s, a 100k-triangle knot from outside, timestamps); `acceleratedRaycast` 0.40 M rays/s against three's 306 (100k triangles); the path tracer about 120 Mrays/s (wall time of one dispatch); Sponza (405 meshes, 3.7 M triangles) through `load-gltf` has every first tree in about 150-230 ms and every tinybvh tree in about 600 ms after the first update.
 
 ## Public-API gaps the examples ran into
 
 - No `declare module 'three'` augmentation in `/three`: `raycaster.firstHitOnly`, `geometry.boundsTree` and `geometry.computeBoundsTree` need casts (three-mesh-bvh ships one).
-- `SceneTrees` keeps no CPU copy of its trees, so there's no SAH cost per tree for the overlay; and its GPU build time (`counts.gpuBuildMs`) is submit-to-stats wall time, not timestamps.
-- `SceneTreesObject3DSync` doesn't list its mesh handles; the examples collect them from `onTree` events.
+- `SceneTrees` keeps no CPU copy of its trees, so there is no SAH cost per tree for the overlay; and its GPU build time (`counts.gpuBuildMs`) is submit-to-stats wall time, not timestamps. `SceneTrees.update(encoder)` takes no timestamp writes, so the top-level refit's GPU time can't be shown (the instances page shows CPU ms of sync + update).
+- `SceneTreesObject3DSync` doesn't list its mesh handles; the pages collect them from `onTree` events.
+- The GPU walk's step counters (the counted walk the benches use) aren't public, so the inspector's heat map is a CPU walk over the same tree.
+- `GpuRays` here (picking and batches over a `SceneTrees`: buffers, readback, hit decoding) is about 100 lines every app will write; a small helper in the package would do.
+
+## Library issues the examples ran into
+
+- **Pose-pass compile race (`SceneTreesObject3DSync` with a renderer):** the sync starts each pose variant's `compileComputeAsync` but doesn't wait for it, and an `update()` before three's async pipeline exists dispatches `setPipeline(undefined)` (a TypeError, seen on the M5 with nine skinned meshes on one geometry). `three/skinned` works around it by making the passes itself (`createPosePass`) and awaiting `prepare()` before the first update.
+- **Limits:** a scene past 128 MiB of triangles needs `requiredLimits` on the `WebGPURenderer` (three asks for WebGPU's defaults). `shared/app.ts` asks for the adapter's `maxStorageBufferBindingSize` and `maxBufferSize`; without it, a 1.8 M-triangle scene fails with a clear `RangeError` naming the limit.

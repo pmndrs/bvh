@@ -23,7 +23,7 @@ export interface ExampleApp {
     loop(frame: (now: number, delta: number) => boolean | void | Promise<boolean | void>): void;
 }
 
-export async function createApp(title: string, folder: string): Promise<ExampleApp> {
+export async function createApp(title: string, folder: string, options: { readonly trackTimestamp?: boolean } = {}): Promise<ExampleApp> {
     document.title = `${title} · @pmndrs/bvh examples`;
     const overlay = new Overlay(title, folder);
     if (!navigator.gpu) {
@@ -31,7 +31,12 @@ export async function createApp(title: string, folder: string): Promise<ExampleA
         overlay.error(message);
         throw new Error(message);
     }
-    const renderer = new WebGPURenderer({ antialias: true });
+    // Big scenes need storage bindings past WebGPU's default 128 MiB: ask for what the adapter allows.
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    const requiredLimits = adapter
+        ? { maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize }
+        : undefined;
+    const renderer = new WebGPURenderer({ antialias: true, requiredLimits, powerPreference: 'high-performance', trackTimestamp: options.trackTimestamp ?? false });
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     renderer.setSize(innerWidth, innerHeight);
     document.body.append(renderer.domElement);

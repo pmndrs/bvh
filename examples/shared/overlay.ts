@@ -75,10 +75,16 @@ class Section {
         heading.textContent = title;
         this.element.append(heading);
         parent.append(this.element);
+        // Hidden until it has something to show.
+        this.element.hidden = true;
+    }
+    show(): void {
+        this.element.hidden = false;
     }
     set(key: string, value: string): void {
         let span = this.rows.get(key);
         if (!span) {
+            this.element.hidden = false;
             const row = document.createElement('div');
             row.className = 'row';
             const name = document.createElement('span');
@@ -167,13 +173,17 @@ export class Overlay {
         header.innerHTML = `<a href="${base}">← Examples</a><span>${title}</span><a href="${SOURCE_TREE}${folder}" target="_blank" rel="noopener">Source ↗</a>`;
         this.root.append(header);
         this.builder = new Section(this.root, 'Builder');
+        this.builder.show();
         this.reason.className = 'reason';
         this.builder.element.append(this.reason);
         this.treeSection = new Section(this.root, 'Tree');
         this.raysSection = new Section(this.root, 'Rays');
         this.extra = new Section(this.root, 'Scene');
-        this.controls = new Section(this.root, 'Controls').element;
+        const controls = new Section(this.root, 'Controls');
+        controls.show();
+        this.controls = controls.element;
         const frames = new Section(this.root, 'Main thread');
+        frames.show();
         this.graph = new FrameGraph(frames.element);
         this.errors.className = 'error';
         this.root.append(this.errors);
