@@ -17,6 +17,11 @@
  * `SkinnedMesh.applyBoneTransform`).
  *
  * - The pass's posed vertices, read back, must match it (within f32 rounding).
+ * - Every posed vertex read back must lie in the box the sync last gave
+ *   `SceneTrees` for its mesh (`addMesh`'s `deforming.bounds`, then
+ *   `setDeformBounds`): checked here and, with `deformSlack: 0` (the box is
+ *   the pass's bound itself), for characters thousands of units from the
+ *   origin, where f32 steps are about 5e-4 apart.
  * - Rays traced on the GPU through the SceneTrees buffers must find what a CPU
  *   walk finds over meshes posed on the CPU with that math (tinybvh trees).
  *
@@ -79,7 +84,7 @@ function tubeGeometry(random: () => number, bones: number): BufferGeometry {
     return geometry;
 }
 
-function skinned(geometry: BufferGeometry, bones: number, materials: MeshBasicMaterial | MeshBasicMaterial[]): SkinnedMesh {
+function skinned(geometry: BufferGeometry, bones: number, materials: MeshBasicMaterial | MeshBasicMaterial[], place?: (mesh: SkinnedMesh) => void): SkinnedMesh {
     const chain: Bone[] = [];
     for (let b = 0; b < bones; b++) {
         const bone = new Bone();
@@ -89,6 +94,7 @@ function skinned(geometry: BufferGeometry, bones: number, materials: MeshBasicMa
     }
     const mesh = new SkinnedMesh(geometry, materials);
     mesh.add(chain[0]);
+    place?.(mesh);
     mesh.updateMatrixWorld(true);
     mesh.bind(new Skeleton(chain));
     return mesh;
@@ -164,6 +170,81 @@ function cpuPosed(mesh: Mesh): Mesh {
     return posed;
 }
 
+/** Records the deform box the sync last gave each SceneTrees mesh (the test page only reads it). */
+function recordDeformBoxes(trees: SceneTrees): Map<number, Float32Array> {
+    const boxes = new Map<number, Float32Array>();
+    const addMesh = trees.addMesh.bind(trees);
+    const setDeformBounds = trees.setDeformBounds.bind(trees);
+    trees.addMesh = (geometry, options) => {
+        const handle = addMesh(geometry, options);
+        const deforming = options?.deforming;
+        if (deforming && deforming !== true) boxes.set(handle, Float32Array.from(deforming.bounds));
+        return handle;
+    };
+    trees.setDeformBounds = (mesh, bounds) => {
+        setDeformBounds(mesh, bounds);
+        boxes.set(mesh, Float32Array.from(bounds));
+    };
+    return boxes;
+}
+
+/**
+ * Reads each posed object's vertices back from its pass and checks they all
+ * lie in the deform box of each of its SceneTrees meshes. Returns the
+ * smallest margin (negative: a vertex outside) and the vertices checked.
+ */
+async function checkContainment(
+    device: GPUDevice,
+    sync: SceneTreesObject3DSync,
+    boxes: Map<number, Float32Array>,
+    posed: readonly Mesh[],
+    phase: string,
+    failures: string[],
+): Promise<{ margin: number; vertices: number }> {
+    await device.queue.onSubmittedWorkDone();
+    const meshesOf = new Map<Object3D, Set<number>>();
+    for (let handle = 0; handle < 1024; handle++) {
+        const source = sync.sourceOf(handle);
+        if (!source) continue;
+        let set = meshesOf.get(source.object);
+        if (!set) meshesOf.set(source.object, (set = new Set()));
+        set.add(source.mesh);
+    }
+    let margin = Infinity;
+    let vertices = 0;
+    for (const mesh of posed) {
+        const pass = sync.posePassOf(mesh);
+        const handles = meshesOf.get(mesh);
+        if (!pass || !handles) {
+            failures.push(`${phase}: ${mesh.name || mesh.type} has no pose pass or meshes`);
+            continue;
+        }
+        const gpu = new Float32Array(await readBuffer(device, pass.buffer, pass.vertexCount * 16));
+        for (const handle of handles) {
+            const box = boxes.get(handle);
+            if (!box) {
+                failures.push(`${phase}: mesh ${handle} never got a deform box`);
+                continue;
+            }
+            let outside = 0;
+            let first = '';
+            for (let i = 0; i < pass.vertexCount; i++) {
+                for (let k = 0; k < 3; k++) {
+                    const value = gpu[i * 4 + k];
+                    const room = Math.min(value - box[k], box[k + 3] - value);
+                    if (room < margin) margin = room;
+                    if (!(room >= 0)) {
+                        if (outside++ === 0) first = `vertex ${i} axis ${k} at ${value} outside [${box[k]}, ${box[k + 3]}]`;
+                    }
+                }
+            }
+            vertices += pass.vertexCount;
+            if (outside > 0) failures.push(`${phase}: ${mesh.name || mesh.type} mesh ${handle}: ${outside} coordinates outside its deform box, first ${first}`);
+        }
+    }
+    return { margin, vertices };
+}
+
 /** Rays from around the scene toward points near the posed surfaces (most hit something). */
 function aimedRays(random: () => number, targets: Vector3[], count: number): TraceRay[] {
     const rays: TraceRay[] = [];
@@ -194,6 +275,7 @@ try {
         const scene = buildScene(random);
         animate(scene, 0);
         const trees = await SceneTrees.create(device, { label: `three-skinned ${triangleLeaves}`, workers: { size: 2 }, triangleLeaves });
+        const deformBoxes = recordDeformBoxes(trees);
         const sync = new SceneTreesObject3DSync(trees, scene.root, { renderer });
         let boundsMoved = 0;
         const frame = () => {
@@ -236,6 +318,8 @@ try {
                 }
             }
             if (!(worstVertex <= 1e-4)) failures.push(`${phase}: posed vertices differ from three's CPU pose by up to ${worstVertex}`);
+            // 1b. Every posed vertex inside its mesh's deform box.
+            const contained = await checkContainment(device, sync, deformBoxes, scene.posed, phase, failures);
             // 2. GPU hits against a CPU walk over CPU-posed meshes.
             const reference: Mesh[] = [];
             const originals = new Map<Object3D, Mesh>();
@@ -262,8 +346,8 @@ try {
             const gpuScene = await readScene(device, trees.buffers, { triangleLeaves: trees.triangleLeaves, positionLayout: trees.positionLayout });
             const { disagreements, count, hits } = compareWithReference(rays, gpuHits, gpuScene, referenceTrace);
             const counts = trees.deformingCounts;
-            results[phase] = { hits, disagreements: count, worstVertex, refits: counts.refits, driftRebuilds: counts.driftRebuilds, boundsMoved, posesSkipped: counts.posesSkipped };
-            log(`${phase}: ${hits} hits, ${count} disagreements, worst vertex ${worstVertex.toExponential(2)}, ${counts.refits} refits, ${counts.driftRebuilds} drift rebuilds, ${boundsMoved} box moves`);
+            results[phase] = { hits, disagreements: count, worstVertex, boxMargin: contained.margin, refits: counts.refits, driftRebuilds: counts.driftRebuilds, boundsMoved, posesSkipped: counts.posesSkipped };
+            log(`${phase}: ${hits} hits, ${count} disagreements, worst vertex ${worstVertex.toExponential(2)}, box margin ${contained.margin.toExponential(2)} over ${contained.vertices} vertices, ${counts.refits} refits, ${counts.driftRebuilds} drift rebuilds, ${boundsMoved} box moves`);
             for (const d of disagreements.slice(0, 3)) failures.push(`${phase}: ray ${d.ray}: ${d.what}`);
             if (hits < rays.length / 3) failures.push(`${phase}: only ${hits} hits`);
         };
@@ -285,6 +369,60 @@ try {
         sync.dispose();
         trees.dispose();
     }
+
+    // Far from the origin, with deformSlack: 0 (each box is the pass's own bound): the f32 room must hold the GPU's rounding.
+    {
+        const random = createRandom(93);
+        const scene = buildScene(random);
+        // The morph-only mesh's rest pose far out too (object space).
+        scene.morphed.geometry.translate(-4000.37, 2500.61, 3000.29);
+        scene.morphed.geometry.morphAttributes.position![0].array.forEach((_, i, array) => ((array as Float32Array)[i] += [-4000.37, 2500.61, 3000.29][i % 3]));
+        const far = [
+            [5000.3, -1.8, -3000.7],
+            [-7000.45, 2000.15, 9000.85],
+            [12000.6, -8000.2, 300.4],
+        ];
+        // And a rigid character bound far out (each vertex on one bone: a tight box, so rounding shows; the bind
+        // matrices' large translations make the kernel round several times at that magnitude).
+        const rigidGeometry = tubeGeometry(random, 5);
+        const weights = rigidGeometry.attributes.skinWeight;
+        for (let i = 0; i < weights.count; i++) weights.setXYZW(i, 1, 0, 0, 0);
+        const rigid = skinned(rigidGeometry, 5, material(), (mesh) => {
+            mesh.position.set(9000.35, -6000.15, 4000.45);
+            mesh.rotation.set(0.3, 1.1, -0.4);
+        });
+        scene.root.add(rigid);
+        const posed = [...scene.posed, rigid];
+        const trees = await SceneTrees.create(device, { label: 'three-skinned far', workers: { size: 2 } });
+        const boxes = recordDeformBoxes(trees);
+        animate(scene, 0);
+        scene.skinnedMeshes.forEach((mesh, m) => mesh.skeleton.bones[0].position.set(far[m][0], far[m][1], far[m][2]));
+        scene.root.updateMatrixWorld(true);
+        const sync = new SceneTreesObject3DSync(trees, scene.root, { renderer, deformSlack: 0 });
+        let margin = Infinity;
+        let vertices = 0;
+        for (let at = 1; at <= 60; at++) {
+            animate(scene, at);
+            scene.skinnedMeshes.forEach((mesh, m) => mesh.skeleton.bones[0].position.set(far[m][0] + at * 0.37, far[m][1] - at * 0.11, far[m][2] + at * 0.23));
+            rigid.skeleton.bones[0].position.set(at * 0.29, -1.8 + at * 0.13, -at * 0.31);
+            rigid.skeleton.bones.forEach((bone, b) => b > 0 && bone.rotation.set(at % 2 ? 0.2 * Math.sin(at + b) : 0, 0.1 * b, 0));
+            rigid.morphTargetInfluences!.fill(at % 3 === 0 ? 0.5 : 0);
+            scene.root.updateMatrixWorld(true);
+            sync.update();
+            const encoder = device.createCommandEncoder();
+            trees.update(encoder);
+            device.queue.submit([encoder.finish()]);
+            if (at % 5 !== 0) continue;
+            const contained = await checkContainment(device, sync, boxes, posed, `far frame ${at}`, failures);
+            margin = Math.min(margin, contained.margin);
+            vertices += contained.vertices;
+        }
+        results.far = { boxMargin: margin, vertices };
+        log(`far (deformSlack 0): box margin ${margin.toExponential(2)} over ${vertices} vertices`);
+        sync.dispose();
+        trees.dispose();
+    }
+
     await drainDevice(device);
     reportGpuTest({
         status: failures.length === 0 ? 'pass' : 'fail',
