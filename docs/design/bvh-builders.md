@@ -178,17 +178,19 @@ Off by default (today's path: one batch per update, as big as the device allows)
 
 - **`SceneTrees.create(device, { gpuMaxBatchBytes })`**, or **`GpuFirstTrees.build(requests, { maxBatchBytes })`**: the update's meshes are split into batches of at most that many bytes (inputs, scratch and outputs, exactly as `hplocBatchBytes` counts them), in mesh order.
   - The batches are built one after another, each with its own submit and stats readback, on one **`GpuHplocScratchPool`**.
-  - The pool holds the inputs, scratch and uniforms. It is allocated once, each buffer at the largest size any batch needs (`hplocScratchPoolBytes`; in practice the largest batch's), and freed after the last batch.
-  - Each batch's outputs are its own. A batch starts only once the previous batch's outputs are let go (`GpuTreeOutputs.letGo`): copied into the scene's storage by an update and released by the next, or adopted.
+  - **One queue per `GpuFirstTrees`.** Every capped build of a builder (the load, the deforming meshes' own build, runtime adds, drift rebuilds) queues its batches in one FIFO, so only one batch's scratch and outputs are alive at once however many builds overlap.
+  - The pool holds the inputs, scratch and uniforms. It is allocated when a batch starts with no pool, each buffer at the largest size of that batch and every batch queued then (`hplocScratchPoolBytes`); made again, larger, between batches when a bigger batch comes; freed when the queue is empty.
+  - Each batch's outputs are its own. A batch starts only once the previous batch's outputs are let go (`GpuTreeOutputs.letGo`).
+  - **No update needed between batches.** When a batch's stats are read, `SceneTrees` stores its trees at once: copied into the scene's storage in a submit of its own (then the outputs are freed), or, adopting into empty buffers, adopted. The next batch starts right away. The next update only *places* the stored trees (top level, events). So `frame(); await whenBuilt(); frame()` gives every mesh its GPU tree, capped or not.
   - So the peak is about **the storage plus one batch**. Without that wait, every batch's outputs would pile up.
-- **The storage grows once.** When a capped load's first batch is placed, the node and triangle storages also reserve room for the meshes whose GPU build is still running. Their triangles are known exactly, and their nodes are estimated at the placed GPU trees' nodes per triangle. Without the reservation, each batch's arrival doubled the buffers: the first cut of the lever measured 1,175–1,295 MiB peaks with 311 MiB retired at once, and 623 MiB settled.
+- **The storage grows once.** When a capped load's first batch is stored, the node and triangle storages also reserve room for the meshes whose GPU build is still to come. Their triangles are known exactly, and their nodes are estimated at the stored GPU trees' nodes per triangle. The room is set aside in the allocators (ranges in use that hold nothing), so later batches go into it with no growth, and tinybvh's trees can't take it. The room of a mesh that is removed, refused, or gets tinybvh's tree first is given back at once (`SceneTrees.memory.reserved`). Without the reservation, each batch's arrival doubled the buffers: the first cut of the lever measured 1,175–1,295 MiB peaks with 311 MiB retired at once, and 623 MiB settled.
+- **Growing between updates** (storing a batch that doesn't fit the reserve) is only done when it can't lose anything: when the storages hold nothing yet, or the last update recorded nothing into them (a growth's copies run in their own submit, which may come before the last update's encoder). Otherwise the batch waits for the next update, as an uncapped one does, and the queue behind it waits too; `whenBuilt` then takes tinybvh's tree for the meshes behind it rather than wait for an update that may not come. A growth between updates bumps `SceneTrees.version` there; the old buffers stay valid until the next update. Ranges of meshes removed between updates are freed at the next update, so a stored batch never overwrites a tree a recorded frame may still trace.
 - **Standalone:**
   - `planGpuHplocBatches(device, meshes, { maxBatchBytes })` and `planGpuLbvhBatches(...)` plan the batches;
   - `GpuHplocBuilder.createScratchPool(batches)` and `createBatch(meshes, options, pool)` build them on one pool;
   - `createMeshLayoutBuilder(device, { maxBatchBytes })` does all of it (it reads each batch's trees back and frees them before the next). The LBVH gets the planner's cap but no pool: its batches allocate and free their own scratch, one after another.
 - **A mesh bigger than the cap** builds alone, in its own batch, and the pool then follows that batch. The cap is a target, not a guarantee.
 - **Costs:**
-  - Every batch after the first waits for two `SceneTrees.update`s, so the caller must keep updating; awaiting `whenBuilt` without updating never resolves.
   - While a later batch waits, its meshes' CPU arrays are copied into the tinybvh worker rather than moved (`transferGeometry`, merged groups), because the GPU build still has to upload them.
   - Each batch has its own submit and readback.
 - **Undo:** leave `gpuMaxBatchBytes` / `maxBatchBytes` unset. The uncapped path is the code as it was.
@@ -209,14 +211,12 @@ Correctness on every row: the GPU walk gave the CPU reference's hits on 20,000 r
 
 | Cap | Batches | Peak MiB | In use MiB | Settled MiB | First trees ms | GPU build ms |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| none (today) | 1 | 1,482.7 | 1,105.6 | 470.0 | 166 | 108 |
-| 512 MiB | 3 | 963.0 | 675.9 | 460.7 | 214 | 111 |
-| 256 MiB | 7 | 712.1 | 463.7 | 458.6 | 331 | 93 |
-| 128 MiB | 13 | 581.4 | 485.4 | 453.3 | 443 | 121 |
+| none | 1 | 1,482.7 | 1,105.6 | 470.0 | 171 | 106 |
+| 512 MiB | 3 | 963.0 | 460.7 | 460.7 | 147 | 99 |
+| 256 MiB | 7 | 711.0 | 458.6 | 458.6 | 166 | 110 |
+| 128 MiB | 13 | 581.4 | 453.3 | 453.3 | 192 | 125 |
 
-- Each capped peak is the storage (about 461 MiB with its reservation) plus one batch, just as predicted: storage + pool 287 + outputs 215 = 963 at 512 MiB, and storage + 145 + 108 = 712 at 256 MiB.
-- Settled memory is a little lower than today's, because the reservation estimates the nodes rather than adding 1/8 headroom.
-- The GPU time doesn't change. The first trees come about 2 frames per batch later.
-- `adopt` (1,482.7 peak, 613.6 settled) and `copy-merged` (one world-space group of 5.7M triangles, so one batch whatever the cap) were not run capped on Sponza. The `scene-trees-mid-swap` oracle covers `copy`, `copy-merged` and `adopt` with a 4 KiB cap (a batch per mesh), for correctness.
-
-**Default:** no cap, for Dennis to decide. No cap is better on every count but one: 256 MiB halves the peak (−770 MiB) and settles 11 MiB lower, but the first trees come 165 ms later at 60 Hz. A 256 MiB default is the proposal.
+- Each capped peak is the storage (about 461 MiB with its reservation) plus one batch, just as predicted: storage + pool 287 + outputs 215 = 963 at 512 MiB, and storage + 145 + 108 = 712 at 256 MiB. The page fails a capped row whose peak passes the storage plus the pool and the largest batch's outputs, with 5% tolerance (bounds 1,011, 748 and 611 MiB).
+- Settled memory is a little lower than uncapped, because the reservation estimates the nodes rather than adding 1/8 headroom.
+- The GPU time doesn't change. Since each batch is stored between updates (in its own submit) and the next starts at once, the first trees come no later than uncapped (147-192 ms against 171; the first cut, which waited two updates per batch, took 214, 331 and 443 ms). "In use" is now the settled size: no batch's outputs are held until an update.
+- `adopt` (1,482.7 peak, 613.6 settled) and `copy-merged` (one world-space group of 5.7M triangles, so one batch whatever the cap) were not run capped on Sponza. The `scene-trees-mid-swap` oracle covers `copy`, `copy-merged`, `adopt` and `adopt-merged` with a 4 KiB cap (a batch per mesh), for correctness, loading with `frame(); await whenBuilt(); frame()`.

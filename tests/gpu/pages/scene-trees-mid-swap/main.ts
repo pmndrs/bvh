@@ -28,8 +28,9 @@
  * GPU pass and their tinybvh trees from the CPU one). The `-capped` variants
  * set `gpuMaxBatchBytes` to 4 KiB, so every mesh is a GPU batch of its
  * own, built one after another on one scratch pool (a case with several
- * meshes must build in more than one batch); they update once per frame
- * until the first trees are in, as the cap needs.
+ * meshes must build in more than one batch). Every variant loads with
+ * `frame(); await whenBuilt(); frame()`: with a cap the batches go on between
+ * updates, so that is enough for every first tree to be a GPU tree.
  *
  * URL option: `?sharedRays=100000` shrinks the seam cases.
  */
@@ -66,6 +67,7 @@ const VARIANTS: readonly Variant[] = [
     { name: 'copy-capped', gpuTreeOutputs: 'copy', merged: false, maxBatchBytes: SMALL_CAP },
     { name: 'copy-merged-capped', gpuTreeOutputs: 'copy', merged: true, maxBatchBytes: SMALL_CAP },
     { name: 'adopt-capped', gpuTreeOutputs: 'adopt', merged: false, maxBatchBytes: SMALL_CAP },
+    { name: 'adopt-merged-capped', gpuTreeOutputs: 'adopt', merged: true, maxBatchBytes: SMALL_CAP },
 ];
 
 /** Each instance its own mesh copy, two of every three static (the trace-oracle's merged variants). */
@@ -133,21 +135,11 @@ await runGpuTest(
                     return counts;
                 };
 
-                if (variant.maxBatchBytes === undefined) {
-                    frame();
-                    await scene.whenBuilt();
-                    frame();
-                } else {
-                    // Each capped batch after the first starts once an update has copied the one before out: update until built.
-                    let built = false;
-                    void scene.whenBuilt().then(() => (built = true));
-                    frame();
-                    while (!built) {
-                        await device.queue.onSubmittedWorkDone();
-                        await new Promise((resolve) => setTimeout(resolve, 0));
-                        frame();
-                    }
-                    frame();
+                // The same with a cap: the batches go on between updates (each stored in its own submit), so no update is needed until whenBuilt.
+                frame();
+                await scene.whenBuilt();
+                frame();
+                if (variant.maxBatchBytes !== undefined) {
                     const { gpuBatches } = scene.counts;
                     results[`${oracleCase.name} ${variant.name} batches`] = gpuBatches;
                     if (gpuBatches > 1) cappedCasesWithBatches.add(variant.name);

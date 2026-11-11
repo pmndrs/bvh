@@ -23,7 +23,10 @@
  *
  * Correctness gate, not timing: in the GPU-tree state and settled, the GPU
  * walk must give the hits of the CPU walk over the scene assembled on the
- * CPU from tinybvh trees (20,000 rays from inside the scene's box).
+ * CPU from tinybvh trees (20,000 rays from inside the scene's box). Memory
+ * gate for capped variants: the peak stays under the storage (as the GPU
+ * trees left it) plus one batch (the scratch pool and the largest batch's
+ * outputs), with 5% tolerance.
  */
 
 import { SceneTrees, type SceneTreesMemory } from '../../../../src/scene/scene-trees.ts';
@@ -157,6 +160,18 @@ try {
         frame();
         const settled = trees.memory;
         const settledWrong = await check('settled');
+        // The lever's promise: the peak is the storage plus one batch (the scratch pool and one batch's outputs), not more.
+        let peakBoundMB: number | null = null;
+        if (capMB) {
+            const plan = planGpuHplocBatches(device, scene.meshes, { maxBatchBytes: Number(capMB) * MB });
+            const groups = plan.batches.map((batch) => batch.map((index) => scene.meshes[index]));
+            const pool = Object.values<number>(hplocScratchPoolBytes(groups)).reduce((sum, bytes) => sum + bytes, 0);
+            const largestOutputs = Math.max(...groups.map((group) => hplocBatchBytes(geometryTotals(group)).outputs));
+            // Storage as the GPU trees left it (with its reservation), plus 5% for retired buffers and rounding.
+            const bound = (gpuTreesMemory.resident + pool + largestOutputs) * 1.05;
+            peakBoundMB = mb(bound);
+            if (settled.peak > bound) failures.push(`${variant}: peak ${mb(settled.peak)} MB is over the storage plus one batch (${mb(bound)} MB with 5% tolerance)`);
+        }
         if (variant !== 'warmup') results[variant] = {
             capMB: capMB ? Number(capMB) : null,
             firstTreesMs: Math.round(trees.timeline.firstTreesMs ?? -1),
@@ -169,6 +184,7 @@ try {
             gpuTreesState: summary(gpuTreesMemory),
             settled: summary(settled),
             peakMB: mb(settled.peak),
+            peakBoundMB,
             disagreements: { gpuTrees: gpuWrong, settled: settledWrong },
         };
         log(`${variant}: first trees ${Math.round(trees.timeline.firstTreesMs ?? -1)} ms, ${counts.gpuBatches} GPU batches ${Math.round(counts.gpuBuildMs)} ms, tinybvh built ${Math.round(refinedAt ?? -1)} ms, GPU-tree state ${mb(gpuTreesMemory.total)} MB, peak ${mb(settled.peak)} MB, settled ${mb(settled.total)} MB`);

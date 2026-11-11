@@ -24,11 +24,13 @@ import { createRandom, randomAffine, randomRays, tessellatedQuad } from '../trac
 import type { TraceRay } from '../trace/rays.ts';
 import { assembleTraceScene, type TraceSceneData, type TraceSceneInstance } from '../trace/scene-assembly.ts';
 import type { TopLevelBvh } from '../trace/top-level.ts';
-import { GpuTreeOutputs, type FirstTreeBuilder, type GpuTreeBatchResult, type GpuTreeBuilds, type GpuTreeRequest } from './gpu-first-trees.ts';
+import { GpuFirstTrees, GpuTreeOutputs, type FirstTreeBuilder, type GpuTreeBatchResult, type GpuTreeBuilds, type GpuTreeRequest } from './gpu-first-trees.ts';
 import { MERGED_SOURCE_WORDS } from './merged-identity-gpu.ts';
 import { SceneTrees, type SceneInstanceDescriptor, type SceneTreeEvent, type SceneTreesOptions } from './scene-trees.ts';
 import type { GpuMeshTreeRange } from '../mesh-input.ts';
 import { gatherStandIn } from '../../tests/support/top-level-gather.ts';
+import { FakeHploc, settle } from '../../tests/support/fake-hploc.ts';
+import { planGpuHplocBatches } from '../gpu-hploc.ts';
 
 /** The merged-identity WGSL, line by line on the CPU. */
 function mergedIdentityStandIn(bindings: ReadonlyMap<number, FakeBinding>): void {
@@ -614,6 +616,147 @@ describe('SceneTrees', () => {
         const after = records();
         expect([...after.keys()].sort()).toEqual([102, 400, MERGED_INSTANCE_INDEX]);
         expect(after.get(400)!.offsets).toEqual(offsetsOf(meshes[3]));
+        scene.dispose();
+    });
+});
+
+/** Smaller than any one-mesh batch: every mesh is a GPU batch of its own. */
+const SMALL_CAP = 4 * 1024;
+
+/** A capped scene on the real GpuFirstTrees queue, with a stand-in H-PLOC builder. */
+async function setUpCapped(options: Partial<SceneTreesOptions> = {}) {
+    const gpu: FakeGpu = createFakeGpu({}, { kernels: { bvhMergedIdentity: mergedIdentityStandIn } });
+    const hploc = new FakeHploc(gpu.device);
+    const scene = await SceneTrees.create(gpu.device, { gpuMaxBatchBytes: SMALL_CAP, ...options, firstTreeBuilder: new GpuFirstTrees(gpu.device, { hploc }) });
+    const frame = () => {
+        const encoder = gpu.createEncoder();
+        scene.update(encoder);
+        gpu.submit(encoder);
+    };
+    return { gpu, hploc, scene, frame };
+}
+
+/** Rejects instead of hanging when `promise` takes longer than a test should. */
+function withinTime<T>(promise: Promise<T>, what: string, ms = 5000): Promise<T> {
+    return Promise.race([promise, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${what} did not resolve (deadlock?)`)), ms))]);
+}
+
+describe('SceneTrees with gpuMaxBatchBytes (the real queue, a stand-in H-PLOC)', () => {
+    for (const variant of [
+        { name: 'copy, holdRefinements', options: { holdRefinements: true }, allGpu: true },
+        { name: 'adopt, holdRefinements', options: { holdRefinements: true, gpuTreeOutputs: 'adopt' as const }, allGpu: true },
+        { name: 'adopt, merged, holdRefinements', options: { holdRefinements: true, gpuTreeOutputs: 'adopt' as const, mergeStaticInstances: true }, allGpu: true },
+        { name: 'adopt', options: { gpuTreeOutputs: 'adopt' as const }, allGpu: false },
+        { name: 'copy', options: {}, allGpu: false },
+    ]) {
+        it(`${variant.name}: frame(); await whenBuilt(); frame() places every first tree, batch after batch without updates in between`, async () => {
+            const { scene, frame, hploc } = await setUpCapped(variant.options);
+            const { geometries, instances, rays } = sceneOf(5);
+            // Some instances not static, so the merged variant keeps instanced meshes (more than one batch) too.
+            const mixed = instances.map((instance, index) => ({ ...instance, static: index % 2 === 0 }));
+            addAll(scene, geometries, mixed);
+            frame();
+            await withinTime(scene.whenBuilt(), 'whenBuilt');
+            frame();
+            expect(hploc.violations).toEqual([]);
+            expect(hploc.maxActive).toBe(1);
+            expect(scene.counts.gpuBatches).toBeGreaterThan(1);
+            expect(scene.counts.waitingForFirstTree).toBe(0);
+            if (variant.allGpu) expect(scene.counts).toMatchObject({ onTinybvhTrees: 0, gpuTreesBuilt: scene.counts.onGpuTrees });
+            expect(disagreements(readScene(scene), await reference(geometries, mixed), rays)).toEqual([]);
+            // The swap, then nothing left behind: no outputs, no reserve, no pool.
+            await withinTime(scene.whenRefined(), 'whenRefined');
+            scene.releaseRefinements();
+            frame();
+            frame();
+            expect(scene.counts.onGpuTrees).toBe(0);
+            expect(disagreements(readScene(scene), await reference(geometries, mixed), rays)).toEqual([]);
+            expect(scene.memory).toMatchObject({ gpuBuildOutputs: 0, gpuBuilding: 0, reserved: 0 });
+            expect(hploc.poolsAlive).toBe(0);
+            scene.dispose();
+        });
+    }
+
+    it('reserves room for the batches to come, gives back the room of a removed mesh and of one tinybvh got to first, and loses no tree', async () => {
+        const { scene, frame, hploc } = await setUpCapped({ holdRefinements: true });
+        hploc.manual = true;
+        const { instances, rays } = sceneOf(5);
+        // Big enough that batch 0 grows the storages past their first size (the growth that reserves).
+        const geometries = instances.map((_, index) => tessellatedQuad(40 + 4 * index, 1));
+        const { meshes, handles } = addAll(scene, geometries, instances);
+        frame();
+        expect(hploc.batches.length).toBe(1);
+        await hploc.finishNext();
+        // Batch 0 is stored (no update since), and the next batch started: its outputs were let go first.
+        expect(hploc.events.filter((event) => /^(start|let go)/.test(event))).toEqual(['start 0', 'let go 0', 'start 1']);
+        const triangles = (index: number) => scene.meshStatus(meshes[index]).placement;
+        expect(triangles(0)).toBeNull();
+        const pendingTriangles = geometries.slice(1).reduce((sum, geometry) => sum + geometry.positions.length / 9, 0);
+        // Triangles of meshes 1-4 exactly, plus their nodes at batch 0's nodes per triangle.
+        expect(scene.memory.reserved).toBeGreaterThanOrEqual(pendingTriangles * 48);
+        const reservedBefore = scene.memory.reserved;
+        const buffersBefore = { nodes: scene.buffers.nodes, triangles: scene.buffers.triangles };
+
+        // Mesh 4 goes before its batch starts: its room is given back now.
+        scene.removeInstance(handles[4]);
+        scene.removeMesh(meshes[4]);
+        const shareOf4 = reservedBefore - scene.memory.reserved;
+        expect(shareOf4).toBeGreaterThanOrEqual((geometries[4].positions.length / 9) * 48);
+
+        // Mesh 1's batch builds; meanwhile tinybvh's tree of mesh 3 is placed first (its hold released): its room goes too.
+        // (whenRefined would wait for the GPU batches too, which wait for the test here.)
+        for (let wait = 0; wait < 500 && scene.counts.tinybvhBuilding > 0; wait++) await settle(1);
+        scene.releaseRefinements((mesh) => mesh === meshes[3]);
+        frame();
+        expect(scene.meshStatus(meshes[3]).builtBy).toBe('tinybvh');
+        const afterTinybvh = scene.memory.reserved;
+        expect(afterTinybvh).toBeLessThan(reservedBefore - shareOf4);
+
+        while (hploc.waitingBatches > 0) await hploc.finishNext();
+        await settle();
+        frame();
+        // Every remaining batch (and tinybvh's tree, in mesh 3's room) went into room set aside then: no growth since batch 0.
+        expect(scene.buffers.nodes).toBe(buffersBefore.nodes);
+        expect(scene.buffers.triangles).toBe(buffersBefore.triangles);
+        expect(scene.memory.reserved).toBe(0);
+        expect(scene.meshStatus(meshes[0]).builtBy).toBe('gpu');
+        expect(scene.meshStatus(meshes[1]).builtBy).toBe('gpu');
+        expect(scene.meshStatus(meshes[2]).builtBy).toBe('gpu');
+        // Batches in order, each after the one before let go; mesh 3's GPU tree was dropped, not lost (tinybvh's is placed).
+        const order = hploc.events.filter((event) => /^(start|let go)/.test(event));
+        expect(order).toEqual(order.map((_, index) => (index % 2 === 0 ? `start ${index / 2}` : `let go ${(index - 1) / 2}`)));
+        expect(hploc.violations).toEqual([]);
+        const kept = instances.slice(0, 4);
+        expect(disagreements(readScene(scene), await reference(geometries.slice(0, 4), kept), rays)).toEqual([]);
+        scene.dispose();
+    });
+
+    it('when a batch cannot be stored between updates, whenBuilt takes tinybvh\'s trees for the meshes behind it, and updates finish the GPU batches', async () => {
+        const { scene, frame, hploc } = await setUpCapped({ holdRefinements: true });
+        const { geometries, instances, rays } = sceneOf(4);
+        addAll(scene, geometries, instances);
+        frame();
+        // As if the last update had recorded storage writes its frame has still to run: growing between updates isn't safe.
+        (scene as unknown as { encoderWritesStorage: boolean }).encoderWritesStorage = true;
+        await withinTime(scene.whenBuilt(), 'whenBuilt');
+        for (let update = 0; update < 20 && scene.counts.gpuBatches < geometries.length; update++) {
+            frame();
+            await settle(2);
+        }
+        frame();
+        expect(scene.counts.gpuBatches).toBe(planGpuHplocBatches(createFakeGpu().device, geometries, { maxBatchBytes: SMALL_CAP }).batches.length);
+        expect(hploc.violations).toEqual([]);
+        expect(disagreements(readScene(scene), await reference(geometries, instances), rays)).toEqual([]);
+        scene.dispose();
+    });
+
+    it('frees the slots of meshes whose geometry the queue reads later as their tinybvh builds start (no entry left behind)', async () => {
+        const { scene, frame } = await setUpCapped({ holdRefinements: true });
+        const { geometries, instances } = sceneOf(3);
+        addAll(scene, geometries, instances);
+        frame();
+        expect((scene as unknown as { gpuReadsGeometryLater: Set<number> }).gpuReadsGeometryLater.size).toBe(0);
+        await withinTime(scene.whenBuilt(), 'whenBuilt');
         scene.dispose();
     });
 });
