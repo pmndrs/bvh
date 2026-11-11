@@ -65,10 +65,8 @@ jobs:
   gpu-swiftshader:
     name: GPU pages (headless Chrome, SwiftShader)
     runs-on: ubuntu-latest
-    # UNVERIFIED: written without a CI run. Whether the runner's Chrome exposes a
-    # SwiftShader WebGPU adapter with these flags, and whether the runner's preflight
-    # accepts it, is not yet known. Remove continue-on-error once it passes.
-    continue-on-error: true
+    # Verified 2026-11-11: all three pages pass on SwiftShader in about 5.5 minutes in total.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4.2.2
       - uses: pnpm/action-setup@v4.1.0
@@ -84,7 +82,8 @@ jobs:
       - name: Asset-free correctness pages
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
-          # tests/gpu/chrome.ts appends these to Chrome's flags. SwiftShader has no
+          # BVH_ALLOW_SOFTWARE_ADAPTER=1 is the runner's explicit opt-in for a software adapter;
+          # without it the runner rejects SwiftShader. tests/gpu/chrome.ts appends these to Chrome's flags. SwiftShader has no
           # `subgroups`, so bvh-lbvh-fallback exercises the tinybvh fallback.
           BVH_CHROME_FLAGS: --no-sandbox --use-webgpu-adapter=swiftshader --use-angle=swiftshader --enable-unsafe-swiftshader
           BVH_ALLOW_SOFTWARE_ADAPTER: '1'
