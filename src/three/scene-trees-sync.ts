@@ -30,6 +30,16 @@
  *   `static: false`. A new object on a geometry whose mesh was merged away
  *   gets that mesh added again.
  *
+ * - **Skinned and morphed meshes** (with a `renderer`): a `SkinnedMesh`, or a
+ *   mesh with position morph targets, is added as a deforming mesh of its own
+ *   (not shared with other objects on its geometry), and each `update()` runs
+ *   its `BvhPosePass` (three's skinning and morph math in a TSL compute
+ *   pass) and hands the posed vertices to `SceneTrees.setPose`, which refits
+ *   its tree on the GPU. Its top-level box follows the skeleton
+ *   (`setDeformBounds`, from `BvhPosePass.bounds`, with `deformSlack`
+ *   room so it changes rarely). Hidden objects aren't posed. Without a
+ *   renderer (or with `deforming: false`) they are read in their rest pose.
+ *
  * `BvhHit.instance` is the SceneTrees instance's `instanceIndex`, which the
  * sync sets to its handle: {@link SceneTreesObject3DSync.sourceOf} maps it to
  * the three object, instance and group.
@@ -40,7 +50,10 @@ import { Matrix4 } from 'three';
 import type { MeshGeometry } from '../trace/mesh-bvh.ts';
 import type { Mat4 } from '../trace/top-level.ts';
 import type { SceneInstanceChange, SceneInstanceDescriptor, SceneMeshOptions } from '../scene/scene-trees.ts';
+import type { MeshRefitVertices } from '../gpu-mesh-refit.ts';
+import { BvhPosePass, poseVertices, threeDeforms, type BvhPosePassLike } from './deform.ts';
 import {
+    deviceFromRenderer,
     effectivelyVisible,
     instanceMaskFromLayers,
     meshGeometryOf,
@@ -64,6 +77,45 @@ export interface SceneTreesTarget {
     meshStatus?(mesh: number): { readonly mergedInto: number | null };
     /** Whether an instance was merged (`SceneTrees.instanceStatus`). Without it, no instance is. */
     instanceStatus?(instance: number): { readonly mergedInto: number | null };
+    /** A deforming mesh's pose (`SceneTrees.setPose`); needed for skinned and morphed meshes. */
+    setPose?(mesh: number, vertices: MeshRefitVertices): void;
+    /** A deforming mesh's top-level box (`SceneTrees.setDeformBounds`); needed for skinned and morphed meshes. */
+    setDeformBounds?(mesh: number, bounds: ArrayLike<number>): void;
+}
+
+/** {@link SceneTreesObject3DSync}'s options: the scene reader's, plus skinned and morphed meshes. */
+export interface SceneTreesObject3DSyncOptions extends BvhSceneFromObject3DOptions {
+    /**
+     * The `WebGPURenderer` (initialized, on the SceneTrees' device) that runs
+     * the pose passes of skinned and morphed meshes. Without it they are read
+     * in their rest pose, as `bvhSceneFromObject3D` reads them.
+     */
+    readonly renderer?: unknown;
+    /**
+     * Which meshes are posed on the GPU each update. Default: with a renderer,
+     * every `SkinnedMesh` and every mesh with position morph targets
+     * (`threeDeforms`); without one, none. `false` reads every mesh in its rest pose.
+     */
+    readonly deforming?: boolean | ((mesh: Mesh) => boolean);
+    /**
+     * Room added on every side of a posed mesh's top-level box, as a fraction
+     * of its largest extent, when the pose leaves the box (or the box grows to
+     * more than twice the pose's padded size). More room: fewer top-level updates, looser
+     * boxes. Default 0.25.
+     */
+    readonly deformSlack?: number;
+    /** Makes a mesh's pose pass. Default `new BvhPosePass(renderer, mesh)`. */
+    readonly createPosePass?: (mesh: Mesh) => BvhPosePassLike;
+    /** The device for posed meshes' index buffers. Default: the renderer's. */
+    readonly device?: GPUDevice;
+}
+
+/** What one {@link SceneTreesObject3DSync.pose} posed. */
+export interface Object3DPoseCounts {
+    /** Pose passes run. */
+    readonly posed: number;
+    /** Deform boxes moved (once per object, for all its meshes). */
+    readonly boundsMoved: number;
 }
 
 /** What one {@link SceneTreesObject3DSync.update} or {@link SceneTreesObject3DSync.sync} pushed. */
@@ -83,6 +135,19 @@ interface TrackedMesh {
     readonly handle: number;
     readonly source: BvhThreeMeshSource;
     users: number;
+    /** A posed mesh's pose (its object's), the vertices its refit reads, and their index buffer (indexed geometry). */
+    readonly pose: TrackedPose | null;
+    readonly vertices: MeshRefitVertices | null;
+    readonly indexBuffer: GPUBuffer | null;
+}
+
+/** One deforming object's pose pass and the box its meshes have in the top level. */
+interface TrackedPose {
+    readonly object: Mesh;
+    readonly geometry: Mesh['geometry'];
+    readonly pass: BvhPosePassLike;
+    readonly box: Float32Array;
+    readonly meshes: Set<TrackedMesh>;
 }
 
 interface TrackedInstance {
@@ -106,6 +171,27 @@ interface TrackedObject {
     visible: boolean;
     mask: number;
     matrices: number;
+}
+
+/** `box` holds `needed`, and isn't more than twice the size `needed` gets with its slack on any axis. */
+function fits(box: ArrayLike<number>, needed: ArrayLike<number>, slack: number): boolean {
+    const pad = slack * Math.max(needed[3] - needed[0], needed[4] - needed[1], needed[5] - needed[2]);
+    for (let k = 0; k < 3; k++) {
+        if (needed[k] < box[k] || needed[k + 3] > box[k + 3]) return false;
+        if (box[k + 3] - box[k] > 2 * (needed[k + 3] - needed[k] + 2 * pad) + 1e-6) return false;
+    }
+    return true;
+}
+
+/** `needed` with `slack` times its largest extent added on every side, into `out`. */
+function padBox(needed: ArrayLike<number>, slack: number, out: Float32Array): Float32Array {
+    const extent = Math.max(needed[3] - needed[0], needed[4] - needed[1], needed[5] - needed[2]);
+    const pad = extent * slack;
+    for (let k = 0; k < 3; k++) {
+        out[k] = Math.fround(needed[k] - pad);
+        out[k + 3] = Math.fround(needed[k + 3] + pad);
+    }
+    return out;
 }
 
 function sameMatrix(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
@@ -133,15 +219,41 @@ export class SceneTreesObject3DSync {
     private readonly byHandle = new Map<number, TrackedInstance>();
     private readonly objects = new Map<Mesh, TrackedObject>();
     private readonly warned = new WeakSet<Object3D>();
+    private readonly poses = new Map<Mesh, TrackedPose>();
+    private readonly scratchBox = new Float32Array(6);
     private disposed = false;
+    /** What the last {@link pose} posed. */
+    poseCounts: Object3DPoseCounts = { posed: 0, boundsMoved: 0 };
 
     /** Adds every mesh and instance under `root` to `trees` (one {@link sync}). */
     constructor(
         readonly trees: SceneTreesTarget,
         readonly root: Object3D | readonly Object3D[],
-        private readonly options: BvhSceneFromObject3DOptions = {},
+        private readonly options: SceneTreesObject3DSyncOptions = {},
     ) {
+        if (options.deforming === true && !options.renderer && !options.createPosePass) {
+            throw new Error('@pmndrs/bvh/three: deforming: true needs a renderer (SceneTreesObject3DSync options.renderer) to run the pose passes');
+        }
         this.sync();
+    }
+
+    /** The pose pass of a posed object (its `buffer` holds the last pose), or null. */
+    posePassOf(object: Mesh): BvhPosePassLike | null {
+        return this.poses.get(object)?.pass ?? null;
+    }
+
+    /** Whether `mesh` is posed on the GPU (see {@link SceneTreesObject3DSyncOptions.deforming}). */
+    isDeforming(mesh: Mesh): boolean {
+        const option = this.options.deforming;
+        if (option === false) return false;
+        if (!this.options.renderer && !this.options.createPosePass) return false;
+        if ((mesh as unknown as { isInstancedMesh?: boolean; isBatchedMesh?: boolean }).isBatchedMesh) return false;
+        return threeDeforms(mesh) && (typeof option !== 'function' || option(mesh));
+    }
+
+    /** The key of a walked instance's mesh: a posed object's meshes are its own. */
+    private meshKeyOf(instance: WalkedInstance): string {
+        return this.isDeforming(instance.object) ? `${instance.meshKey}:pose:${instance.object.id}` : instance.meshKey;
     }
 
     /** The three object behind a hit's `instance` (the SceneTrees `instanceIndex`), or null. */
@@ -181,10 +293,11 @@ export class SceneTreesObject3DSync {
         const toRemove: TrackedInstance[] = [];
         const toAdd: WalkedInstance[] = [];
         let skipped = 0;
+        const meshKeys = new Map<WalkedInstance, string>(walked.map((instance) => [instance, this.meshKeyOf(instance)]));
         for (const instance of walked) {
             seen.add(instance.key);
             const tracked = this.instances.get(instance.key);
-            if (tracked && tracked.mesh.key === instance.meshKey) {
+            if (tracked && tracked.mesh.key === meshKeys.get(instance)) {
                 keep.push([tracked, instance]);
                 continue;
             }
@@ -220,16 +333,16 @@ export class SceneTreesObject3DSync {
                 removed++;
             }
             for (const instance of toAdd) {
-                let mesh = this.meshes.get(instance.meshKey);
+                const meshKey = meshKeys.get(instance)!;
+                let mesh = this.meshes.get(meshKey);
                 if (mesh && this.trees.meshStatus?.(mesh.handle).mergedInto != null) {
                     // SceneTrees dropped its geometry at the merge: a new instance needs the mesh again.
-                    this.meshes.delete(instance.meshKey);
+                    this.meshes.delete(meshKey);
                     mesh = undefined;
                 }
                 if (!mesh) {
-                    const source = { geometry: instance.geometry, start: instance.range.start, count: instance.range.count };
-                    mesh = { key: instance.meshKey, handle: this.trees.addMesh(meshGeometryOf(source)), source, users: 0 };
-                    this.meshes.set(instance.meshKey, mesh);
+                    mesh = meshKey === instance.meshKey ? this.addPlainMesh(instance) : this.addPosedMesh(instance, meshKey);
+                    this.meshes.set(meshKey, mesh);
                     meshesAdded++;
                 }
                 // No instanceIndex: SceneTrees uses the handle, which sourceOf() maps back.
@@ -272,6 +385,7 @@ export class SceneTreesObject3DSync {
             for (const [key, mesh] of [...this.meshes]) {
                 if (mesh.users > 0) continue;
                 this.trees.removeMesh(mesh.handle);
+                this.forgetMesh(mesh);
                 this.meshes.delete(key);
                 meshesRemoved++;
             }
@@ -327,7 +441,34 @@ export class SceneTreesObject3DSync {
                 if (this.pushState(instance, instanceVisible, mask, instance.material, false)) changed++;
             }
         }
+        if (this.poses.size > 0) this.pose();
         return { moved, changed, added: 0, removed: 0, meshesAdded: 0, meshesRemoved: 0, skipped: 0 };
+    }
+
+    /**
+     * Runs the pose pass of every visible posed object (skinned and morphed
+     * meshes) and hands its vertices to `SceneTrees.setPose`, moving its
+     * top-level box when the pose leaves it. {@link update} calls it last.
+     */
+    pose(): Object3DPoseCounts {
+        this.checkLive();
+        let posed = 0;
+        let boundsMoved = 0;
+        const slack = this.options.deformSlack ?? 0.25;
+        for (const pose of this.poses.values()) {
+            if (pose.meshes.size === 0 || !effectivelyVisible(pose.object)) continue;
+            pose.pass.update();
+            posed++;
+            const needed = pose.pass.bounds(this.scratchBox);
+            if (!fits(pose.box, needed, slack)) {
+                padBox(needed, slack, pose.box);
+                for (const mesh of pose.meshes) this.trees.setDeformBounds!(mesh.handle, pose.box);
+                boundsMoved++;
+            }
+            for (const mesh of pose.meshes) this.trees.setPose!(mesh.handle, mesh.vertices!);
+        }
+        this.poseCounts = { posed, boundsMoved };
+        return this.poseCounts;
     }
 
     /**
@@ -340,10 +481,61 @@ export class SceneTreesObject3DSync {
             if (this.isMerged(tracked)) continue;
             this.removeTracked(tracked);
         }
-        for (const mesh of this.meshes.values()) if (mesh.users === 0) this.trees.removeMesh(mesh.handle);
+        for (const mesh of this.meshes.values()) {
+            if (mesh.users === 0) this.trees.removeMesh(mesh.handle);
+            mesh.indexBuffer?.destroy();
+        }
+        for (const pose of this.poses.values()) pose.pass.dispose();
+        this.poses.clear();
         this.meshes.clear();
         this.objects.clear();
         this.disposed = true;
+    }
+
+    private addPlainMesh(instance: WalkedInstance): TrackedMesh {
+        const source = { geometry: instance.geometry, start: instance.range.start, count: instance.range.count };
+        return { key: instance.meshKey, handle: this.trees.addMesh(meshGeometryOf(source)), source, users: 0, pose: null, vertices: null, indexBuffer: null };
+    }
+
+    /** A posed object's mesh for one range: the pose pass (one per object and geometry), an index buffer, the deform box. */
+    private addPosedMesh(instance: WalkedInstance, key: string): TrackedMesh {
+        if (!this.trees.setPose || !this.trees.setDeformBounds) throw new Error('@pmndrs/bvh/three: posed meshes need a SceneTrees target with setPose and setDeformBounds');
+        const object = instance.object;
+        let pose = this.poses.get(object);
+        if (pose && pose.geometry !== object.geometry) pose = undefined; // its old meshes go at the end of this sync, and their pass with them
+        if (!pose) {
+            const pass = this.options.createPosePass ? this.options.createPosePass(object) : new BvhPosePass(this.options.renderer, object);
+            pass.update();
+            const box = padBox(pass.bounds(new Float32Array(6)), this.options.deformSlack ?? 0.25, new Float32Array(6));
+            pose = { object, geometry: object.geometry, pass, box, meshes: new Set() };
+            this.poses.set(object, pose);
+        }
+        const source = { geometry: instance.geometry, start: instance.range.start, count: instance.range.count };
+        const geometry = meshGeometryOf(source);
+        let indexBuffer: GPUBuffer | null = null;
+        if (geometry.indices) {
+            const device = this.options.device ?? deviceFromRenderer(this.options.renderer);
+            const indices = Uint32Array.from(geometry.indices);
+            indexBuffer = device.createBuffer({
+                label: `@pmndrs/bvh/three pose indices ${object.name || object.id}`,
+                size: Math.max(16, Math.ceil(indices.byteLength / 16) * 16),
+                usage: 0x80 | 0x8 | 0x4, // STORAGE | COPY_DST | COPY_SRC (drift rebuilds copy it)
+            });
+            device.queue.writeBuffer(indexBuffer, 0, indices);
+        }
+        const handle = this.trees.addMesh(geometry, { deforming: { bounds: pose.box } });
+        const mesh: TrackedMesh = { key, handle, source, users: 0, pose, vertices: poseVertices(pose.pass, instance.geometry, source.start, source.count, indexBuffer), indexBuffer };
+        pose.meshes.add(mesh);
+        return mesh;
+    }
+
+    /** A mesh left the SceneTrees: its index buffer goes, and its pose pass with its pose's last mesh. */
+    private forgetMesh(mesh: TrackedMesh): void {
+        mesh.indexBuffer?.destroy();
+        const pose = mesh.pose;
+        if (!pose || !pose.meshes.delete(mesh) || pose.meshes.size > 0) return;
+        pose.pass.dispose();
+        if (this.poses.get(pose.object) === pose) this.poses.delete(pose.object);
     }
 
     private isMerged(tracked: TrackedInstance): boolean {

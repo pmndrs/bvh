@@ -16,7 +16,9 @@ export {
     type BvhThreeScene,
     type BvhThreeSource,
 } from './scene.ts';
-export { SceneTreesObject3DSync, type Object3DSyncCounts, type SceneTreesTarget } from './scene-trees-sync.ts';
+export { SceneTreesObject3DSync, type Object3DPoseCounts, type Object3DSyncCounts, type SceneTreesObject3DSyncOptions, type SceneTreesTarget } from './scene-trees-sync.ts';
+// Skinned and morphed meshes on the GPU: three's skinning and morph math in a TSL compute pass, feeding SceneTrees.setPose.
+export { BvhPosePass, poseVertices, threeDeforms, type BvhPosePassLike, type BvhPosePassOptions } from './deform.ts';
 
 // CPU raycasts (Q1) and the CPU tree: three-mesh-bvh-style drop-ins over the core's CpuMeshBvh.
 export {

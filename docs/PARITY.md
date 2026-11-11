@@ -55,7 +55,7 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 | 3.1 | Triangles (`MeshBVH`) | have | Every builder and walk (`src/index.ts`, `src/trace/`) | all |
 | 3.2 | `PointsBVH` | missing | The layout has leaves of triangles only (`src/gpu-layout.ts`) | None (drei's `Points.tsx` has its own raycast, no BVH) |
 | 3.3 | `LineSegmentsBVH`, `LineLoopBVH`, `LineBVH` | missing | as above | None |
-| 3.4 | `SkinnedMeshBVH` (live skinned pose) | missing | Skinned meshes use the rest pose; `/three` falls back to three's raycast (`src/three/raycast.ts:352`). The GPU side takes poses through `SceneTrees.setPose` (row 6.3) | None |
+| 3.4 | `SkinnedMeshBVH` (live skinned pose) | partial | GPU: `SceneTreesObject3DSync` with a `renderer` poses `SkinnedMesh` and morph-target meshes each update (`BvhPosePass`, a TSL compute pass with three's math, into `SceneTrees.setPose`; the top-level box follows the skeleton). Checked on the `three-skinned` GPU page against three's CPU pose. CPU picking falls back to three's raycast (`src/three/raycast.ts`), which is exact | None |
 
 ## 4. Build options
 
@@ -87,7 +87,7 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 | --- | --- | --- | --- | --- |
 | 6.1 | `refit()` | have | `CpuMeshBvh.refit(input?)` rewrites the triangle records from the source positions and runs `refitOnCpu` (`src/refit-cpu.ts`); `geometry.boundsTree.refit()` rereads the position attribute and the raycast uses the tree again. GPU refit: `src/gpu-mesh-refit.ts`, `SceneTrees.setPose`, `src/scene/deforming-trees.ts` | pathtracer (`core/PathTracingSceneGenerator.js:219`), ddgi-research (own packer, `src/scene.js:49`, `src/provider.js:83`), reflections (`MeshBVHTraceProvider.ts:507`) |
 | 6.2 | `computeBoundsTree`, `disposeBoundsTree`, `acceleratedRaycast`, `firstHitOnly` | have | `src/three/raycast.ts` (`prepareBoundsTrees()` is awaited once first). `geometry.boundsTree` is a `BvhBoundsTree`, the core `CpuMeshBvh` with three's types. Options: rows 4.1-4.7. `docs/three.md` has the bench | homefig (`scene-bvh.tsx:78-116`, `build-collider-world.ts:12,288-297`, `first-person-controls.tsx:47,323-332`), drei (`Bvh.tsx:5,34,55-62,111-124`) |
-| 6.3 | `StaticGeometryGenerator` (skinned and morphed meshes to a static geometry) | missing | `SceneTrees.setPose` takes vertices you pose yourself | pathtracer (own copy, note 4: `core/PathTracingSceneGenerator.js:3,94`) |
+| 6.3 | `StaticGeometryGenerator` (skinned and morphed meshes to a static geometry) | partial | GPU: `BvhPosePass` (`src/three/deform.ts`) poses into a GPU buffer that `SceneTrees.setPose` refits from, nothing read back. No CPU static geometry (three's raycast is the CPU path) | pathtracer (own copy, note 4: `core/PathTracingSceneGenerator.js:3,94`) |
 | 6.4 | `MeshBVHHelper` / `BVHHelper` | have | `BVHHelper` and `MeshBVHHelper` in `/three` (`src/three/helper.ts`): three-mesh-bvh's `Group` with `depth`, `displayParents`, `displayEdges`, `color`, `opacity`, `instanceId`, `edgeMaterial` / `meshMaterial`, `update()`, `dispose()`, the constructor forms `(mesh or bvh, depth)` and `(mesh, bvh, depth)`, following the mesh's transform. The boxes and indices come from the core (`bvhHelperPositions`, `bvhHelperIndices`). Segment counts tested in Node against the tree's node counts at each depth (`src/three/helper.test.ts`); not drawn in a browser yet. No `BatchedMesh` per-geometry tree (`boundsTrees`), as row 5.5 | drei (`Bvh.stories.tsx:5,29`, story only); csg: none in `src` |
 | 6.5 | `getTriangleHitPointInfo` | have | `getTriangleHitPointInfo(point, geometry, triangleIndex, target)` in `/three` (tested against three-mesh-bvh's), and `CpuMeshBvh.getTriangleHitPointInfo(point, triangle, { attributes })` in the core: barycentrics, corners, face normal and any attributes interpolated | None |
 
@@ -127,7 +127,7 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 
 ## Counts
 
-51 rows: **29 have, 5 partial, 14 missing, 3 won't** (4.8, 8.12, 9.2). At the audit, before items 1 to 5: 12 have, 13 partial, 23 missing. Every "won't" has its reason in its row; P8's done-when also wants them in the "Coming from three-mesh-bvh" docs page.
+51 rows: **29 have, 7 partial, 12 missing, 3 won't** (4.8, 8.12, 9.2). At the audit, before items 1 to 5: 12 have, 13 partial, 23 missing. Every "won't" has its reason in its row; P8's done-when also wants them in the "Coming from three-mesh-bvh" docs page.
 
 ## Proposed build-out order
 

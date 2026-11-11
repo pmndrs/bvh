@@ -27,7 +27,7 @@ The three.js side of the package. It's the only part that imports three, which i
 ## Scenes (`bvhSceneFromObject3D`)
 
 - **Objects and instances:**
-  - Reads `Mesh`, `InstancedMesh` (instances below its `count`), `BatchedMesh` (active instances; `getVisibleAt` too) and `SkinnedMesh` (rest pose; skinning and morph targets aren't applied).
+  - Reads `Mesh`, `InstancedMesh` (instances below its `count`), `BatchedMesh` (active instances; `getVisibleAt` too) and `SkinnedMesh` (rest pose; skinning and morph targets aren't applied by `bvhSceneFromObject3D`; the sync poses them on the GPU, below).
   - Reads the triangles three's `Mesh.raycast` tests: the draw range, and with an array of materials, the groups within it. Each group is its own mesh, so it can carry its own material.
   - Ranges are read as three steps through them: three indices at a time from the range's start while the index is below its end. A range that starts off a multiple of 3 gives triangles made of neighbouring triangles' corners, and one whose length isn't a multiple of 3 ends in a triangle that reads past it; both are in the mesh, as in three. Overlapping groups are both read. A triangle that would read past the index (or the positions) is dropped: three reports it at a `NaN` distance with `NaN` corners, which no ray can hit (`threeTriangleRanges`).
   - Takes indexed, non-indexed and interleaved positions. Interleaved (or normalized, or non-float) positions are compacted once per geometry and shared by all its groups' meshes.
@@ -41,6 +41,26 @@ The three.js side of the package. It's the only part that imports three, which i
 - **`sync.update()` cost:** it skips an object whose `matrixWorld`, effective visibility, layers and `instanceMatrix.version` (a `BatchedMesh`'s matrices texture version) are unchanged, without allocating. Set `instanceMatrix.needsUpdate = true` after `setMatrixAt`, as three needs anyway. A `BatchedMesh`'s per-instance visibility is still compared each frame, since three gives it no version.
 - **Failures:** `sync.sync()` walks and plans before it changes anything, so a throwing `material` callback leaves everything as it was. Each `SceneTrees` call updates the sync's records along with it, so a later `sync()` picks up where a failed one stopped.
 - **Without SceneTrees:** `buildTraceScene(scene.meshes, scene.instances, { build, mergeStaticInstances })` builds it all at once. `uploadTraceScene` then gives buffers that `BvhTraceNodes` takes as `{ buffers }`.
+
+## Skinned and morphed meshes (`BvhPosePass`)
+
+```ts
+const sync = new SceneTreesObject3DSync(trees, scene, { renderer }); // the renderer runs the pose passes
+// each frame, after the mixer and scene.updateMatrixWorld():
+sync.update();               // transforms, then every visible posed object's pass, then SceneTrees.setPose
+trees.update(encoder); submit; bvh.update();
+```
+
+- **Which meshes:** with a `renderer`, every `SkinnedMesh` and every mesh with position morph targets (`threeDeforms(mesh)`), unless `deforming: false` or a `(mesh) => boolean` says otherwise. Without a renderer they stay in their rest pose, as before. `BatchedMesh` is never posed.
+- **Their own meshes:** a posed object gets its own deforming SceneTrees mesh per triangle range (not shared with other objects on the geometry, since each has its own pose). Its instances never merge.
+- **The pass** (`BvhPosePass`, `src/three/deform.ts`) is a TSL compute pass with three r187's math in three's order: morphs as `morphReference` does them (`p *= base`, then `p += target * influence` for each non-zero influence), then skinning as `getSkinnedPosition` does it (`bindMatrixInverse * sum(bone * weight * (bindMatrix * p))`, after `skeleton.update()`). It writes one `vec4` per vertex into a buffer of ours, which `SceneTrees.setPose` refits the tree from (`GpuMeshRefit`): nothing is read back. On the M5 the posed vertices match three's CPU pose (`getVertexPosition`, `applyBoneTransform`) to 6.4e-7.
+- **Compile cost:** one shader per variant (skinned, morphed, both). Counts are uniforms, the morph loop is a `Loop` over a uniform, the storage arrays are runtime-sized, so every posed mesh of a variant shares one pipeline and the WGSL is the same on every load. `pass.prepare()` compiles it with `compileComputeAsync`.
+- **The top-level box follows the pose:** SceneTrees keeps one box per deforming mesh in its top level. The sync sets it (`SceneTrees.setDeformBounds`) from `pass.bounds()`, a box that holds the pose computed from the skeleton on the CPU (per bone, the box of the vertices it moves, carried through the bone matrix: 16 corner transforms per bone). It only moves when the pose leaves the box or the box grows past twice the padded pose; `deformSlack` (default 0.25 of the largest extent, on every side) sets the room. A walking character's root motion is followed. Negative skin weights fall back to a box from every vertex on the CPU.
+- **Inputs are read once:** the rest positions, skin indices and weights and morph targets are packed at the pass's creation (through the attributes, so interleaved and normalized ones work). A new geometry object gets a new pass at `sync.sync()`; editing those attributes in place is not followed.
+- **Not read:** `InstancedMesh.morphTexture` (per-instance morphs; every instance gets `morphTargetInfluences`), morphed normals (the walk uses geometric normals).
+- **Hidden objects aren't posed.** `sync.pose()` runs the passes alone; `sync.poseCounts` says how many ran and how many boxes moved; `sync.posePassOf(object)` gives the pass (its `buffer` holds the last pose).
+- **CPU picking on posed meshes stays on three's raycast** (`acceleratedRaycast` falls back for a `SkinnedMesh` or morph targets): three poses each vertex on the CPU there, so it's exact and linear in the vertex count. three-mesh-bvh's `StaticGeometryGenerator` route (pose on the CPU, then build or refit a tree) costs the same CPU pose per frame plus a refit, and only pays off for many raycasts per frame on one pose; it isn't here yet (PARITY 6.3).
+- **Tested:** `src/three/deform.test.ts` (the box holds three's CPU pose over 40 random frames, relative and absolute morphs, root motion; the sync's bookkeeping), and the GPU page `three-skinned` (below).
 
 ## In three's node system (`BvhTraceNodes`)
 
