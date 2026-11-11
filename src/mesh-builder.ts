@@ -65,7 +65,7 @@ export async function createMeshLayoutBuilder(
     let tinyBvh: Promise<TinyBvhBuilder> | null = null;
     const buildOnCpu = async (geometry: MeshInput, gpuOptions: GpuBuildOptions): Promise<GpuLayoutMeshBvh> => {
         tinyBvh ??= createTinyBvhBuilder();
-        return (await tinyBvh).buildLayout(geometry, { maxLeafPrimitives: gpuOptions.maxLeafPrimitives, triangleLeaves: gpuOptions.triangleLeaves }).layout;
+        return (await tinyBvh).buildLayout(geometry, { maxLeafPrimitives: gpuOptions.maxLeafPrimitives, triangleLeaves: gpuOptions.triangleLeaves, nodeFormat: gpuOptions.nodeFormat }).layout;
     };
 
     if (fallbackReason !== null || !device) {

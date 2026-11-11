@@ -49,6 +49,7 @@ export {
 } from './gpu-layout.ts';
 // Quantized nodes (docs/design/compressed-nodes.md): packing a tree's nodes, unpacking them, the frame rule.
 export { dequantizeNodes, nodeFrameOf, quantizeNodes, quantizeNodeWords, readNodeFrame, type NodeFrame } from './quantized-nodes.ts';
+export { GpuNodeQuantizer, quantizeTreeBuffers, type QuantizeJob, type QuantizeMesh } from './gpu-quantize.ts';
 // Indexed leaves (docs/design/indexed-leaves.md): converting a tree between the formats, and the weld.
 export {
     indexedFromRecords,

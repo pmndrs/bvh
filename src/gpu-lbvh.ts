@@ -51,12 +51,16 @@
  */
 
 import { checkNodeFormat } from './quantized-nodes.ts';
+import { quantizeTreeBuffers } from './gpu-quantize.ts';
 import {
     GPU_LAYOUT_MAX_LEAF_PRIMITIVES,
     GPU_LAYOUT_MAX_TRIANGLES,
     GPU_LAYOUT_NODE_BYTES,
     GPU_LAYOUT_TRIANGLE_BYTES,
+    gpuLayoutNodeBufferBytes,
+    gpuLayoutNodeBytes,
     gpuLayoutTriangleBytes,
+    type GpuLayoutNodeFormat,
     type GpuLayoutTriangleLeaves,
     type GpuLayoutMeshBvh,
 } from './gpu-layout.ts';
@@ -377,15 +381,19 @@ export class GpuLbvhBuilder {
 /** Copies every usable tree in shared GPU buffers back into CPU memory, with one readback. Any GPU builder's trees. */
 export async function readTreeLayouts(device: GPUDevice, trees: GpuTreeBuffers, label: string): Promise<(GpuLayoutMeshBvh | null)[]> {
     let nodeEnd = 0;
+    let parentEnd = 0;
     let triangleEnd = 0;
     for (const mesh of trees.meshes) {
         nodeEnd = Math.max(nodeEnd, mesh.nodeOffset + mesh.nodeCount);
+        parentEnd = Math.max(parentEnd, (mesh.parentOffset ?? mesh.nodeOffset) + mesh.nodeCount);
         triangleEnd = Math.max(triangleEnd, mesh.triangleOffset + mesh.triangleCount);
     }
-    const nodeBytes = nodeEnd * GPU_LAYOUT_NODE_BYTES;
+    const quantized = trees.nodeFormat === 'quantized';
+    const nodeSize = gpuLayoutNodeBytes(trees.nodeFormat);
+    const nodeBytes = nodeEnd * nodeSize;
     const triangleSize = gpuLayoutTriangleBytes(trees.triangleLeaves);
     const triangleBytes = triangleEnd * triangleSize;
-    const parentBytes = nodeEnd * 4;
+    const parentBytes = parentEnd * 4;
     const readback = device.createBuffer({ label: `${label} readback`, size: nodeBytes + triangleBytes + parentBytes, usage: USAGE.MAP_READ | USAGE.COPY_DST });
     try {
         const encoder = device.createCommandEncoder({ label: `${label} readback` });
@@ -397,11 +405,13 @@ export async function readTreeLayouts(device: GPUDevice, trees: GpuTreeBuffers, 
         const bytes = readback.getMappedRange();
         return trees.meshes.map((mesh) => {
             if (mesh.problem) return null;
-            const nodeStart = mesh.nodeOffset * GPU_LAYOUT_NODE_BYTES;
+            // Quantized: the frame slot before the root, then the nodes.
+            const nodeStart = (mesh.nodeOffset - (quantized ? 1 : 0)) * nodeSize;
             const triangleStart = nodeBytes + mesh.triangleOffset * triangleSize;
-            const parentStart = nodeBytes + triangleBytes + mesh.nodeOffset * 4;
+            const parentStart = nodeBytes + triangleBytes + (mesh.parentOffset ?? mesh.nodeOffset) * 4;
             return {
-                nodes: bytes.slice(nodeStart, nodeStart + mesh.nodeCount * GPU_LAYOUT_NODE_BYTES),
+                nodes: bytes.slice(nodeStart, nodeStart + gpuLayoutNodeBufferBytes(mesh.nodeCount, trees.nodeFormat)),
+                ...(quantized ? { nodeFormat: 'quantized' as const } : {}),
                 triangles: bytes.slice(triangleStart, triangleStart + mesh.triangleCount * triangleSize),
                 ...(trees.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const } : {}),
                 parents: new Uint32Array(bytes.slice(parentStart, parentStart + mesh.nodeCount * 4)),
@@ -670,6 +680,8 @@ export class GpuLbvhBatch {
     readonly meshCount: number;
     /** The triangle format the batch writes. */
     readonly triangleLeaves: GpuLayoutTriangleLeaves;
+    /** The node format `finish` hands out (the batch builds `f32` nodes either way). */
+    readonly nodeFormat: GpuLayoutNodeFormat;
     private readonly device: GPUDevice;
     private readonly label: string;
     private readonly pipelines: Record<LbvhKernel, GPUComputePipeline>;
@@ -697,6 +709,7 @@ export class GpuLbvhBatch {
     ) {
         this.device = device;
         this.triangleLeaves = options.triangleLeaves;
+        this.nodeFormat = options.nodeFormat;
         this.label = label;
         this.pipelines = pipelines;
         this.sortPipelines = sortPipelines;
@@ -904,7 +917,7 @@ export class GpuLbvhBatch {
             // From here the outputs are the caller's; if the read above failed, destroy() frees them with the rest.
             this.finished = true;
             const { outNodes, outTriangles, outParents } = this.buffers;
-            return {
+            const trees: GpuTreeBuffers = {
                 nodes: outNodes,
                 triangles: outTriangles,
                 triangleLeaves: this.triangleLeaves,
@@ -916,6 +929,8 @@ export class GpuLbvhBatch {
                     outParents.destroy();
                 },
             };
+            // Built f32 (the climb hands boxes over in the nodes' f32 words), then packed.
+            return this.nodeFormat === 'quantized' ? quantizeTreeBuffers(device, trees, this.label) : trees;
         } finally {
             readback.destroy();
             this.destroy();

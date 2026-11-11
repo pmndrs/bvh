@@ -62,6 +62,8 @@ import {
     BVH_QUERY_ANY,
     INDEXED_FLAG_SHIFT,
     INDEXED_ID_MASK,
+    QUANTIZED_NODE_BYTES,
+    type NodeFormat,
     MERGED_SIDE_MATERIAL_SHIFT,
     MERGED_SIDE_SOURCE_BITS,
     type PositionLayout,
@@ -350,6 +352,7 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
                     bvhTransformDirection(instance, ray.direction),
                 );
                 meshVertexBase = bvhMeshVertexBase(instance.triangleOffset);
+                bvhEnterMeshNodes(instance.rootNodeOffset);
                 stack[stackSize] = BVH_REF_INSTANCE_MARKER;
                 stackSize += 1u;
                 insideInstance = true;
@@ -409,6 +412,71 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
 }
 `;
 }
+
+/** Mesh nodes as 64-byte `f32` nodes: four `vec4f`, nothing to set up per instance. */
+const F32_NODE_LOADERS_WGSL = /* wgsl */ `
+fn bvhLoadMeshNode(nodeIndex: u32) -> BvhNode {
+    let base = nodeIndex * BVH_VEC4_PER_NODE;
+    let a = bvhTraceNodes[base];
+    let b = bvhTraceNodes[base + 1u];
+    let c = bvhTraceNodes[base + 2u];
+    let d = bvhTraceNodes[base + 3u];
+    return BvhNode(
+        a.xyz, bitcast<u32>(a.w),
+        b.xyz, bitcast<u32>(b.w),
+        c.xyz, bitcast<u32>(c.w),
+        d.xyz, bitcast<u32>(d.w),
+    );
+}
+
+// f32 nodes need no frame.
+fn bvhEnterMeshNodes(rootNodeOffset: u32) {}
+`;
+
+/**
+ * Mesh nodes as 32-byte quantized nodes (docs/design/compressed-nodes.md):
+ * two `vec4u`, child `side` at `vec4u` `side`: three axis words (min plane
+ * bits 0-15, max plane bits 16-31) and the child's stack reference. Planes
+ * decode as `origin + f32(q) * step` on the frame of the instance's mesh, read
+ * from the slot before its root on entry (`bvhEnterMeshNodes`) into private
+ * variables, so the walk's text is the `f32` walk's. The frame rule makes
+ * every decoded plane an exact `f32` (fused or not), so the box test that
+ * follows is `bvhBoxEntry` on a box that contains the exact one.
+ */
+const QUANTIZED_NODE_LOADERS_WGSL = /* wgsl */ `
+const BVH_QUANTIZED_VEC4_PER_NODE: u32 = ${QUANTIZED_NODE_BYTES / 16}u;
+
+var<private> bvhMeshFrameOrigin: vec3f;
+var<private> bvhMeshFrameStep: vec3f;
+
+fn bvhEnterMeshNodes(rootNodeOffset: u32) {
+    let at = (rootNodeOffset - 1u) * BVH_QUANTIZED_VEC4_PER_NODE;
+    bvhMeshFrameOrigin = bitcast<vec3f>(bvhTraceNodes[at].xyz);
+    bvhMeshFrameStep = bitcast<vec3f>(bvhTraceNodes[at + 1u].xyz);
+}
+
+fn bvhDecodeMin(planes: vec3u) -> vec3f {
+    return bvhMeshFrameOrigin + vec3f(planes & vec3u(0xffffu)) * bvhMeshFrameStep;
+}
+
+fn bvhDecodeMax(planes: vec3u) -> vec3f {
+    return bvhMeshFrameOrigin + vec3f(planes >> vec3u(16u)) * bvhMeshFrameStep;
+}
+
+fn bvhLoadMeshNode(nodeIndex: u32) -> BvhNode {
+    let base = nodeIndex * BVH_QUANTIZED_VEC4_PER_NODE;
+    let left = bvhTraceNodes[base];
+    let right = bvhTraceNodes[base + 1u];
+    // A missing right child keeps BVH_EMPTY_CHILD as its reference, which the walk tests.
+    let rightEmpty = right.w == BVH_EMPTY_CHILD;
+    return BvhNode(
+        bvhDecodeMin(left.xyz), left.w & BVH_REF_INDEX_MASK,
+        bvhDecodeMax(left.xyz), select(right.w & BVH_REF_INDEX_MASK, BVH_EMPTY_CHILD, rightEmpty),
+        bvhDecodeMin(right.xyz), left.w >> BVH_REF_COUNT_SHIFT,
+        bvhDecodeMax(right.xyz), select(right.w >> BVH_REF_COUNT_SHIFT, 0u, rightEmpty),
+    );
+}
+`;
 
 /**
  * Triangle loading for 48-byte records: three contiguous `vec4f`. A merged
@@ -544,6 +612,14 @@ export interface TraceModuleOptions {
     readonly triangleLeaves?: TriangleLeaves;
     /** Indexed only: the positions buffer's layout, `'vec4'` (the default) or `'packed'`. */
     readonly positionLayout?: PositionLayout;
+    /**
+     * The scene's node format (docs/design/compressed-nodes.md), compiled in
+     * like `rayMasks`: `'f32'` (the default, 64-byte nodes) or `'quantized'`
+     * (32-byte nodes decoded on the frame read once per instance entered).
+     * Only `bvhLoadMeshNode` and the instance entry's frame read differ; it is
+     * the same walk, with the same bindings.
+     */
+    readonly nodeFormat?: NodeFormat;
 }
 
 const DEFAULT_TRACE_SLOT: BindingSlot = { group: 0, firstBinding: 0 };
@@ -569,10 +645,14 @@ export function traceModuleWgsl(options: TraceModuleOptions = {}): string {
         throw new RangeError(`traceModuleWgsl: triangleLeaves must be 'records' or 'indexed', got ${String(options.triangleLeaves)}`);
     }
     const packed = options.positionLayout === 'packed';
+    const nodeFormat = options.nodeFormat ?? 'f32';
+    if (nodeFormat !== 'f32' && nodeFormat !== 'quantized') throw new RangeError(`traceModuleWgsl: nodeFormat must be 'f32' or 'quantized', got ${String(nodeFormat)}`);
+    const quantized = nodeFormat === 'quantized';
     return /* wgsl */ `${COMMON_WGSL}
 // Nodes and triangles are read as plain vec4s, so every load is one 16-byte
-// read whatever the backend makes of a struct with vec3 members.
-@group(${group}) @binding(${nodes}) var<storage, read> bvhTraceNodes: array<vec4f>;
+// read whatever the backend makes of a struct with vec3 members. Quantized
+// nodes are read as vec4u, so no packed plane passes through a float register.
+@group(${group}) @binding(${nodes}) var<storage, read> bvhTraceNodes: array<${quantized ? 'vec4u' : 'vec4f'}>;
 @group(${group}) @binding(${triangles}) var<storage, read> bvhTraceTriangles: array<${indexed ? 'vec4u' : 'vec4f'}>;
 @group(${group}) @binding(${topLevel}) var<storage, read> bvhTraceTopLevel: array<vec4u>;${
         indexed ? `\n@group(${group}) @binding(${slot.firstBinding + 3}) var<storage, read> bvhTracePositions: array<${packed ? 'f32' : 'vec4f'}>;` : ''
@@ -593,19 +673,7 @@ const BVH_TRIANGLE_FLAG_FLIP_FRONT_FACE: u32 = ${TRIANGLE_FLAG_FLIP_FRONT_FACE}u
 // Instance flags bit 3: a merged mesh; the hit's instance is the triangle's padding word.
 const BVH_INSTANCE_FLAG_MERGED: u32 = ${INSTANCE_FLAG.merged}u;
 
-fn bvhLoadMeshNode(nodeIndex: u32) -> BvhNode {
-    let base = nodeIndex * BVH_VEC4_PER_NODE;
-    let a = bvhTraceNodes[base];
-    let b = bvhTraceNodes[base + 1u];
-    let c = bvhTraceNodes[base + 2u];
-    let d = bvhTraceNodes[base + 3u];
-    return BvhNode(
-        a.xyz, bitcast<u32>(a.w),
-        b.xyz, bitcast<u32>(b.w),
-        c.xyz, bitcast<u32>(c.w),
-        d.xyz, bitcast<u32>(d.w),
-    );
-}
+${quantized ? QUANTIZED_NODE_LOADERS_WGSL : F32_NODE_LOADERS_WGSL}
 
 ${indexed ? indexedLoadersWgsl(packed) : RECORD_LOADERS_WGSL}
 
@@ -1087,6 +1155,8 @@ export interface BatchKernelOptions {
     readonly triangleLeaves?: TriangleLeaves;
     /** Indexed only: `'vec4'` (the default) or `'packed'` positions. */
     readonly positionLayout?: PositionLayout;
+    /** The trace module's node format (`TraceModuleOptions.nodeFormat`). Default `'f32'`. */
+    readonly nodeFormat?: NodeFormat;
 }
 
 /** Bytes of the batch kernel's uniform (`BvhBatchParams`, group 1 binding 2, only with ray masks). Padded to 16. */
@@ -1108,6 +1178,6 @@ export function batchKernelWgsl(mode: 'closest' | 'any', options: BatchKernelOpt
     }
     rejectOldPositionalCall('batchKernelWgsl', options);
     const rayMasks = options.rayMasks ?? true;
-    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout })}
+    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat })}
 ${batchEntryWgsl(mode, 1, rayMasks, options.hitNormal ?? true)}`;
 }

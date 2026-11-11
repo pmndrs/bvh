@@ -32,6 +32,12 @@
  *   `checkGpuLayout`) trees, `vec4` and `packed` positions, masks compiled out,
  *   and `-weld` (a tolerance weld at 1e-6 before building). The hook cases also
  *   run indexed (`[hooks]` names starting `indexed`).
+ * - `quantized-*`, `merged-quantized-*`: quantized nodes (docs/design/compressed-nodes.md),
+ *   32-byte nodes on a per-mesh frame, outward-rounded: tinybvh (packed on the way
+ *   out of the worker), the GPU LBVH and H-PLOC (packed by the GPU quantize pass,
+ *   checked by `checkGpuLayout`), masks compiled out, combined with indexed leaves,
+ *   and merged groups (one frame per group). The shared-edge rays are B3's leak
+ *   class; looser boxes must not lose a hit. The hook cases also run quantized.
  * Every variant also runs the seam fixtures (`seamQuad` in cases.ts): split
  * seams, every corner its own vertex with the same bits, must let nothing
  * through; one-ulp seams leak in every format (the double-precision reference
@@ -120,6 +126,8 @@ interface OracleVariant {
     positionLayout?: 'vec4' | 'packed';
     /** Weld each mesh's vertices within this distance before building (`weldPositions`); default 0, off. */
     weldTolerance?: number;
+    /** The trees', scene's and kernel's node format (docs/design/compressed-nodes.md); default f32. */
+    nodeFormat?: 'f32' | 'quantized';
 }
 
 /** The tolerance weld's distance in the `-weld` variant: far below the quads' 0.5 grid, far above an ulp at 2 (2.4e-7). */
@@ -142,6 +150,14 @@ const VARIANTS: OracleVariant[] = [
     { name: 'indexed-hploc', treeSource: 'gpu-hploc', triangleLeaves: 'indexed' },
     { name: 'merged-indexed-tinybvh', treeSource: 'tinybvh', merged: true, triangleLeaves: 'indexed' },
     { name: 'merged-indexed-hploc', treeSource: 'gpu-hploc', merged: true, triangleLeaves: 'indexed', positionLayout: 'packed' },
+    { name: 'quantized-tinybvh', treeSource: 'tinybvh', nodeFormat: 'quantized' },
+    { name: 'quantized-tinybvh-nomasks', treeSource: 'tinybvh', nodeFormat: 'quantized', rayMasks: false },
+    { name: 'quantized-lbvh', treeSource: 'gpu-lbvh', nodeFormat: 'quantized' },
+    { name: 'quantized-hploc', treeSource: 'gpu-hploc', nodeFormat: 'quantized' },
+    { name: 'quantized-indexed-tinybvh', treeSource: 'tinybvh', nodeFormat: 'quantized', triangleLeaves: 'indexed' },
+    { name: 'merged-quantized-tinybvh', treeSource: 'tinybvh', merged: true, nodeFormat: 'quantized' },
+    { name: 'merged-quantized-hploc', treeSource: 'gpu-hploc', merged: true, nodeFormat: 'quantized' },
+    { name: 'merged-quantized-indexed-hploc', treeSource: 'gpu-hploc', merged: true, nodeFormat: 'quantized', triangleLeaves: 'indexed', positionLayout: 'packed' },
 ];
 
 /** Variants whose one-ulp seam slips must equal `watertight-tinybvh`'s: the same trees and corner bits, the other format. */
@@ -149,6 +165,17 @@ const VARIANTS: OracleVariant[] = [
 const INDEXED_HOOK_VARIANT: OracleVariant = { name: 'indexed-hooks', treeSource: 'tinybvh', triangleLeaves: 'indexed' };
 
 const ULP_SAME_AS_RECORDS = ['indexed-tinybvh', 'indexed-tinybvh-packed'];
+
+/**
+ * Quantized variants of the same trees: the triangle test is the same, the boxes looser, so a
+ * one-ulp seam may let fewer rays through (a looser box takes rays an exact box's slab test
+ * rounds away), never more.
+ */
+const ULP_AT_MOST_RECORDS = ['quantized-tinybvh', 'quantized-indexed-tinybvh'];
+
+/** The hooks' quantized passes build their trees and scene as this variant does. */
+const QUANTIZED_HOOK_VARIANT: OracleVariant = { name: 'quantized-hooks', treeSource: 'tinybvh', nodeFormat: 'quantized' };
+const QUANTIZED_INDEXED_HOOK_VARIANT: OracleVariant = { name: 'quantized-indexed-hooks', treeSource: 'tinybvh', nodeFormat: 'quantized', triangleLeaves: 'indexed' };
 
 /** Rays per hook case and traced mask (hooks.ts); the reference runs once per mask. */
 const HOOK_SIZES = { randomRays: 8000, thinBoxRays: 1200 };
@@ -276,18 +303,21 @@ async function buildTrees(builder: MeshBvhBuilder, meshes: readonly MeshGeometry
     if (variant.treeSource === 'gpu-lbvh' || variant.treeSource === 'gpu-hploc') {
         const gpuBuilder = gpuBuilders.get(variant.treeSource);
         assert(gpuBuilder, `the ${variant.treeSource} builder was not made`);
-        const results = await gpuBuilder.buildLayouts(meshes, { triangleLeaves: variant.triangleLeaves });
+        const results = await gpuBuilder.buildLayouts(meshes, { triangleLeaves: variant.triangleLeaves, nodeFormat: variant.nodeFormat });
         for (const result of results) assert(result.builtBy === variant.treeSource, `a mesh fell back to ${result.builtBy}: ${result.fallbackReason}`);
+        // GPU-packed quantized nodes (the GPU quantize pass) must pass the layout check: every decoded box around its exact one.
+        if (variant.nodeFormat === 'quantized') results.forEach((result, index) => assert(result.layout.nodeFormat === 'quantized' && checkGpuLayout(result.layout, meshes[index]).length === 0, `${variant.name}: mesh ${index}'s quantized layout fails the check: ${checkGpuLayout(result.layout, meshes[index]).slice(0, 2).join('; ')}`));
         // GPU-written indexed triangles (H-PLOC natively; the LBVH's records converted) must pass the layout check.
         if (variant.triangleLeaves === 'indexed') results.forEach((result, index) => assert(result.layout.triangleLeaves === 'indexed' && checkGpuLayout(result.layout, meshes[index]).length === 0, `${variant.name}: mesh ${index}'s indexed layout fails the check: ${checkGpuLayout(result.layout, meshes[index]).slice(0, 2).join('; ')}`));
         return results.map((result) => result.layout);
     }
-    return Promise.all(meshes.map((mesh) => builder.build(mesh, { triangleLeaves: variant.triangleLeaves })));
+    return Promise.all(meshes.map((mesh) => builder.build(mesh, { triangleLeaves: variant.triangleLeaves, nodeFormat: variant.nodeFormat })));
 }
 
 /** The assembly options of a variant's format: indexed scenes take the geometry for their positions. */
 function formatOptions(variant: OracleVariant, geometries: readonly (MeshGeometry | null)[]) {
-    return variant.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const, positionLayout: variant.positionLayout, geometries } : {};
+    const nodes = variant.nodeFormat === 'quantized' ? { nodeFormat: 'quantized' as const } : {};
+    return variant.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const, positionLayout: variant.positionLayout, geometries, ...nodes } : nodes;
 }
 
 /** The variant's input meshes: welded within its tolerance, or as they are. */
@@ -447,6 +477,7 @@ await runGpuTest(async ({ device, log }) => {
             hitNormal: variant.hitNormal ?? true,
             triangleLeaves: variant.triangleLeaves,
             positionLayout: variant.positionLayout,
+            nodeFormat: variant.nodeFormat,
         });
         const results = { cases: {} as Record<string, unknown>, sharedEdges: [] as SharedEdgeReport[] };
         byTest[variant.name] = results;
@@ -512,12 +543,27 @@ await runGpuTest(async ({ device, log }) => {
         });
     }
 
+    for (const name of ULP_AT_MOST_RECORDS) {
+        const seams = seamReports.get(name);
+        if (!recordSeams || !seams) continue;
+        seams.forEach((report, index) => {
+            const expected = recordSeams[index];
+            if (report.slipped > expected.slipped || report.slippedAny > expected.slippedAny) {
+                failures.push(`[${name}] ${report.name}: ${report.slipped}/${report.slippedAny} slipped, more than records' ${expected.slipped}/${expected.slippedAny}`);
+            }
+        });
+    }
+
     // The hooks: triangle filters and instance masks, with ray masks on and off.
     const hooks: Record<string, unknown> = {};
-    for (const [rayMasks, merged, indexed] of [[true, false, false], [false, false, false], [true, true, false], [true, false, true], [false, false, true], [true, true, true]] as const) {
-        const format = indexed ? INDEXED_HOOK_VARIANT : VARIANTS[0];
+    const hookPasses = [
+        [true, false, false, false], [false, false, false, false], [true, true, false, false], [true, false, true, false], [false, false, true, false], [true, true, true, false],
+        [true, false, false, true], [false, false, false, true], [true, true, true, true],
+    ] as const;
+    for (const [rayMasks, merged, indexed, quantized] of hookPasses) {
+        const format = quantized ? (indexed ? QUANTIZED_INDEXED_HOOK_VARIANT : QUANTIZED_HOOK_VARIANT) : indexed ? INDEXED_HOOK_VARIANT : VARIANTS[0];
         for (const hook of buildHookCases(HOOK_SIZES)) {
-            const kernel = await TraceBatchKernel.create(device, { label: hook.name, triangleFilter: hook.filterWgsl, rayMasks, triangleLeaves: format.triangleLeaves });
+            const kernel = await TraceBatchKernel.create(device, { label: hook.name, triangleFilter: hook.filterWgsl, rayMasks, triangleLeaves: format.triangleLeaves, nodeFormat: format.nodeFormat });
             let scene: TraceSceneData;
             let flagged: number;
             if (merged) {
@@ -535,7 +581,7 @@ await runGpuTest(async ({ device, log }) => {
                 for (const mask of hookMasks(hook, rayMasks)) {
                     const answers = await traceOnGpu(device, (encoder, batch) => kernel.encode(encoder, buffers, { ...batch, mask }), hook.base.rays);
                     const result = evaluateCase(hook.base, tracerAnswers(answers), await hookReferenceAnswers(hook, mask, rayMasks));
-                    const name = `${indexed ? 'indexed ' : ''}${merged ? 'merged ' : ''}${hookPassName(hook, mask, rayMasks)}`;
+                    const name = `${quantized ? 'quantized ' : ''}${indexed ? 'indexed ' : ''}${merged ? 'merged ' : ''}${hookPassName(hook, mask, rayMasks)}`;
                     hooks[name] = {
                         rays: result.rays,
                         flaggedTriangles: flagged,

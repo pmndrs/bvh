@@ -26,6 +26,8 @@ import {
     GPU_LAYOUT_NODE_BYTES,
     GPU_LAYOUT_NODE_WORD,
     GPU_LAYOUT_TRIANGLE_BYTES,
+    GPU_LAYOUT_QUANTIZED_NODE_BYTES,
+    type GpuLayoutNodeFormat,
     type GpuLayoutTriangleLeaves,
 } from '../gpu-layout.ts';
 
@@ -36,6 +38,17 @@ import {
  * tracer without someone reviewing the walk.
  */
 export const TRACER_GPU_LAYOUT_VERSION = 2;
+
+/**
+ * How a scene stores its mesh nodes (docs/design/compressed-nodes.md):
+ * `'f32'` (the default, the 64-byte nodes below) or `'quantized'` (32-byte
+ * nodes on a per-mesh frame, `GpuLayoutNodeFormat`). The walk is compiled
+ * for one (`traceModuleWgsl({ nodeFormat })`); the top level is always `f32`.
+ */
+export type NodeFormat = GpuLayoutNodeFormat;
+/** One quantized node: 32 bytes, two `vec4u` (`GPU_LAYOUT_QUANTIZED_NODE_WORD`). The frame slot before a mesh's root is the same size. */
+export const QUANTIZED_NODE_BYTES = GPU_LAYOUT_QUANTIZED_NODE_BYTES;
+export const QUANTIZED_NODE_WORDS = QUANTIZED_NODE_BYTES / 4;
 
 /** One BVH node: two child boxes (Aila-Laine layout), 16 words. */
 export const BVH_NODE_BYTES = GPU_LAYOUT_NODE_BYTES;

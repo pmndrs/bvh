@@ -38,6 +38,7 @@ import { createRandom, randomAffine, randomRays, randomTriangleSoup, tessellated
 import { assembleTraceScene, buildTraceScene, type TraceSceneData, type TraceSceneInstance } from './scene-assembly.ts';
 import type { TraceRay } from './rays.ts';
 import type { TrianglePasses } from './triangle-filter.ts';
+import { batchKernelWgsl, traceModuleEntries, traceModuleWgsl } from './wgsl.ts';
 
 const tinyBvh = await createTinyBvhBuilder();
 const f32 = (geometry: MeshGeometry): MeshBvh => buildMeshBvhWithTinyBvh(geometry, tinyBvh);
@@ -62,6 +63,25 @@ function hardMeshes(): MeshGeometry[] {
         { positions: new Float32Array([-2, 5, 1e-30, 0.5, 5, 1e-30, 0, 6, -1e-30, 3, 3, 3, 3, 3, 3.5, 3.25, 3.5, 3]) },
     ];
 }
+
+describe('the quantized walk module', () => {
+    it('reads nodes as vec4u and the frame on instance entry, around the same walk with the same bindings', () => {
+        const f32Module = traceModuleWgsl();
+        const quantizedModule = traceModuleWgsl({ nodeFormat: 'quantized' });
+        expect(f32Module).toContain('var<storage, read> bvhTraceNodes: array<vec4f>;');
+        expect(quantizedModule).toContain('var<storage, read> bvhTraceNodes: array<vec4u>;');
+        expect(quantizedModule).toContain('var<private> bvhMeshFrameOrigin: vec3f;');
+        const walk = (module: string) => module.slice(module.indexOf('fn bvhWalkClosest('), module.indexOf('fn bvhTraceClosest('));
+        expect(walk(quantizedModule)).toBe(walk(f32Module));
+        expect(walk(f32Module)).toContain('node = bvhLoadMeshNode(instance.rootNodeOffset + index);');
+        expect(walk(f32Module)).toContain('bvhEnterMeshNodes(instance.rootNodeOffset);');
+        const both = traceModuleWgsl({ nodeFormat: 'quantized', triangleLeaves: 'indexed', positionLayout: 'packed', rayMasks: false });
+        expect(walk(both)).toBe(walk(traceModuleWgsl({ triangleLeaves: 'indexed', positionLayout: 'packed', rayMasks: false })));
+        expect(traceModuleEntries({ triangleLeaves: 'records' })).toHaveLength(3);
+        expect(batchKernelWgsl('closest', { nodeFormat: 'quantized' })).toContain('array<vec4u>;');
+        expect(() => traceModuleWgsl({ nodeFormat: 'f16' as never })).toThrow(RangeError);
+    });
+});
 
 describe('the frame', () => {
     it('is a power-of-two step and an origin on it, every plane an exact f32, the box within the span', () => {

@@ -14,7 +14,6 @@
 
 import type { Mat4 } from './top-level.ts';
 import {
-    BVH_NODE_BYTES,
     INDEXED_TRIANGLE_BYTES,
     INDEXED_TRIANGLE_WORDS,
     MESH_HEADER_WORD,
@@ -542,7 +541,10 @@ export async function buildTraceScene(
 
 /** What `GpuMeshRefit.setTree` needs for a scene mesh (from {@link meshRefitPlacement}). */
 export interface MeshRefitPlacement {
+    /** The mesh's root, in words (quantized scenes: its frame slot is the 8 words before). */
     readonly nodeWordOffset: number;
+    /** The scene's node format: `GpuMeshRefit` refits an `f32` copy and packs it into a quantized scene. */
+    readonly nodeFormat?: GpuLayoutNodeFormat;
     readonly triangleWordOffset: number;
     /** Indexed scenes: the mesh's first vertex in the scene's positions. */
     readonly vertexBase?: number;
@@ -565,7 +567,7 @@ export interface MeshRefitPlacement {
  * refit with `weld: false` (and no `weldTolerance`).
  */
 export function meshRefitPlacement(
-    scene: Pick<TraceSceneData, 'meshes'> & Partial<Pick<TraceSceneData, 'triangleLeaves' | 'positionLayout'>>,
+    scene: Pick<TraceSceneData, 'meshes'> & Partial<Pick<TraceSceneData, 'triangleLeaves' | 'positionLayout' | 'nodeFormat'>>,
     meshIndex: number,
 ): MeshRefitPlacement {
     const placement = scene.meshes[meshIndex];
@@ -577,8 +579,9 @@ export function meshRefitPlacement(
         );
     }
     if (placement.triangleCount === 0) throw new RangeError(`meshRefitPlacement: mesh ${meshIndex} has no tree in this scene`);
-    const nodeWordOffset = placement.nodeOffset * (BVH_NODE_BYTES / 4);
-    if (scene.triangleLeaves !== 'indexed') return { nodeWordOffset, triangleWordOffset: placement.triangleOffset * TRIANGLE_WORDS };
+    const nodeWordOffset = placement.nodeOffset * (gpuLayoutNodeBytes(scene.nodeFormat) / 4);
+    const nodes = scene.nodeFormat === 'quantized' ? { nodeFormat: 'quantized' as const } : {};
+    if (scene.triangleLeaves !== 'indexed') return { nodeWordOffset, ...nodes, triangleWordOffset: placement.triangleOffset * TRIANGLE_WORDS };
     if (placement.welded) {
         throw new RangeError(
             `meshRefitPlacement: mesh ${meshIndex} of this indexed scene was welded, so its vertex numbering is not the app's and a refit from the app's vertices would write the wrong vertices. ` +
@@ -590,6 +593,7 @@ export function meshRefitPlacement(
     }
     return {
         nodeWordOffset,
+        ...nodes,
         triangleWordOffset: placement.triangleOffset * INDEXED_TRIANGLE_WORDS,
         vertexBase: placement.vertexBase,
         vertexCount: placement.vertexCount,
