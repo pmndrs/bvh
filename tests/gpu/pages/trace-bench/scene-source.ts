@@ -1,58 +1,57 @@
 /**
- * Finds a benchmark scene's geometry: reads the scene manifest, downloads the
- * model file from `assets/downloads` (or the older `assets/downloads.bak`),
- * and returns meshes, instances, the probe volume and the sun direction.
+ * Finds a benchmark scene's geometry: reads the scene manifest and downloads the
+ * model file, both from outside this repository (the test server serves them from
+ * BVH_MANIFESTS_DIR and BVH_ASSETS_DIR; see tests/gpu/README.md), and returns
+ * meshes, instances, the probe volume and the sun direction.
  *
- * Browser only: it uses `fetch` against the test site's dev server, which can
- * serve any file inside the repo at `/@fs/<absolute path>`.
+ * Browser only: it uses `fetch` against the test site's server.
  */
 
-import type { ModelPart, SceneManifest } from '../../../../scenes/src/manifest.ts';
-import repositoryPackageUrl from '../../../../package.json?url';
+import { ASSETS_BASE, ASSETS_LIST, MANIFESTS_BASE } from '../../contract.ts';
+import type { ModelPart, SceneManifest } from '../../scene-manifest.ts';
 import { BENCH_SCENE_SUBSETS, FALLBACK_TOWARD_SUN } from './config.ts';
 import { fetchGltfGeometry, modelTransformMatrix, type BenchInstance, type BenchMeshGeometry } from './gltf-geometry.ts';
 import { normalizeVector, worldBounds, type Box, type Vec3 } from './rays.ts';
 
-/** Folders searched for downloaded models, in order. The first one that has the file wins. */
-const DOWNLOAD_FOLDERS = ['assets/downloads', 'assets/downloads.bak'];
+/** Folder under the assets directory that holds the downloaded models. */
+const DOWNLOAD_FOLDER = 'downloads';
 
-/** vite answers `?url` for a file outside its root with `/@fs/<absolute path>`, which tells us where the repo is. */
-const REPOSITORY_URL = repositoryPackageUrl.replace(/\/package\.json$/, '');
-
-const manifestModules = import.meta.glob('../../../../scenes/manifests/*.json', { eager: true, import: 'default' }) as Record<
-    string,
-    SceneManifest
->;
-
-export function findManifest(id: string): SceneManifest {
-    const manifest = Object.values(manifestModules).find((candidate) => candidate.id === id);
-    if (!manifest) {
-        const known = Object.values(manifestModules)
-            .map((candidate) => candidate.id)
-            .sort()
-            .join(', ');
-        throw new Error(`no scene manifest with id "${id}" (known: ${known})`);
-    }
-    return manifest;
+interface AssetListing {
+    assets: string[];
+    manifests: string[];
 }
 
 /**
- * Which model files exist, known without asking the server. Probing with
- * `fetch` would log a 404 for every folder that lacks the file, and the test
- * runner fails a page on any logged error. The glob is lazy and never loads
- * the files; only its keys (paths relative to this file) are used.
+ * Which files the server has, known without probing. Fetching a missing file would log a 404,
+ * and the test runner fails a page on any logged error.
  */
-const availableModelFiles = Object.keys(
-    import.meta.glob(['../../../../assets/downloads/**/*.{glb,gltf}', '../../../../assets/downloads.bak/**/*.{glb,gltf}']),
-).map((key) => key.replace(/^(\.\.\/)+/, ''));
+let listing: Promise<AssetListing> | null = null;
+function listAssets(): Promise<AssetListing> {
+    listing ??= fetch(ASSETS_LIST).then((response) => response.json() as Promise<AssetListing>);
+    return listing;
+}
 
-function findModelUrl(asset: string, path: string): string {
-    const tried = DOWNLOAD_FOLDERS.map((folder) => `${folder}/${asset}/${path}`);
-    const found = tried.find((candidate) => availableModelFiles.includes(candidate));
-    if (!found) {
-        throw new Error(`model file not found (looked in ${tried.join(', ')}). Run "pnpm assets:fetch --only ${asset}" first.`);
+export async function findManifest(id: string): Promise<SceneManifest> {
+    const { manifests } = await listAssets();
+    const file = `${id}.json`;
+    if (!manifests.includes(file)) {
+        throw new Error(
+            `no scene manifest "${file}" (known: ${manifests.map((name) => name.replace(/\.json$/, '')).sort().join(', ') || 'none'}). ` +
+                'Set BVH_MANIFESTS_DIR, see tests/gpu/README.md.',
+        );
     }
-    return `${REPOSITORY_URL}/${found}`;
+    const response = await fetch(`${MANIFESTS_BASE}${file}`);
+    if (!response.ok) throw new Error(`could not read manifest ${file}: HTTP ${response.status}`);
+    return (await response.json()) as SceneManifest;
+}
+
+async function findModelUrl(asset: string, path: string): Promise<string> {
+    const { assets } = await listAssets();
+    const file = `${DOWNLOAD_FOLDER}/${asset}/${path}`;
+    if (!assets.includes(file)) {
+        throw new Error(`model file not found (looked for ${file}). Set BVH_ASSETS_DIR, see tests/gpu/README.md.`);
+    }
+    return `${ASSETS_BASE}${file}`;
 }
 
 export interface BenchScene {
@@ -102,7 +101,7 @@ export function volumeBox(volume: SceneManifest['volume']): Box {
 export async function loadBenchScene(id: string, volume: 'manifest' | 'scene'): Promise<BenchScene> {
     const start = performance.now();
     const subset = BENCH_SCENE_SUBSETS[id];
-    const manifest = findManifest(subset?.manifest ?? id);
+    const manifest = await findManifest(subset?.manifest ?? id);
     const meshes: BenchMeshGeometry[] = [];
     const instances: BenchInstance[] = [];
     const modelFiles: string[] = [];
@@ -115,8 +114,8 @@ export async function loadBenchScene(id: string, volume: 'manifest' | 'scene'): 
     for (const part of parts) {
         if (part.kind !== 'model') throw new Error(`scene "${id}" has a procedural part; the benchmark only loads model files`);
         const modelPart: ModelPart = part;
-        const url = findModelUrl(modelPart.asset, modelPart.path);
-        modelFiles.push(url.slice(REPOSITORY_URL.length + 1));
+        const url = await findModelUrl(modelPart.asset, modelPart.path);
+        modelFiles.push(url.slice(ASSETS_BASE.length));
         const geometry = await fetchGltfGeometry(url, modelTransformMatrix(modelPart.transform));
         const meshOffset = meshes.length;
         meshes.push(...geometry.meshes);

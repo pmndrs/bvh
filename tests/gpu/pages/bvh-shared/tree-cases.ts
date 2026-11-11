@@ -5,7 +5,7 @@
  * GPU buffers (interleaved vertices; 16-bit indices at an odd offset).
  */
 
-import type { GpuMeshGeometry, MeshInput } from '../../../../packages/bvh/src/mesh-input.ts';
+import type { GpuMeshGeometry, MeshInput } from '../../../../src/mesh-input.ts';
 
 /** Deterministic random numbers in [0, 1). */
 export function randomSource(seed: number): () => number {

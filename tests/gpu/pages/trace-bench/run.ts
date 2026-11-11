@@ -1,6 +1,6 @@
 /**
  * The tracer benchmark (T0.10 parts B and C, T1.3): ours, on trees from two
- * builders and through the platform API, against three-mesh-bvh on
+ * builders, against three-mesh-bvh on
  * probe-style rays, per scene.
  *
  * Per scene, in order:
@@ -9,8 +9,7 @@
  *   3. generate the probe rays, trace them once to find the hits, and turn the
  *      hits into shadow rays toward the sun (the same rays go to every tracer);
  *   4. time ours-tinybvh (tinybvh's trees, our walk), then ours-tmbuild
- *      (three-mesh-bvh's trees in our layout, our walk), then platform (the
- *      same scene through createGI and its scene API), then three-mesh-bvh,
+ *      (three-mesh-bvh's trees in our layout, our walk), then three-mesh-bvh,
  *      each on closest and any;
  *   5. compare the closest hits between tracers.
  *
@@ -18,7 +17,7 @@
  * a scene's peak is one tracer's structures plus the rays.
  */
 
-import { createMeshBvhBuilder, type MeshBvhBuilder } from '../../../../packages/ddgi-core/src/platform/trace/index.ts';
+import { createMeshBvhBuilder, type MeshBvhBuilder } from '../../../../src/trace/index.ts';
 import type { AdapterSummary } from '../../contract.ts';
 import { drainDevice, reportGpuTest, summarizeAdapterInfo, watchDevice } from '../../client.ts';
 import {
@@ -34,7 +33,7 @@ import {
     type BenchProfileName,
 } from './config.ts';
 import { createDispatchTimer, type DispatchTimer } from './dispatch-timer.ts';
-import { GpuLbvhBuilder } from '../../../../packages/bvh/src/gpu-lbvh.ts';
+import { GpuLbvhBuilder } from '../../../../src/gpu-lbvh.ts';
 import {
     buildGpuScene,
     buildOursScene,
@@ -52,7 +51,6 @@ import { makeProbeGrid, makeProbeRays, makeShadowRays, makeSphereDirections, typ
 import type { AgreementResult, DeviceRecord, ModeResult, SceneResult, TraceBenchData } from './results.ts';
 import { loadBenchScene } from './scene-source.ts';
 import { compareBlocked, compareClosestDistances } from './statistics.ts';
-import { runPlatformTracer } from './platform-bench.ts';
 import { runSynthetic } from './synthetic.ts';
 import { createTmbvhRenderer, runTmbvh, TMBVH_TIMING_METHOD, type TmbvhRun } from './tmbvh-bench.ts';
 import type { WebGPURenderer } from 'three/webgpu';
@@ -304,24 +302,6 @@ async function runScene(context: BenchContext, sceneId: string): Promise<SceneRe
             await yieldToBrowser();
         }
 
-        // The same scene through the platform API (createGI, scene API, queries.rays).
-        if (config.tracers.includes('platform') && oursAvailable) {
-            try {
-                progress(`${sceneId}: describing the scene through the platform API`);
-                const run = await runPlatformTracer(device, context.timer, scene.meshes, scene.instances, oursRays, plan);
-                result.platform = run.build;
-                progress(
-                    `${sceneId}: platform ready in ${Math.round(run.build.readyMs)} ms; scene copy ${(run.build.bytesSceneCopy / 1e6).toFixed(1)} MB, ` +
-                        `acceleration ${(run.build.bytesAcceleration / 1e6).toFixed(1)} MB`,
-                );
-                finish('platform', run);
-            } catch (error) {
-                result.skipped.push(`platform: ${error instanceof Error ? error.message : String(error)}`);
-                progress(`${sceneId}: platform skipped (${error instanceof Error ? error.message : String(error)})`);
-            }
-            await yieldToBrowser();
-        }
-
         if (config.tracers.includes('tmbvh')) {
             try {
                 progress(`${sceneId}: three-mesh-bvh building (SAH, leaf ${config.tmbvhLeafSize})`);
@@ -357,7 +337,6 @@ async function runScene(context: BenchContext, sceneId: string): Promise<SceneRe
         ['ours-tinybvh', 'tmbvh'],
         ['ours-tinybvh', 'ours-tmbuild'],
         ['ours-tmbuild', 'tmbvh'],
-        ['ours-tinybvh', 'platform'],
         ['ours-tinybvh', 'ours-lbvh'],
         ['ours-tinybvh', 'ours-hploc'],
     ];

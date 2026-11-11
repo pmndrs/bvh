@@ -31,18 +31,17 @@ export const SYNTHETIC_INSTANCE_COUNT = 10_000;
  * - `ours-tinybvh`: tinybvh (WASM, in our worker) builds each mesh's tree, traced by our watertight walk.
  *   Our own SAH mesh builder (`ours-wt` in rows before T1.3) was deleted once B0's checks passed.
  * - `ours-tmbuild`: three-mesh-bvh builds each mesh's tree, converted to our layout, traced by our watertight walk.
- * - `platform`: the same as `ours-tinybvh`, but through the platform API (`createGI`, its scene API, `queries.rays`).
  * - `tmbvh`: three-mesh-bvh's own trees and its own WebGPU walk.
  * - `ours-lbvh`: the GPU LBVH (B1, `@pmndrs/bvh`) builds every mesh's tree on the GPU in one batch, timed
  *   with GPU timestamps; the trees are read back and traced by our watertight walk. Needs subgroups.
  * - `ours-hploc`: the same with the GPU H-PLOC (B2). Also builds the scene once more with tinybvh's
  *   codes, tie rule and one-triangle leaves, and compares its SAH cost with tinybvh's `BuildHPLOC`.
  */
-export const TRACER_IDS = ['ours-tinybvh', 'ours-tmbuild', 'platform', 'tmbvh', 'ours-lbvh', 'ours-hploc'] as const;
+export const TRACER_IDS = ['ours-tinybvh', 'ours-tmbuild', 'tmbvh', 'ours-lbvh', 'ours-hploc'] as const;
 export type TracerId = (typeof TRACER_IDS)[number];
 
 /** What runs when the URL names no tracer. `ours-lbvh` and `ours-hploc` are asked for by their own pages (trace-bench-lbvh*, trace-bench-hploc*). */
-export const DEFAULT_TRACER_IDS: readonly TracerId[] = ['ours-tinybvh', 'ours-tmbuild', 'platform', 'tmbvh'];
+export const DEFAULT_TRACER_IDS: readonly TracerId[] = ['ours-tinybvh', 'ours-tmbuild', 'tmbvh'];
 
 /** GPU builds (LBVH, H-PLOC) timed per scene after one warm-up (median, fastest and slowest are reported). */
 export const GPU_BUILD_TIMED_RUNS = 5;

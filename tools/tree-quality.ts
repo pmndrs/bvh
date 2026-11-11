@@ -16,10 +16,10 @@
  * Sponza, most of it tinybvh's scalar `BuildHPLOC`.
  */
 
-import { treeSahCost } from '../../packages/bvh/src/layout-check.ts';
-import { buildHplocOnCpu } from '../../packages/bvh/src/hploc-cpu.ts';
-import { buildLbvhOnCpu } from '../../packages/bvh/src/lbvh-cpu.ts';
-import { createTinyBvhBuilder, type GpuLayoutMeshBvh, type TinyBvhBuilder, type MeshInput } from '../../packages/bvh/src/index.ts';
+import { treeSahCost } from '../src/layout-check.ts';
+import { buildHplocOnCpu } from '../src/hploc-cpu.ts';
+import { buildLbvhOnCpu } from '../src/lbvh-cpu.ts';
+import { createTinyBvhBuilder, type GpuLayoutMeshBvh, type TinyBvhBuilder, type MeshInput } from '../src/index.ts';
 import { readSceneMeshes } from './scene-meshes.ts';
 
 interface Builder {

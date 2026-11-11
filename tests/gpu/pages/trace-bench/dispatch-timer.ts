@@ -1,9 +1,8 @@
 /**
  * Times one compute dispatch on the GPU.
  *
- * Preferred: timestamp queries around the dispatch's own pass, through the
- * platform `GpuTimer` in strict mode (a missing or failed timer throws instead
- * of silently leaving a dispatch untimed). Without the `timestamp-query`
+ * Preferred: timestamp queries around the dispatch's own pass (a failed
+ * query throws instead of silently leaving a dispatch untimed). Without the `timestamp-query`
  * feature the fallback is wall time from submit to "queue drained", labelled
  * as such in the results.
  *
@@ -11,7 +10,6 @@
  * before the next starts, so no two timed passes overlap on the GPU.
  */
 
-import { GpuTimer } from '../../../../packages/ddgi-core/src/platform/timing/index.ts';
 import { median } from './statistics.ts';
 import type { TimingSource, TimingSummary } from './results.ts';
 
@@ -30,26 +28,29 @@ const PASS_NAME = 'trace-bench/dispatch';
 export async function createDispatchTimer(device: GPUDevice): Promise<DispatchTimer> {
     if (!device.features.has('timestamp-query')) return createWallClockTimer(device);
 
-    const timer = new GpuTimer(device, { strict: true, slotCount: 2, maxPassesPerFrame: 1 });
-    await timer.ready;
-    if (timer.status !== 'ready') throw new Error(`GPU timer is ${timer.status}, so the benchmark cannot time on the GPU`);
+    const querySet = device.createQuerySet({ type: 'timestamp', count: 2, label: 'trace-bench timestamps' });
+    const resolveBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+    const readBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const timestampWrites: GPUComputePassTimestampWrites = { querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 };
 
     return {
         source: 'timestamp-query',
         async time(encode) {
-            await timer.waitForFreeSlot();
-            timer.beginFrame();
             const encoder = device.createCommandEncoder({ label: 'trace-bench dispatch' });
-            encode(encoder, timer.computePass(PASS_NAME));
-            timer.resolve(encoder);
+            encode(encoder, timestampWrites);
+            encoder.resolveQuerySet(querySet, 0, 2, resolveBuffer, 0);
+            encoder.copyBufferToBuffer(resolveBuffer, 0, readBuffer, 0, 16);
             device.queue.submit([encoder.finish()]);
-            timer.readback();
-            await timer.drain();
-            const passes = timer.takeSamples().flatMap((sample) => sample.passes.filter((pass) => pass.name === PASS_NAME));
-            if (passes.length !== 1) throw new Error(`expected one timed pass, the GPU timer returned ${passes.length}`);
-            return passes[0].gpuMs;
+            await readBuffer.mapAsync(GPUMapMode.READ);
+            const [begin, end] = new BigUint64Array(readBuffer.getMappedRange().slice(0));
+            readBuffer.unmap();
+            return Number(end - begin) / 1e6;
         },
-        dispose: () => timer.dispose(),
+        dispose() {
+            querySet.destroy();
+            resolveBuffer.destroy();
+            readBuffer.destroy();
+        },
     };
 }
 

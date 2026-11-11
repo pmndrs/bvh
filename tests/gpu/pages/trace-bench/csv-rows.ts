@@ -153,16 +153,6 @@ function sceneRows(result: SceneResult): MetricRow[] {
             );
         }
     }
-    const platform = result.platform;
-    if (platform) {
-        rows.push(
-            { scene, metric: 'platform/describe_ms', value: platform.describeMs },
-            { scene, metric: 'platform/ready_ms', value: platform.readyMs },
-            { scene, metric: 'platform/memory_bytes_scene_copy', value: platform.bytesSceneCopy },
-            { scene, metric: 'platform/memory_bytes_acceleration', value: platform.bytesAcceleration },
-            { scene, metric: 'platform/memory_bytes_triangles', value: platform.bytesTriangles },
-        );
-    }
     const tmbvh = result.tmbvh;
     if (tmbvh) {
         rows.push(

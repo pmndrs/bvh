@@ -10,11 +10,11 @@
  * - the trees it builds pass the layout checker.
  */
 
-import { GpuHplocBuilder } from '../../../../packages/bvh/src/gpu-hploc.ts';
-import { GpuLbvhBuilder } from '../../../../packages/bvh/src/gpu-lbvh.ts';
-import { GpuMeshRefit } from '../../../../packages/bvh/src/gpu-mesh-refit.ts';
-import { checkGpuLayout } from '../../../../packages/bvh/src/layout-check.ts';
-import { createMeshLayoutBuilder } from '../../../../packages/bvh/src/mesh-builder.ts';
+import { GpuHplocBuilder } from '../../../../src/gpu-hploc.ts';
+import { GpuLbvhBuilder } from '../../../../src/gpu-lbvh.ts';
+import { GpuMeshRefit } from '../../../../src/gpu-mesh-refit.ts';
+import { checkGpuLayout } from '../../../../src/layout-check.ts';
+import { createMeshLayoutBuilder } from '../../../../src/mesh-builder.ts';
 import { assert, runGpuTest } from '../../client.ts';
 
 function randomSoup(count: number, seed: number): Float32Array {

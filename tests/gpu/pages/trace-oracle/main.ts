@@ -6,27 +6,12 @@
  * thin box no interior ray may escape, random scenes, and about two million
  * rays aimed at the seams of a tessellated quad (they must not slip through).
  * Everything runs once per variant (see VARIANTS), always with the watertight
- * test of Woop et al. (the tracer's only triangle test):
- * - `platform`: through the platform object (T1.3): the scene API, `prepare`,
- *   frames, then the `rays` backend's `encodeBatch`. Hits report scene-copy
- *   instance slots, which the page maps back to the case's instance indices.
- *   The page reaches platform internals directly (it constructs
- *   `GIPlatformImpl` for `rays.whenBuilt()` and `sceneCopy.instanceSlot()`);
- *   inline tracing from a technique's own kernel, the way DDGI traces, is
- *   checked by `trace-inline`. It traces once every tinybvh tree from the
- *   worker is in (M1's trees, after any GPU first trees were swapped out).
- *   Three more variants check the first trees from the GPU (T2.12), which
- *   need subgroups (skipped without):
- *   - `platform-gpu-trees`: every mesh on its GPU (H-PLOC) tree, copied into
- *     the tracer's buffers, tinybvh's held back;
- *   - `platform-mid-swap`: tinybvh's trees swapped in for every other mesh
- *     only (some meshes on GPU trees, some on tinybvh's);
- *   - `platform-refused`: GPU trees deeper than 3 levels refused, so those
- *     meshes wait for tinybvh's while the rest keep their GPU trees;
+ * test of Woop et al. (the tracer's only triangle test). The ddgi platform's own
+ * variants (`platform*`: scene API, first GPU trees, mid-swap) stayed in webgpu-ddgi:
  * - `watertight-tinybvh`: the same trees assembled and traced directly;
  * - `watertight-tmbuild`: trees built by three-mesh-bvh and converted;
  * - `watertight-lbvh`: trees built on the GPU by the LBVH builder (B1,
- *   `@pmndrs/bvh`'s `createMeshLayoutBuilder`), read back and assembled the
+ *   `createMeshLayoutBuilder`), read back and assembled the
  *   same way. It runs only when the device has subgroups; without them the
  *   builder would fall back to tinybvh, which the variants above already cover;
  * - `watertight-hploc`: the same with the GPU H-PLOC builder (B2).
@@ -42,19 +27,14 @@ import {
     createMeshBvhBuilder,
     HIT_RECORD_BYTES,
     newTraceStats,
-    RAY_BYTES,
     TRACE_MODULE_ENTRIES,
-    TraceBatchKernel,
-    uploadTraceScene,
     type MeshBvhBuilder,
     type TraceSceneData,
-} from '../../../../packages/ddgi-core/src/platform/trace/index.ts';
-import { type TracedHit } from '../../../../packages/bvh/src/trace/oracle-compare.ts';
-import { createMeshLayoutBuilder, createTinyBvhBuilder, type MeshLayoutBuilder } from '../../../../packages/bvh/src/index.ts';
-import type { FrameInput } from '../../../../packages/ddgi-core/src/platform/contract/frame.ts';
-import { GIPlatformImpl } from '../../../../packages/ddgi-core/src/platform/gi-platform.ts';
-import type { MeshTreeCounts } from '../../../../packages/ddgi-core/src/platform/trace/ray-queries.ts';
-import { buildMeshBvhWithTinyBvh } from '../../../../packages/bvh/src/trace/mesh-bvh-topology.ts';
+} from '../../../../src/trace/index.ts';
+import { type TracedHit } from '../../../../src/trace/oracle-compare.ts';
+import { createMeshLayoutBuilder, createTinyBvhBuilder, type MeshLayoutBuilder } from '../../../../src/index.ts';
+import { buildMeshBvhWithTinyBvh } from '../../../../src/trace/mesh-bvh-topology.ts';
+import { RAY_BYTES, TraceBatchKernel, uploadTraceScene } from '../../trace-gpu.ts';
 import { assert, runGpuTest } from '../../client.ts';
 import {
     buildOracleCases,
@@ -64,7 +44,6 @@ import {
     type OracleCase,
     type SharedEdgeCase,
 } from './cases.ts';
-import { IDENTITY_MATRIX } from '../trace-bench/gltf-geometry.ts';
 import { buildMeshBvhWithTmbvh } from '../trace-bench/tmbvh-convert.ts';
 import {
     computeReferenceAnswersYielding,
@@ -77,37 +56,22 @@ import {
 } from './check.ts';
 
 /**
- * What each pass of the oracle traces: the triangle test, and who built the
- * per-mesh trees. `three-mesh-bvh` trees are built by that library and
- * converted to our layout (../trace-bench/tmbvh-convert.ts), the T0.10 part C
- * experiment; they are traced by the same WGSL walk.
+ * What each pass of the oracle traces: who built the per-mesh trees. `three-mesh-bvh`
+ * trees are built by that library and converted to our layout
+ * (../trace-bench/tmbvh-convert.ts), the T0.10 part C experiment; they are traced by
+ * the same WGSL walk.
  */
 interface OracleVariant {
     name: string;
-    treeSource: 'platform' | 'tinybvh' | 'three-mesh-bvh' | 'gpu-lbvh' | 'gpu-hploc';
-    /** For `platform`: which trees the platform's meshes are on when the rays are traced (T2.12). Default `refined`. */
-    platformTrees?: PlatformTrees;
+    treeSource: 'tinybvh' | 'three-mesh-bvh' | 'gpu-lbvh' | 'gpu-hploc';
 }
 
-/** The states of the platform's mesh trees the oracle checks (see the file comment). */
-type PlatformTrees = 'refined' | 'gpu' | 'mid-swap' | 'refused';
-
-/** `platform-refused` refuses GPU trees deeper than this, so the oracle's bigger meshes wait for tinybvh. */
-const REFUSED_DEPTH = 3;
-
 const VARIANTS: OracleVariant[] = [
-    { name: 'platform', treeSource: 'platform', platformTrees: 'refined' },
-    { name: 'platform-gpu-trees', treeSource: 'platform', platformTrees: 'gpu' },
-    { name: 'platform-mid-swap', treeSource: 'platform', platformTrees: 'mid-swap' },
-    { name: 'platform-refused', treeSource: 'platform', platformTrees: 'refused' },
     { name: 'watertight-tinybvh', treeSource: 'tinybvh' },
     { name: 'watertight-tmbuild', treeSource: 'three-mesh-bvh' },
     { name: 'watertight-lbvh', treeSource: 'gpu-lbvh' },
     { name: 'watertight-hploc', treeSource: 'gpu-hploc' },
 ];
-
-/** Each platform variant's mesh tree counts per case, for the report. */
-const platformTreeLog: Record<string, Record<string, MeshTreeCounts>> = {};
 
 /** The GPU builders (B1 LBVH, B2 H-PLOC), made once the device is known. */
 const gpuBuilders = new Map<'gpu-lbvh' | 'gpu-hploc', MeshLayoutBuilder>();
@@ -148,7 +112,7 @@ async function readBuffer(device: GPUDevice, source: GPUBuffer, byteLength: numb
     return copy;
 }
 
-/** Records one batch: the low-level kernel or the platform's `encodeBatch`. */
+/** Records one batch of rays into the encoder. */
 type EncodeBatch = (encoder: GPUCommandEncoder, batch: { mode: 'closest' | 'any'; rays: GPUBuffer; results: GPUBuffer; count: number }) => void;
 
 /** Traces the packed rays on the GPU in both modes and reads the results back. */
@@ -239,97 +203,6 @@ function probeStackDepth(scene: TraceSceneData, oracleCase: OracleCase): number 
     return stats.maxStackSize;
 }
 
-/** A frame with no technique work: the platform only uploads the scene and places trees. */
-const IDLE_FRAME: FrameInput = {
-    deltaTime: 0,
-    budget: { units: 0 },
-    camera: { position: [0, 0, 0], view: IDENTITY_MATRIX, projection: IDENTITY_MATRIX, near: 0.1, far: 100 },
-};
-
-/**
- * Traces a case through the platform object: the scene API, `prepare`, frames
- * until the mesh trees are in the state `trees` asks for (see the file
- * comment), then the `rays` backend's `encodeBatch`. Uses internals a host
- * doesn't have: `rays.whenBuilt()`, `rays.whenRefined()`,
- * `rays.releaseRefinements()`, `rays.meshTreeCounts` and
- * `sceneCopy.instanceSlot()`. Hits report scene-copy instance slots; they
- * are mapped back to the case's own instance indices for the checks.
- */
-async function traceThroughPlatform(device: GPUDevice, oracleCase: OracleCase, trees: PlatformTrees, treeLog: Record<string, MeshTreeCounts>): Promise<GpuAnswers> {
-    const platform = new GIPlatformImpl(device, {
-        label: `oracle ${oracleCase.name}`,
-        rayBatches: true,
-        meshTrees: trees === 'refined' ? {} : { holdRefinements: true, gpuMaxDepth: trees === 'refused' ? REFUSED_DEPTH : undefined },
-    });
-    try {
-        const material = platform.scene.createMaterial({ albedo: [1, 1, 1] });
-        const meshes = oracleCase.meshes.map((mesh) =>
-            platform.scene.createMesh({
-                positions: mesh.positions,
-                indices: mesh.indices ?? Uint32Array.from({ length: mesh.positions.length / 3 }, (_, index) => index),
-            }),
-        );
-        const caseIndexBySlot = new Map<number, number>();
-        for (const instance of oracleCase.instances) {
-            const handle = platform.scene.createInstance({
-                mesh: meshes[instance.meshIndex],
-                materials: [material],
-                transform: instance.objectToWorld,
-                visible: instance.visible,
-                contributesToGI: instance.contributesToGi,
-            });
-            caseIndexBySlot.set(platform.sceneCopy.instanceSlot(handle), instance.instanceIndex);
-        }
-        await platform.prepare();
-        const frame = (): void => {
-            const encoder = device.createCommandEncoder({ label: 'oracle platform frame' });
-            platform.encode(encoder, IDLE_FRAME);
-            device.queue.submit([encoder.finish()]);
-        };
-        frame(); // uploads the scene; the GPU and the worker start building
-        // Every tinybvh tree built, so each state below is reached for sure (held ones wait for a release).
-        await platform.rays.whenRefined();
-        frame(); // places the trees and builds the top level
-        await platform.rays.whenBuilt();
-        frame(); // places the top level's shape if it came after the trees
-        if (trees === 'mid-swap') {
-            // Every other mesh slot takes tinybvh's tree; the rest keep the GPU's.
-            platform.rays.releaseRefinements((slot) => slot % 2 === 1);
-            frame();
-        }
-        assert(!platform.rays.building, 'the platform still reports trees building');
-        const counts = platform.rays.meshTreeCounts;
-        treeLog[oracleCase.name] = counts;
-        const meshCount = oracleCase.meshes.length;
-        assert(counts.onGpuTrees + counts.onTinybvhTrees === meshCount, `${oracleCase.name}: ${counts.onGpuTrees} + ${counts.onTinybvhTrees} meshes have trees, not ${meshCount}`);
-        if (trees === 'refined') assert(counts.onGpuTrees === 0, `${oracleCase.name}: ${counts.onGpuTrees} meshes are still on GPU trees after every tinybvh tree arrived`);
-        if (trees === 'gpu') assert(counts.onGpuTrees === meshCount, `${oracleCase.name}: only ${counts.onGpuTrees} of ${meshCount} meshes are on GPU trees`);
-        if (trees === 'mid-swap') {
-            assert(counts.onGpuTrees === Math.ceil(meshCount / 2), `${oracleCase.name}: ${counts.onGpuTrees} of ${meshCount} meshes are on GPU trees mid-swap`);
-        }
-        if (trees === 'refused') {
-            assert(counts.onTinybvhTrees === counts.gpuTreesRefused, `${oracleCase.name}: ${counts.gpuTreesRefused} GPU trees were refused but ${counts.onTinybvhTrees} meshes are on tinybvh trees`);
-        }
-
-        const answers = await traceOnGpu(device, (encoder, batch) => {
-            platform.rays.encodeBatch(encoder, { mode: batch.mode, rays: batch.rays, hits: batch.results, count: batch.count });
-        }, oracleCase.rays);
-        // GiHit.instance is the scene-copy slot; the checks know the case's instance indices.
-        for (let ray = 0; ray < answers.blocked.length; ray++) {
-            const base = ray * HIT_RECORD_WORDS;
-            if (!(answers.closest[base] >= 0)) continue;
-            const caseIndex = caseIndexBySlot.get(answers.closestWords[base + 1]);
-            answers.closestWords[base + 1] = caseIndex ?? UNKNOWN_SLOT;
-        }
-        return answers;
-    } finally {
-        platform.dispose();
-    }
-}
-
-/** Reported for a hit on a slot that holds none of the case's instances, so the checks fail it. */
-const UNKNOWN_SLOT = 0xffffffff;
-
 /** Traces a case in a variant and returns the answers plus the trees (for the stack and size report). */
 async function traceCase(
     device: GPUDevice,
@@ -339,10 +212,6 @@ async function traceCase(
     variant: OracleVariant,
 ): Promise<{ answers: GpuAnswers; built: BuiltScene }> {
     const built = await buildScene(builder, oracleCase, variant);
-    if (variant.treeSource === 'platform') {
-        const treeLog = (platformTreeLog[variant.name] ??= {});
-        return { answers: await traceThroughPlatform(device, oracleCase, variant.platformTrees ?? 'refined', treeLog), built };
-    }
     const buffers = uploadTraceScene(device, built.data, oracleCase.name);
     try {
         return { answers: await traceOnGpu(device, (encoder, batch) => kernel.encode(encoder, buffers, batch), oracleCase.rays), built };
@@ -426,12 +295,6 @@ await runGpuTest(async ({ device, log }) => {
             log(`[${variant.name}] skipped: ${gpuBuilder.fallbackReason}`);
             continue;
         }
-        // The platform builds first trees on the GPU only with subgroups (T2.12).
-        if (variant.treeSource === 'platform' && variant.platformTrees !== 'refined' && !device.features.has('subgroups')) {
-            skipped.push(`${variant.name}: the device has no "subgroups" feature, so the platform builds no GPU trees`);
-            log(`[${variant.name}] skipped: no subgroups`);
-            continue;
-        }
         const kernel = await TraceBatchKernel.create(device);
         const results = { cases: {} as Record<string, unknown>, sharedEdges: [] as SharedEdgeReport[] };
         byTest[variant.name] = results;
@@ -472,16 +335,8 @@ await runGpuTest(async ({ device, log }) => {
         if (!byTest[variant.name]) continue;
         slippedTotals[variant.name] = byTest[variant.name].sharedEdges.reduce((sum, report) => sum + report.slipped, 0);
     }
-    // platform-refused must have refused some GPU trees, and kept others, somewhere in the cases.
-    const refusedLog = platformTreeLog['platform-refused'];
-    if (refusedLog) {
-        const counts = Object.values(refusedLog);
-        assert(counts.some((count) => count.gpuTreesRefused > 0), 'platform-refused: no GPU tree was refused');
-        assert(counts.some((count) => count.onGpuTrees > 0), 'platform-refused: every GPU tree was refused');
-    }
     return {
         skipped,
-        platformMeshTrees: platformTreeLog,
         sharedEdgeRaysPerTest: byTest[VARIANTS[0].name].sharedEdges.reduce((sum, report) => sum + report.rays, 0),
         slippedTotals,
         byTest,
@@ -493,6 +348,6 @@ await runGpuTest(async ({ device, log }) => {
         deepestStackRequired: deepestRequired,
     };
 }, {
-    // As a host asking optionalFeatures(adapter): the platform then keeps its top level on the GPU (B1a).
+    // The GPU builders need subgroups; without it their variants are skipped.
     optionalFeatures: ['subgroups'],
 });
