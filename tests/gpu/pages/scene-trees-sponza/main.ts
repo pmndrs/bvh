@@ -1,12 +1,17 @@
 /**
  * SceneTrees on Intel Sponza (manual): memory and timing of the load, for P9.
  *
- * Variants (`?variants=copy,adopt,copy-merged`, the default):
+ * Variants (`?variants=...`; the default runs all seven below). Every variant
+ * but the capped ones sets `gpuMaxBatchBytes: Infinity` (no cap, one batch):
  *
- * - `copy`: `gpuTreeOutputs: 'copy'` (the default, ddgi's path);
+ * - `copy`: `gpuTreeOutputs: 'copy'` (ddgi's path);
  * - `adopt`: the load batch's outputs become the scene's buffers (no copy;
  *   each GPU tree's range freed at its swap);
- * - `copy-merged`: `copy` with `mergeStaticInstances` (every instance static).
+ * - `copy-merged`: `copy` with `mergeStaticInstances` (every instance static);
+ * - `copy-default`: `copy` with `gpuMaxBatchBytes` left out (256 MiB);
+ * - `copy-cap512`, `copy-cap256`, `copy-cap128` (any `-cap<MB>` suffix):
+ *   `gpuMaxBatchBytes` of that many MiB, the build-peak lever (several
+ *   batches one after another on one scratch pool).
  *
  * Each loads the scene with `holdRefinements`, so the GPU trees are in use on
  * their own first, then releases tinybvh's trees. Recorded, from the first update:
@@ -14,14 +19,21 @@
  * - `firstTreesMs`: every mesh on a GPU tree (placed by an update);
  * - `tinybvhBuiltMs`: every tinybvh tree built (in the worker pool);
  * - memory with the GPU trees in use (`gpuTreesTotal`), the peak over the
- *   load (`peak`), and settled after every swap and one more update (`settled`).
+ *   load (`peak`), and settled after every swap and one more update (`settled`);
+ * - `gpuBatches` and `gpuBuildMs`: the GPU batches and the sum of their times
+ *   from submit to stats (the build plus the readback's latency).
  *
  * Correctness gate, not timing: in the GPU-tree state and settled, the GPU
  * walk must give the hits of the CPU walk over the scene assembled on the
- * CPU from tinybvh trees (20,000 rays from inside the scene's box).
+ * CPU from tinybvh trees (20,000 rays from inside the scene's box). Memory
+ * gate for capped variants: the peak stays under the storage (as the GPU
+ * trees left it) plus one batch (the scratch pool and the largest batch's
+ * outputs), with 5% tolerance.
  */
 
-import { SceneTrees, type SceneTreesMemory } from '../../../../src/scene/scene-trees.ts';
+import { DEFAULT_GPU_MAX_BATCH_BYTES, SceneTrees, type SceneTreesMemory } from '../../../../src/scene/scene-trees.ts';
+import { hplocBatchBytes, hplocScratchPoolBytes, planGpuHplocBatches } from '../../../../src/gpu-hploc.ts';
+import { geometryTotals } from '../../../../src/gpu-lbvh.ts';
 import { createBvhWorkerPool, defaultWorkerPoolSize } from '../../../../src/worker/pool.ts';
 import { assembleTraceScene, type TraceSceneData } from '../../../../src/trace/scene-assembly.ts';
 import { buildMeshBvhWithTinyBvh } from '../../../../src/trace/mesh-bvh-topology.ts';
@@ -55,7 +67,7 @@ try {
     adapter = requested.adapter;
     const device = requested.device;
     deviceErrors = watchDevice(device);
-    const variants = (new URLSearchParams(location.search).get('variants') ?? 'copy,adopt,copy-merged').split(',');
+    const variants = (new URLSearchParams(location.search).get('variants') ?? 'copy,adopt,copy-merged,copy-default,copy-cap512,copy-cap256,copy-cap128').split(',');
     const scene = await loadBenchScene('sponza', 'scene');
     log(`sponza: ${scene.meshes.length} meshes, ${scene.instances.length} instances, ${scene.uniqueTriangles} triangles (load ${Math.round(scene.loadMs)} ms)`);
     const kernel = await TraceBatchKernel.create(device);
@@ -73,14 +85,40 @@ try {
     reference = null;
 
     const results: Record<string, unknown> = { meshes: scene.meshes.length, instances: scene.instances.length, triangles: scene.uniqueTriangles, workers: defaultWorkerPoolSize() };
+    // The prediction from the code (hplocBatchBytes): every buffer of one uncapped batch, and per cap the batches and the pool.
+    const whole = hplocBatchBytes(geometryTotals(scene.meshes));
+    const triangles = geometryTotals(scene.meshes).triangles;
+    results.predicted = {
+        triangles,
+        batchMB: mb(whole.total),
+        scratchMB: mb(whole.scratch),
+        outputsMB: mb(whole.outputs),
+        bytesPerTriangle: Object.fromEntries(Object.entries<number>(whole.buffers).map(([name, bytes]) => [name, Math.round((bytes / triangles) * 100) / 100])),
+        capped: Object.fromEntries(
+            [512, 256, 128].map((capMB) => {
+                const plan = planGpuHplocBatches(device, scene.meshes, { maxBatchBytes: capMB * MB });
+                const groups = plan.batches.map((batch) => batch.map((index) => scene.meshes[index]));
+                const pool = Object.values<number>(hplocScratchPoolBytes(groups)).reduce((sum, bytes) => sum + bytes, 0);
+                const largestOutputs = Math.max(...groups.map((group) => hplocBatchBytes(geometryTotals(group)).outputs));
+                const largestBatch = Math.max(...groups.map((group) => hplocBatchBytes(geometryTotals(group)).total));
+                return [capMB, { batches: plan.batches.length, largestBatchMB: mb(largestBatch), poolMB: mb(pool), poolPlusOutputsMB: mb(pool + largestOutputs) }];
+            }),
+        ),
+    };
+    log(`predicted one batch: ${mb(whole.total)} MB (${mb(whole.scratch)} scratch and inputs, ${mb(whole.outputs)} outputs) for ${triangles} triangles`);
     const failures: string[] = [];
-    for (const variant of variants) {
+    // A first load (`warmup`, `copy`, not reported) compiles every pipeline, so no variant's times include it.
+    for (const variant of ['warmup', ...variants]) {
         const pool = createBvhWorkerPool();
+        // `-cap<MB>` sets a cap, `-default` leaves it out (256 MiB), and the rest turn it off (Infinity: one batch).
+        const isDefault = variant.endsWith('-default');
+        const capMB = isDefault ? String(DEFAULT_GPU_MAX_BATCH_BYTES / MB) : /-cap(\d+)/.exec(variant)?.[1];
         const trees = await SceneTrees.create(device, {
+            gpuMaxBatchBytes: isDefault ? undefined : capMB ? Number(capMB) * MB : Infinity,
             label: `sponza ${variant}`,
             holdRefinements: true,
             gpuTreeOutputs: variant.startsWith('adopt') ? 'adopt' : 'copy',
-            mergeStaticInstances: variant.endsWith('merged'),
+            mergeStaticInstances: variant.includes('merged'),
             workers: pool,
         });
         const meshes = scene.meshes.map((mesh) => trees.addMesh(mesh));
@@ -126,8 +164,23 @@ try {
         frame();
         const settled = trees.memory;
         const settledWrong = await check('settled');
-        results[variant] = {
+        // The lever's promise: the peak is the storage plus one batch (the scratch pool and one batch's outputs), not more.
+        let peakBoundMB: number | null = null;
+        if (capMB) {
+            const plan = planGpuHplocBatches(device, scene.meshes, { maxBatchBytes: Number(capMB) * MB });
+            const groups = plan.batches.map((batch) => batch.map((index) => scene.meshes[index]));
+            const pool = Object.values<number>(hplocScratchPoolBytes(groups)).reduce((sum, bytes) => sum + bytes, 0);
+            const largestOutputs = Math.max(...groups.map((group) => hplocBatchBytes(geometryTotals(group)).outputs));
+            // Storage as the GPU trees left it (with its reservation), plus 5% for retired buffers and rounding.
+            const bound = (gpuTreesMemory.resident + pool + largestOutputs) * 1.05;
+            peakBoundMB = mb(bound);
+            if (settled.peak > bound) failures.push(`${variant}: peak ${mb(settled.peak)} MB is over the storage plus one batch (${mb(bound)} MB with 5% tolerance)`);
+        }
+        if (variant !== 'warmup') results[variant] = {
+            capMB: capMB ? Number(capMB) : null,
             firstTreesMs: Math.round(trees.timeline.firstTreesMs ?? -1),
+            gpuBatches: counts.gpuBatches,
+            gpuBuildMs: Math.round(counts.gpuBuildMs),
             tinybvhBuiltMs: Math.round(refinedAt ?? -1),
             gpuTreesOnFirst: counts.onGpuTrees,
             tinybvhOnFirst: counts.onTinybvhTrees,
@@ -135,9 +188,10 @@ try {
             gpuTreesState: summary(gpuTreesMemory),
             settled: summary(settled),
             peakMB: mb(settled.peak),
+            peakBoundMB,
             disagreements: { gpuTrees: gpuWrong, settled: settledWrong },
         };
-        log(`${variant}: first trees ${Math.round(trees.timeline.firstTreesMs ?? -1)} ms, tinybvh built ${Math.round(refinedAt ?? -1)} ms, GPU-tree state ${mb(gpuTreesMemory.total)} MB, peak ${mb(settled.peak)} MB, settled ${mb(settled.total)} MB`);
+        log(`${variant}: first trees ${Math.round(trees.timeline.firstTreesMs ?? -1)} ms, ${counts.gpuBatches} GPU batches ${Math.round(counts.gpuBuildMs)} ms, tinybvh built ${Math.round(refinedAt ?? -1)} ms, GPU-tree state ${mb(gpuTreesMemory.total)} MB, peak ${mb(settled.peak)} MB, settled ${mb(settled.total)} MB`);
         trees.dispose();
         pool.dispose();
         await device.queue.onSubmittedWorkDone();

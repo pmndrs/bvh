@@ -163,6 +163,14 @@ Bistro exterior (2,829,226 triangles): H-PLOC 66.0 + 367.4 + 312.9 = 746.3 MiB; 
 
 This Mac's adapter limits let one batch hold all of Sponza (the page's one-batch peak shows it). The floor is the outputs themselves (635.5 MiB), which `adopt` turns into the scene's storage (no copy), at the cost of the node slack above.
 
+**The lever, measured** (`gpuMaxBatchBytes`, **256 MiB by default** in `SceneTrees`, `Infinity` for none; `maxBatchBytes` on the standalone builders, no cap unless given; [bvh-builders.md, "Build peak memory"](bvh-builders.md#build-peak-memory-p9)). It goes one step past the "one at a time" column above, because it also lets go of each batch's outputs before the next batch starts:
+
+- the batches build one after another on one scratch pool;
+- each batch's outputs are copied into the storage (in a submit of their own, with no update needed) and freed before the next batch;
+- the storage reserves room for the rest at the first growth.
+
+So the floor is the storage plus one batch, not all the outputs. On Sponza (Apple M5, copy mode), the peak goes from 1,482.7 MiB to 963.0, 711.0 and 581.4 MiB at caps of 512, 256 and 128 MiB, with settled memory 461, 459 and 453 MiB, and the first trees as soon as uncapped (147, 166 and 192 ms against 171). The default is 256 MiB: −771 MiB of peak on Sponza, for first trees that the first cut delayed by about 165 ms and that now come no later.
+
 ## three-mesh-bvh 0.9.18
 
 Built per mesh on the same geometry (a fresh `BufferGeometry` per mesh with the scene's positions and its own copy of the index, because it reorders the index in place), `verbose: false`. The leaf option in 0.9.18 is `targetLeafSize` (default 10, a target with a depth limit of 40, not a hard cap); there is no `maxLeafTris`.
