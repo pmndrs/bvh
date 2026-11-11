@@ -63,11 +63,12 @@ export {
     BVH_REFIT_STATS_BYTES,
     BVH_REFIT_WORKGROUP_SIZE,
     GpuBvhRefit,
+    GpuBvhRefitKernels,
     type BvhRefitShape,
     type BvhRefitStats,
     type GpuBvhRefitOptions,
 } from './gpu-refit.ts';
-export { GpuMeshRefit, type MeshRefitTarget, type MeshRefitVertices } from './gpu-mesh-refit.ts';
+export { GpuMeshRefit, GpuMeshRefitKernels, type GpuMeshRefitOptions, type MeshRefitTarget, type MeshRefitVertices } from './gpu-mesh-refit.ts';
 export { BVH_INSTANCE_BOX_PADDING, BVH_INSTANCE_BOX_WGSL } from './gpu-instance-box.ts';
 export {
     BVH_FLOAT_MAX,
