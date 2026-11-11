@@ -1,6 +1,6 @@
 /*!
  * The H-PLOC merge below is ported from tinybvh's BuildHPLOC (tiny_bvh_base.h);
- * its licence (packages/bvh/licenses/tinybvh.txt):
+ * its licence (licenses/tinybvh.txt):
  *
  * The MIT License (MIT)
  *
