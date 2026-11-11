@@ -8,7 +8,7 @@
  * found. Unflagged triangles never reach the filter, so a scene pays for the
  * hook only on the triangles that need it.
  *
- * - On the GPU the kernel supplies `giTriangleFilter` as its own piece of WGSL
+ * - On the GPU the kernel supplies `bvhTriangleFilter` as its own piece of WGSL
  *   (see {@link NO_TRIANGLE_FILTER_WGSL} for the signature); the walk in
  *   `wgsl.ts` calls it.
  * - On the CPU, `createCpuTracer(scene, { triangleFilter })` takes a
@@ -46,14 +46,14 @@ export interface TriangleFilterHit {
 export type TriangleFilter = (instanceIndex: number, triangleIndex: number, hit: TriangleFilterHit) => boolean;
 
 /**
- * `giTriangleFilter` for a kernel without a filter: every triangle blocks,
+ * `bvhTriangleFilter` for a kernel without a filter: every triangle blocks,
  * flagged or not. A kernel with a filter defines the same function itself:
- * `fn giTriangleFilter(instance: u32, triangle: u32, t: f32, barycentrics: vec2f, frontFace: bool) -> bool`,
+ * `fn bvhTriangleFilter(instance: u32, triangle: u32, t: f32, barycentrics: vec2f, frontFace: bool) -> bool`,
  * returning true when the ray passes.
  */
 export const NO_TRIANGLE_FILTER_WGSL = /* wgsl */ `
 // ---- No triangle filter: every triangle blocks (trace/triangle-filter.ts) ----
-fn giTriangleFilter(instance: u32, triangle: u32, t: f32, barycentrics: vec2f, frontFace: bool) -> bool {
+fn bvhTriangleFilter(instance: u32, triangle: u32, t: f32, barycentrics: vec2f, frontFace: bool) -> bool {
     return false;
 }
 `;

@@ -65,7 +65,7 @@ export function uploadTraceScene(device: GPUDevice, scene: TraceSceneData, label
 
 export interface TraceBatch {
     readonly mode: 'closest' | 'any';
-    /** At least `count` rays of 32 bytes (`GiRay`). */
+    /** At least `count` rays of 32 bytes (`BvhRay`). */
     readonly rays: GPUBuffer;
     /** Closest: `count` records of `HIT_RECORD_BYTES`. Any: `count` u32, 1 = blocked. */
     readonly results: GPUBuffer;
@@ -99,7 +99,7 @@ export class TraceBatchKernel {
                 layout: 'auto',
                 compute: {
                     module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode) }),
-                    entryPoint: 'giBatch',
+                    entryPoint: 'bvhBatch',
                 },
             });
         const [closestPipeline, anyPipeline] = await Promise.all([pipelineFor('closest'), pipelineFor('any')]);

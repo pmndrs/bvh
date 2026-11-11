@@ -104,7 +104,7 @@ interface TriangleHit {
 }
 
 export interface CpuTracerOptions {
-    /** The CPU twin of the kernel's `giTriangleFilter`, for flagged triangles; without it they block. */
+    /** The CPU twin of the kernel's `bvhTriangleFilter`, for flagged triangles; without it they block. */
     readonly triangleFilter?: TriangleFilter;
 }
 

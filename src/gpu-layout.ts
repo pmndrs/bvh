@@ -24,7 +24,7 @@ export const GPU_LAYOUT_NODE_BYTES = 64;
 export const GPU_LAYOUT_NODE_WORDS = GPU_LAYOUT_NODE_BYTES / 4;
 
 /**
- * Word positions inside a node, matching the tracer's WGSL `GiBvhNode`:
+ * Word positions inside a node, matching the tracer's WGSL `BvhNode`:
  *
  *     leftMin: vec3f,  leftIndex: u32,
  *     leftMax: vec3f,  rightIndex: u32,
@@ -62,7 +62,7 @@ export const GPU_LAYOUT_NO_PARENT = 0xffffffff;
 export const GPU_LAYOUT_TRIANGLE_BYTES = 48;
 
 /**
- * Word positions inside a triangle, matching the tracer's WGSL `GiBvhTriangle`
+ * Word positions inside a triangle, matching the tracer's WGSL `BvhTriangle`
  * (and ddgi-core's `TRIANGLE_WORD`): each corner is a `vec3f` followed by one
  * word, the original triangle index after the first, the flags after the second.
  */

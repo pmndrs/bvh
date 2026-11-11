@@ -59,7 +59,7 @@ export interface OracleCase {
     readonly description: string;
     readonly meshes: readonly MeshGeometry[];
     readonly instances: readonly TraceSceneInstance[];
-    /** Packed `GiRay`s. */
+    /** Packed `BvhRay`s. */
     readonly rays: Float32Array;
     /** Hand-checked rays; `rays` holds exactly these, in order. Absent for random cases. */
     readonly curated?: readonly CuratedRay[];

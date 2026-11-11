@@ -100,7 +100,7 @@ describe('probe rays', () => {
         for (let i = 0; i < 64; i++) expect(Math.hypot(a[i * 3], a[i * 3 + 1], a[i * 3 + 2])).toBeCloseTo(1, 6);
     });
 
-    it('packs every probe times every direction in the GiRay layout', () => {
+    it('packs every probe times every direction in the BvhRay layout', () => {
         const grid = makeProbeGrid({ min: [0, 0, 0], max: [2, 2, 2] }, 8);
         const directions = makeSphereDirections(4, 1);
         const rays = makeProbeRays(grid, directions);

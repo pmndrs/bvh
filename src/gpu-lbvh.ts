@@ -1,7 +1,7 @@
 /**
  * GPU LBVH builder (stage B1 of docs/design/bvh-framework.md): a tree per
  * mesh, built on the GPU in the tracer's layout (gpu-layout.ts), so the
- * tracer and everything that traces (`giTraceClosest`, `giTraceAny`, DDGI)
+ * tracer and everything that traces (`bvhTraceClosest`, `bvhTraceAny`, DDGI)
  * read its trees exactly as they read tinybvh's (B0). It is the stepping
  * stone to H-PLOC (B2), which reuses the Morton codes, the sort and the
  * bottom-up pass.

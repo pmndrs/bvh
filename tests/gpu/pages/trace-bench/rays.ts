@@ -9,7 +9,7 @@
  *   decide whether a hit point is lit. Hits facing away from the sun get no
  *   shadow ray, since the shading would skip them too.
  *
- * Rays are packed as the tracer's `GiRay`: `origin (3), tMin, direction (3), tMax`
+ * Rays are packed as the tracer's `BvhRay`: `origin (3), tMin, direction (3), tMax`
  * as eight 32-bit floats. That is also two `vec4f` per ray, which is how the
  * three-mesh-bvh kernel reads the same buffer.
  */
@@ -145,7 +145,7 @@ export function worldBounds(meshes: readonly BenchMeshGeometry[], instances: rea
 export interface ShadowRayInput {
     /** The closest-hit rays, packed. */
     closestRays: Float32Array;
-    /** One `GiHitRecord` per ray (`HIT_RECORD_BYTES` each), as read back from the GPU. */
+    /** One `BvhHitRecord` per ray (`HIT_RECORD_BYTES` each), as read back from the GPU. */
     hitRecords: ArrayBuffer;
     meshes: readonly BenchMeshGeometry[];
     /** Indexed by the instance index the tracer reports. */

@@ -381,7 +381,7 @@ export interface OursRayBuffers {
 
 export interface OursTracerRun {
     modes: ModeResult[];
-    /** Closest-hit records (`GiHitRecord`) of the last closest dispatch. */
+    /** Closest-hit records (`BvhHitRecord`) of the last closest dispatch. */
     hitRecords: ArrayBuffer;
     /** Closest `t` per ray, negative for a miss. */
     closestT: Float32Array;
@@ -398,7 +398,7 @@ function summarizeMode(tracer: TracerId, mode: TraceMode, rays: number, timer: D
     return { tracer, mode, rays, timing, timingSource: timer.source, mraysPerSecond: megaRaysPerSecond(rays, timing.medianMs) };
 }
 
-/** Pulls `t` out of an array of `GiHitRecord`s. */
+/** Pulls `t` out of an array of `BvhHitRecord`s. */
 export function extractHitDistances(hitRecords: ArrayBuffer): Float32Array {
     const recordWords = HIT_RECORD_BYTES / 4;
     const floats = new Float32Array(hitRecords);

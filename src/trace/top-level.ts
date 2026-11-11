@@ -29,7 +29,7 @@ import { buildSahTree, DEFAULT_SAH_OPTIONS, type SahBuildOptions } from './sah-b
 
 /** One placed copy of a mesh, as the top-level builder sees it. */
 export interface TraceInstance {
-    /** The platform instance index. Comes back as `GiHit.instance`. */
+    /** The platform instance index. Comes back as `BvhHit.instance`. */
     readonly instanceIndex: number;
     /** Where this mesh's nodes start in the shared node buffer, counted in nodes. */
     readonly nodeOffset: number;

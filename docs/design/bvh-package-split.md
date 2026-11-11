@@ -38,7 +38,7 @@ The examples should make three cases obvious:
 
 **Still in ddgi-core, though not DDGI-specific** (`packages/ddgi-core/src/platform/trace/`)
 - The layout's WGSL structs (`layout.ts`).
-- The WGSL ray walk (`giTraceClosest`, `giTraceAny`) and its watertight triangle test (`wgsl.ts`).
+- The WGSL ray walk (`bvhTraceClosest`, `bvhTraceAny`) and its watertight triangle test (`wgsl.ts`).
 - A CPU port of that walk, step for step (`cpu-traversal.ts`).
 - The oracle (`oracle-compare.ts`, `oracle-fixtures.ts`, `reference-tracer.ts`).
 - Turning a tree's shape into the layout (`mesh-bvh-topology.ts`).

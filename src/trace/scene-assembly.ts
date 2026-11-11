@@ -17,7 +17,7 @@ import type { SahBuildOptions } from './sah-builder.ts';
 export interface TraceSceneInstance {
     /** Position in the `meshes` array. */
     readonly meshIndex: number;
-    /** The platform instance index, returned in `GiHit.instance`. */
+    /** The platform instance index, returned in `BvhHit.instance`. */
     readonly instanceIndex: number;
     readonly objectToWorld: Mat4;
     readonly contributesToGi?: boolean;

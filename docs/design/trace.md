@@ -15,7 +15,7 @@ Everything is plain arrays in a few storage buffers, so it survives a worker han
 - **Node: 64 bytes, two child boxes per node** (the Aila-Laine layout used by most GPU BVH2 tracers). One node read gives both children's boxes, so the walk tests both and visits the nearer one first without a second memory fetch.
 
   ```
-  struct GiBvhNode {          // 64 bytes
+  struct BvhNode {            // 64 bytes
       leftMin:  vec3f, leftIndex:  u32,
       leftMax:  vec3f, rightIndex: u32,
       rightMin: vec3f, leftCount:  u32,   // count > 0: child is a leaf with `count` triangles starting at index

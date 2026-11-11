@@ -28,7 +28,7 @@ export const BVH_NODE_BYTES = GPU_LAYOUT_NODE_BYTES;
 export const BVH_NODE_WORDS = BVH_NODE_BYTES / 4;
 
 /**
- * Word positions inside a node. Matches the WGSL `GiBvhNode`:
+ * Word positions inside a node. Matches the WGSL `BvhNode`:
  *
  *     leftMin: vec3f,  leftIndex: u32,
  *     leftMax: vec3f,  rightIndex: u32,
@@ -63,7 +63,7 @@ export const TRIANGLE_BYTES = GPU_LAYOUT_TRIANGLE_BYTES;
 export const TRIANGLE_WORDS = TRIANGLE_BYTES / 4;
 
 /**
- * Word positions inside a triangle. Matches the WGSL `GiBvhTriangle`.
+ * Word positions inside a triangle. Matches the WGSL `BvhTriangle`.
  */
 export const TRIANGLE_WORD = {
     vertex0: 0,
@@ -76,7 +76,7 @@ export const TRIANGLE_WORD = {
 
 /**
  * Triangle `flags` bit 0: consult the triangle filter. The walk asks the
- * kernel's `giTriangleFilter` (the CPU walk its `triangleFilter`) whether the
+ * kernel's `bvhTriangleFilter` (the CPU walk its `triangleFilter`) whether the
  * ray passes before taking the hit (triangle-filter.ts).
  */
 export const TRIANGLE_FLAG_FILTER = 1;

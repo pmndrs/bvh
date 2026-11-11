@@ -190,23 +190,23 @@ describe('flagged triangles without a filter', () => {
 });
 
 describe('the triangle filter in the WGSL walk', () => {
-    const call = 'giTriangleFilter(instance.instanceIndex, triangle.originalIndex, candidate.t, candidate.barycentrics, candidate.frontFacing)';
-    const declaration = 'fn giTriangleFilter(instance: u32, triangle: u32, t: f32, barycentrics: vec2f, frontFace: bool) -> bool';
+    const call = 'bvhTriangleFilter(instance.instanceIndex, triangle.originalIndex, candidate.t, candidate.barycentrics, candidate.frontFacing)';
+    const declaration = 'fn bvhTriangleFilter(instance: u32, triangle: u32, t: f32, barycentrics: vec2f, frontFace: bool) -> bool';
 
     it('is called from both walks, for flagged triangles only', () => {
         const module = traceModuleWgsl({ group: 0, firstBinding: 0 });
         expect(module.split(call).length - 1).toBe(2);
-        expect(module).toContain(`const GI_TRIANGLE_FLAG_FILTER: u32 = ${TRIANGLE_FLAG_FILTER}u;`);
-        expect(module.split('(triangle.flags & GI_TRIANGLE_FLAG_FILTER) != 0u').length - 1).toBe(2);
+        expect(module).toContain(`const BVH_TRIANGLE_FLAG_FILTER: u32 = ${TRIANGLE_FLAG_FILTER}u;`);
+        expect(module.split('(triangle.flags & BVH_TRIANGLE_FLAG_FILTER) != 0u').length - 1).toBe(2);
         // The module only calls it; the kernel supplies it.
-        expect(module).not.toContain('fn giTriangleFilter(');
+        expect(module).not.toContain('fn bvhTriangleFilter(');
     });
 
     it('defaults to the no-filter piece, which declares the signature the walk calls, and takes another', () => {
         expect(NO_TRIANGLE_FILTER_WGSL).toContain(declaration);
         for (const mode of ['closest', 'any'] as const) {
             const kernel = batchKernelWgsl(mode);
-            expect(kernel.split('fn giTriangleFilter(').length - 1).toBe(1);
+            expect(kernel.split('fn bvhTriangleFilter(').length - 1).toBe(1);
             expect(kernel).toContain(NO_TRIANGLE_FILTER_WGSL);
             expect(wgslNameProblems(kernel)).toEqual([]);
         }
@@ -214,6 +214,6 @@ describe('the triangle filter in the WGSL walk', () => {
         const kernel = batchKernelWgsl('closest', { group: 0, firstBinding: 0 }, custom);
         expect(kernel).toContain(custom);
         expect(kernel).not.toContain(NO_TRIANGLE_FILTER_WGSL);
-        expect(kernel.split('fn giTriangleFilter(').length - 1).toBe(1);
+        expect(kernel.split('fn bvhTriangleFilter(').length - 1).toBe(1);
     });
 });

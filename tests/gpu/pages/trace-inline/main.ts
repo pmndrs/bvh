@@ -1,7 +1,7 @@
 /**
  * Inline tracing from a caller's own kernel: the trace module's WGSL
  * (`traceModuleWgsl`, group 0: nodes, triangles, top level) is placed in front of a
- * kernel that calls `giTraceClosest` and `giTraceAny` itself, with three storage
+ * kernel that calls `bvhTraceClosest` and `bvhTraceAny` itself, with three storage
  * buffers of its own in group 1 (rays in, hits out, any-hit answers out). That is
  * 3 + 3 = 6 storage buffers, inside the default per-stage limit of 8. The kernel supplies the walk's
  * triangle filter hook as "none" (`NO_TRIANGLE_FILTER_WGSL`: every triangle blocks).
@@ -56,7 +56,7 @@ struct InlineResult {
     padding1: u32,
 }
 
-@group(1) @binding(0) var<storage, read> inlineRays: array<GiRay>;
+@group(1) @binding(0) var<storage, read> inlineRays: array<BvhRay>;
 @group(1) @binding(1) var<storage, read_write> inlineHits: array<InlineResult>;
 @group(1) @binding(2) var<storage, read_write> inlineBlocked: array<u32>;
 
@@ -68,13 +68,13 @@ fn main(@builtin(global_invocation_id) id: vec3u, @builtin(num_workgroups) group
         return;
     }
     let ray = inlineRays[index];
-    let hit = giTraceClosest(ray);
+    let hit = bvhTraceClosest(ray);
     var result = InlineResult(hit.t, ${NO_INSTANCE}u, hit.triangle, select(0u, 1u, hit.frontFace), hit.barycentrics, 0u, 0u);
     if (hit.t >= 0.0) {
         result.instance = hit.instance;
     }
     inlineHits[index] = result;
-    inlineBlocked[index] = select(0u, 1u, giTraceAny(ray));
+    inlineBlocked[index] = select(0u, 1u, bvhTraceAny(ray));
 }
 `;
 
