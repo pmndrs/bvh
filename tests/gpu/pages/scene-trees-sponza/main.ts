@@ -1,12 +1,14 @@
 /**
  * SceneTrees on Intel Sponza (manual): memory and timing of the load, for P9.
  *
- * Variants (`?variants=...`; the default runs all six below):
+ * Variants (`?variants=...`; the default runs all seven below). Every variant
+ * but the capped ones sets `gpuMaxBatchBytes: Infinity` (no cap, one batch):
  *
- * - `copy`: `gpuTreeOutputs: 'copy'` (the default, ddgi's path);
+ * - `copy`: `gpuTreeOutputs: 'copy'` (ddgi's path);
  * - `adopt`: the load batch's outputs become the scene's buffers (no copy;
  *   each GPU tree's range freed at its swap);
  * - `copy-merged`: `copy` with `mergeStaticInstances` (every instance static);
+ * - `copy-default`: `copy` with `gpuMaxBatchBytes` left out (256 MiB);
  * - `copy-cap512`, `copy-cap256`, `copy-cap128` (any `-cap<MB>` suffix):
  *   `gpuMaxBatchBytes` of that many MiB, the build-peak lever (several
  *   batches one after another on one scratch pool).
@@ -29,7 +31,7 @@
  * outputs), with 5% tolerance.
  */
 
-import { SceneTrees, type SceneTreesMemory } from '../../../../src/scene/scene-trees.ts';
+import { DEFAULT_GPU_MAX_BATCH_BYTES, SceneTrees, type SceneTreesMemory } from '../../../../src/scene/scene-trees.ts';
 import { hplocBatchBytes, hplocScratchPoolBytes, planGpuHplocBatches } from '../../../../src/gpu-hploc.ts';
 import { geometryTotals } from '../../../../src/gpu-lbvh.ts';
 import { createBvhWorkerPool, defaultWorkerPoolSize } from '../../../../src/worker/pool.ts';
@@ -65,7 +67,7 @@ try {
     adapter = requested.adapter;
     const device = requested.device;
     deviceErrors = watchDevice(device);
-    const variants = (new URLSearchParams(location.search).get('variants') ?? 'copy,adopt,copy-merged,copy-cap512,copy-cap256,copy-cap128').split(',');
+    const variants = (new URLSearchParams(location.search).get('variants') ?? 'copy,adopt,copy-merged,copy-default,copy-cap512,copy-cap256,copy-cap128').split(',');
     const scene = await loadBenchScene('sponza', 'scene');
     log(`sponza: ${scene.meshes.length} meshes, ${scene.instances.length} instances, ${scene.uniqueTriangles} triangles (load ${Math.round(scene.loadMs)} ms)`);
     const kernel = await TraceBatchKernel.create(device);
@@ -108,9 +110,11 @@ try {
     // A first load (`warmup`, `copy`, not reported) compiles every pipeline, so no variant's times include it.
     for (const variant of ['warmup', ...variants]) {
         const pool = createBvhWorkerPool();
-        const capMB = /-cap(\d+)/.exec(variant)?.[1];
+        // `-cap<MB>` sets a cap, `-default` leaves it out (256 MiB), and the rest turn it off (Infinity: one batch).
+        const isDefault = variant.endsWith('-default');
+        const capMB = isDefault ? String(DEFAULT_GPU_MAX_BATCH_BYTES / MB) : /-cap(\d+)/.exec(variant)?.[1];
         const trees = await SceneTrees.create(device, {
-            gpuMaxBatchBytes: capMB ? Number(capMB) * MB : undefined,
+            gpuMaxBatchBytes: isDefault ? undefined : capMB ? Number(capMB) * MB : Infinity,
             label: `sponza ${variant}`,
             holdRefinements: true,
             gpuTreeOutputs: variant.startsWith('adopt') ? 'adopt' : 'copy',

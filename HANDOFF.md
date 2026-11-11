@@ -57,7 +57,7 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
 - **The 40-byte hit record's cost:** measured on the M5 only (2026-11-11): no measurable cost, ratios 0.96-1.15 against the 24-byte record, medians 1.02-1.11; see `docs/design/memory.md`. RTX 3060 and Intel not run.
 - **The `LICENSE` file:** missing, and the holder (Dennis Smolek or Poimandres) is undecided.
 - **`bvh:wasm --check`:** needs the pinned emsdk, which isn't downloaded.
-- **Peak memory:** BX.19's breakdown is in `docs/design/memory.md`. Smaller H-PLOC batches only lower the peak if they are built one after another (`GpuFirstTrees` creates every batch before the submit); the rest of the levers are BX.20.
+- **Peak memory:** BX.19's breakdown is in `docs/design/memory.md`. The build-peak lever is in: `SceneTrees` caps each H-PLOC batch at **256 MiB by default** (`gpuMaxBatchBytes`, `Infinity` for none), building the batches one after another on one scratch pool (one queue per `GpuFirstTrees`), each stored between updates. Sponza on the M5: peak 1,483 → 711 MiB (−771), settled 470 → 459, first trees 171 → 166 ms (the first cut cost about +165 ms; batches no longer wait for updates). RTX 3060 and Intel not run. The rest of the levers are BX.20.
 - **Still to do in `/three`:** draw ranges and groups that don't start on a multiple of 3, skinned and morphed meshes, a CPU scene raycast, a helper, and Windows compile cost.
 - **API tidy:** `export *` in `src/trace/index.ts`, the batch helpers in `gpu-lbvh.ts`, and folding the two layout files into one.
 - **Next phases:** Babylon (P6), the P4 examples and docs site, the comparison suite (P5), and CPU queries (P8).

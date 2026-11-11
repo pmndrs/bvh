@@ -12,7 +12,8 @@
  * into more batches only when one doesn't fit the device's buffers
  * (`planGpuHplocBatches`).
  *
- * **A cap on a batch's bytes** (`maxBatchBytes`, off by default: the P9
+ * **A cap on a batch's bytes** (`maxBatchBytes`, off by default here, 256 MiB
+ * through `SceneTrees`' `gpuMaxBatchBytes`: the P9
  * peak-memory lever, docs/design/bvh-builders.md "Build peak memory"). The
  * meshes are split into batches of at most that many GPU bytes each (inputs,
  * scratch and outputs), built one after another. Every capped batch of this
@@ -26,7 +27,7 @@
  * storage plus one batch, not the whole scene's scratch and outputs at once.
  * `SceneTrees` lets a capped batch go on its own, without waiting for an
  * update, whenever it can (see its `gpuMaxBatchBytes`). A mesh bigger than
- * the cap builds alone. Undo: leave `maxBatchBytes` unset.
+ * the cap builds alone. Undo: leave `maxBatchBytes` unset (or `Infinity`).
  *
  * **Its own submit, and one small readback** of the stats (node count, depth,
  * refused or not: a few words per mesh), never the trees. The readback must
@@ -63,7 +64,8 @@ export interface GpuTreeBuildOptions {
      * Cap each batch's GPU bytes (inputs, scratch and outputs) and build the
      * batches one after another, each once the previous one's outputs are let
      * go, in the builder's one queue with every other capped build (see the
-     * file comment). Default: no cap, every batch in one submit.
+     * file comment). Default (or `Infinity`): no cap, every batch in one
+     * submit. `SceneTrees` passes its `gpuMaxBatchBytes` (256 MiB unless set).
      */
     readonly maxBatchBytes?: number;
     /** Asked before each capped batch that waited in the queue: true stops it (its meshes come back refused). */
@@ -278,7 +280,7 @@ export class GpuFirstTrees implements FirstTreeBuilder {
             generation: requests[index].generation,
             reason: `too big for a GPU build on this device (buffers of at most ${limitBytes} bytes)`,
         }));
-        if (options.maxBatchBytes !== undefined) {
+        if (options.maxBatchBytes !== undefined && options.maxBatchBytes !== Infinity) {
             return this.enqueue(notBuilt, plan.batches.map((indices) => indices.map((index) => requests[index])), options);
         }
 

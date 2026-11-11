@@ -26,7 +26,7 @@ import { assembleTraceScene, type TraceSceneData, type TraceSceneInstance } from
 import type { TopLevelBvh } from '../trace/top-level.ts';
 import { GpuFirstTrees, GpuTreeOutputs, type FirstTreeBuilder, type GpuTreeBatchResult, type GpuTreeBuilds, type GpuTreeRequest } from './gpu-first-trees.ts';
 import { MERGED_SOURCE_WORDS } from './merged-identity-gpu.ts';
-import { SceneTrees, type SceneInstanceDescriptor, type SceneTreeEvent, type SceneTreesOptions } from './scene-trees.ts';
+import { DEFAULT_GPU_MAX_BATCH_BYTES, SceneTrees, type SceneInstanceDescriptor, type SceneTreeEvent, type SceneTreesOptions } from './scene-trees.ts';
 import type { GpuMeshTreeRange } from '../mesh-input.ts';
 import { gatherStandIn } from '../../tests/support/top-level-gather.ts';
 import { FakeHploc, settle } from '../../tests/support/fake-hploc.ts';
@@ -337,7 +337,8 @@ describe('SceneTrees', () => {
     it("adopt: the load batch's outputs become the buffers (no copy), with a lower peak and the same hits", async () => {
         const peaks: Record<string, number> = {};
         for (const mode of ['copy', 'adopt'] as const) {
-            const { scene, stand, frame, gpu } = await setUp({ holdRefinements: true, gpuTreeOutputs: mode });
+            // Uncapped (Infinity): the single-batch path, whose copy mode holds the outputs until the next update.
+            const { scene, stand, frame, gpu } = await setUp({ holdRefinements: true, gpuTreeOutputs: mode, gpuMaxBatchBytes: Infinity });
             const { geometries, instances, rays } = sceneOf(6);
             addAll(scene, geometries, instances);
             frame();
@@ -484,7 +485,8 @@ describe('SceneTrees', () => {
     it("adopt: a deforming mesh's batch that finishes first waits for the main load batch, which is adopted", async () => {
         const gpu = createFakeGpu({}, { features: ['subgroups'], kernels: { bvhMergedIdentity: mergedIdentityStandIn } });
         const builder = new StandInGpuBuilder(gpu.device);
-        const deforming = await SceneTrees.create(gpu.device, { firstTreeBuilder: builder, topLevel: 'cpu', gpuTreeOutputs: 'adopt', holdRefinements: true });
+        // Uncapped: with a cap the main batch is adopted between updates and the cloth placed in the same update (the capped tests cover that).
+        const deforming = await SceneTrees.create(gpu.device, { firstTreeBuilder: builder, topLevel: 'cpu', gpuTreeOutputs: 'adopt', holdRefinements: true, gpuMaxBatchBytes: Infinity });
         const tick = () => {
             const encoder = gpu.createEncoder();
             deforming.update(encoder);
@@ -748,6 +750,23 @@ describe('SceneTrees with gpuMaxBatchBytes (the real queue, a stand-in H-PLOC)',
         expect(hploc.violations).toEqual([]);
         expect(disagreements(readScene(scene), await reference(geometries, instances), rays)).toEqual([]);
         scene.dispose();
+    });
+
+    it('caps at 256 MiB by default; Infinity turns the cap off, and a cap must be positive', async () => {
+        expect(DEFAULT_GPU_MAX_BATCH_BYTES).toBe(256 * 1024 * 1024);
+        const asked: (number | undefined)[] = [];
+        for (const gpuMaxBatchBytes of [undefined, Infinity, 1 << 20]) {
+            const gpu = createFakeGpu();
+            const stand = new StandInGpuBuilder(gpu.device);
+            const build = stand.build.bind(stand);
+            stand.build = (requests, options) => (asked.push(options?.maxBatchBytes), build(requests));
+            const scene = await SceneTrees.create(gpu.device, { firstTreeBuilder: stand, gpuMaxBatchBytes });
+            scene.addMesh(tessellatedQuad(2, 1));
+            scene.update(gpu.createEncoder());
+            scene.dispose();
+        }
+        expect(asked).toEqual([DEFAULT_GPU_MAX_BATCH_BYTES, undefined, 1 << 20]);
+        await expect(SceneTrees.create(createFakeGpu().device, { gpuMaxBatchBytes: 0 })).rejects.toThrow(/positive number of bytes/);
     });
 
     it('frees the slots of meshes whose geometry the queue reads later as their tinybvh builds start (no entry left behind)', async () => {

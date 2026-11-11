@@ -21,7 +21,9 @@
  * side, material and normal, `t` to rounding. A case whose rays must all hit
  * fails on any GPU miss (an escape, or a ray that slipped through a seam).
  *
- * Variants: `gpuTreeOutputs` `copy` and `adopt`, each with
+ * Variants: `gpuTreeOutputs` `copy` and `adopt` with the default cap
+ * (`gpuMaxBatchBytes` left out: 256 MiB, one batch for these cases) and with
+ * `Infinity` (no cap, the single-batch path), each with
  * `mergeStaticInstances` off and on (on: each instance gets its own copy of
  * its mesh and two of every three are static, as the trace-oracle's merged
  * variants do, so the merged groups' GPU trees get their identity from the
@@ -60,7 +62,10 @@ interface Variant {
 const SMALL_CAP = 4 * 1024;
 
 const VARIANTS: readonly Variant[] = [
+    // No maxBatchBytes: the default cap (256 MiB, one batch for these cases); `-uncapped`: Infinity, the single-batch path.
     { name: 'copy', gpuTreeOutputs: 'copy', merged: false },
+    { name: 'copy-uncapped', gpuTreeOutputs: 'copy', merged: false, maxBatchBytes: Infinity },
+    { name: 'adopt-uncapped', gpuTreeOutputs: 'adopt', merged: false, maxBatchBytes: Infinity },
     { name: 'copy-merged', gpuTreeOutputs: 'copy', merged: true },
     { name: 'adopt', gpuTreeOutputs: 'adopt', merged: false },
     { name: 'adopt-merged', gpuTreeOutputs: 'adopt', merged: true },
@@ -139,7 +144,7 @@ await runGpuTest(
                 frame();
                 await scene.whenBuilt();
                 frame();
-                if (variant.maxBatchBytes !== undefined) {
+                if (variant.maxBatchBytes === SMALL_CAP) {
                     const { gpuBatches } = scene.counts;
                     results[`${oracleCase.name} ${variant.name} batches`] = gpuBatches;
                     if (gpuBatches > 1) cappedCasesWithBatches.add(variant.name);
@@ -168,7 +173,7 @@ await runGpuTest(
         pool.dispose();
         kernel.destroy();
         for (const variant of VARIANTS) {
-            if (variant.maxBatchBytes !== undefined && !cappedCasesWithBatches.has(variant.name)) failures.push(`${variant.name}: no case built in more than one GPU batch`);
+            if (variant.maxBatchBytes === SMALL_CAP && !cappedCasesWithBatches.has(variant.name)) failures.push(`${variant.name}: no case built in more than one GPU batch`);
         }
         if (failures.length > 0) throw new Error(failures.slice(0, 10).join(' | '));
         return { cases: cases.length, variants: VARIANTS.length, totalRays, ...results };

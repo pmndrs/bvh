@@ -114,6 +114,7 @@ export * from './trace/index.ts';
 // mesh by mesh, the GPU top level (or the CPU one without subgroups), runtime adds and removals,
 // merged static groups, and memory stats.
 export {
+    DEFAULT_GPU_MAX_BATCH_BYTES,
     GPU_TREE_MAX_DEPTH,
     SceneTrees,
     type GpuTreeOutputsMode,

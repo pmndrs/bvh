@@ -174,7 +174,7 @@ T is triangles and I is radix-tree inner nodes, `max(1, T - 1)` per mesh (so I i
 
 ### The lever: `maxBatchBytes`
 
-Off by default (today's path: one batch per update, as big as the device allows).
+**On by default in `SceneTrees`: 256 MiB** (`DEFAULT_GPU_MAX_BATCH_BYTES`). `gpuMaxBatchBytes: Infinity` turns it off (one batch per update, as big as the device allows: the path before the cap). The standalone builders (`GpuFirstTrees.build`, `createMeshLayoutBuilder`, the planners) keep no cap unless given one (`maxBatchBytes`; `Infinity` is no cap there too): they are building blocks, and `SceneTrees` is where the scene's peak is decided.
 
 - **`SceneTrees.create(device, { gpuMaxBatchBytes })`**, or **`GpuFirstTrees.build(requests, { maxBatchBytes })`**: the update's meshes are split into batches of at most that many bytes (inputs, scratch and outputs, exactly as `hplocBatchBytes` counts them), in mesh order.
   - The batches are built one after another, each with its own submit and stats readback, on one **`GpuHplocScratchPool`**.
@@ -193,7 +193,7 @@ Off by default (today's path: one batch per update, as big as the device allows)
 - **Costs:**
   - While a later batch waits, its meshes' CPU arrays are copied into the tinybvh worker rather than moved (`transferGeometry`, merged groups), because the GPU build still has to upload them.
   - Each batch has its own submit and readback.
-- **Undo:** leave `gpuMaxBatchBytes` / `maxBatchBytes` unset. The uncapped path is the code as it was.
+- **Undo:** `gpuMaxBatchBytes: Infinity` (or `maxBatchBytes` left unset on the standalone builders). The uncapped path is the code as it was.
 
 This is batching, which is ours. The H-PLOC and LBVH kernels are unchanged, and so is every tree they build: the oracle pages compare the trees with tinybvh's and the CPU walk. So `docs/DIVERGENCES.md` has no row for it.
 
@@ -220,3 +220,5 @@ Correctness on every row: the GPU walk gave the CPU reference's hits on 20,000 r
 - Settled memory is a little lower than uncapped, because the reservation estimates the nodes rather than adding 1/8 headroom.
 - The GPU time doesn't change. Since each batch is stored between updates (in its own submit) and the next starts at once, the first trees come no later than uncapped (147-192 ms against 171; the first cut, which waited two updates per batch, took 214, 331 and 443 ms). "In use" is now the settled size: no batch's outputs are held until an update.
 - `adopt` (1,482.7 peak, 613.6 settled) and `copy-merged` (one world-space group of 5.7M triangles, so one batch whatever the cap) were not run capped on Sponza. The `scene-trees-mid-swap` oracle covers `copy`, `copy-merged`, `adopt` and `adopt-merged` with a 4 KiB cap (a batch per mesh), for correctness, loading with `frame(); await whenBuilt(); frame()`.
+
+**Default: 256 MiB** (Dennis's decision). On Sponza it takes the peak from 1,482.7 to 711.0 MiB (−771 MiB) and settles 11 MiB lower. The cost it was weighed against, first trees about 165 ms later at 60 Hz, was the first cut's (each batch waited for two updates); with batches stored between updates the first trees come as soon as uncapped (166 against 171 ms; a second run, 190 for the default row and 171 for `copy-cap256` against 182: run-to-run noise of a frame or so). The `copy-default` row of `scene-trees-sponza` is this default; every other uncapped row there sets `Infinity`.

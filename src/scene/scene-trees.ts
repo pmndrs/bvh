@@ -48,8 +48,9 @@
  *   builds, so the main one is adopted; trees that arrive with the adopted
  *   batch are placed into its buffers at the next update.
  *
- * **A cap on the GPU batches' bytes** (`gpuMaxBatchBytes`, off by default: the
- * P9 build-peak lever; docs/design/bvh-builders.md, "Build peak memory"). The
+ * **A cap on the GPU batches' bytes** (`gpuMaxBatchBytes`, 256 MiB by default,
+ * `Infinity` for none: the P9 build-peak lever; docs/design/bvh-builders.md,
+ * "Build peak memory"). The
  * load's H-PLOC build is the biggest memory number (Sponza: 1,483 MB at peak,
  * scratch and outputs of one batch of 5.74M triangles, against 470 MB
  * settled). With a cap, an update's meshes are built in batches of at most
@@ -82,7 +83,7 @@
  * A mesh bigger than the cap builds alone in its batch. While later batches
  * wait, their meshes' geometry stays with the GPU build, so it is copied into
  * the worker rather than moved (`transferGeometry`, merged groups). Undo:
- * leave `gpuMaxBatchBytes` unset.
+ * `gpuMaxBatchBytes: Infinity`.
  *
  * Call {@link SceneTrees.update} once per frame, before anything traces, with
  * the frame's encoder; it records copies and passes, and the caller submits.
@@ -130,6 +131,16 @@ export const GPU_TREE_MAX_DEPTH = TRACE_STACK_SIZE - 1 - TOP_LEVEL_STACK_RESERVE
  */
 const GPU_TREE_NODE_HEADROOM = 1 / 8;
 
+/**
+ * `gpuMaxBatchBytes` when it is left out: 256 MiB. On Sponza (Apple M5) it
+ * takes the load's peak from 1,483 to 711 MiB (−771 MiB) and settles 11 MiB
+ * lower; the first trees cost about +165 ms at 60 Hz as first measured, when
+ * each batch waited for two updates, and nothing now (166 ms against 171)
+ * that batches go on between updates. docs/design/bvh-builders.md,
+ * "Build peak memory".
+ */
+export const DEFAULT_GPU_MAX_BATCH_BYTES = 256 * 1024 * 1024;
+
 const INITIAL_NODES = 1024;
 const INITIAL_TRIANGLES = 2048;
 const USAGE = { COPY_SRC: 0x4, COPY_DST: 0x8, STORAGE: 0x80 } as const;
@@ -149,8 +160,10 @@ export interface SceneTreesOptions {
     readonly gpuTreeOutputs?: GpuTreeOutputsMode;
     /**
      * Cap each GPU build batch's bytes (inputs, scratch and outputs) and build
-     * the batches one after another (see the file comment). Default: no cap,
-     * one batch for all of an update's meshes, as big as the device allows.
+     * the batches one after another (see the file comment). Default 256 MiB
+     * ({@link DEFAULT_GPU_MAX_BATCH_BYTES}). `Infinity` turns the cap off: one
+     * batch for all of an update's meshes, as big as the device allows (the
+     * path before the cap).
      * The batches go on between updates (each is copied out in its own
      * submit), but their trees reach rays at the next {@link SceneTrees.update},
      * as any tree does.
@@ -564,8 +577,9 @@ export class SceneTrees {
         this.warn = options.warn ?? ((message) => console.warn(message));
         this.onTree = options.onTree ?? null;
         this.gpuTreeOutputs = options.gpuTreeOutputs ?? 'copy';
-        this.maxBatchBytes = options.gpuMaxBatchBytes;
-        if (this.maxBatchBytes !== undefined && !(this.maxBatchBytes > 0)) throw new RangeError(`gpuMaxBatchBytes must be a positive number of bytes, got ${this.maxBatchBytes}`);
+        const maxBatchBytes = options.gpuMaxBatchBytes ?? DEFAULT_GPU_MAX_BATCH_BYTES;
+        if (!(maxBatchBytes > 0)) throw new RangeError(`gpuMaxBatchBytes must be a positive number of bytes (Infinity: no cap), got ${maxBatchBytes}`);
+        this.maxBatchBytes = maxBatchBytes === Infinity ? undefined : maxBatchBytes;
         this.transferGeometry = options.transferGeometry ?? false;
         this.mergeStatic = options.mergeStaticInstances ?? false;
         this.gpuMaxDepth = options.gpuMaxDepth ?? GPU_TREE_MAX_DEPTH;
