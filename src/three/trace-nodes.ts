@@ -148,6 +148,32 @@ const threeInternals = {
     },
 };
 
+/**
+ * A `StorageBufferAttribute` three binds to `buffer` (ours, on the renderer's
+ * device), as {@link BvhTraceNodes} binds its buffers: three never creates,
+ * writes from the CPU or destroys it. For the pose pass (`deform.ts`), which
+ * writes posed vertices into a buffer SceneTrees reads.
+ */
+export function storageStandIn(renderer: unknown, buffer: GPUBuffer, itemSize = 4): StorageBufferAttribute {
+    const target = renderer as RendererLike;
+    if (!target?.backend?.isWebGPUBackend || !target.backend.device) throw new Error('@pmndrs/bvh/three: needs an initialized WebGPURenderer on its WebGPU backend (await renderer.init())');
+    threeInternals.check(target);
+    const attribute = new StorageBufferAttribute(new Float32Array(itemSize), itemSize);
+    attribute.name = buffer.label;
+    threeInternals.bind(target.backend, attribute, buffer);
+    threeInternals.guardDestroy(target.backend, attribute);
+    return attribute;
+}
+
+/** Throws unless three, having used `attribute` ({@link storageStandIn}), still binds `buffer` and made none of its own. */
+export function checkStandIn(renderer: unknown, attribute: object, buffer: GPUBuffer, what: string): void {
+    const target = renderer as RendererLike;
+    if (!threeInternals.usedByThree(target, attribute)) return;
+    if (threeInternals.bufferOf(target.backend, attribute) !== buffer || threeInternals.otherBuffer(target.backend, attribute, buffer)) {
+        throw unsupported(`did not bind the ${what} buffer @pmndrs/bvh set (backend.get(attribute).buffer)`);
+    }
+}
+
 /** A three storage buffer node, as far as this file uses one. */
 type StorageNode = Node & { value: unknown; setName(name: string): unknown };
 type NodeInput = BvhTslNode | number;

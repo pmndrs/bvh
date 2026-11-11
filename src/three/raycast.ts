@@ -41,10 +41,18 @@
  * from {@link computeBoundsTree} (or one from another library), a
  * `SkinnedMesh`, or a mesh with morph targets (the tree holds the rest pose).
  *
- * **Not matched:** a draw range or group that starts at an index that isn't a
- * multiple of 3 (three then tests triangles made of neighbouring triangles'
- * corners; the tree only holds the authored ones), and a trailing partial
- * triangle. The tree is built from the positions at {@link computeBoundsTree}
+ * **Ranges off a multiple of 3, overlapping groups.** three steps through a
+ * range three indices at a time from its start, so a draw range or group that
+ * starts at an index that isn't a multiple of 3 tests triangles made of
+ * neighbouring triangles' corners, and one whose length isn't a multiple of 3
+ * ends in a triangle that reads past it (`threeTriangleRanges`). Both are
+ * matched: such a range is walked in a second tree over the triangles that
+ * start at index 1 (or 2) mod 3, built on its first raycast with the tree's
+ * build options (it needs tinybvh, as `computeBoundsTree` does; without it the
+ * raycast falls back to three's) and refitted with the tree. Groups that
+ * overlap are walked once each, as three tests them once per group.
+ *
+ * **Staleness.** The tree is built from the positions at {@link computeBoundsTree}
  * time: when the position attribute's version, or the index (its object or
  * version), changed since, the raycast falls back to three's own with a
  * one-time warning until `boundsTree.refit()` (same index) or
@@ -104,6 +112,11 @@ let sharedBuilderLoading: Promise<TinyBvhBuilder> | null = null;
 export async function prepareBoundsTrees(): Promise<TinyBvhBuilder> {
     sharedBuilderLoading ??= createTinyBvhBuilder().then((builder) => (sharedBuilder = builder));
     return sharedBuilderLoading;
+}
+
+/** The tinybvh builder {@link prepareBoundsTrees} loaded, or null before it resolved. */
+export function preparedBoundsTreeBuilder(): TinyBvhBuilder | null {
+    return sharedBuilder;
 }
 
 /** three-mesh-bvh's split strategies, taken by {@link BvhBoundsTreeOptions.strategy}. Every one builds the same tree (see there). */
@@ -217,18 +230,44 @@ export function buildOptionsFromThreeMeshBvh(options: BvhBoundsTreeOptions): Cpu
     };
 }
 
-/** What a raycast against one mesh needs to know about each candidate triangle. */
-interface RaycastState {
+/**
+ * One walk of a raycast: ranges that start on the same index mod 3 (`shift`)
+ * and don't overlap, so each triangle of the walked tree belongs to at most one.
+ */
+interface RaycastPass {
+    /** The ranges' start index mod 3: 0 walks the tree itself, 1 and 2 its shifted trees. */
+    readonly shift: number;
     /**
-     * Per triangle: its group's position in `materials` + 1, or 0 when outside
-     * every range. Null with one range: then `[first, end)` holds the triangles of `materials[0]`.
+     * Per triangle of the walked tree: its range's position in `materials` + 1,
+     * or 0 when outside every range. Null with one range: then `[first, end)`
+     * holds the triangles of `materials[0]`.
      */
     readonly ranges: Uint16Array | null;
     readonly first: number;
     readonly end: number;
+    /** The ranges as `[first, end)` triangles of the walked tree, ascending (they don't overlap). */
+    readonly spans: readonly (readonly [number, number])[];
     /** The materials of the ranges; their `side` is read at each raycast. */
     readonly materials: (Material | null)[];
     readonly groupIndices: number[];
+}
+
+/** A hit of {@link BvhBoundsTree.raycastLocal}, in the geometry's space. */
+export interface BvhLocalHit {
+    t: number;
+    /** three's `faceIndex`. */
+    triangle: number;
+    /** The index (vertex, without an index) of the triangle's first corner. */
+    firstIndex: number;
+    u: number;
+    v: number;
+    materialIndex: number;
+}
+
+/** What a raycast against one mesh needs to know about each candidate triangle. */
+interface RaycastState {
+    /** Usually one; more for ranges off a multiple of 3 or groups that overlap. */
+    readonly passes: RaycastPass[];
     /** What it was made for: the draw range, groups (start, count, materialIndex) and, for an array, its materials. */
     readonly drawStart: number;
     readonly drawCount: number;
@@ -239,7 +278,8 @@ interface RaycastState {
 /** States per material kept for different draw ranges (a BatchedMesh raycasts each geometry's range); past this the cache starts again. */
 const MAX_STATES_PER_MATERIAL = 256;
 
-function positionVersionOf(attribute: BufferAttribute | InterleavedBufferAttribute): number {
+/** A position attribute's version (an interleaved one's buffer's). */
+export function positionVersionOf(attribute: BufferAttribute | InterleavedBufferAttribute): number {
     const interleaved = attribute as InterleavedBufferAttribute;
     return interleaved.isInterleavedBufferAttribute === true ? interleaved.data.version : (attribute as BufferAttribute).version;
 }
@@ -266,6 +306,112 @@ export function meshInputFromGeometry(geometry: BufferGeometry): MeshInput {
     return { positions, indices };
 }
 
+/** Triangles to cut shifted trees from: a geometry's, or a {@link MeshInput}'s. */
+interface TriangleSource {
+    /** `x, y, z` per vertex when the positions are plain f32 (used in place); else null and read from `attribute`. */
+    readonly positions: Float32Array | null;
+    readonly attribute: BufferAttribute | InterleavedBufferAttribute | null;
+    readonly vertexCount: number;
+    readonly index: ArrayLike<number> | null;
+    /** Index count, or the vertex count without an index. */
+    readonly length: number;
+}
+
+function sourceOfGeometry(geometry: BufferGeometry): TriangleSource {
+    const position = geometry.getAttribute('position') as BufferAttribute | InterleavedBufferAttribute;
+    const plain = position as BufferAttribute;
+    const isPlain = (position as InterleavedBufferAttribute).isInterleavedBufferAttribute !== true && plain.array instanceof Float32Array && plain.itemSize === 3 && !plain.normalized;
+    const index = geometry.index;
+    return {
+        positions: isPlain ? (plain.array as Float32Array).subarray(0, position.count * 3) : null,
+        attribute: isPlain ? null : position,
+        vertexCount: position.count,
+        index: index ? index.array : null,
+        length: index ? index.count : position.count,
+    };
+}
+
+function sourceOfInput(input: MeshInput): TriangleSource {
+    const vertexCount = Math.floor(input.positions.length / 3);
+    const index = input.indices ?? null;
+    return { positions: input.positions, attribute: null, vertexCount, index, length: index ? index.length : vertexCount };
+}
+
+/** How many triangles start at index `shift` mod 3 (1 or 2) and end within `source`. */
+function shiftedTriangleCount(length: number, shift: number): number {
+    return Math.max(0, Math.floor((length - shift) / 3));
+}
+
+/**
+ * The triangles of a source that start at index `shift` mod 3 (1 or 2):
+ * shifted triangle `t` is indices `shift + 3t` to `shift + 3t + 2` (its three
+ * `faceIndex` is `t`). `triangles` lists the ones to take (ascending; the
+ * tree's triangle `i` is `triangles[i]`), or null for every one. Positions are
+ * used in place when they are plain f32 and the triangles' vertices are one
+ * run; otherwise only the vertices the triangles use are copied. Null when a
+ * triangle isn't in the source (a cut `MeshInput`).
+ */
+function shiftedMeshInput(source: TriangleSource, shift: number, triangles: Uint32Array | null): MeshInput | null {
+    const available = shiftedTriangleCount(source.length, shift);
+    const count = triangles ? triangles.length : available;
+    if (count === 0) return null;
+    if (triangles && triangles[count - 1] >= available) return null;
+    const at = (i: number) => (triangles ? triangles[i] : i);
+    const contiguous = at(count - 1) - at(0) === count - 1;
+    const read = (vertex: number, out: Float32Array, to: number) => {
+        if (source.positions) {
+            out[to] = source.positions[vertex * 3];
+            out[to + 1] = source.positions[vertex * 3 + 1];
+            out[to + 2] = source.positions[vertex * 3 + 2];
+        } else {
+            out[to] = source.attribute!.getX(vertex);
+            out[to + 1] = source.attribute!.getY(vertex);
+            out[to + 2] = source.attribute!.getZ(vertex);
+        }
+    };
+    const index = source.index;
+    if (!index) {
+        const first = shift + at(0) * 3;
+        if (contiguous && source.positions) return { positions: source.positions.subarray(first * 3, (first + count * 3) * 3), indices: null };
+        const positions = new Float32Array(count * 9);
+        for (let i = 0; i < count; i++) for (let corner = 0; corner < 3; corner++) read(shift + at(i) * 3 + corner, positions, (i * 3 + corner) * 3);
+        return { positions, indices: null };
+    }
+    if (source.positions) {
+        // The index's own values over the positions in place: no position copy.
+        const first = shift + at(0) * 3;
+        if (contiguous && (index instanceof Uint16Array || index instanceof Uint32Array)) return { positions: source.positions, indices: index.subarray(first, first + count * 3) };
+        const indices = new Uint32Array(count * 3);
+        for (let i = 0; i < count; i++) for (let corner = 0; corner < 3; corner++) indices[i * 3 + corner] = index[shift + at(i) * 3 + corner];
+        return { positions: source.positions, indices };
+    }
+    // Positions that need converting: only the vertices these triangles use, renumbered in order of first use.
+    const remap = new Map<number, number>();
+    const indices = new Uint32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+        for (let corner = 0; corner < 3; corner++) {
+            const vertex = index[shift + at(i) * 3 + corner];
+            let local = remap.get(vertex);
+            if (local === undefined) remap.set(vertex, (local = remap.size));
+            indices[i * 3 + corner] = local;
+        }
+    }
+    const positions = new Float32Array(remap.size * 3);
+    for (const [vertex, local] of remap) if (vertex < source.vertexCount) read(vertex, positions, local * 3);
+    return { positions, indices };
+}
+
+/** A tree over shifted triangles (see {@link shiftedMeshInput}). */
+interface ShiftedTree {
+    readonly shift: number;
+    readonly tree: CpuMeshBvh;
+    /** The tree's triangle `i` is shifted triangle `triangles[i]`; null when it holds every shifted triangle, in order. */
+    readonly triangles: Uint32Array | null;
+}
+
+/** Subset shifted trees kept per tree (draw ranges and groups); past this, they are made again. */
+const MAX_SHIFTED_SUBSETS = 16;
+
 /** three-mesh-bvh's `HitPointInfo`: what `closestPointToPoint` and `closestPointToGeometry` return. */
 export type BvhClosestPointInfo = BvhClosestPoint<Vector3>;
 
@@ -291,12 +437,23 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
     staleWarned = false;
     /** The `geometry.boundingBox` this tree set (`setBoundingBox`), which `refit` keeps current. */
     private ownBoundingBox: Box3 | null = null;
-    private state: RaycastState | null = null;
+    private state: RaycastPass | null = null;
+    /**
+     * Trees over triangles starting at index 1 and 2 mod 3, made on first use
+     * (`shiftedTree`): keyed `shift` for one over every such triangle, or
+     * `shift:spans` for one over just a pass's ranges' triangles.
+     */
+    private readonly shifted = new Map<string, ShiftedTree>();
+    /** While a pass walks a subset shifted tree: its triangle → shifted triangle. */
+    private mapping: Uint32Array | null = null;
+    private readonly buildOptions: CpuMeshBvhBuildOptions;
+    private readonly builder: TinyBvhBuilder | null;
     private readonly rangeCache = new WeakMap<object, RaycastState[]>();
     /** The walk's acceptance test for the current state: inside a range, and on a side its material shows. */
-    private readonly acceptState: BvhTriangleAccept = (triangle, frontFace) => {
+    private readonly acceptState: BvhTriangleAccept = (local, frontFace) => {
         const state = this.state!;
-        const range = state.ranges ? state.ranges[triangle] : triangle >= state.first && triangle < state.end ? 1 : 0;
+        const triangle = this.mapping ? this.mapping[local] : local;
+        const range = state.ranges ? (state.ranges[triangle] ?? 0) : triangle >= state.first && triangle < state.end ? 1 : 0;
         if (range === 0) return false;
         const side = state.materials[range - 1]?.side ?? FrontSide;
         if (side === FrontSide) return frontFace;
@@ -318,6 +475,8 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
             layout = CpuMeshBvh.buildLayout(input, builder, buildOptions);
         }
         super(layout, { source: input });
+        this.buildOptions = buildOptions;
+        this.builder = options.builder ?? null;
         this.geometry = geometry;
         this.position = snapshot.position;
         this.positionVersion = snapshot.positionVersion;
@@ -340,6 +499,7 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
     override refit(input?: MeshInput): void {
         if (input) {
             super.refit(input);
+            this.refitShifted(sourceOfInput(input));
             this.updateOwnBoundingBox();
             return;
         }
@@ -348,6 +508,7 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
             throw new Error('BvhBoundsTree.refit: the position attribute or the index was replaced or changed; call computeBoundsTree again');
         }
         super.refit(meshInputFromGeometry(this.geometry));
+        this.refitShifted(sourceOfGeometry(this.geometry));
         this.positionVersion = positionVersionOf(position);
         this.staleWarned = false;
         this.updateOwnBoundingBox();
@@ -462,25 +623,27 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
             { start: 0, count: Infinity },
             firstHitOnly,
         );
+        if (!hits) throw new Error('@pmndrs/bvh/three: a group starts off a multiple of 3; call `await prepareBoundsTrees()` so its triangles can get a tree');
         hits.sort((a, b) => a.t - b.t);
         return hits.map((hit) => ({
             distance: hit.t * length,
             point: origin.clone().addScaledVector(direction, hit.t),
-            ...intersectionFields(this.geometry, hit.triangle, hit.u, hit.v, direction, hit.materialIndex),
+            ...intersectionFields(this.geometry, hit.triangle, hit.firstIndex, hit.u, hit.v, direction, hit.materialIndex),
         }));
     }
 
     protected override createHit(hit: BvhRayIntersection, ray: { readonly origin: readonly number[]; readonly direction: readonly number[] }): BvhBoundsTreeHit {
         const direction = new Vector3(ray.direction[0], ray.direction[1], ray.direction[2]);
         const point = new Vector3(ray.origin[0], ray.origin[1], ray.origin[2]).addScaledVector(direction, hit.t);
-        return { distance: hit.t * direction.length(), point, ...intersectionFields(this.geometry, hit.triangle, hit.u, hit.v, direction, 0) };
+        return { distance: hit.t * direction.length(), point, ...intersectionFields(this.geometry, hit.triangle, hit.triangle * 3, hit.u, hit.v, direction, 0) };
     }
 
     /**
      * Intersects a local-space ray (origin, direction: three's ray through the
      * inverse of the world matrix, not renormalized, so `t` is the world
      * distance) with the triangles three would test for `material`.
-     * `firstHitOnly`: the closest only. Returns local hits.
+     * `firstHitOnly`: the closest only. Returns local hits, or null when a
+     * range off a multiple of 3 needs a shifted tree and tinybvh isn't loaded.
      */
     raycastLocal(
         origin: readonly [number, number, number],
@@ -490,28 +653,115 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
         material: Material | Material[],
         drawRange: { readonly start: number; readonly count: number },
         firstHitOnly: boolean,
-    ): { t: number; triangle: number; u: number; v: number; materialIndex: number }[] {
+    ): BvhLocalHit[] | null {
         const state = this.stateFor(material, drawRange);
-        if (!state.ranges && state.first === 0 && state.end >= this.triangleCount) {
+        if (state.passes.length === 1 && state.passes[0].shift === 0) return this.walkPass(this, state.passes[0], origin, direction, near, far, firstHitOnly);
+        const out: BvhLocalHit[] = [];
+        for (const pass of state.passes) {
+            const shifted = pass.shift === 0 ? null : this.shiftedTree(pass);
+            if (shifted === undefined) return null;
+            if (pass.shift !== 0 && shifted === null) continue;
+            for (const hit of this.walkPass(shifted ? shifted.tree : this, pass, origin, direction, near, far, firstHitOnly, shifted?.triangles ?? null)) {
+                if (firstHitOnly && out.length > 0) {
+                    if (hit.t >= out[0].t) continue;
+                    out.length = 0;
+                }
+                out.push(hit);
+            }
+        }
+        return out;
+    }
+
+    /** One pass of {@link raycastLocal}: its ranges' triangles in `tree`. */
+    private walkPass(
+        tree: CpuMeshBvh<unknown>,
+        pass: RaycastPass,
+        origin: readonly [number, number, number],
+        direction: readonly [number, number, number],
+        near: number,
+        far: number,
+        firstHitOnly: boolean,
+        mapping: Uint32Array | null = null,
+    ): BvhLocalHit[] {
+        const shift = pass.shift;
+        const shifted = (triangle: number) => (mapping ? mapping[triangle] : triangle);
+        // A subset tree holds only its pass's triangles: with one range, every one is in it.
+        if (!pass.ranges && (mapping !== null || (pass.first === 0 && pass.end >= tree.triangleCount))) {
             // One material over every triangle: its side culls natively in the walk, with no per-triangle callback.
-            const side = state.materials[0]?.side ?? FrontSide;
+            const side = pass.materials[0]?.side ?? FrontSide;
             if (side !== FrontSide && side !== BackSide && side !== DoubleSide) return [];
             const walkSide = side === FrontSide ? BVH_FRONT_SIDE : side === BackSide ? BVH_BACK_SIDE : BVH_DOUBLE_SIDE;
-            const materialIndex = state.groupIndices[0];
-            return this.intersectRay(origin, direction, near, far, firstHitOnly, null, walkSide).map((hit) => ({ t: hit.t, triangle: hit.triangle, u: hit.u, v: hit.v, materialIndex }));
+            const materialIndex = pass.groupIndices[0];
+            return tree.intersectRay(origin, direction, near, far, firstHitOnly, null, walkSide).map((hit) => {
+                const triangle = shifted(hit.triangle);
+                return { t: hit.t, triangle, firstIndex: shift + triangle * 3, u: hit.u, v: hit.v, materialIndex };
+            });
         }
         const previous = this.state;
-        this.state = state;
+        const previousMapping = this.mapping;
+        this.state = pass;
+        this.mapping = mapping;
         try {
-            return this.intersectRay(origin, direction, near, far, firstHitOnly, this.acceptState).map((hit) => ({
-                t: hit.t,
-                triangle: hit.triangle,
-                u: hit.u,
-                v: hit.v,
-                materialIndex: state.groupIndices[state.ranges ? state.ranges[hit.triangle] - 1 : 0],
-            }));
+            return tree.intersectRay(origin, direction, near, far, firstHitOnly, this.acceptState).map((hit) => {
+                const triangle = shifted(hit.triangle);
+                return {
+                    t: hit.t,
+                    triangle,
+                    firstIndex: shift + triangle * 3,
+                    u: hit.u,
+                    v: hit.v,
+                    materialIndex: pass.groupIndices[pass.ranges ? pass.ranges[triangle] - 1 : 0],
+                };
+            });
         } finally {
             this.state = previous;
+            this.mapping = previousMapping;
+        }
+    }
+
+    /**
+     * The tree a shifted pass (ranges starting at index 1 or 2 mod 3) walks,
+     * built on first use with this tree's build options: over just the pass's
+     * ranges' triangles, or over every triangle of its shift when the ranges
+     * hold half of them or more (then any pass of that shift uses it). Null
+     * when the ranges hold no triangle, undefined when tinybvh isn't loaded.
+     */
+    private shiftedTree(pass: RaycastPass): ShiftedTree | null | undefined {
+        const shift = pass.shift;
+        const whole = this.shifted.get(`${shift}`);
+        if (whole) return whole;
+        const available = shiftedTriangleCount(this.geometry.index ? this.geometry.index.count : this.geometry.getAttribute('position').count, shift);
+        const spans = pass.spans.map(([a, b]) => [Math.min(a, available), Math.min(b, available)] as const).filter(([a, b]) => b > a);
+        const count = spans.reduce((sum, [a, b]) => sum + b - a, 0);
+        if (count === 0) return null;
+        const everyTriangle = count * 2 >= available;
+        const key = everyTriangle ? `${shift}` : `${shift}:${spans.map(([a, b]) => `${a}-${b}`).join(',')}`;
+        const made = this.shifted.get(key);
+        if (made) return made;
+        const builder = this.builder ?? sharedBuilder;
+        if (!builder) return undefined;
+        let triangles: Uint32Array | null = null;
+        if (!everyTriangle) {
+            triangles = new Uint32Array(count);
+            let at = 0;
+            for (const [a, b] of spans) for (let t = a; t < b; t++) triangles[at++] = t;
+        }
+        const input = shiftedMeshInput(sourceOfGeometry(this.geometry), shift, triangles);
+        if (!input) return null;
+        if (!everyTriangle && this.shifted.size >= MAX_SHIFTED_SUBSETS) {
+            for (const [made, tree] of this.shifted) if (tree.triangles) this.shifted.delete(made);
+        }
+        const tree: ShiftedTree = { shift, tree: CpuMeshBvh.build(input, builder, this.buildOptions), triangles };
+        this.shifted.set(key, tree);
+        return tree;
+    }
+
+    /** Refits the shifted trees from `source` (the tree's own refit input); one whose triangles `source` cuts off is dropped, made again on its next use. */
+    private refitShifted(source: TriangleSource): void {
+        for (const [key, shifted] of [...this.shifted]) {
+            const input = shiftedMeshInput(source, shifted.shift, shifted.triangles);
+            if (input && (input.indices ? input.indices.length : input.positions.length / 3) === shifted.tree.triangleCount * 3) shifted.tree.refit(input);
+            else this.shifted.delete(key);
         }
     }
 
@@ -556,28 +806,30 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
     }
 
     private makeState(material: Material | Material[], drawRange: { readonly start: number; readonly count: number }): RaycastState {
-        const materials: (Material | null)[] = [];
-        const groupIndices: number[] = [];
-        const spans: [number, number][] = [];
+        // Each range goes into the first pass with its shift whose ranges it doesn't overlap.
+        const passes: { shift: number; spans: [number, number][]; materials: (Material | null)[]; groupIndices: number[] }[] = [];
         for (const range of threeTriangleRanges(this.geometry, material, drawRange)) {
-            if (range.start % 3 !== 0) continue; // not authored triangles (see the file comment)
-            materials.push(range.threeMaterial);
-            groupIndices.push(range.group >= 0 ? range.materialIndex : 0);
-            spans.push([range.start / 3, Math.min(this.triangleCount, (range.start + range.count) / 3)]);
-        }
-        let ranges: Uint16Array | null = null;
-        if (spans.length > 1) {
-            const fill = new Uint16Array(this.triangleCount);
-            spans.forEach(([first, end], i) => fill.fill(i + 1, first, end));
-            ranges = fill;
+            const shift = range.start % 3;
+            const first = (range.start - shift) / 3;
+            const end = first + range.count / 3;
+            let pass = passes.find((candidate) => candidate.shift === shift && candidate.spans.every(([a, b]) => end <= a || first >= b));
+            if (!pass) passes.push((pass = { shift, spans: [], materials: [], groupIndices: [] }));
+            pass.spans.push([first, end]);
+            pass.materials.push(range.threeMaterial);
+            pass.groupIndices.push(range.group >= 0 ? range.materialIndex : 0);
         }
         const isArray = Array.isArray(material);
         return {
-            ranges,
-            first: spans.length === 1 ? spans[0][0] : 0,
-            end: spans.length === 1 ? spans[0][1] : 0,
-            materials,
-            groupIndices,
+            passes: passes.map(({ shift, spans, materials, groupIndices }): RaycastPass => {
+                let ranges: Uint16Array | null = null;
+                if (spans.length > 1) {
+                    const fill = new Uint16Array(Math.max(...spans.map(([, end]) => end)));
+                    spans.forEach(([first, end], i) => fill.fill(i + 1, first, end));
+                    ranges = fill;
+                }
+                const sorted = spans.map(([a, b]) => [a, b] as const).sort((a, b) => a[0] - b[0]);
+                return { shift, ranges, first: spans.length === 1 ? spans[0][0] : 0, end: spans.length === 1 ? spans[0][1] : 0, spans: sorted, materials, groupIndices };
+            }),
             drawStart: drawRange.start,
             drawCount: drawRange.count,
             groups: isArray ? this.geometry.groups.flatMap((group) => [group.start, group.count, group.materialIndex ?? 0]) : [],
@@ -590,10 +842,10 @@ const vA = new Vector3();
 const vB = new Vector3();
 const vC = new Vector3();
 
-/** The vertex indices of a triangle (three's `face.a`, `b`, `c`). */
-function cornersOf(geometry: BufferGeometry, triangle: number): [number, number, number] {
+/** The vertex indices of the triangle whose first corner is at index `first` (three's `face.a`, `b`, `c`). */
+function cornersOf(geometry: BufferGeometry, first: number): [number, number, number] {
     const index = geometry.index;
-    return index ? [index.getX(triangle * 3), index.getX(triangle * 3 + 1), index.getX(triangle * 3 + 2)] : [triangle * 3, triangle * 3 + 1, triangle * 3 + 2];
+    return index ? [index.getX(first), index.getX(first + 1), index.getX(first + 2)] : [first, first + 1, first + 2];
 }
 
 /**
@@ -602,16 +854,17 @@ function cornersOf(geometry: BufferGeometry, triangle: number): [number, number,
  * `faceIndex`, `barycoord`, and `uv`, `uv1` and `normal` (interpolated,
  * turned against `localDirection`) when the geometry has them.
  */
-function intersectionFields(
+export function intersectionFields(
     geometry: BufferGeometry,
     triangle: number,
+    firstIndex: number,
     u: number,
     v: number,
     localDirection: Vector3,
     materialIndex: number,
 ): Pick<Intersection, 'face' | 'faceIndex' | 'barycoord' | 'uv' | 'uv1' | 'normal'> {
     const { position, uv, uv1, normal } = geometry.attributes;
-    const [a, b, c] = cornersOf(geometry, triangle);
+    const [a, b, c] = cornersOf(geometry, firstIndex);
     const barycoord = new Vector3(1 - u - v, u, v);
     vA.fromBufferAttribute(position, a);
     vB.fromBufferAttribute(position, b);
@@ -651,7 +904,7 @@ export interface BvhHitPointInfoTarget {
  * triangle gets zero weights.
  */
 export function getTriangleHitPointInfo(point: Vector3, geometry: BufferGeometry, triangleIndex: number, target?: BvhHitPointInfoTarget): BvhHitPointInfo {
-    const [a, b, c] = cornersOf(geometry, triangleIndex);
+    const [a, b, c] = cornersOf(geometry, triangleIndex * 3);
     const position = geometry.attributes.position;
     vA.fromBufferAttribute(position, a);
     vB.fromBufferAttribute(position, b);
@@ -788,6 +1041,10 @@ export function acceleratedRaycast(this: Mesh, raycaster: Raycaster, intersects:
     const toT = 1 / direction.length();
     const firstHitOnly = (raycaster as Raycaster & { firstHitOnly?: boolean }).firstHitOnly === true;
     const hits = tree.raycastLocal(localOrigin, localDirection, raycaster.near * toT, raycaster.far * toT, material, this.geometry.drawRange, firstHitOnly);
+    if (!hits) {
+        threeRaycast.call(this, raycaster, intersects); // a range off a multiple of 3, and tinybvh isn't loaded for its tree
+        return;
+    }
     if (hits.length === 0) return;
     const localDir = new Vector3(...localDirection);
     for (const hit of hits) {
@@ -795,6 +1052,6 @@ export function acceleratedRaycast(this: Mesh, raycaster: Raycaster, intersects:
         worldPoint.copy(localPoint).applyMatrix4(this.matrixWorld);
         const distance = raycaster.ray.origin.distanceTo(worldPoint);
         if (distance < raycaster.near || distance > raycaster.far) continue;
-        intersects.push({ distance, point: worldPoint.clone(), object: this, ...intersectionFields(this.geometry, hit.triangle, hit.u, hit.v, localDir, hit.materialIndex) });
+        intersects.push({ distance, point: worldPoint.clone(), object: this, ...intersectionFields(this.geometry, hit.triangle, hit.firstIndex, hit.u, hit.v, localDir, hit.materialIndex) });
     }
 }

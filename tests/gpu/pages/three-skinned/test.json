@@ -1,0 +1,4 @@
+{
+    "description": "@pmndrs/bvh/three skinned and morphed meshes on a WebGPURenderer: SceneTreesObject3DSync poses SkinnedMeshes (indexed with groups, non-indexed, with morphs and root motion) and a morph-only mesh through BvhPosePass (a TSL compute pass, three's math) into SceneTrees.setPose; the posed vertices must match three's CPU pose (getVertexPosition / applyBoneTransform) and the GPU walk's hits a CPU walk over meshes posed on the CPU, over an animation with held bends (drift rebuilds) and a walking root (deform boxes moving), records and indexed leaves.",
+    "timeoutMs": 300000
+}

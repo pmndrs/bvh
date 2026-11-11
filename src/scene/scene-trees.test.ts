@@ -433,7 +433,37 @@ describe('SceneTrees', () => {
         frame();
         expect(passes).not.toContain('meshRefitTriangles');
         expect(scene.memory.meshRefits).toBeGreaterThan(0);
+        expect(() => scene.setDeformBounds(rock, box)).toThrow(/not added as deforming|no mesh/);
+        expect(() => scene.setDeformBounds(cloth, [1, 0, 0, 0, 0, 0])).toThrow(/not a box/);
         scene.dispose();
+
+        // setDeformBounds moves a deforming mesh's top-level box: a box away from the quad culls it, the old one finds it again.
+        // The CPU top level here (the fake GPU runs no kernels); the GPU top level is checked on the three-skinned page.
+        for (const topLevel of ['cpu'] as const) {
+            const builder = new StandInGpuBuilder(gpu.device);
+            const bounded = await SceneTrees.create(gpu.device, { firstTreeBuilder: builder, topLevel });
+            const sheet = bounded.addMesh(tessellatedQuad(4, 1), { deforming: { bounds: box } });
+            bounded.addInstance({ mesh: sheet, objectToWorld: identity });
+            const tick = () => {
+                const encoder = gpu.createEncoder();
+                bounded.update(encoder);
+                gpu.submit(encoder);
+            };
+            tick();
+            while (builder.waiting > 0) await builder.finishBatch();
+            await bounded.whenRefined();
+            tick();
+            tick();
+            const ray = { origin: [0.1, 0.2, 3] as const, direction: [0, 0, -1] as const, tMin: 0, tMax: 100 };
+            expect(createCpuTracer(readScene(bounded)).closest(ray)?.t, topLevel).toBeCloseTo(3, 5);
+            bounded.setDeformBounds(sheet, [10, 10, 10, 11, 11, 11]);
+            tick();
+            expect(createCpuTracer(readScene(bounded)).closest(ray)).toBeNull();
+            bounded.setDeformBounds(sheet, box);
+            tick();
+            expect(createCpuTracer(readScene(bounded)).closest(ray)?.t).toBeCloseTo(3, 5);
+            bounded.dispose();
+        }
 
         // Without subgroups: no refit, the pose is counted as skipped.
         const plain = await setUp({ stand: false });

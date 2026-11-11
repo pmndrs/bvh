@@ -8,7 +8,7 @@ node tests/gpu/run.ts --filter trace-bench-smoke --verbose --json out.json
 
 `--filter` matches by substring of the page folder name (`bvh-lbvh` also runs `bvh-lbvh-fallback` and `-profile`). The runner starts a vite server on `tests/gpu/`, launches your installed Chrome headless with WebGPU, runs each `pages/<name>/` and fails on a failed report, any browser error or WebGPU validation warning, or a timeout. It was ported from webgpu-ddgi's `tools/gpu/`; most of what is below that is general (page contract, `test.json`, `--gpu`) is in `tests/gpu/RUNNER.md`, ddgi's README for the runner.
 
-Pages that run quickly and need no assets: `bvh-lbvh`, `bvh-hploc`, `bvh-blas-refit`, `bvh-lbvh-fallback`, `bvh-top-level-gpu`, `scene-trees-mid-swap`, `scene-trees-runtime`, `scene-trees-deforming`, `three-trace` (three's `WebGPURenderer`, `@pmndrs/bvh/three`), `trace-inline`, `trace-oracle`. `scene-trees-sponza` (manual) loads Sponza and reports `SceneTrees` memory and load times. The `trace-bench-*` pages load scenes (see below); the Sponza and Bistro ones take minutes.
+Pages that run quickly and need no assets: `bvh-lbvh`, `bvh-hploc`, `bvh-blas-refit`, `bvh-lbvh-fallback`, `bvh-top-level-gpu`, `scene-trees-mid-swap`, `scene-trees-runtime`, `scene-trees-deforming`, `three-trace` (three's `WebGPURenderer`, `@pmndrs/bvh/three`), `three-skinned` (skinned and morphed meshes posed by `BvhPosePass`), `trace-inline`, `trace-oracle`. `scene-trees-sponza` (manual) loads Sponza and reports `SceneTrees` memory and load times. The `trace-bench-*` pages load scenes (see below); the Sponza and Bistro ones take minutes.
 
 ## Scene assets
 

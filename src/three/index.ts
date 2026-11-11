@@ -16,7 +16,9 @@ export {
     type BvhThreeScene,
     type BvhThreeSource,
 } from './scene.ts';
-export { SceneTreesObject3DSync, type Object3DSyncCounts, type SceneTreesTarget } from './scene-trees-sync.ts';
+export { SceneTreesObject3DSync, type Object3DPoseCounts, type Object3DSyncCounts, type SceneTreesObject3DSyncOptions, type SceneTreesTarget } from './scene-trees-sync.ts';
+// Skinned and morphed meshes on the GPU: three's skinning and morph math in a TSL compute pass, feeding SceneTrees.setPose.
+export { BvhPosePass, poseVertices, threeDeforms, type BvhPosePassLike, type BvhPosePassOptions } from './deform.ts';
 
 // CPU raycasts (Q1) and the CPU tree: three-mesh-bvh-style drop-ins over the core's CpuMeshBvh.
 export {
@@ -46,6 +48,8 @@ export {
     type BvhHitPointInfoTarget,
     type BvhSplitStrategy,
 } from './raycast.ts';
+// A ray against the whole scene on the CPU (three-mesh-bvh's ObjectBVH.raycast), and frustum culling over the top level.
+export { BvhSceneRaycaster, raycastScene, type BvhSceneRaycasterOptions } from './scene-raycast.ts';
 // Shapecast and bvhcast (Q2): three-mesh-bvh's shape classes with three's types, over the core's math.
 export { ExtendedTriangle, OrientedBox, SeparatingAxisBounds } from './shapes.ts';
 // three-mesh-bvh's names for what intersectsBounds returns.
