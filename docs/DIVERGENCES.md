@@ -137,7 +137,7 @@ These look like differences but have no source to differ from, or they match it.
 
 Rows where a reason, a measurement or the source's behaviour is not written down anywhere I looked.
 
-1. **T1 needs GPU re-runs.** The fix is ported (`7d62375`), but NVIDIA and Intel were not re-run with it (ddgi PROGRESS says so), and the oracle hasn't run on Metal from this repo yet.
+1. **T1 needs GPU re-runs on NVIDIA and Intel.** The fix is ported (`7d62375`), but NVIDIA and Intel were not re-run with it (ddgi PROGRESS says so). On Metal it holds from this repo: on an Apple M5 (2026-11-11, branch `bx-walk-api`) the `trace-oracle` page let 0 of 2M shared-edge rays slip in each of its five variants.
 2. **T3: what the paper does for an edge function of exactly 0.** Our comment says zero counts as inside for both triangles. No doc says whether the paper does the same, or whether we dropped a fallback (for example a double-precision retry). Not recorded.
 3. **L5 and L6: what HIPRT's LBVH does** about leaf collapse and about subgroup or warp pairing. Our comments list the collapse as a difference but do not say what HIPRT does. Also the measured effect of each on the LBVH alone is not recorded. Whether `maxLeafPrimitives: 1` really gives no collapse in the LBVH has not been tested in any doc.
 4. **P6: what tinybvh's `BuildHPLOC` does for node numbering.** Our comment names a per-mesh counter as the alternative. Also two notes disagree on the gain: the WGSL comment implies a large cost (hundreds of thousands of queued atomics), NOTES measured about 5%.

@@ -1,4 +1,4 @@
 {
-    "description": "Inline tracing from the page's own kernel: the trace module in group 0, three own storage buffers in group 1, bvhTraceClosest/bvhTraceAny called inline, against the CPU reference on the oracle scenes.",
+    "description": "Inline tracing from the page's own kernel: the trace module in group 0, three own storage buffers in group 1, bvhTraceClosestMasked (all ones) and bvhTraceAny called inline, against the CPU reference on the oracle scenes.",
     "timeoutMs": 300000
 }
