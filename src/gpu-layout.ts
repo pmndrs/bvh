@@ -19,7 +19,10 @@
  *
  * History: 1, the first layout. 2, instance records carry an 8-bit instance
  * mask in bits 8-15 of their `flags` word (written as 0xff, visible to every
- * ray, unless the instance gives one); nothing else moved.
+ * ray, unless the instance gives one). Also in 2, before its release: merged
+ * static meshes. Instance flags bit 3 (`merged`) says the hit's instance is
+ * the triangle's `padding` word (the source instance index), and triangle
+ * flags bit 1 flips `frontFace`. Builders still write 0 to both; nothing moved.
  */
 export const GPU_LAYOUT_VERSION = 2;
 
@@ -69,6 +72,8 @@ export const GPU_LAYOUT_TRIANGLE_BYTES = 48;
  * Word positions inside a triangle, matching the tracer's WGSL `BvhTriangle`
  * (and ddgi-core's `TRIANGLE_WORD`): each corner is a `vec3f` followed by one
  * word, the original triangle index after the first, the flags after the second.
+ * The word after the third (`padding`) is 0 as every builder writes it; in a
+ * merged static mesh the scene assembly writes the source instance index there.
  */
 export const GPU_LAYOUT_TRIANGLE_WORD = {
     vertex0: 0,

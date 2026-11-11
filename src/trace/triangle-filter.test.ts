@@ -380,8 +380,8 @@ describe('the triangle filter and ray masks in the WGSL walk', () => {
         expect(module.split(call).length - 1).toBe(2);
         expect(module).toContain(`const BVH_TRIANGLE_FLAG_FILTER: u32 = ${TRIANGLE_FLAG_FILTER}u;`);
         expect(module.split('(triangle.flags & BVH_TRIANGLE_FLAG_FILTER) != 0u').length - 1).toBe(2);
-        expect(module).toContain('triangleHit.frontFacing, BVH_QUERY_CLOSEST, rayMask,');
-        expect(module).toContain('triangleHit.frontFacing, BVH_QUERY_ANY, rayMask,');
+        expect(module).toContain('frontFace, BVH_QUERY_CLOSEST, rayMask,');
+        expect(module).toContain('frontFace, BVH_QUERY_ANY, rayMask,');
         expect(module).toContain(`const BVH_QUERY_CLOSEST: u32 = ${BVH_QUERY_CLOSEST}u;`);
         expect(module).toContain(`const BVH_QUERY_ANY: u32 = ${BVH_QUERY_ANY}u;`);
         // With triangleFilter: null the kernel supplies the filter.
@@ -436,7 +436,7 @@ describe('the triangle filter and ray masks in the WGSL walk', () => {
         expect(module).toContain('fn bvhTraceClosest(ray: BvhRay) -> BvhHit {\n    return bvhWalkClosest(ray);');
         expect(module).toContain('fn bvhTraceAny(ray: BvhRay) -> bool {\n    return bvhWalkAny(ray);');
         // The filter is still told a mask: all ones.
-        expect(module).toContain('triangleHit.frontFacing, BVH_QUERY_CLOSEST, BVH_RAY_MASK_ALL,');
+        expect(module).toContain('frontFace, BVH_QUERY_CLOSEST, BVH_RAY_MASK_ALL,');
         // The batch kernel has no mask uniform either.
         const batch = batchKernelWgsl('any', { rayMasks: false });
         expect(batch).not.toContain('@binding(2) var<uniform>');

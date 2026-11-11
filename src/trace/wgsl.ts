@@ -50,6 +50,8 @@ import {
     TRIANGLE_BYTES,
     TRACE_STACK_SIZE,
     TRIANGLE_FLAG_FILTER,
+    TRIANGLE_FLAG_FLIP_FRONT_FACE,
+    INSTANCE_FLAG,
     INSTANCE_MASK_SHIFT,
     INSTANCE_MASK_ALL,
     RAY_MASK_ALL,
@@ -139,7 +141,7 @@ struct BvhNode {
 struct BvhTriangle {
     vertex0: vec3f, originalIndex: u32,
     vertex1: vec3f, flags: u32,
-    vertex2: vec3f, padding: u32,
+    vertex2: vec3f, padding: u32,   // 0, or the source instance in a merged mesh
 }
 
 // The world-to-object transform is a 3x4 matrix stored as three rows.
@@ -220,8 +222,9 @@ function walkWgsl(kind: 'closest' | 'any', rayMasks: boolean): string {
     const onTriangleHit = closest
         ? `// The test ran in object space, where the winding is the one the mesh was
                     // authored with, so frontFacing is the authored side even for a mirrored
-                    // instance (DECISIONS 2026-11-04).
-                    result = BvhHit(triangleHit.t, instance.instanceIndex, triangle.originalIndex, triangleHit.barycentrics, triangleHit.frontFacing);
+                    // instance (DECISIONS 2026-11-04); a merged mesh's triangle from a mirrored
+                    // source carries the flip bit instead (see hitInstance above).
+                    result = BvhHit(triangleHit.t, hitInstance, triangle.originalIndex, triangleHit.barycentrics, frontFace);
                     farthest = triangleHit.t;`
         : 'return true;';
     return /* wgsl */ `
@@ -316,13 +319,20 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
                 if (!triangleHit.hit) {
                     continue;
                 }
+                // A merged mesh (mergeStaticInstances, static-merge.ts) holds several source
+                // instances in world space: its triangles name their source instance in the
+                // padding word, and the flip bit marks those of a mirrored source, whose
+                // world-space winding is the reverse of the authored one. Elsewhere padding
+                // is 0 and the bit clear, so this is the instance's index and the side as tested.
+                let hitInstance = select(instance.instanceIndex, triangle.padding, (instance.flags & BVH_INSTANCE_FLAG_MERGED) != 0u);
+                let frontFace = triangleHit.frontFacing != ((triangle.flags & BVH_TRIANGLE_FLAG_FLIP_FRONT_FACE) != 0u);
                 // A flagged triangle asks the filter first (triangle-filter.ts). A ray
                 // that passes records nothing and leaves 'farthest' alone, so what
                 // lies behind the triangle is still found.
                 if ((triangle.flags & BVH_TRIANGLE_FLAG_FILTER) != 0u) {
                     let candidate = BvhCandidate(
-                        instance.instanceIndex, triangle.originalIndex, triangleHit.t, triangleHit.barycentrics,
-                        triangleHit.frontFacing, ${query}, ${candidateMask},
+                        hitInstance, triangle.originalIndex, triangleHit.t, triangleHit.barycentrics,
+                        frontFace, ${query}, ${candidateMask},
                     );
                     if (bvhTrianglePasses(candidate)) {
                         continue;
@@ -421,6 +431,11 @@ const BVH_VEC4_PER_TRIANGLE: u32 = ${TRIANGLE_BYTES / 16}u;
 // Triangle flags bit 0: consult the triangle filter (bvhTrianglePasses;
 // trace/triangle-filter.ts).
 const BVH_TRIANGLE_FLAG_FILTER: u32 = ${TRIANGLE_FLAG_FILTER}u;
+// Triangle flags bit 1: the hit's frontFace is flipped (a merged mesh's triangle
+// from a mirrored source instance).
+const BVH_TRIANGLE_FLAG_FLIP_FRONT_FACE: u32 = ${TRIANGLE_FLAG_FLIP_FRONT_FACE}u;
+// Instance flags bit 3: a merged mesh; the hit's instance is the triangle's padding word.
+const BVH_INSTANCE_FLAG_MERGED: u32 = ${INSTANCE_FLAG.merged}u;
 
 fn bvhLoadMeshNode(nodeIndex: u32) -> BvhNode {
     let base = nodeIndex * BVH_VEC4_PER_NODE;

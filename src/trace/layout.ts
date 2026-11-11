@@ -81,6 +81,27 @@ export const TRIANGLE_WORD = {
  */
 export const TRIANGLE_FLAG_FILTER = 1;
 
+/**
+ * Triangle `flags` bit 1: flip the hit's `frontFace`. Set by
+ * `assembleTraceScene` on a merged mesh's triangles (`mergeStaticInstances`,
+ * static-merge.ts) that come from a mirrored source instance: they are stored
+ * in world space, where a mirror reverses the authored winding. Builders never
+ * write it. Bits 2-15 are reserved, 0. Bits 16-31 are reserved for a
+ * per-instance material (planned: material + 1, 0 = none), which a merged
+ * mesh will carry per triangle because its record has no single material;
+ * not written yet.
+ */
+export const TRIANGLE_FLAG_FLIP_FRONT_FACE = 2;
+
+/**
+ * The triangle record's `padding` word (word 11): the *source instance index*
+ * of a triangle in a merged mesh (the record's instance has
+ * {@link INSTANCE_FLAG}`.merged`), which the walk returns as `BvhHit.instance`
+ * and `BvhCandidate.instance`. 0 in every other mesh; builders always write 0,
+ * and `assembleTraceScene` writes the index after the build.
+ */
+export const TRIANGLE_WORD_SOURCE_INSTANCE = TRIANGLE_WORD.padding;
+
 /** @deprecated The old name of {@link TRIANGLE_FLAG_FILTER}, from when the bit only meant an alpha test. */
 export const TRIANGLE_FLAG_ALPHA_TEST = TRIANGLE_FLAG_FILTER;
 
@@ -104,8 +125,11 @@ export const INSTANCE_WORD = {
 } as const;
 
 /**
- * Instance `flags` bits 0-2. Bits 3-7 are reserved; bits 8-15 hold the
- * instance mask ({@link INSTANCE_MASK_SHIFT}); bits 16-31 are reserved.
+ * Instance `flags` bits 0-3. Bits 4-7 are reserved; bits 8-15 hold the
+ * instance mask ({@link INSTANCE_MASK_SHIFT}); bits 16-31 are reserved for
+ * a per-instance material index (planned: material + 1, 0 = none). A merged
+ * record ({@link INSTANCE_FLAG}`.merged`) will leave them 0 and its triangles
+ * carry their source's material in triangle flags bits 16-31 instead.
  */
 export const INSTANCE_FLAG = {
     /** Rays that hit this instance count (an instance can be hidden from GI only). */
@@ -119,6 +143,14 @@ export const INSTANCE_FLAG = {
      * follow the authored side, DECISIONS 2026-11-04).
      */
     mirrored: 4,
+    /**
+     * A merged mesh of static instances (`mergeStaticInstances`,
+     * static-merge.ts): its triangles are in world space under an identity
+     * transform, and each names its source instance in the padding word
+     * ({@link TRIANGLE_WORD_SOURCE_INSTANCE}). The walk returns that index as
+     * the hit's instance instead of the record's `instanceIndex`.
+     */
+    merged: 8,
 } as const;
 
 /**
