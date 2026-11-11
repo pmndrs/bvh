@@ -15,7 +15,7 @@ Everything is plain arrays in a few storage buffers, so it survives a worker han
 - **Node: 64 bytes, two child boxes per node** (the Aila-Laine layout used by most GPU BVH2 tracers). One node read gives both children's boxes, so the walk tests both and visits the nearer one first without a second memory fetch.
 
   ```
-  struct GiBvhNode {          // 64 bytes
+  struct BvhNode {            // 64 bytes
       leftMin:  vec3f, leftIndex:  u32,
       leftMax:  vec3f, rightIndex: u32,
       rightMin: vec3f, leftCount:  u32,   // count > 0: child is a leaf with `count` triangles starting at index
@@ -23,7 +23,7 @@ Everything is plain arrays in a few storage buffers, so it survives a worker han
   }
   ```
   A child with count 0 is an inner node at `index`. A leaf child stores the first triangle and the number of triangles.
-- **Triangles: 48 bytes each, stored in tree order** (leaves point at contiguous runs, so no index indirection): `v0` + original triangle index, `v1` + flags, `v2` + pad. The three corners are stored as they are, so a vertex shared by two triangles has identical bits in both; the watertight test needs that. The original index maps a hit back to the mesh's UVs and material group. Flags bit 0 marks "needs alpha test".
+- **Triangles: 48 bytes each, stored in tree order** (leaves point at contiguous runs, so no index indirection): `v0` + original triangle index, `v1` + flags, `v2` + pad. The three corners are stored as they are, so a vertex shared by two triangles has identical bits in both; the watertight test needs that. The original index maps a hit back to the mesh's UVs and material group. Flags bit 0 (`TRIANGLE_FLAG_FILTER`) sends the triangle to the triangle filter (below).
 - **Leaves:** at most 4 triangles in the tracer's own builder, fewer where the SAH cost says so. The builders take a largest-leaf option.
 - **Deforming meshes** keep the tree's shape. Refitting bottom-up needs each node's parent, so the builder also writes a parent index per node (4 bytes per node, kept in a separate array that only the refit pass uses).
 
@@ -31,7 +31,7 @@ All meshes' nodes go in one node buffer, and all triangles in one triangle buffe
 
 ### Instances and the top level
 
-- **Instance record: 64 bytes.** It holds the world-to-object transform as a 3x4 matrix (48 bytes), the mesh's root node offset, its triangle offset, the instance index, and flags. Rays are moved into object space, so moving an object never touches its tree. Mirrored and non-uniform scales work because the hit distance is measured on the object-space ray, whose direction we deliberately *don't* renormalize, so `t` stays in world units.
+- **Instance record: 64 bytes.** It holds the world-to-object transform as a 3x4 matrix (48 bytes), the mesh's root node offset, its triangle offset, the instance index, and flags. Flags bits 0-2 are `contributesToGi`, `visible` and `mirrored`; bits 8-15 hold the 8-bit instance mask (as in DXR; `0xff`, visible to every ray, unless the instance gives one). Layout version 2 added the mask; nothing else moved. Rays are moved into object space, so moving an object never touches its tree. Mirrored and non-uniform scales work because the hit distance is measured on the object-space ray, whose direction we deliberately *don't* renormalize, so `t` stays in world units.
 - **Top-level tree:** the same 64-byte node layout, over instance world boxes. Leaves point at instance records. It can be built on the CPU with binned SAH (`src/trace/top-level.ts`), or, on a device with subgroups, refitted on the GPU each frame something moves with a new shape built in a worker now and then (`GpuBvhRefit`; the declared fallback without subgroups is the CPU rebuild). The walk's WGSL is the same either way.
 - **Buffers:** instance records and top-level nodes share one buffer (records first, after a 64-byte header). That gives three storage buffers for tracing: nodes, triangles, and top level. This matters because a default device allows only 8 per shader stage.
 
@@ -52,6 +52,29 @@ A default device caps one storage binding at 128 MB. At 48 bytes per triangle th
 - **Stack overflow:** the builders report the maximum depth. The top-level and mesh depths together must fit in the stack (47 levels are left for a mesh tree under a top level; a deeper GPU-built tree is refused).
 - **Hit records** are written with a `u32` front-face flag, because buffers can't hold `bool`. A single-triangle tree has an empty right child.
 
+### The public WGSL API
+
+`traceModuleWgsl({ traceSlot, triangleFilter, rayMasks })` returns the module. Everything it declares starts with `bvh`, `Bvh` or `BVH_`.
+
+```
+struct BvhRay { origin: vec3f, tMin: f32, direction: vec3f, tMax: f32 }   // 32 bytes
+struct BvhHit { t: f32, instance: u32, triangle: u32, barycentrics: vec2f, frontFace: bool }
+fn bvhTraceClosest(ray: BvhRay) -> BvhHit
+fn bvhTraceAny(ray: BvhRay) -> bool
+fn bvhTraceClosestMasked(ray: BvhRay, mask: u32) -> BvhHit   // only with rayMasks (the default)
+fn bvhTraceAnyMasked(ray: BvhRay, mask: u32) -> bool         // only with rayMasks
+
+struct BvhCandidate { instance: u32, triangle: u32, t: f32, barycentrics: vec2f,
+                      frontFace: bool, query: u32, rayMask: u32 }
+fn bvhTrianglePasses(candidate: BvhCandidate) -> bool         // supplied by the caller
+```
+
+- **Triangle filter.** A triangle whose flags bit 0 is set asks `bvhTrianglePasses` before its hit is taken; true means the ray passes through, and then nothing is recorded and the closest distance stays, so what lies behind is still found. Unflagged triangles never ask, so a scene pays only on the triangles that need it. `query` is `BVH_QUERY_CLOSEST` (0) or `BVH_QUERY_ANY` (1), so one filter can, say, let shadow rays through a surface that closest-hit rays still see. `rayMask` is the trace's mask, all ones for the plain functions or with masks compiled out. The candidate is a struct so fields can be added without breaking filters. `triangleFilter` defaults to `DEFAULT_TRIANGLE_FILTER_WGSL` (every triangle blocks); `null` leaves it for the kernel to declare.
+- **Ray masks.** A masked trace skips an instance whose `(instanceMask & rayMask) == 0` at the top level, before entering its tree. The plain functions mean all ones, so **mask 0 is never hit**, by the plain functions too, unless masks are compiled out (`rayMasks: false`, where every instance is visible). The default mask written by `buildTopLevel` is `0xff`. The test reads the flags word the instance load already fetches, so it costs one shift, AND and compare per instance leaf (not per triangle).
+- **`rayMasks: false`** compiles the mask code out of the same walk (no second walk): no `*Masked` functions, no mask parameter or test, instance masks ignored, `rayMask` all ones in the candidate. Nothing changes size in either mode: `BvhRay` stays 32 bytes and instance records 64.
+- **Batch kernel.** `batchKernelWgsl(mode, { traceSlot, triangleFilter, rayMasks })`: rays and results in group 1, and with ray masks one mask for the whole batch, a uniform at group 1 binding 2 (`BATCH_PARAMS_BYTES`). There is no per-ray mask buffer.
+- **CPU walk and reference.** `createCpuTracer(scene, { triangleFilter, rayMasks })` with `closest(ray, { mask, stats })` and `any(ray, { mask, stats })`; `buildReferenceScene(meshes, instances, { triangleFilter, rayMasks })` with `traceClosestReference(scene, ray, { mask })` and `traceAnyReference(scene, ray, { mask })`. The filter is a `TrianglePasses`, taking a `TriangleCandidate` with the WGSL struct's fields. The reference asks it about every triangle it really hits (it has no flags), so test filters should give one answer per triangle: f32 and f64 disagree right at a decision boundary inside a triangle.
+
 ## Why the triangle test is watertight
 
 - **Moller-Trumbore leaks at shared edges; the watertight test doesn't.** Two million rays were aimed exactly at shared triangle edges. With Moller-Trumbore, 11.6% slipped through on an RTX 3060 and 3.0% on an Intel GPU. Rays into the corners of a sealed thin box also leaked (354 of 6,000 on NVIDIA). The watertight test let none through on either GPU.
@@ -62,7 +85,7 @@ A default device caps one storage binding at 128 MB. At 48 bytes per triangle th
 
 - **CPU walk** (`src/trace/cpu-traversal.ts`): a step-for-step TypeScript port of the WGSL walk, over the same buffers. It runs in Node, so unit tests cover the walk and the layout without a GPU.
 - **Reference tracer** (`src/trace/reference-tracer.ts`): a plain tracer over the triangles with no tree, for checking answers.
-- **Oracle** (`src/trace/oracle-fixtures.ts`, `oracle-compare.ts`): fixed cases (thin walls, mirrored and non-uniform transforms, instancing, and rays aimed exactly at shared triangle edges, which must not slip through) that the GPU walk, the CPU walk and the reference tracer must agree on. The `trace-oracle` GPU page (`tests/gpu/pages/trace-oracle`) runs it on a device and reports mismatches; it must report none on every GPU we test.
+- **Oracle** (`src/trace/oracle-fixtures.ts`, `oracle-compare.ts`): fixed cases (thin walls, mirrored and non-uniform transforms, instancing, rays aimed exactly at shared triangle edges, which must not slip through, and the triangle filter and instance masks with ray masks on and off, `tests/gpu/pages/trace-oracle/hooks.ts`) that the GPU walk, the CPU walk and the reference tracer must agree on. The `trace-oracle` GPU page (`tests/gpu/pages/trace-oracle`) runs it on a device and reports mismatches; it must report none on every GPU we test.
 - **Layout check** (`src/layout-check.ts`): checks a built tree against the layout (child indices, leaf ranges, boxes that contain their children).
 
 ## Benchmark method

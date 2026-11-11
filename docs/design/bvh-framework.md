@@ -17,7 +17,7 @@ An engine-free BVH module inside the platform, with its own tests and benchmark.
 ```
             ┌─────────────── Builder contract ───────────────┐
  triangles ─▶ CPU: tinybvh (WASM, worker)  ─┐                 │
- (arrays or  │ three adapter: three-mesh-bvh ├─▶ our GPU layout ─▶ WGSL tracer (giTraceClosest / giTraceAny)
+ (arrays or  │ three adapter: three-mesh-bvh ├─▶ our GPU layout ─▶ WGSL tracer (bvhTraceClosest / bvhTraceAny)
   GPU buffer)│ GPU: LBVH → PLOC → H-PLOC  ─┘   (nodes, tris)   │
             └────────────────────────────────────────────────┘
  every frame:  BLAS refit (deforming) · TLAS rebuild/refit (moving instances)  — all on the GPU
@@ -83,7 +83,7 @@ The BVH runs as its **own lane, alongside the DDGI milestones**. It isn't a gate
   - B1 and B2 make builds fast. That matters for startup, deforming meshes and moving instances.
   - A good CPU SAH tree (B0, tinybvh) traces as fast as, or faster than, a GPU-built one. GPU builders aim to *approach* SAH quality.
   - So for M1's static scenes, B0 trees are already the fastest trees to trace. Waiting for H-PLOC wouldn't make M1's DDGI faster.
-- **The DDGI loop only talks to the tracer through `giTraceClosest` and `giTraceAny`.** Swapping builders or layouts later changes no DDGI code. M1's numbers get re-run on each new BVH stage, and `trace.csv` and the DDGI benchmarks record which stage was used.
+- **The DDGI loop only talks to the tracer through `bvhTraceClosest` and `bvhTraceAny`.** Swapping builders or layouts later changes no DDGI code. M1's numbers get re-run on each new BVH stage, and `trace.csv` and the DDGI benchmarks record which stage was used.
 
 Where the BVH does gate:
 

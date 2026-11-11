@@ -30,9 +30,9 @@ function structLayout(wgsl: string, name: string): { offsets: Record<string, num
     return { offsets, size: Math.ceil(offset / structAlign) * structAlign };
 }
 
-describe('GiHitRecord', () => {
+describe('BvhHitRecord', () => {
     it('has the layout the contract documents and the readers use', () => {
-        const layout = structLayout(batchEntryWgsl('closest', 1), 'GiHitRecord');
+        const layout = structLayout(batchEntryWgsl('closest', 1), 'BvhHitRecord');
         expect(layout.size).toBe(HIT_RECORD_BYTES);
         expect(layout.offsets).toEqual({
             t: HIT_RECORD_WORD.t * 4,

@@ -22,7 +22,7 @@ Every builder follows the same contract, so one can replace another without chan
   - one parent index per node, for refits;
   - the mesh's box, its depth and its counts.
 
-  The word positions are in `src/gpu-layout.ts`. The layout is part of the API: `GPU_LAYOUT_VERSION` (now 1) goes up with any change to it, and that is a breaking change. If you write your own WGSL walk, check that number at startup.
+  The word positions are in `src/gpu-layout.ts`. The layout is part of the API: `GPU_LAYOUT_VERSION` (now 2; 2 added the instance mask) goes up with any change to it, and that is a breaking change. If you write your own WGSL walk, check that number at startup.
 - **Rule:** every builder must pass the same ray oracle (the `trace-oracle` GPU page, on the RTX 3060 and the Intel UHD) before it is used. `checkGpuLayout` also checks any tree against its mesh: every triangle bit for bit, every box exactly the box below it, parents, depth and counts.
 
 ## Which builder to use
@@ -158,6 +158,20 @@ import { deserializeLayout, serializeLayout } from '@pmndrs/bvh';
 const bytes = serializeLayout(layout); // one ArrayBuffer: a 64-byte header, then nodes, triangles and parents
 const loaded = deserializeLayout(bytes); // refuses bytes from another GPU_LAYOUT_VERSION: rebuild those
 ```
+
+**Trace rays in your own kernel** (the WGSL walk; the design is in [docs/design/trace.md](docs/design/trace.md)):
+
+```ts
+import { traceModuleWgsl } from '@pmndrs/bvh';
+
+const code = `${traceModuleWgsl({ traceSlot: { group: 0, firstBinding: 0 } })}
+@compute @workgroup_size(64) fn main(/* ... */) {
+    let hit = bvhTraceClosest(ray);                  // BvhHit; hit.t < 0 is a miss
+    let shadowed = bvhTraceAnyMasked(shadowRay, 0x1u); // only instances whose mask has bit 0
+}`;
+```
+
+The module declares `BvhRay`, `BvhHit`, `bvhTraceClosest`, `bvhTraceAny` and, unless `rayMasks: false`, `bvhTraceClosestMasked` and `bvhTraceAnyMasked`. Triangles flagged with `TRIANGLE_FLAG_FILTER` (`writeTriangleFilterFlags`) ask `fn bvhTrianglePasses(candidate: BvhCandidate) -> bool` first: pass your own as `triangleFilter` (or `null` to declare it yourself); the default, `DEFAULT_TRIANGLE_FILTER_WGSL`, lets nothing through. Instances get an 8-bit mask (`mask` on the instance, default `0xff`). Mask rule: in the default build (`rayMasks: true`) `bvhTraceClosest` and `bvhTraceAny` walk with an all-ones ray mask, so an instance whose mask is 0 is invisible to them, as in DXR. With `rayMasks: false` there are no masks and every instance is visible. With masks on, the plain functions cost one shift, AND and compare per instance leaf (not per triangle). The old positional `traceModuleWgsl(slot)` and `batchKernelWgsl(mode, slot, filter)` throw a `TypeError`; pass `{ traceSlot }`. The CPU walk (`createCpuTracer`) and the reference tracer take the same filter and masks.
 
 **Check a tree:**
 

@@ -16,15 +16,19 @@
  * to a size, a word position or a meaning bumps this number, and that is a
  * breaking change. Code with its own walk checks it at startup; serialized
  * trees (serialize.ts) carry it and are refused when it differs.
+ *
+ * History: 1, the first layout. 2, instance records carry an 8-bit instance
+ * mask in bits 8-15 of their `flags` word (written as 0xff, visible to every
+ * ray, unless the instance gives one); nothing else moved.
  */
-export const GPU_LAYOUT_VERSION = 1;
+export const GPU_LAYOUT_VERSION = 2;
 
 /** One node: two child boxes (Aila-Laine layout), 64 bytes. */
 export const GPU_LAYOUT_NODE_BYTES = 64;
 export const GPU_LAYOUT_NODE_WORDS = GPU_LAYOUT_NODE_BYTES / 4;
 
 /**
- * Word positions inside a node, matching the tracer's WGSL `GiBvhNode`:
+ * Word positions inside a node, matching the tracer's WGSL `BvhNode`:
  *
  *     leftMin: vec3f,  leftIndex: u32,
  *     leftMax: vec3f,  rightIndex: u32,
@@ -62,7 +66,7 @@ export const GPU_LAYOUT_NO_PARENT = 0xffffffff;
 export const GPU_LAYOUT_TRIANGLE_BYTES = 48;
 
 /**
- * Word positions inside a triangle, matching the tracer's WGSL `GiBvhTriangle`
+ * Word positions inside a triangle, matching the tracer's WGSL `BvhTriangle`
  * (and ddgi-core's `TRIANGLE_WORD`): each corner is a `vec3f` followed by one
  * word, the original triangle index after the first, the flags after the second.
  */

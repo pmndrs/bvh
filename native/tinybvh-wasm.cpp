@@ -107,7 +107,7 @@ static bool arrayBytes(uint64_t count, uint64_t elementBytes, size_t& bytes)
 
 // One node: the boxes of its two children (Aila-Laine layout). A child with
 // count > 0 is a leaf of `count` triangles from position `index` of the
-// triangle array; count == 0 means the inner node `index`. Matches the WGSL `GiBvhNode`.
+// triangle array; count == 0 means the inner node `index`. Matches the WGSL `BvhNode`.
 struct GpuNode {
     float leftMin[3];
     uint32_t leftIndex;
@@ -133,7 +133,7 @@ static_assert(offsetof(GpuNode, rightMax) + 16 == sizeof(GpuNode), "a 16-byte lo
 
 // One triangle in tree order: its three corners exactly as the input has them
 // (the watertight test needs a shared vertex to have the same bits in every
-// triangle), its original index and its flags. Matches the WGSL `GiBvhTriangle`.
+// triangle), its original index and its flags. Matches the WGSL `BvhTriangle`.
 struct GpuTriangle {
     float vertex0[3];
     uint32_t originalIndex;

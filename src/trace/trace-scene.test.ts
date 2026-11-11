@@ -3,6 +3,9 @@ import { createCpuTracer, newTraceStats } from './cpu-traversal.ts';
 import {
     EMPTY_CHILD_INDEX,
     INSTANCE_FLAG,
+    INSTANCE_MASK_ALL,
+    INSTANCE_MASK_BITS,
+    instanceMaskFromFlags,
     INSTANCE_RECORD_WORDS,
     INSTANCE_WORD,
     NODE_WORD,
@@ -93,6 +96,32 @@ describe('buildTopLevel', () => {
         expect(seen.size).toBe(40);
     });
 
+    it('writes the instance mask in flags bits 8-15: 0xff by default, the given one otherwise, other bits unchanged', () => {
+        const random = createRandom(4);
+        const masks = [undefined, 0, 1, 0x80, 0xff, 0x5a];
+        const instances = masks.map((mask, i) => ({
+            instanceIndex: i,
+            nodeOffset: 0,
+            triangleOffset: 0,
+            meshBounds: bounds,
+            objectToWorld: randomAffine(random, { extent: 10, mirror: i % 2 === 1 }),
+            mask,
+        }));
+        const top = buildTopLevel(instances);
+        const words = new Uint32Array(top.buffer);
+        for (let record = 0; record < instances.length; record++) {
+            const flags = words[TOP_LEVEL_HEADER_WORDS + record * INSTANCE_RECORD_WORDS + INSTANCE_WORD.flags];
+            const source = top.recordOrder[record];
+            expect(instanceMaskFromFlags(flags)).toBe(masks[source] ?? INSTANCE_MASK_ALL);
+            expect(flags & ~INSTANCE_MASK_BITS).toBe(
+                INSTANCE_FLAG.contributesToGi | INSTANCE_FLAG.visible | (source % 2 === 1 ? INSTANCE_FLAG.mirrored : 0),
+            );
+        }
+        for (const mask of [256, -1, 1.5]) {
+            expect(() => buildTopLevel([{ ...instances[0], mask }])).toThrow(RangeError);
+        }
+    });
+
     it('puts every instance in exactly one leaf and every leaf box around its instance', () => {
         const random = createRandom(3);
         const instances = Array.from({ length: 100 }, (_, i) => ({
@@ -177,7 +206,7 @@ function compareCpuTracerWithReference(
     const any = newTally();
     const stats = newTraceStats();
     rays.forEach((ray, index) => {
-        const actual = tracer.closest(ray, stats);
+        const actual = tracer.closest(ray, { stats });
         const traced = actual && { hit: true, ...actual };
         addToTally(closest, compareClosest(traced, traceClosestReference(reference, ray), ray), `ray ${index}`);
         addToTally(any, compareAny(tracer.any(ray), traceAnyReference(reference, ray)), `ray ${index}`);

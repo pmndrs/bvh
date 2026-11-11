@@ -1,10 +1,11 @@
 /**
  * Inline tracing from a caller's own kernel: the trace module's WGSL
  * (`traceModuleWgsl`, group 0: nodes, triangles, top level) is placed in front of a
- * kernel that calls `giTraceClosest` and `giTraceAny` itself, with three storage
+ * kernel that calls `bvhTraceClosest` and `bvhTraceAny` itself, with three storage
  * buffers of its own in group 1 (rays in, hits out, any-hit answers out). That is
  * 3 + 3 = 6 storage buffers, inside the default per-stage limit of 8. The kernel supplies the walk's
- * triangle filter hook as "none" (`NO_TRIANGLE_FILTER_WGSL`: every triangle blocks).
+ * triangle filter itself (`triangleFilter: null`, then `DEFAULT_TRIANGLE_FILTER_WGSL`: every
+ * triangle blocks), and calls the masked closest-hit with all ones next to the plain any-hit.
  *
  * The answers are checked against the CPU reference on the oracle scenes, mirrored
  * boxes and thin walls included, plus rays at shared edges. Default device limits,
@@ -23,7 +24,7 @@ import {
     type TraceSceneData,
 } from '../../../../src/trace/index.ts';
 import type { TracedHit } from '../../../../src/trace/oracle-compare.ts';
-import { NO_TRIANGLE_FILTER_WGSL } from '../../../../src/trace/triangle-filter.ts';
+import { DEFAULT_TRIANGLE_FILTER_WGSL } from '../../../../src/trace/triangle-filter.ts';
 import { assert, runGpuTest } from '../../client.ts';
 import { RAY_BYTES, uploadTraceScene } from '../../trace-gpu.ts';
 import { buildOracleCases, FULL_SIZES, sharedEdgeCase, type OracleCase } from '../trace-oracle/cases.ts';
@@ -56,7 +57,7 @@ struct InlineResult {
     padding1: u32,
 }
 
-@group(1) @binding(0) var<storage, read> inlineRays: array<GiRay>;
+@group(1) @binding(0) var<storage, read> inlineRays: array<BvhRay>;
 @group(1) @binding(1) var<storage, read_write> inlineHits: array<InlineResult>;
 @group(1) @binding(2) var<storage, read_write> inlineBlocked: array<u32>;
 
@@ -68,13 +69,14 @@ fn main(@builtin(global_invocation_id) id: vec3u, @builtin(num_workgroups) group
         return;
     }
     let ray = inlineRays[index];
-    let hit = giTraceClosest(ray);
+    // Masked with all ones: the same answers as bvhTraceClosest(ray).
+    let hit = bvhTraceClosestMasked(ray, 0xffffffffu);
     var result = InlineResult(hit.t, ${NO_INSTANCE}u, hit.triangle, select(0u, 1u, hit.frontFace), hit.barycentrics, 0u, 0u);
     if (hit.t >= 0.0) {
         result.instance = hit.instance;
     }
     inlineHits[index] = result;
-    inlineBlocked[index] = select(0u, 1u, giTraceAny(ray));
+    inlineBlocked[index] = select(0u, 1u, bvhTraceAny(ray));
 }
 `;
 
@@ -169,7 +171,7 @@ await runGpuTest(async ({ device, log }) => {
         label: 'trace-inline',
         layout: 'auto',
         compute: {
-            module: device.createShaderModule({ label: 'trace-inline', code: `${traceModuleWgsl({ group: 0, firstBinding: 0 })}\n${NO_TRIANGLE_FILTER_WGSL}\n${KERNEL_WGSL}` }),
+            module: device.createShaderModule({ label: 'trace-inline', code: `${traceModuleWgsl({ traceSlot: { group: 0, firstBinding: 0 }, triangleFilter: null })}\n${DEFAULT_TRIANGLE_FILTER_WGSL}\n${KERNEL_WGSL}` }),
             entryPoint: 'main',
         },
     });

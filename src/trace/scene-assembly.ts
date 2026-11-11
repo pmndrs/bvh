@@ -5,6 +5,11 @@
  * Mesh nodes keep mesh-relative indices, so a mesh can be built once, in a
  * worker, and placed anywhere in the shared buffers. The instance record
  * carries the two offsets the traversal adds.
+ *
+ * The meshes' node and triangle records are *copied* into the scene's
+ * buffers. Changing a `MeshBvh` afterwards (its triangle flags, say) does not
+ * reach the scene; write the scene's buffers instead (`meshes[i]` gives each
+ * mesh's range).
  */
 
 import type { Mat4 } from './top-level.ts';
@@ -17,11 +22,23 @@ import type { SahBuildOptions } from './sah-builder.ts';
 export interface TraceSceneInstance {
     /** Position in the `meshes` array. */
     readonly meshIndex: number;
-    /** The platform instance index, returned in `GiHit.instance`. */
+    /** The platform instance index, returned in `BvhHit.instance`. */
     readonly instanceIndex: number;
     readonly objectToWorld: Mat4;
     readonly contributesToGi?: boolean;
     readonly visible?: boolean;
+    /** The instance mask, 0-255; defaults to 0xff, visible to every ray (see `TraceInstance.mask`). */
+    readonly mask?: number;
+}
+
+/** Where one input mesh landed in the scene's shared buffers. A `TriangleRecordRange` for `writeTriangleFilterFlags`. */
+export interface TraceSceneMeshPlacement {
+    /** First node, counted in nodes. */
+    readonly nodeOffset: number;
+    readonly nodeCount: number;
+    /** First triangle record, counted in triangles. */
+    readonly triangleOffset: number;
+    readonly triangleCount: number;
 }
 
 export interface TraceSceneData {
@@ -30,8 +47,12 @@ export interface TraceSceneData {
     /** Every mesh's triangles, one after another. */
     readonly triangles: ArrayBuffer;
     readonly topLevel: TopLevelBvh;
-    /** Where each input mesh landed. */
-    readonly meshes: readonly { readonly nodeOffset: number; readonly triangleOffset: number }[];
+    /**
+     * Where each input mesh landed. The scene holds copies of the meshes'
+     * records: to change a mesh's triangle flags after assembly, write
+     * `triangles` with the mesh's entry as the range.
+     */
+    readonly meshes: readonly TraceSceneMeshPlacement[];
     /** Deepest mesh tree among the meshes the instances use. */
     readonly maxMeshDepth: number;
     /** Stack entries the worst case needs: top-level depth + one marker + mesh depth. */
@@ -47,8 +68,8 @@ export function assembleTraceScene(
 ): TraceSceneData {
     let totalNodes = 0;
     let totalTriangles = 0;
-    const placements = meshes.map((mesh) => {
-        const placement = { nodeOffset: totalNodes, triangleOffset: totalTriangles };
+    const placements = meshes.map((mesh): TraceSceneMeshPlacement => {
+        const placement = { nodeOffset: totalNodes, nodeCount: mesh.nodeCount, triangleOffset: totalTriangles, triangleCount: mesh.triangleCount };
         totalNodes += mesh.nodeCount;
         totalTriangles += mesh.triangleCount;
         return placement;
@@ -78,6 +99,7 @@ export function assembleTraceScene(
             objectToWorld: instance.objectToWorld,
             contributesToGi: instance.contributesToGi,
             visible: instance.visible,
+            mask: instance.mask,
         };
     });
     const topLevel = buildTopLevel(traceInstances, topLevelOptions);

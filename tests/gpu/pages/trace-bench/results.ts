@@ -21,6 +21,8 @@ export interface TimingSummary {
 export interface ModeResult {
     tracer: TracerId;
     mode: TraceMode;
+    /** True for the extra pass of our kernel built with ray masks (all-ones mask); the metric group is `<mode>-masked`. */
+    rayMasks?: boolean;
     /** Rays in the dispatch. */
     rays: number;
     timing: TimingSummary;

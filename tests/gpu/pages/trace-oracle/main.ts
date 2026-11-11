@@ -14,7 +14,15 @@
  *   `createMeshLayoutBuilder`), read back and assembled the
  *   same way. It runs only when the device has subgroups; without them the
  *   builder would fall back to tinybvh, which the variants above already cover;
- * - `watertight-hploc`: the same with the GPU H-PLOC builder (B2).
+ * - `watertight-hploc`: the same with the GPU H-PLOC builder (B2);
+ * - `watertight-tinybvh-nomasks`: tinybvh trees through a kernel built with
+ *   `rayMasks: false`, the walk with its mask code compiled out.
+ * The variants above trace through the masked batch kernel (the default) with
+ * a mask of all ones. Then the hook cases (hooks.ts) run on tinybvh trees, with
+ * ray masks on and off: a filter on flagged triangles, a filter that depends on
+ * the query (a surface that casts no shadow), and instance masks against
+ * several ray masks with a filter that reads the ray mask. Each traced mask is
+ * checked against the reference given the same filter and mask.
  * The default device limits are used on purpose: the oracle scenes are tiny and
  * the core has to work there.
  *
@@ -45,6 +53,7 @@ import {
     type SharedEdgeCase,
 } from './cases.ts';
 import { buildMeshBvhWithTmbvh } from '../trace-bench/tmbvh-convert.ts';
+import { buildHookCases, hookMasks, hookPassName, hookReferenceAnswers, writeHookFlags } from './hooks.ts';
 import {
     computeReferenceAnswersYielding,
     evaluateCase,
@@ -64,6 +73,8 @@ import {
 interface OracleVariant {
     name: string;
     treeSource: 'tinybvh' | 'three-mesh-bvh' | 'gpu-lbvh' | 'gpu-hploc';
+    /** The batch kernel's `rayMasks`; default true. */
+    rayMasks?: boolean;
 }
 
 const VARIANTS: OracleVariant[] = [
@@ -71,7 +82,11 @@ const VARIANTS: OracleVariant[] = [
     { name: 'watertight-tmbuild', treeSource: 'three-mesh-bvh' },
     { name: 'watertight-lbvh', treeSource: 'gpu-lbvh' },
     { name: 'watertight-hploc', treeSource: 'gpu-hploc' },
+    { name: 'watertight-tinybvh-nomasks', treeSource: 'tinybvh', rayMasks: false },
 ];
+
+/** Rays per hook case and traced mask (hooks.ts); the reference runs once per mask. */
+const HOOK_SIZES = { randomRays: 8000, thinBoxRays: 1200 };
 
 /** The GPU builders (B1 LBVH, B2 H-PLOC), made once the device is known. */
 const gpuBuilders = new Map<'gpu-lbvh' | 'gpu-hploc', MeshLayoutBuilder>();
@@ -197,8 +212,8 @@ function probeStackDepth(scene: TraceSceneData, oracleCase: OracleCase): number 
     const rayCount = Math.min(STACK_PROBE_RAYS, oracleCase.rays.length / 8);
     for (let index = 0; index < rayCount; index++) {
         const ray = unpackRay(oracleCase.rays, index);
-        tracer.closest(ray, stats);
-        tracer.any(ray, stats);
+        tracer.closest(ray, { stats });
+        tracer.any(ray, { stats });
     }
     return stats.maxStackSize;
 }
@@ -295,7 +310,7 @@ await runGpuTest(async ({ device, log }) => {
             log(`[${variant.name}] skipped: ${gpuBuilder.fallbackReason}`);
             continue;
         }
-        const kernel = await TraceBatchKernel.create(device);
+        const kernel = await TraceBatchKernel.create(device, { label: variant.name, rayMasks: variant.rayMasks ?? true });
         const results = { cases: {} as Record<string, unknown>, sharedEdges: [] as SharedEdgeReport[] };
         byTest[variant.name] = results;
 
@@ -325,6 +340,39 @@ await runGpuTest(async ({ device, log }) => {
             );
             for (const failure of sharedEdgeFailures(report)) failures.push(`[${variant.name}] ${report.name}: ${failure}`);
         }
+        kernel.destroy();
+    }
+
+    // The hooks: triangle filters and instance masks, with ray masks on and off.
+    const hooks: Record<string, unknown> = {};
+    for (const rayMasks of [true, false]) {
+        for (const hook of buildHookCases(HOOK_SIZES)) {
+            const kernel = await TraceBatchKernel.create(device, { label: hook.name, triangleFilter: hook.filterWgsl, rayMasks });
+            const scene = assembleTraceScene(await Promise.all(hook.base.meshes.map((mesh) => builder.build(mesh))), hook.base.instances);
+            const flagged = writeHookFlags(scene, hook);
+            const buffers = uploadTraceScene(device, scene, hook.name);
+            try {
+                for (const mask of hookMasks(hook, rayMasks)) {
+                    const answers = await traceOnGpu(device, (encoder, batch) => kernel.encode(encoder, buffers, { ...batch, mask }), hook.base.rays);
+                    const result = evaluateCase(hook.base, tracerAnswers(answers), await hookReferenceAnswers(hook, mask, rayMasks));
+                    const name = hookPassName(hook, mask, rayMasks);
+                    hooks[name] = {
+                        rays: result.rays,
+                        flaggedTriangles: flagged,
+                        closest: { matches: result.closest.matches, ambiguous: result.closest.ambiguous, mismatches: result.closest.mismatches },
+                        any: { matches: result.any.matches, ambiguous: result.any.ambiguous, mismatches: result.any.mismatches },
+                    };
+                    log(
+                        `[hooks] ${name}: ${result.rays} rays, closest ${result.closest.mismatches} mismatches / ${result.closest.ambiguous} ambiguous, ` +
+                            `any ${result.any.mismatches} / ${result.any.ambiguous}`,
+                    );
+                    for (const failure of result.failures) failures.push(`[hooks] ${name}: ${failure}`);
+                }
+            } finally {
+                buffers.destroy();
+                kernel.destroy();
+            }
+        }
     }
     builder.dispose();
 
@@ -340,6 +388,7 @@ await runGpuTest(async ({ device, log }) => {
         sharedEdgeRaysPerTest: byTest[VARIANTS[0].name].sharedEdges.reduce((sum, report) => sum + report.rays, 0),
         slippedTotals,
         byTest,
+        hooks,
         traceStorageBuffers: TRACE_MODULE_ENTRIES.length,
         batchKernelStorageBuffers: TRACE_MODULE_ENTRIES.length + 2,
         maxStorageBuffersPerShaderStage: limits.maxStorageBuffersPerShaderStage,

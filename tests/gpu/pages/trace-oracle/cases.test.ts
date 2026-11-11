@@ -16,6 +16,7 @@ import { buildReferenceScene, traceClosestReference } from '../../../../src/trac
 import { type TracedHit } from '../../../../src/trace/oracle-compare.ts';
 import { buildOracleCases, sharedEdgeCase, SMALL_SIZES, unpackRay, type OracleCase } from './cases.ts';
 import { computeReferenceAnswers, evaluateCase } from './check.ts';
+import { buildHookCases, hookMasks, hookPassName, hookReferenceAnswers, writeHookFlags } from './hooks.ts';
 
 // Mesh trees come from tinybvh (WASM), the only mesh builder since B0.
 const tinyBvh = await createTinyBvhBuilder();
@@ -31,7 +32,7 @@ function traceOnCpu(oracleCase: OracleCase, reference: ReturnType<typeof compute
         oracleCase,
         {
             closest(index): TracedHit | null {
-                const hit = tracer.closest(unpackRay(oracleCase.rays, index), stats);
+                const hit = tracer.closest(unpackRay(oracleCase.rays, index), { stats });
                 return hit && { hit: true, ...hit };
             },
             any: (index) => tracer.any(unpackRay(oracleCase.rays, index)),
@@ -74,5 +75,35 @@ describe('shared edges on the CPU traversal', () => {
             // Doubles leave far more room than f32; the GPU page reports the f32 count.
             expect(slipped).toBe(0);
         });
+    }
+});
+
+describe('hook cases (triangle filter, instance masks) on the CPU traversal', () => {
+    for (const hook of buildHookCases(SMALL_SIZES)) {
+        for (const rayMasks of [true, false]) {
+            it(`${hook.name}, ray masks ${rayMasks ? 'on' : 'off'}: ${hook.description}`, { timeout: 60_000 }, async () => {
+                const scene = assembleTraceScene(
+                    hook.base.meshes.map((mesh) => buildMeshBvhWithTinyBvh(mesh, tinyBvh)),
+                    hook.base.instances,
+                );
+                expect(writeHookFlags(scene, hook)).toBeGreaterThan(0);
+                const tracer = createCpuTracer(scene, { triangleFilter: hook.passes, rayMasks });
+                for (const mask of hookMasks(hook, rayMasks)) {
+                    const reference = await hookReferenceAnswers(hook, mask, rayMasks, Infinity);
+                    const result = evaluateCase(
+                        hook.base,
+                        {
+                            closest(index): TracedHit | null {
+                                const hit = tracer.closest(unpackRay(hook.base.rays, index), { mask });
+                                return hit && { hit: true, ...hit };
+                            },
+                            any: (index) => tracer.any(unpackRay(hook.base.rays, index), { mask }),
+                        },
+                        reference,
+                    );
+                    expect(result.failures, `${hookPassName(hook, mask, rayMasks)}: ${result.failures.join('\n')}`).toEqual([]);
+                }
+            });
+        }
     }
 });

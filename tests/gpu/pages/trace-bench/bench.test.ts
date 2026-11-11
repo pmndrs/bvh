@@ -100,7 +100,7 @@ describe('probe rays', () => {
         for (let i = 0; i < 64; i++) expect(Math.hypot(a[i * 3], a[i * 3 + 1], a[i * 3 + 2])).toBeCloseTo(1, 6);
     });
 
-    it('packs every probe times every direction in the GiRay layout', () => {
+    it('packs every probe times every direction in the BvhRay layout', () => {
         const grid = makeProbeGrid({ min: [0, 0, 0], max: [2, 2, 2] }, 8);
         const directions = makeSphereDirections(4, 1);
         const rays = makeProbeRays(grid, directions);
@@ -284,6 +284,13 @@ describe('CSV rows', () => {
         expect(metrics).toContain('sponza ours-wt/closest/gpu_ms_median');
         expect(metrics).toContain('sponza agreement/ours-wt_vs_tmbvh/closest_rate');
         expect(metrics).toContain('device limit/max_storage_buffer_binding_size_bytes');
+    });
+
+    it('names the extra masked pass <mode>-masked', () => {
+        const masked = { ...data, scenes: data.scenes.map((scene) => ({ ...scene, modes: scene.modes.map((mode) => ({ ...mode, rayMasks: true })) })) } as unknown as TraceBenchData;
+        const metrics = traceBenchRows(masked).map((row) => row.metric);
+        expect(metrics).toContain('ours-wt/closest-masked/mrays_per_s');
+        expect(metrics).not.toContain('ours-wt/closest/mrays_per_s');
     });
 
     it('says how many probes were traced and whether the grid was thinned', () => {
