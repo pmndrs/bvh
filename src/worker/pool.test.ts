@@ -141,6 +141,25 @@ describe('createBvhWorkerPool', () => {
         for (const build of builds) await expect(build).rejects.toThrow(/disposed/);
         await expect(pool.build(quad(2))).rejects.toThrow(/disposed/);
     });
+
+    it('rejects inline builds on dispose, the one already running and the one about to start', async () => {
+        vi.useFakeTimers({ toFake: ['setTimeout'] });
+        const pool = createBvhWorkerPool({ worker: 'never' });
+        const running = pool.build(quad(30));
+        // Run the inline runner's turn: the build has started and waits on tinybvh (a promise) when dispose comes.
+        vi.advanceTimersByTime(0);
+        vi.useRealTimers();
+        expect(pool.stats.running).toBe(1);
+        const queued = pool.build(quad(2));
+        pool.dispose();
+        await expect(running).rejects.toThrow(/disposed/);
+        await expect(queued).rejects.toThrow(/disposed/);
+        // And one handed to the inline runner in the same turn as dispose.
+        const other = createBvhWorkerPool({ worker: 'never' });
+        const scheduled = other.build(quad(2));
+        other.dispose();
+        await expect(scheduled).rejects.toThrow(/disposed/);
+    });
     it('copies views into one shared buffer instead of detaching it, and still moves whole-buffer arrays', async () => {
         vi.stubGlobal('Worker', FakeWorker);
         const pool = createBvhWorkerPool({ size: 1, transferInput: true });

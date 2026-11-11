@@ -82,6 +82,31 @@ export {
     type CpuRefitResult,
 } from './refit-cpu.ts';
 
+// CPU queries on one mesh's tree (P8): raycasts, the box walk shapecasts build on, refit, saving.
+export {
+    barycoordOnTriangle,
+    BVH_BACK_SIDE,
+    BVH_CONTAINED,
+    BVH_DOUBLE_SIDE,
+    BVH_FRONT_SIDE,
+    BVH_INTERSECTED,
+    BVH_NOT_INTERSECTED,
+    CpuMeshBvh,
+    type BvhBoxTarget,
+    type BvhRayIntersection,
+    type BvhRayLike,
+    type BvhRaycastHit,
+    type BvhRaycastOptions,
+    type BvhTraverseCallbacks,
+    type BvhTriangleAccept,
+    type BvhTriangleHitPointInfo,
+    type BvhTriangleHitPointOptions,
+    type BvhVec3Like,
+    type BvhVertexAttribute,
+    type CpuMeshBvhBuildOptions,
+    type CpuMeshBvhOptions,
+} from './query/cpu-mesh-bvh.ts';
+
 // Checks on any tree.
 export { checkGpuLayout, treeSahCost, type LayoutCheckMergedIdentity, type LayoutCheckOptions } from './layout-check.ts';
 

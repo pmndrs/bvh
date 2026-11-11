@@ -171,6 +171,8 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
     const queue: Job[] = [];
     const workers: PoolWorker[] = [];
     let inlineRunning = 0;
+    /** Builds running inline now (a tinybvh build can't be stopped, so dispose settles them and drops their result). */
+    const inlineJobs = new Set<Job>();
     let finished = 0;
     let disposed = false;
 
@@ -184,9 +186,11 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
 
     const runInline = (job: Job): void => {
         inlineRunning++;
+        inlineJobs.add(job);
         // A later turn, so an inline pool is as asynchronous as a worker one.
         setTimeout(() => {
             if (job.settled) {
+                inlineJobs.delete(job);
                 inlineRunning--;
                 finished++;
                 pump();
@@ -196,6 +200,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
                 (bvh) => settle(job, { bvh }),
                 (error: unknown) => settle(job, { error: toError(error) }),
             ).finally(() => {
+                inlineJobs.delete(job);
                 inlineRunning--;
                 finished++;
                 pump();
@@ -355,6 +360,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
                 entry.worker.terminate();
                 if (entry.job) settle(entry.job, { error });
             }
+            for (const job of inlineJobs) settle(job, { error });
             for (const job of queue.splice(0)) settle(job, { error });
         },
     };

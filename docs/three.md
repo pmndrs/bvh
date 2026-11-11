@@ -22,7 +22,7 @@ The three.js side of the package. It's the only part that imports three, which i
 | `hit.indices` (the vertex indices) | `hit.triangle`: the triangle's index within its mesh (a group, draw range or batch range), as built. |
 | `hit.objectIndex` (the transform slot) | `hit.instance`, the SceneTrees instance. `sync.sourceOf(hit.instance)` gives `{ object, instanceId, group }`. |
 | `writeTransformData` override (material in the pad words) | `material(object, info)` in the options, which becomes `hit.material` (0-65534). |
-| `MeshBVH` per geometry (`geometry.boundsTree`) | Trees are per geometry and triangle range, built by SceneTrees (GPU, then a tinybvh worker pool), or by `buildTraceScene` with any builder. |
+| `MeshBVH` per geometry (`geometry.boundsTree`) | Trees are per geometry and triangle range, built by SceneTrees (GPU, then a tinybvh worker pool), or by `buildTraceScene` with any builder. For CPU queries, `geometry.boundsTree` is a `BvhBoundsTree` ("CPU raycast" below). |
 
 ## Scenes (`bvhSceneFromObject3D`)
 
@@ -76,7 +76,7 @@ renderer.compute(kernel); // or render
 
 ## CPU raycast
 
-These are drop-ins for three-mesh-bvh's functions of the same names. They run the CPU walk (`createCpuTracer`) over one tinybvh tree per geometry:
+These are drop-ins for three-mesh-bvh's functions of the same names. They run the CPU walk (`createCpuTracer`) over one tinybvh tree per geometry, held by the core's `CpuMeshBvh` ("The tree object" below):
 
 ```ts
 await prepareBoundsTrees();                         // loads tinybvh (WebAssembly) once
@@ -96,9 +96,45 @@ raycaster.firstHitOnly = true;                      // optional
 - **Materials:** the triangle ranges are cached per material and draw range, and checked against the groups and the materials an array holds. Swapping `mesh.material[i]` is picked up, and each material's `side` is read at every raycast.
 - **All hits:** without `firstHitOnly`, every hit is returned, as three does. The triangle filter collects them.
 - **Falls back to three's raycast** when the geometry has no tree, for a `SkinnedMesh`, or when there are morph targets.
-- **Edited geometry:** if the position attribute's version, or the index (object or version), changed since `computeBoundsTree`, the raycast falls back to three's own and warns once. It stays that way until `computeBoundsTree` runs again.
+- **Edited geometry:** if the position attribute's version, or the index (object or version), changed since `computeBoundsTree`, the raycast falls back to three's own and warns once. It stays that way until `geometry.boundsTree.refit()` (same index) or `computeBoundsTree` runs again.
 - **Not matched:** a range that starts off a multiple of 3.
 - **Tested:** `src/three/raycast.test.ts` checks it against three on 8,000 random rays.
+
+### The tree object (`geometry.boundsTree`)
+
+`computeBoundsTree` makes a `BvhBoundsTree`: the core's `CpuMeshBvh` (`src/query/cpu-mesh-bvh.ts`, exported from `@pmndrs/bvh`) with three's types on top. `acceleratedRaycast` runs through it, so `/three` and the core share one walk and one triangle test. `/three` also exports it as `MeshBVH`, so switching from three-mesh-bvh is one import change (`import { MeshBVH } from '@pmndrs/bvh/three'`); the rows below are where the two differ. In place of three-mesh-bvh's `MeshBVH`:
+
+| three-mesh-bvh `MeshBVH` | `BvhBoundsTree` |
+| --- | --- |
+| `new MeshBVH(geometry, options)` | `new BvhBoundsTree(geometry, options)` (after `await prepareBoundsTrees()`), or `geometry.computeBoundsTree(options)` |
+| `raycast(ray, materialOrSide, near, far)`, `raycastFirst(...)` | The same arguments (a side, a material, or an array of materials by group), three intersections in the geometry's space, without `object` |
+| `refit()` | `refit()`: rereads the position attribute, keeps the tree's shape, and the raycast uses the tree again. The index must not have changed. A `geometry.boundingBox` the tree set (`setBoundingBox`) is updated too. Every input is checked before anything is written, so a refit that throws leaves the tree as it was |
+| `resolveTriangleIndex(i)` | The same: a tree position (from `traverse`) to the triangle's index. The geometry is never reordered, as with `indirect: true` |
+| `getBoundingBox(box3)`, `estimateMemoryInBytes(bvh)` | `getBoundingBox(box3)`, `estimateMemoryInBytes()` (a method) |
+| `MeshBVH.serialize(bvh)`, `MeshBVH.deserialize(data, geometry)` | `boundsTree.serialize()` and `deserializeBoundsTree(bytes, geometry)`. The bytes are our layout (`serializeLayout`), not three-mesh-bvh's format |
+| `getTriangleHitPointInfo(point, geometry, triangleIndex, target)` | The same function, from `/three` |
+| `shapecast`, `bvhcast`, `closestPointToPoint` | Not yet. `traverse({ intersectsBounds, intersectsRange, boundsTraverseOrder })` is the box walk they will build on, with `shapecast`'s contract: `intersectsBounds(box, isLeaf, score, depth, nodeIndex)` and `intersectsRange(offset, count, contained, depth, nodeIndex, box)` in three-mesh-bvh's order, the root's box not asked about, a falsy answer skipping a box, `CONTAINED` reported as one range over the subtree, one `boundsTraverseOrder` call per child, and a truthy `intersectsRange` stopping the walk. The box is a `Float32Array(6)`, not a `Box3`, and ranges are tree positions (indirect mode: `resolveTriangleIndex` maps them) |
+| `new GenerateMeshBVHWorker().generate(geometry, options)` | `new GenerateMeshBvhWorker().generate(geometry, options)`: a `BvhBoundsTree` built on `@pmndrs/bvh/worker`'s pool (inline in Node). The geometry's arrays are copied, not moved, so it stays usable, and several builds may run at once. Edits made while it builds leave the tree stale (raycasts fall back to three's until `refit()`). `generator.dispose()` stops the pool and rejects its unfinished builds |
+
+Without three: `CpuMeshBvh.create({ positions, indices })` (or `CpuMeshBvh.build(input, tinyBvhBuilder)`, or `new CpuMeshBvh(layout)` over any tree in our layout), then `raycast(ray, { side, near, far })` with `BVH_FRONT_SIDE` / `BVH_BACK_SIDE` / `BVH_DOUBLE_SIDE` (three's values). Side culling is native to the CPU walk (`createCpuTracer`'s per-trace `side`, CPU only: the WGSL walk has no side option, and a double-sided CPU raycast is the GPU walk exactly). A layout from a file is checked when the tree is made (children in range, each node reached once, leaves and original indices within the triangles), so a corrupt one throws instead of hanging a walk. `generateCpuMeshBvh(pool, input, options)` from `@pmndrs/bvh/worker` builds one off the main thread.
+
+### Build options
+
+`computeBoundsTree`, `new BvhBoundsTree` and `GenerateMeshBvhWorker.generate` take three-mesh-bvh's options:
+
+| Option | What happens |
+| --- | --- |
+| `strategy` (`CENTER` 0, `AVERAGE` 1, `SAH` 2) | Accepted. Every value builds the same tree: tinybvh's default builder (binned SAH over a grid of cells, "SIMD Bonsai"), whose trees have a lower SAH cost than a centre or average split. There is no CENTER or AVERAGE builder. Other values throw |
+| `targetLeafSize`, `maxLeafSize`, `maxLeafTris` | The largest leaf, in that order of precedence, clamped to our layout's 1 to 8 triangles: three-mesh-bvh's default 10 gives 8. tinybvh's SAH may make smaller leaves; larger ones are cut in half |
+| `maxDepth` | Accepted, not honoured: tinybvh decides the depth (`boundsTree.depth`). A value below the built tree's depth logs one warning. The ray walk's stack holds 64 entries and throws a `RangeError` past it, which takes a degenerate mesh |
+| `setBoundingBox` | Default `true`, as three-mesh-bvh: sets `geometry.boundingBox` from the tree when it has none, and `boundsTree.refit()` keeps that box current. A box three computed or you set is left alone. `false` leaves `geometry.boundingBox` unset |
+| `indirect` | Accepted and ignored: the index is never reordered |
+| `onProgress` | Called with 0 before the build and 1 after it. tinybvh builds in one WebAssembly call, with nothing to report in between |
+| `verbose`, `useSharedArrayBuffer` | Accepted and ignored |
+| `range` | Throws: the tree holds every triangle, and raycasts follow the draw range |
+| `builder`, `layout`, `snapshot` (ours) | A tinybvh builder to use; a tree already built for this geometry, to skip the build; the geometry's versions when that tree's build started (`snapshotGeometry`), so edits during the build count |
+
+What the surveyed callers pass, all accepted: homefig `{ maxLeafSize: 10 }`; drei `{ strategy: SAH, verbose: false, setBoundingBox: true, maxDepth: 40, maxLeafTris: 10, indirect: false }`; three-gpu-pathtracer `{ strategy: SAH, maxLeafTris: 1, indirect: true, onProgress }`; upscaler `{ strategy: SAH, targetLeafSize: 4 }`; three-bvh-csg `{ maxLeafSize: 3, indirect: true, useSharedArrayBuffer }` (`src/three/bounds-tree.test.ts`).
 
 Raycasts per second, Node 22 on the Apple M5 while other jobs were running (`node --experimental-transform-types bench/three-raycast.ts --seconds 2`, three runs, median). The mesh is a torus knot, the rays come from outside, and 81% of them hit:
 
