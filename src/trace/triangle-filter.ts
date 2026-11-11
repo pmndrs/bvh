@@ -47,6 +47,7 @@ import {
     type BvhQuery,
     type TriangleLeaves,
 } from './layout.ts';
+import { isIndexedSceneTriangles } from './indexed-scene-buffers.ts';
 
 /** A candidate hit on a flagged triangle, as the filter sees it. The same fields as the WGSL `BvhCandidate`. */
 export interface TriangleCandidate {
@@ -117,22 +118,56 @@ export interface TriangleRecordRange {
  * merged has an empty `TraceSceneData.meshes` entry with `mergedInto`; passing
  * it throws, since it would flag nothing: flag its group's range instead.
  *
- * `triangles` is a mesh tree's buffer (`MeshBvh.triangles`) or the assembled
- * scene's shared one (`TraceSceneData.triangles`, with one mesh's entry of
- * `TraceSceneData.meshes` as `range`); without `range` every record is
+ * `triangles` is a mesh tree (`MeshBvh`) or its buffer, or the assembled
+ * scene (`TraceSceneData`) or its shared buffer, with one mesh's entry of
+ * `TraceSceneData.meshes` as `range`; without `range` every record is
  * rewritten. A range outside the buffer throws a `RangeError`.
+ *
+ * Pass the tree or the scene itself and the format comes from its
+ * `triangleLeaves`. A bare buffer is taken as records unless `triangleLeaves`
+ * says `'indexed'`; an indexed scene's buffer passed bare without it throws,
+ * since its 16-byte units read as 48-byte records would overwrite vertex
+ * indices. Without `range`, an indexed buffer must be a lone tree's: an
+ * indexed scene's holds headers and merged side tables between the meshes, so
+ * it throws.
  *
  * `assembleTraceScene` copies each mesh's records into the scene's buffer, so
  * flags written to a `MeshBvh` after assembly do not reach the scene: write
  * them before assembling, or write the scene's buffer with the mesh's range
  * (and upload it again).
  */
+/** A tree or a scene whose triangles `writeTriangleFilterFlags` writes, in its own format. */
+export interface TriangleFilterTarget {
+    readonly triangles: ArrayBuffer;
+    readonly triangleLeaves?: TriangleLeaves;
+    /** Present on a scene (`TraceSceneData`). */
+    readonly meshes?: readonly unknown[];
+}
+
 export function writeTriangleFilterFlags(
-    triangles: ArrayBuffer | Uint32Array,
+    target: ArrayBuffer | Uint32Array | TriangleFilterTarget,
     filtered: (originalIndex: number, sourceInstance: number | undefined) => boolean,
     range?: TriangleRecordRange,
-    triangleLeaves: TriangleLeaves = 'records',
+    leaves?: TriangleLeaves,
 ): number {
+    const owner = target instanceof ArrayBuffer || target instanceof Uint32Array ? null : target;
+    const triangles = owner ? owner.triangles : (target as ArrayBuffer | Uint32Array);
+    const buffer = triangles instanceof Uint32Array ? triangles.buffer : triangles;
+    const indexedScene = isIndexedSceneTriangles(buffer) || (owner?.triangleLeaves === 'indexed' && owner.meshes !== undefined);
+    const ownLeaves = owner ? (owner.triangleLeaves ?? 'records') : indexedScene ? 'indexed' : undefined;
+    if (leaves !== undefined && ownLeaves !== undefined && leaves !== ownLeaves) {
+        throw new RangeError(`writeTriangleFilterFlags: the triangles are ${ownLeaves}, not ${leaves}`);
+    }
+    if (!owner && indexedScene && leaves === undefined) {
+        throw new RangeError("writeTriangleFilterFlags: this is an indexed scene's buffer; pass the scene itself, or triangleLeaves: 'indexed'");
+    }
+    const triangleLeaves = leaves ?? ownLeaves ?? 'records';
+    if (triangleLeaves === 'indexed' && !range && indexedScene) {
+        throw new RangeError(
+            "writeTriangleFilterFlags: an indexed scene's buffer needs a range (an entry of TraceSceneData.meshes or mergedGroups): " +
+                'between its meshes it holds headers and side tables, not triangles',
+        );
+    }
     if (triangleLeaves === 'indexed') return writeIndexedFilterFlags(triangles, filtered, range);
     if (range?.mergedInto !== undefined && range.triangleCount === 0) {
         throw new RangeError(

@@ -275,7 +275,7 @@ export class GpuMeshRefit {
     private triangleWordOffset = 0;
     private group: { group: GPUBindGroup; key: readonly unknown[] } | null = null;
     /** Indexed trees: the mesh's vertex base and the scene's floats per vertex; null for records. */
-    private indexed: { vertexBase: number; sceneStride: number } | null = null;
+    private indexed: { vertexBase: number; vertexCount: number | null; sceneStride: number } | null = null;
     private readonly indexedParams: GPUBuffer;
     private indexedGroups: { copy: GPUBindGroup; boxes: GPUBindGroup; key: readonly unknown[] } | null = null;
 
@@ -313,13 +313,25 @@ export class GpuMeshRefit {
             nodeWordOffset?: number;
             triangleWordOffset?: number;
             generation?: number;
-            /** Indexed trees: the mesh's first vertex in the target's positions buffer. */
+            /**
+             * Indexed trees, required: the mesh's first vertex in the target's
+             * positions buffer (0 for a tree in its own buffers;
+             * `meshRefitPlacement` for a scene mesh).
+             */
             vertexBase?: number;
+            /** Indexed trees: the mesh's vertices there; `encode` then refuses a posed buffer of another size. */
+            vertexCount?: number;
             /** Indexed trees: the positions buffer's layout. Default `'vec4'`. */
             positionLayout?: 'vec4' | 'packed';
         } = {},
     ): void {
-        this.indexed = layout.triangleLeaves === 'indexed' ? { vertexBase: placement.vertexBase ?? 0, sceneStride: placement.positionLayout === 'packed' ? 3 : 4 } : null;
+        if (layout.triangleLeaves === 'indexed' && placement.vertexBase === undefined) {
+            throw new RangeError('GpuMeshRefit.setTree: an indexed tree needs placement.vertexBase (0 for a tree in its own buffers; meshRefitPlacement gives a scene mesh\'s)');
+        }
+        this.indexed =
+            layout.triangleLeaves === 'indexed'
+                ? { vertexBase: placement.vertexBase!, vertexCount: placement.vertexCount ?? null, sceneStride: placement.positionLayout === 'packed' ? 3 : 4 }
+                : null;
         if (this.indexed) this.device.queue.writeBuffer(this.indexedParams, 0, new Uint32Array([this.indexed.vertexBase, this.indexed.sceneStride, 0, 0]));
         const words = new Uint32Array(layout.nodes, 0, layout.nodeCount * 16);
         const nodeWordOffset = placement.nodeWordOffset ?? 0;
@@ -365,6 +377,9 @@ export class GpuMeshRefit {
             // Indexed: copy the posed vertices into the scene's positions, then the boxes from there; the triangles stay.
             const pipelines = this.kernels.indexed!;
             if (!target.positions) throw new Error('GpuMeshRefit: an indexed tree needs the target positions buffer');
+            if (this.indexed.vertexCount !== null && vertices.vertexCount !== this.indexed.vertexCount) {
+                throw new RangeError(`GpuMeshRefit: the posed buffer has ${vertices.vertexCount} vertices, the mesh has ${this.indexed.vertexCount} in the scene's positions`);
+            }
             const groups = this.indexedBindGroups(pipelines, target.triangles, target.positions, vertices.positionBuffer);
             pass.setPipeline(pipelines.copy);
             pass.setBindGroup(0, groups.copy);

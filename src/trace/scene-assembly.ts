@@ -31,6 +31,7 @@ import {
 import { checkTriangleLeaves, indexedFromRecords, weldExactBits, weldPositions } from '../indexed-leaves.ts';
 import { checkTriangleFlags } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
+import { markIndexedSceneTriangles } from './indexed-scene-buffers.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { buildTopLevel, IDENTITY_TRANSFORM, throwMergedTransformChange, type TopLevelBvh, type TraceInstance } from './top-level.ts';
 import type { SahBuildOptions } from './sah-builder.ts';
@@ -76,6 +77,16 @@ export interface TraceSceneMeshPlacement {
      * (`triangleCount` 0). `writeTriangleFilterFlags` refuses it.
      */
     readonly mergedInto?: number;
+    /** Indexed scenes: the mesh's first vertex in `TraceSceneData.positions` (its header's vertex base). */
+    readonly vertexBase?: number;
+    /** Indexed scenes: the mesh's vertices in `TraceSceneData.positions`. */
+    readonly vertexCount?: number;
+    /**
+     * Indexed scenes: the mesh's vertices were welded (the exact-bit weld, on
+     * by default, or `weldTolerance`), so the scene's vertex numbering is not
+     * the app's and `meshRefitPlacement` refuses the mesh.
+     */
+    readonly welded?: boolean;
 }
 
 export interface TraceSceneData {
@@ -235,6 +246,12 @@ export function assembleTraceScene(
         );
     });
     const placedPositions = indexed ? placeIndexedTriangles(placed, allPlacements, geometryOf, triangles, positionLayout, options.weld ?? true) : null;
+    if (placedPositions) {
+        const welded = options.weld ?? true;
+        allPlacements.forEach((placement, index) => {
+            allPlacements[index] = { ...placement, vertexBase: placedPositions.bases[index], vertexCount: placedPositions.counts[index], welded };
+        });
+    }
 
     let maxMeshDepth = 0;
     const placeInstance = (instance: TraceSceneInstance): TraceInstance => {
@@ -307,6 +324,7 @@ export function assembleTraceScene(
     }
 
     const positions = placedPositions?.positions ?? new ArrayBuffer(0);
+    if (indexed) markIndexedSceneTriangles(triangles);
     return {
         nodes,
         triangles,
@@ -336,7 +354,7 @@ function placeIndexedTriangles(
     triangles: ArrayBuffer,
     positionLayout: PositionLayout,
     weld: boolean,
-): { positions: ArrayBuffer; vertexCount: number } {
+): { positions: ArrayBuffer; vertexCount: number; bases: number[]; counts: number[] } {
     const words = new Uint32Array(triangles);
     const welds = placed.map((mesh, index) => {
         if (!mesh) return null;
@@ -381,7 +399,7 @@ function placeIndexedTriangles(
             bits[at + 2] = kept[vertex * 3 + 2];
         }
     });
-    return { positions, vertexCount };
+    return { positions, vertexCount, bases, counts: welds.map((result) => result?.vertexCount ?? 0) };
 }
 
 /** The plan must be for these instances, unmoved, with the same mask, flags and material, and each tree for its group. */
@@ -483,24 +501,47 @@ export async function buildTraceScene(
     const layoutOptions: TraceSceneAssemblyOptions = indexed
         ? { triangleLeaves: 'indexed', geometries, positionLayout: options.positionLayout, weld: options.weld }
         : {};
+    // A tolerance weld renumbers vertices too: the scene's are not the app's, so no refit (meshRefitPlacement).
+    const markWelded = (scene: TraceSceneData): TraceSceneData =>
+        indexed && tolerance > 0 ? { ...scene, meshes: scene.meshes.map((placement) => ({ ...placement, welded: true })) } : scene;
     if (!options.mergeStaticInstances) {
         const meshes = await Promise.all(geometries.map((geometry) => options.build(geometry)));
-        return assembleTraceScene(meshes, instances, options.topLevel, layoutOptions);
+        return markWelded(assembleTraceScene(meshes, instances, options.topLevel, layoutOptions));
     }
     const plan = mergeStaticGeometry(geometries, instances, options);
     const meshes = await Promise.all(geometries.map((geometry, index) => (plan.meshNeeded[index] ? options.build(geometry) : null)));
     const mergedMeshes = await Promise.all(plan.groups.map((group) => options.build(group.geometry)));
-    return assembleTraceScene(meshes, instances, options.topLevel, { ...layoutOptions, merged: { plan, meshes: mergedMeshes } });
+    return markWelded(assembleTraceScene(meshes, instances, options.topLevel, { ...layoutOptions, merged: { plan, meshes: mergedMeshes } }));
+}
+
+/** What `GpuMeshRefit.setTree` needs for a scene mesh (from {@link meshRefitPlacement}). */
+export interface MeshRefitPlacement {
+    readonly nodeWordOffset: number;
+    readonly triangleWordOffset: number;
+    /** Indexed scenes: the mesh's first vertex in the scene's positions. */
+    readonly vertexBase?: number;
+    /** Indexed scenes: the mesh's vertices there; the posed buffer must have exactly this many. */
+    readonly vertexCount?: number;
+    /** Indexed scenes: the positions buffer's layout. */
+    readonly positionLayout?: PositionLayout;
 }
 
 /**
- * The word offsets a `GpuMeshRefit.setTree` needs for input mesh `meshIndex`
- * of an assembled scene (a deforming mesh refit in the scene's shared
- * buffers). Throws for a mesh merged into a static group: merged records are
- * world space and name source-mesh triangles, so a refit from the source's
- * object-space vertices would corrupt them. Merged ranges are never refit.
+ * What a `GpuMeshRefit.setTree` needs for input mesh `meshIndex` of an
+ * assembled scene (a deforming mesh refit in the scene's shared buffers): the
+ * word offsets and, in an indexed scene, the mesh's vertex base, vertex count
+ * and the positions layout. Throws for a mesh merged into a static group:
+ * merged records are world space and name source-mesh triangles, so a refit
+ * from the source's object-space vertices would corrupt them. Merged ranges
+ * are never refit. Throws for a welded mesh of an indexed scene too: the
+ * refit copies the app's vertex v to scene vertex `vertexBase + v`, which only
+ * holds when the scene kept the app's numbering. Assemble meshes you will
+ * refit with `weld: false` (and no `weldTolerance`).
  */
-export function meshRefitPlacement(scene: Pick<TraceSceneData, 'meshes'> & Partial<Pick<TraceSceneData, 'triangleLeaves'>>, meshIndex: number): { nodeWordOffset: number; triangleWordOffset: number } {
+export function meshRefitPlacement(
+    scene: Pick<TraceSceneData, 'meshes'> & Partial<Pick<TraceSceneData, 'triangleLeaves' | 'positionLayout'>>,
+    meshIndex: number,
+): MeshRefitPlacement {
     const placement = scene.meshes[meshIndex];
     if (!placement) throw new RangeError(`meshRefitPlacement: the scene has no mesh ${meshIndex}`);
     if (placement.mergedInto !== undefined) {
@@ -510,7 +551,24 @@ export function meshRefitPlacement(scene: Pick<TraceSceneData, 'meshes'> & Parti
         );
     }
     if (placement.triangleCount === 0) throw new RangeError(`meshRefitPlacement: mesh ${meshIndex} has no tree in this scene`);
-    return { nodeWordOffset: placement.nodeOffset * (BVH_NODE_BYTES / 4), triangleWordOffset: placement.triangleOffset * (scene.triangleLeaves === 'indexed' ? INDEXED_TRIANGLE_WORDS : TRIANGLE_WORDS) };
+    const nodeWordOffset = placement.nodeOffset * (BVH_NODE_BYTES / 4);
+    if (scene.triangleLeaves !== 'indexed') return { nodeWordOffset, triangleWordOffset: placement.triangleOffset * TRIANGLE_WORDS };
+    if (placement.welded) {
+        throw new RangeError(
+            `meshRefitPlacement: mesh ${meshIndex} of this indexed scene was welded, so its vertex numbering is not the app's and a refit from the app's vertices would write the wrong vertices. ` +
+                'Assemble meshes you will refit with weld: false (and no weldTolerance)',
+        );
+    }
+    if (placement.vertexBase === undefined || placement.vertexCount === undefined) {
+        throw new RangeError(`meshRefitPlacement: mesh ${meshIndex} of this indexed scene has no vertexBase or vertexCount`);
+    }
+    return {
+        nodeWordOffset,
+        triangleWordOffset: placement.triangleOffset * INDEXED_TRIANGLE_WORDS,
+        vertexBase: placement.vertexBase,
+        vertexCount: placement.vertexCount,
+        positionLayout: scene.positionLayout ?? 'vec4',
+    };
 }
 
 /** A material for an error message: `none` for undefined or NO_MATERIAL (0xffffffff). */

@@ -20,7 +20,7 @@ import { INDEXED_FLAG_SHIFT, INDEXED_ID_MASK, INSTANCE_FLAG, INSTANCE_RECORD_WOR
 import { MERGED_INSTANCE_INDEX } from '../trace/static-merge.ts';
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
 import type { MeshGeometry } from '../trace/mesh-bvh.ts';
-import { createRandom, randomAffine, randomRays, tessellatedQuad } from '../trace/oracle-fixtures.ts';
+import { createRandom, randomAffine, randomRays, randomTriangleSoup, tessellatedQuad } from '../trace/oracle-fixtures.ts';
 import type { TraceRay } from '../trace/rays.ts';
 import { assembleTraceScene, type TraceSceneData, type TraceSceneInstance } from '../trace/scene-assembly.ts';
 import type { TopLevelBvh } from '../trace/top-level.ts';
@@ -30,7 +30,6 @@ import { DEFAULT_GPU_MAX_BATCH_BYTES, SceneTrees, type SceneInstanceDescriptor, 
 import type { GpuMeshTreeRange } from '../mesh-input.ts';
 import { gatherStandIn } from '../../tests/support/top-level-gather.ts';
 import { FakeHploc, settle } from '../../tests/support/fake-hploc.ts';
-import { planGpuHplocBatches } from '../gpu-hploc.ts';
 
 /** The merged-identity WGSL, line by line on the CPU. */
 function mergedIdentityStandIn(bindings: ReadonlyMap<number, FakeBinding>): void {
@@ -576,6 +575,52 @@ describe('SceneTrees', () => {
         }
         expect(scene.version).toBe(version);
         expect(scene.memory.retired).toBe(0);
+        expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+        scene.dispose();
+    });
+
+    it('indexed: a positions growth past the device limit throws with nothing changed and the mesh still waiting, every update', async () => {
+        // 96 KB of vec4 positions for the soup, 64 KB allowed: the positions are placed first, when its builds start.
+        const gpu = createFakeGpu({ maxStorageBufferBindingSize: 64 * 1024 });
+        const scene = await SceneTrees.create(gpu.device, { gpuFirstTrees: false, triangleLeaves: 'indexed' });
+        const frame = () => {
+            const encoder = gpu.createEncoder();
+            scene.update(encoder);
+            gpu.submit(encoder);
+        };
+        const random = createRandom(6);
+        const small = tessellatedQuad(4, 1);
+        const first: Instance = { mesh: scene.addMesh(small), meshIndex: 0, instanceIndex: 0, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] };
+        scene.addInstance(first);
+        frame();
+        await scene.whenRefined();
+        frame();
+        const expected = await reference([small], [first]);
+        const rays = randomRays(random, 300, [-2, -2, -2, 2, 2, 2], 1);
+        expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+
+        const big = scene.addMesh(randomTriangleSoup(random, 2000, 2, 0.2));
+        const bigInstance = scene.addInstance({ mesh: big, instanceIndex: 1, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 5, 1] });
+        const version = scene.version;
+        const positions = scene.memory.positions;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const encoder = gpu.createEncoder();
+            // Each update tries the mesh again: it was not dropped from the new meshes.
+            expect(() => scene.update(encoder)).toThrow(/trace positions buffer needs maxStorageBufferBindingSize/);
+            expect((encoder as unknown as { commands: unknown[] }).commands).toEqual([]);
+            expect(scene.meshStatus(big).builtBy).toBe(null);
+        }
+        expect(scene.version).toBe(version);
+        expect(scene.memory.positions).toBe(positions);
+        expect(scene.memory.retired).toBe(0);
+        expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+
+        // Without the mesh the scene carries on.
+        scene.removeInstance(bigInstance);
+        scene.removeMesh(big);
+        frame();
+        await scene.whenRefined();
+        frame();
         expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
         scene.dispose();
     });

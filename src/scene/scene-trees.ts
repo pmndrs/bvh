@@ -1160,7 +1160,7 @@ export class SceneTrees {
         if (this.updates === 1 && this.mergeStatic) this.planMerges();
         if (this.newMeshes.length > 0) {
             this.loadStartedAt ??= performance.now();
-            this.startBuilds(this.newMeshes.splice(0), encoder);
+            this.startBuilds(encoder);
         }
 
         // Errors before anything is recorded: the frame's encoder is untouched, the scene as it was.
@@ -1231,6 +1231,7 @@ export class SceneTrees {
                 // A deforming mesh's instances never merge: a merged range is never refit.
                 static: instance.static && !this.meshes.get(instance.mesh)!.deforming,
             })),
+            { triangleLeaves: this.triangleLeaves },
         );
         if (plan.groups.length === 0) return;
         this.plan = plan;
@@ -1261,12 +1262,14 @@ export class SceneTrees {
     // Builds
     // -----------------------------------------------------------------------
 
-    /** Starts the GPU batch for these meshes, then their tinybvh builds, biggest first. */
-    private startBuilds(slots: readonly number[], encoder: GPUCommandEncoder): void {
+    /** Starts the GPU batch for the new meshes, then their tinybvh builds, biggest first. */
+    private startBuilds(encoder: GPUCommandEncoder): void {
         const now = performance.now();
-        const states = slots.map((slot) => this.meshes.get(slot)!).filter((state) => state.geometry !== null);
+        const states = this.newMeshes.map((slot) => this.meshes.get(slot)!).filter((state) => state.geometry !== null);
         // Indexed: the positions go in first, while the geometry is still here (tinybvh's build may move it into a worker).
+        // A growth past the device limit throws here with nothing changed and the meshes still new, so a later update retries them.
         if (this.positions) this.placePositions(states, encoder);
+        this.newMeshes = [];
         const builder = this.firstTreesReady ? this.firstTrees : null;
         for (const state of states) {
             state.startedAt = now;
@@ -1968,7 +1971,9 @@ export class SceneTrees {
         const residents = [...this.meshes.values()].flatMap((state) => (state.vertices ? [state.vertices] : [])).concat(this.releasePositionsAtUpdate);
         let offsets = counts.map((count) => positions.allocate(Math.max(1, count)));
         if (offsets.some((offset) => offset === null)) {
+            // Give back what fitted, then check before growing: a throw leaves the storage as it was.
             offsets.forEach((offset, index) => offset !== null && positions.release(offset, Math.max(1, counts[index])));
+            positions.checkGrowth(sum(counts.map((count) => Math.max(1, count))));
             positions.grow(encoder, sum(counts.map((count) => Math.max(1, count))), residents);
             offsets = allocateGrown(positions, counts.map((count) => Math.max(1, count)));
         }
@@ -2021,12 +2026,25 @@ export class SceneTrees {
         if (this.deforming?.has(tree.slot)) {
             const layout: GpuLayoutMeshBvh | null = tree.source === 'tinybvh' ? tree.bvh : tree.built.layout;
             // meshRefitPlacement refuses merged meshes: merged ranges are never refit.
+            // Indexed: the refit copies the pose to the mesh's vertex base (deforming meshes are unwelded, so pose vertex v is scene vertex base + v).
             const placement = meshRefitPlacement(
-                { meshes: [{ nodeOffset, nodeCount: placed.nodeCount, triangleOffset, triangleCount: placed.triangleCount, ...(state.mergedInto !== null ? { mergedInto: state.mergedInto } : {}) }], triangleLeaves: this.triangleLeaves },
+                {
+                    meshes: [
+                        {
+                            nodeOffset,
+                            nodeCount: placed.nodeCount,
+                            triangleOffset,
+                            triangleCount: placed.triangleCount,
+                            ...(state.mergedInto !== null ? { mergedInto: state.mergedInto } : {}),
+                            ...(state.vertices ? { vertexBase: state.vertices.offset, vertexCount: state.vertices.count, welded: false } : {}),
+                        },
+                    ],
+                    triangleLeaves: this.triangleLeaves,
+                    positionLayout: this.positionLayout,
+                },
                 0,
             );
-            // Indexed: the refit copies the pose to the mesh's vertex base (deforming meshes are unwelded, so pose vertex v is scene vertex base + v).
-            this.deforming.treePlaced(tree.slot, { ...placement, vertexBase: state.vertices?.offset ?? 0, positionLayout: this.positionLayout }, layout);
+            this.deforming.treePlaced(tree.slot, placement, layout);
         }
         if (replaced === 'gpu' && tree.source === 'tinybvh') this.swaps++;
         this.onTree?.({

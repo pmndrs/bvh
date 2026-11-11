@@ -313,7 +313,7 @@ function unsharedForMerge(meshes: readonly MeshGeometry[], instances: readonly T
 
 /** Builds a merged scene: the meshes normal instances still use, and one tree per merged group, all by the variant's builder. */
 async function buildMergedScene(builder: MeshBvhBuilder, meshes: readonly MeshGeometry[], instances: readonly TraceSceneInstance[], variant: OracleVariant): Promise<TraceSceneData> {
-    const plan = mergeStaticGeometry(meshes, instances);
+    const plan = mergeStaticGeometry(meshes, instances, { triangleLeaves: variant.triangleLeaves });
     const needed = meshes.flatMap((mesh, index) => (plan.meshNeeded[index] ? [index] : []));
     const trees = await buildTrees(builder, [...needed.map((index) => meshes[index]), ...plan.groups.map((group) => group.geometry)], variant);
     const sourceTrees: (MeshBvh | null)[] = meshes.map(() => null);

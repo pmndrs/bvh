@@ -50,7 +50,9 @@ import {
     TRIANGLE_WORDS,
     checkInstanceMask,
     materialCode,
+    type TriangleLeaves,
 } from './layout.ts';
+import { checkTriangleLeaves } from '../indexed-leaves.ts';
 import type { MeshGeometry } from './mesh-bvh.ts';
 import { checkTriangleFlags } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
@@ -113,6 +115,13 @@ export interface StaticMergePlan {
 export interface StaticMergeOptions {
     /** Most triangles in one merged mesh; a group that would pass it is split. Default (and at most) the layout's limit, 2^28 - 1. */
     readonly maxTrianglesPerGroup?: number;
+    /**
+     * The format of the scene the plan is for. `'indexed'` also closes a group
+     * at {@link MAX_MERGED_SOURCES} sources (an indexed scene names a merged
+     * triangle's source by a 16-bit slot). Default `'records'`: no source cap,
+     * the grouping it always had.
+     */
+    readonly triangleLeaves?: TriangleLeaves;
 }
 
 /**
@@ -139,6 +148,7 @@ export function mergeStaticGeometry(
     options: StaticMergeOptions = {},
 ): StaticMergePlan {
     const maxTriangles = Math.min(options.maxTrianglesPerGroup ?? MAX_REFERENCE_INDEX, MAX_REFERENCE_INDEX);
+    const sourceCap = checkTriangleLeaves(options.triangleLeaves, 'mergeStaticGeometry') === 'indexed';
     const users = new Uint32Array(meshes.length);
     for (const instance of instances) {
         if (!meshes[instance.meshIndex]) throw new RangeError(`instance ${instance.instanceIndex} uses mesh ${instance.meshIndex}, which does not exist`);
@@ -183,8 +193,8 @@ export function mergeStaticGeometry(
         const vertices = geometry.positions.length / 3;
         const key = `${mask}`;
         let group = open.get(key);
-        // An indexed scene names a merged triangle's source by a 16-bit slot (MAX_MERGED_SOURCES).
-        if (group && (group.triangles + triangles > maxTriangles || group.members.length >= MAX_MERGED_SOURCES)) {
+        // An indexed scene names a merged triangle's source by a 16-bit slot (MAX_MERGED_SOURCES); records have no such cap.
+        if (group && (group.triangles + triangles > maxTriangles || (sourceCap && group.members.length >= MAX_MERGED_SOURCES))) {
             closed.push(group);
             group = undefined;
         }
@@ -337,7 +347,7 @@ export function writeMergedIndexedIdentity(words: Uint32Array, group: StaticMerg
         throw new RangeError(`the merged tree has ${triangleCount} triangles, its group ${group.sourceInstances.length}`);
     }
     const sourceCount = group.sources.length;
-    if (sourceCount > MAX_MERGED_SOURCES) throw new RangeError(`a merged group holds ${sourceCount} sources; an indexed scene allows ${MAX_MERGED_SOURCES}`);
+    if (sourceCount > MAX_MERGED_SOURCES) throw new RangeError(`a merged group holds ${sourceCount} sources; an indexed scene allows ${MAX_MERGED_SOURCES} (make the plan with triangleLeaves: 'indexed')`);
     const sideUnits = Math.ceil(triangleCount / 4);
     const sourceUnits = Math.ceil(sourceCount / 4);
     const sideStart = (triangleOffset - 1 - sideUnits) * 4;

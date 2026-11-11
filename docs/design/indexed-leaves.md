@@ -108,6 +108,7 @@ The test needs identical coordinate *bits*, not shared indices. `bvhEdgeFunction
   - **Not recommended:** keeping merged groups on records, which would need a per-instance mode bit (bits 4-7 are reserved, `src/trace/layout.ts:129`) and a runtime branch in the leaf loop.
 - **Deforming meshes and refit.**
   - The triangle step (`src/gpu-mesh-refit.ts:9-16`) stops writing 36 B of corners per triangle. It copies the posed vertices into the mesh's position range (12 B per vertex) and writes the boxes as before.
+  - **The mesh must not be welded.** The copy writes the app's vertex v to scene vertex `vertexBase + v`. `meshRefitPlacement` returns the mesh's `vertexBase`, `vertexCount` and the positions layout for `setTree`, and throws for a mesh the scene welded (the exact-bit weld, on by default, or `weldTolerance`): assemble meshes you will refit with `weld: false`. `setTree` requires `vertexBase` for an indexed tree (0 for a tree in its own buffers), and `encode` refuses a pose whose vertex count differs from the placement's.
   - **It must be a copy, not the app's posed buffer:** when `setPose` skips a refit (`scene-trees.ts:704-719`), rays must keep the pose the boxes were built for.
   - `refitOnCpu` and `CpuMeshBvh.refit` (`src/query/cpu-mesh-bvh.ts:610-628`) write positions instead of corners.
 - **`CpuMeshBvh`.**
