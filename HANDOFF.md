@@ -14,7 +14,7 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
 - **`mergeStaticInstances`** comes before the release. It stays off by default until the RTX 3060 has been measured.
 - **Package scope:** it should serve every project that needs a BVH, not just ddgi. See "Consumers" below.
 
-**On `main`** (408 tests; lint, typecheck, build and the licence check pass; every correctness page passes on the Apple M5):
+**On `main`** (429 tests; lint, typecheck, build and the licence check pass; every correctness page passes on the Apple M5):
 - **Ported from ddgi `main` after the split:** shared refit kernels, and the Metal watertight fix `bvhEdgeFunction`. On the M5, rays slipping through shared edges went from 4,513 per 2M to 0.
 - **GPU page runner:** `pnpm test:gpu`, `pnpm test:gpu:page <name>`; see `tests/gpu/README.md`. Scene pages need `BVH_ASSETS_DIR=~/Developer/webgpu-ddgi-radiance-cache/assets` and `BVH_MANIFESTS_DIR=~/Developer/webgpu-ddgi-radiance-cache/scenes/manifests`.
 - **Walk API for 0.1**, at `GPU_LAYOUT_VERSION` 2 (unreleased):
@@ -24,6 +24,7 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
 - **`mergeStaticInstances`:** a merged world-space tree with exact hit identity. Triangle word 11 holds the source instance, flag bit 1 flips the face, and instance bit 3 marks a merged instance. App triangle flags may use bit 0 only.
   - Measured on the package under the radiance-cache lane's bench lock: Sponza surface rays 1.85x closest-hit, 1.36x any-hit; Bistro interior 1.22x and 1.11x.
   - Pages: `trace-bench-surface-*`. Rows are in `bench/results/trace.csv`.
+- **Indexed leaves** (2026-11-12, off by default; `docs/design/indexed-leaves.md`): `triangleLeaves: 'records' | 'indexed'` and `positionLayout: 'vec4' | 'packed'` on the walk (compiled in, one walk), the builders, `assembleTraceScene`/`buildTraceScene`, `SceneTrees` and `BvhTraceNodes`. 16-byte `vec4u(i0, i1, i2, id + flags)` triangles, a 16-byte header per mesh (vertex base, read once per instance entered), our own positions (exact-bit weld on, `weld: false`; opt-in `weldTolerance`), merged groups with a side table, serialized format in header word 7. Sponza 448.1 → 318.0 MiB beyond geometry (306.7 packed), Bistro exterior 210.1 → 155.5. M5 speed: `vec4` 0.83-0.99x records, packed 0.75-0.92x (indicative). All correctness pages pass with indexed variants; one-ulp seams leak alike in both formats, the tolerance weld closes them.
 - **`SceneTrees`** (`src/scene/`):
   - GPU H-PLOC trees first, then tinybvh trees from `@pmndrs/bvh/worker` swapped in per mesh;
   - growable storage;
@@ -55,6 +56,7 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
 - **three-bvh-csg, homefig, drei, three-gpu-pathtracer:** drei and pathtracer's CPU side have what they use. homefig's controller and csg's boolean core have what they use (shapecast, `bvhcast`, `ExtendedTriangle`); neither has switched.
 
 **Open:**
+- **Indexed leaves:** the RTX 3060 and Intel passes (oracle pages, then `trace-bench-surface-*`, whose last section times indexed against records) decide whether indexed becomes the default (Dennis). Not built: a WASM writer for tinybvh (it converts after), indexed output from the GPU LBVH (no binding left in its emit), `CpuMeshBvh` reading corners through positions (it expands to records), the adopt lever with indexed scenes, binding the app's positions (option A). Needs Dennis: the vertex base lives in a per-mesh header, not added into the records as the design said (records stay relocatable); merged groups are now capped at 65,536 sources.
 - **RTX 3060 and Intel:** none of today's work has run on them. The radiance-cache lane runs its RTX pass for the merged tree.
 - **The 40-byte hit record's cost:** measured on the M5 only (2026-11-11): no measurable cost, ratios 0.96-1.15 against the 24-byte record, medians 1.02-1.11; see `docs/design/memory.md`. RTX 3060 and Intel not run.
 - **The `LICENSE` file:** missing, and the holder (Dennis Smolek or Poimandres) is undecided.

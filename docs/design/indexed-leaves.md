@@ -156,3 +156,40 @@ The test needs identical coordinate *bits*, not shared indices. `bvhEdgeFunction
 4. Should the triangle format be a variant flag inside version 2, or a bump to 3?
 5. Should the weld by exact bits be on by default? Do we want an opt-in tolerance weld?
 6. What closest-hit cost on the RTX 3060 is 140 MiB worth before indexed becomes the default?
+
+## Measured (2026-11-12, Apple M5, Chrome 157 headless)
+
+**Correctness** (the gates):
+
+- `trace-oracle`: 16 variants, 8 of them indexed (tinybvh `vec4` and packed, masks compiled out, tolerance weld, the GPU LBVH (converted) and H-PLOC (written on the GPU, `checkGpuLayout`-checked), merged tinybvh and merged H-PLOC packed), plus the hook cases indexed and merged-indexed: 0 mismatches, 0 rays slipped through the 2M shared-edge rays.
+- Seam fixtures (every variant, 200k rays each, plain and transformed): **split seams** let 0 rays through in every format. **One-ulp seams** leak in every format, records and indexed alike: 11,287 and 9,913 of 200k for tinybvh, ray for ray the same in `watertight-tinybvh`, `indexed-tinybvh` and `indexed-tinybvh-packed` (the page checks the slipped rays match); the double-precision reference misses 1,717 and 2,223 of its 20k sample there too. **The tolerance weld closes them**: `indexed-tinybvh-weld` (1e-6, before the build) lets 0 through. This is the documented limit: indexed leaves are as watertight as records, no more; a seam whose copies differ needs the opt-in weld.
+- `trace-inline` (records, indexed, indexed packed), `scene-trees-mid-swap` (4 indexed variants: copy, merged, capped and merged-capped with packed positions; 132 indexed states, 0 disagreements, 0 misses), `three-trace` (records then indexed through `BvhTraceNodes`), `scene-trees-deforming` (records then indexed), `bvh-blas-refit` (indexed refit, `vec4` and packed): all pass.
+- The surface-ray bench checks every indexed answer against records' bit for bit (whole 40-byte hit record, any-hit word): identical on every ray of every case, both scenes.
+
+**Speed** (indicative only: one run of 5 paired rounds per scene, the three formats back to back with the order reversed every other round; ratio = indexed rate over records rate, above 1 faster). Median of rounds (range):
+
+| Sponza | `vec4` closest | `vec4` any | packed closest | packed any |
+| --- | --- | --- | --- | --- |
+| instanced, surface | 0.947 (0.80-1.04) | 0.964 (0.59-1.07) | 0.912 (0.52-1.10) | 0.918 (0.63-1.14) |
+| instanced, air grid | 0.950 (0.92-1.28) | 0.974 (0.88-1.11) | 0.874 (0.82-1.50) | 0.921 (0.81-1.02) |
+| merged, surface | 0.834 (0.77-0.92) | 0.978 (0.93-1.00) | 0.751 (0.69-0.92) | 0.924 (0.85-0.98) |
+| merged, air grid | 0.925 (0.89-0.94) | 0.964 (0.91-0.98) | 0.881 (0.87-0.91) | 0.885 (0.87-0.96) |
+
+| Bistro interior | `vec4` closest | `vec4` any | packed closest | packed any |
+| --- | --- | --- | --- | --- |
+| instanced, surface | 0.977 (0.88-1.04) | 0.974 (0.93-1.07) | 0.881 (0.72-0.96) | 0.912 (0.80-1.04) |
+| instanced, air grid | 0.994 (0.98-1.04) | 0.971 (0.93-1.02) | 0.902 (0.87-0.93) | 0.868 (0.80-0.89) |
+| merged, surface | 0.939 (0.89-1.03) | 0.979 (0.95-1.04) | 0.808 (0.69-0.96) | 0.879 (0.81-1.01) |
+| merged, air grid | 0.993 (0.97-1.01) | 0.943 (0.92-0.97) | 0.889 (0.82-0.91) | 0.827 (0.80-0.85) |
+
+Reading it, on the M5 only: `vec4` positions cost 1-6% on instanced trees and up to 17% on Sponza's merged tree with surface rays (the fastest case, so the extra dependent load shows most); packed `f32` costs another 5-10% everywhere, so `vec4` is the right default and packed is a memory option (11 MiB more saved on Sponza). Nowhere near the old 10-30% everywhere, but not free either. The Sponza instanced rounds swung widely (0.5-1.5), so its medians are the least sure. Rows: `bench/results/trace.csv`, metrics `surface-rays/paired/indexed_over_records/...` and `indexed_packed_over_records/...`, commit `8654783`. The RTX 3060 decides the default (section 7, question 6).
+
+**Bytes**: [memory.md](memory.md), "Indexed leaves": `SceneTrees` on Sponza settles at 327.1 MiB indexed against 458.6 records, peak 580 against 711 MiB; Sponza 448.1 to 318.0 MiB beyond geometry (306.7 packed), Bistro exterior 210.1 to 155.5 (147.5); an H-PLOC batch 270.6 to 238.6 bytes per triangle.
+
+## Left to do
+
+- The RTX 3060 and Intel: the oracle pages and the paired bench. The default stays records until then.
+- tinybvh writes records inside the WASM and converts on the way out: a WASM change would skip the 48-byte copy (needs the pinned emsdk).
+- The GPU LBVH writes records only (its emit pass has no binding left for positions).
+- `CpuMeshBvh` and `/three`'s `BvhBoundsTree` expand indexed trees to records; reading corners through the source's positions would make CPU trees 16 bytes per triangle too.
+- Option A (binding the app's own positions) and the adopt lever for indexed scenes (an adopted batch has no mesh headers).

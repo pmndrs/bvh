@@ -111,7 +111,7 @@ ddgi's GPU pass (`gi/triangle-flags`) writes the same bit of the same word, so i
 
 ## 5. The layout: version 2 and instance masks
 
-`GPU_LAYOUT_VERSION` goes from 1 to 2 (`TRACER_GPU_LAYOUT_VERSION` too). Serialized trees from version 1 are refused by `deserializeLayout` ("rebuild the tree"); trees are cheap to rebuild. Mesh nodes and triangle records didn't change, only the meaning of the instance record's flags word:
+`GPU_LAYOUT_VERSION` goes from 1 to 2 (`TRACER_GPU_LAYOUT_VERSION` too). Serialized trees from version 1 are refused by `deserializeLayout` ("rebuild the tree"); trees are cheap to rebuild. Mesh nodes and triangle records didn't change, only the meaning of the instance record's flags word. (Version 2 also has a second triangle format, indexed leaves, off by default: `triangleLeaves: 'indexed'`, docs/design/indexed-leaves.md. ddgi needs nothing for it: records stay the default, and a ddgi kernel that reads `buffers.triangles` as 48-byte records keeps working as long as it doesn't opt in.)
 
 | Bits of `INSTANCE_WORD.flags` | Meaning |
 | --- | --- |
