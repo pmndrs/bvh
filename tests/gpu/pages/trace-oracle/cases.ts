@@ -13,6 +13,7 @@
  */
 
 import {
+    NO_MATERIAL,
     packRays,
     unpackRay,
     type MeshGeometry,
@@ -41,6 +42,10 @@ export interface ExpectedHit {
     readonly t?: number;
     readonly u?: number;
     readonly v?: number;
+    /** The hit's material index (`NO_MATERIAL` for none), checked when the tracer reports one. */
+    readonly material?: number;
+    /** The world normal of the authored front side, checked (cosine) when the tracer reports one. */
+    readonly normal?: readonly [number, number, number];
 }
 
 export interface CuratedRay {
@@ -147,11 +152,11 @@ function analyticCase(): OracleCase {
     const nonUniform = compose([-8, 0, -1], Math.PI / 4, [2, 0.5, 3]);
     const mirrored = compose([12, 0, -1], Math.PI / 4, [-2, 0.5, 3]);
     const instances: TraceSceneInstance[] = [
-        { meshIndex: 0, instanceIndex: 10, objectToWorld: IDENTITY },
+        { meshIndex: 0, instanceIndex: 10, objectToWorld: IDENTITY, material: 4 },
         { meshIndex: 0, instanceIndex: 20, objectToWorld: compose([0, 0, -2], 0, [1, 1, 1]) },
-        { meshIndex: 1, instanceIndex: 30, objectToWorld: compose([6, 0, 0], 0, [1, 1, 1]) },
-        { meshIndex: 2, instanceIndex: 60, objectToWorld: nonUniform },
-        { meshIndex: 2, instanceIndex: 70, objectToWorld: mirrored },
+        { meshIndex: 1, instanceIndex: 30, objectToWorld: compose([6, 0, 0], 0, [1, 1, 1]), material: 0 },
+        { meshIndex: 2, instanceIndex: 60, objectToWorld: nonUniform, material: 65534 },
+        { meshIndex: 2, instanceIndex: 70, objectToWorld: mirrored, material: 9 },
     ];
 
     // A ray that arrives along the world-space plane normal of a transformed right triangle,
@@ -168,15 +173,15 @@ function analyticCase(): OracleCase {
 
     const down: Vector3 = [0, 0, -1];
     const curated: CuratedRay[] = [
-        { label: 'nearest', ray: ray([0, 0, 3], down), expected: { hit: true, instanceIndex: 10, triangleIndex: 0, t: 3, frontFace: true, u: 0.25, v: 0.5 } },
-        { label: 'tMin skips the near triangle', ray: ray([0, 0, 3], down, 3.001), expected: { hit: true, instanceIndex: 20, t: 5, frontFace: true } },
+        { label: 'nearest', ray: ray([0, 0, 3], down), expected: { hit: true, instanceIndex: 10, triangleIndex: 0, t: 3, frontFace: true, u: 0.25, v: 0.5, material: 4, normal: [0, 0, 1] } },
+        { label: 'tMin skips the near triangle', ray: ray([0, 0, 3], down, 3.001), expected: { hit: true, instanceIndex: 20, t: 5, frontFace: true, material: NO_MATERIAL } },
         { label: 'tMax stops before the near triangle', ray: ray([0, 0, 3], down, 0, 2.999), expected: { hit: false } },
-        { label: 'back side', ray: ray([0, 0, -1], [0, 0, 1]), expected: { hit: true, instanceIndex: 10, t: 1, frontFace: false } },
-        { label: 'reversed winding', ray: ray([6, 0, 3], down), expected: { hit: true, instanceIndex: 30, t: 3, frontFace: false } },
-        { label: 'non-uniform scale', ray: alongNormal(nonUniform), expected: { hit: true, instanceIndex: 60, t: 3, frontFace: true } },
+        { label: 'back side', ray: ray([0, 0, -1], [0, 0, 1]), expected: { hit: true, instanceIndex: 10, t: 1, frontFace: false, normal: [0, 0, 1] } },
+        { label: 'reversed winding', ray: ray([6, 0, 3], down), expected: { hit: true, instanceIndex: 30, t: 3, frontFace: false, material: 0, normal: [0, 0, -1] } },
+        { label: 'non-uniform scale', ray: alongNormal(nonUniform), expected: { hit: true, instanceIndex: 60, t: 3, frontFace: true, material: 65534, normal } },
         // Front faces follow the authored side, also through a mirror (DECISIONS 2026-11-04): the
         // mirrored copy's authored normal points the same way as the non-uniform one's.
-        { label: 'mirrored', ray: alongNormal(mirrored), expected: { hit: true, instanceIndex: 70, t: 3, frontFace: true } },
+        { label: 'mirrored', ray: alongNormal(mirrored), expected: { hit: true, instanceIndex: 70, t: 3, frontFace: true, material: 9, normal } },
         { label: 'miss', ray: ray([30, 30, 3], down), expected: { hit: false } },
         { label: 'parallel to the triangles', ray: ray([0, 0, 3], [1, 0, 0]), expected: { hit: false } },
         { label: 'pointing away', ray: ray([0, 0, 3], [0, 0, 1]), expected: { hit: false } },
@@ -433,6 +438,8 @@ function randomInstancedCase(rayCount: number): OracleCase {
         meshIndex: i % meshes.length,
         instanceIndex: 1000 - i * 7,
         objectToWorld: randomAffine(random, { extent: 14, mirror: i % 4 === 0 }),
+        // Materials on most instances (compared with the reference), none on some.
+        material: i % 5 === 0 ? undefined : (i * 7919) % 65535,
     }));
     return randomCase(
         'random-instanced',
@@ -452,6 +459,7 @@ function manyInstancesCase(rayCount: number): OracleCase {
         meshIndex: 0,
         instanceIndex: i,
         objectToWorld: randomAffine(random, { extent: 25, mirror: i % 5 === 0 }),
+        material: i % 3 === 0 ? undefined : i,
     }));
     return randomCase('many-instances', '200 copies of one 40-triangle mesh, for a deeper top-level tree.', meshes, instances, random, 28, rayCount);
 }

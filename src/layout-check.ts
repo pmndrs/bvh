@@ -43,6 +43,8 @@ export interface LayoutCheckMergedIdentity {
     readonly sourceInstances: Uint32Array;
     readonly sourceTriangles: Uint32Array;
     readonly flipFrontFace: Uint8Array;
+    /** Per triangle: the source's material as flags bits 16-31 hold it (material + 1, 0 for none). Omitted: all 0. */
+    readonly sourceMaterials?: Uint16Array;
 }
 
 export interface LayoutCheckOptions {
@@ -50,8 +52,9 @@ export interface LayoutCheckOptions {
     readonly maxProblems?: number;
     /**
      * The records carry a merged mesh's identity: the original index is the
-     * source mesh's triangle, the padding word the source instance, and flags
-     * bit 1 is set for a mirrored source. Without it, every record's padding
+     * source mesh's triangle, the padding word the source instance, flags
+     * bit 1 is set for a mirrored source, and flags bits 16-31 hold the
+     * source's material + 1. Without it, every record's padding
      * must be 0 (as every builder writes it).
      */
     readonly merged?: LayoutCheckMergedIdentity;
@@ -59,6 +62,8 @@ export interface LayoutCheckOptions {
 
 /** Flags bit 1 (trace/layout.ts `TRIANGLE_FLAG_FLIP_FRONT_FACE`). */
 const FLIP_FRONT_FACE = 2;
+/** Where a merged triangle's material sits in its flags (trace/layout.ts `MATERIAL_SHIFT`). */
+const MATERIAL_SHIFT = 16;
 
 export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, options: LayoutCheckOptions = {}): string[] {
     const maxLeaf = options.maxLeafPrimitives ?? GPU_LAYOUT_MAX_LEAF_PRIMITIVES;
@@ -127,7 +132,11 @@ export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, op
                 }
             }
         }
-        const flags = ((triangleFlags ? triangleFlags[original] : 0) | (merged?.flipFrontFace[original] ? FLIP_FRONT_FACE : 0)) >>> 0;
+        const flags =
+            ((triangleFlags ? triangleFlags[original] : 0) |
+                (merged?.flipFrontFace[original] ? FLIP_FRONT_FACE : 0) |
+                ((merged?.sourceMaterials?.[original] ?? 0) << MATERIAL_SHIFT)) >>>
+            0;
         if (triangleWords[base + GPU_LAYOUT_TRIANGLE_WORD.flags] !== flags) report(`triangle slot ${slot} has flags ${triangleWords[base + GPU_LAYOUT_TRIANGLE_WORD.flags]}, not ${flags}`);
     }
     if (problems.length > 0) return problems;

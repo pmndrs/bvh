@@ -16,9 +16,10 @@
  *    (`bvhInstanceWorldBox`). An instance that is hidden, removed, doesn't
  *    contribute, has a singular transform, or whose mesh has no tree gets an
  *    empty box and a zero record: rays never enter it. The record's flags are
- *    the entry's as packed on the CPU: bits 0-3 (`INSTANCE_FLAG`), the mask
- *    in bits 8-15 (0xff unless the instance gives one) and bits 16-31 (the
- *    per-instance material, `material + 1`), carried through unchanged.
+ *    the entry's, packed on the CPU from the instance input as `buildTopLevel`
+ *    packs them: bits 0-3 (`INSTANCE_FLAG`), the mask in bits 8-15 (0xff
+ *    unless the instance gives one) and the material in bits 16-31
+ *    (`materialCode`: material + 1, 0 for none).
  * 2. *Refit* (`GpuBvhRefit`): recomputes every node box bottom-up from those
  *    world boxes, keeping the tree's shape, with its repair pass.
  *
@@ -60,6 +61,10 @@ import {
     INSTANCE_FLAG,
     INSTANCE_MASK_SHIFT,
     INSTANCE_RECORD_BYTES,
+    MATERIAL_SHIFT,
+    materialCode,
+    materialFromFlags,
+    NO_MATERIAL,
     TOP_HEADER_WORD,
     TOP_LEVEL_HEADER_BYTES,
     TOP_LEVEL_HEADER_WORDS,
@@ -111,11 +116,6 @@ export const TOP_LEVEL_INSTANCE_ENTRY_WORD = {
     live: 27,
 } as const;
 
-/** The per-instance material: `material + 1` in flags bits 16-31, 0 for none. */
-export const INSTANCE_MATERIAL_SHIFT = 16;
-/** Largest material index the flags word holds. */
-export const INSTANCE_MATERIAL_MAX = 0xfffe;
-
 /** A mesh tree placed in the shared buffers, as the mesh table needs it. */
 export interface PlacedMeshTree {
     readonly nodeOffset: number;
@@ -138,7 +138,7 @@ export interface GpuTopLevelInstance {
     readonly contributesToGi?: boolean;
     /** Instance mask, 0-255; default 0xff (every ray). */
     readonly mask?: number;
-    /** Per-instance material index, 0-65534, stored as `material + 1` in flags bits 16-31. Default none (0). */
+    /** Material index, 0-65534 (`MAX_MATERIAL`), stored as `materialCode` (material + 1) in flags bits 16-31. Default none. A merged record can't have one. */
     readonly material?: number;
     /** A merged static group's record: identity transform, never moves. */
     readonly merged?: boolean;
@@ -295,10 +295,8 @@ export function packTopLevelInstance(instance: GpuTopLevelInstance, floats: Floa
     const merged = instance.merged === true;
     if (merged && !isIdentityTransform(e)) throwMergedTransformChange(instance.instanceIndex, 'GpuTopLevel');
     const mask = checkInstanceMask(instance.mask, instance.instanceIndex);
-    const material = instance.material;
-    if (material !== undefined && (!Number.isInteger(material) || material < 0 || material > INSTANCE_MATERIAL_MAX)) {
-        throw new RangeError(`instance ${instance.instanceIndex}: material must be an integer in 0-${INSTANCE_MATERIAL_MAX}, got ${material}`);
-    }
+    const material = materialCode(instance.material, instance.instanceIndex);
+    if (merged && material !== 0) throw new RangeError(`instance ${instance.instanceIndex}: a merged record has no material of its own (its triangles carry their sources')`);
     for (let row = 0; row < 3; row++) {
         const at = base + entry.objectToWorldRow0 + row * 4;
         floats[at] = e[row];
@@ -317,7 +315,7 @@ export function packTopLevelInstance(instance: GpuTopLevelInstance, floats: Floa
             (determinant < 0 ? INSTANCE_FLAG.mirrored : 0) |
             (merged ? INSTANCE_FLAG.merged : 0) |
             (mask << INSTANCE_MASK_SHIFT) |
-            (material === undefined ? 0 : (material + 1) << INSTANCE_MATERIAL_SHIFT)) >>>
+            (material << MATERIAL_SHIFT)) >>>
         0;
     words[base + entry.live] = live ? 1 : 0;
     return live;
@@ -557,7 +555,7 @@ export class GpuTopLevel {
         const entry = TOP_LEVEL_INSTANCE_ENTRY_WORD;
         if (this.isMerged(slot)) throwMergedTransformChange(words[base + entry.instanceIndex], 'GpuTopLevel.setTransform');
         const flags = words[base + entry.flags];
-        const material = flags >>> INSTANCE_MATERIAL_SHIFT;
+        const material = materialFromFlags(flags);
         packTopLevelInstance(
             {
                 meshSlot: words[base + entry.meshSlot],
@@ -566,7 +564,7 @@ export class GpuTopLevel {
                 visible: (flags & INSTANCE_FLAG.visible) !== 0,
                 contributesToGi: (flags & INSTANCE_FLAG.contributesToGi) !== 0,
                 mask: (flags >>> INSTANCE_MASK_SHIFT) & 0xff,
-                material: material === 0 ? undefined : material - 1,
+                material: material === NO_MATERIAL ? undefined : material,
             },
             this.instanceFloats,
             words,

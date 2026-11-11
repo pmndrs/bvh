@@ -87,10 +87,10 @@ export const TRIANGLE_FLAG_FILTER = 1;
  * static-merge.ts) that come from a mirrored source instance: they are stored
  * in world space, where a mirror reverses the authored winding. Builders never
  * write it, and an input's `triangleFlags` may not set it (only bit 0;
- * bits 1-31 throw). Bits 2-15 are reserved, 0. Bits 16-31 are reserved for a
- * per-instance material (planned: material + 1, 0 = none), which a merged
- * mesh will carry per triangle because its record has no single material;
- * not written yet.
+ * bits 1-31 throw). Bits 2-15 are reserved, 0. Bits 16-31 hold the source
+ * instance's material in a merged mesh ({@link MATERIAL_SHIFT}: material + 1,
+ * 0 for none), written by `assembleTraceScene`, because a merged record has
+ * no single material; 0 everywhere else.
  */
 export const TRIANGLE_FLAG_FLIP_FRONT_FACE = 2;
 
@@ -127,9 +127,9 @@ export const INSTANCE_WORD = {
 
 /**
  * Instance `flags` bits 0-3. Bits 4-7 are reserved; bits 8-15 hold the
- * instance mask ({@link INSTANCE_MASK_SHIFT}); bits 16-31 are reserved for
- * a per-instance material index (planned: material + 1, 0 = none). A merged
- * record ({@link INSTANCE_FLAG}`.merged`) will leave them 0 and its triangles
+ * instance mask ({@link INSTANCE_MASK_SHIFT}); bits 16-31 the instance's
+ * material ({@link MATERIAL_SHIFT}: material + 1, 0 for none). A merged
+ * record ({@link INSTANCE_FLAG}`.merged`) leaves them 0, and its triangles
  * carry their source's material in triangle flags bits 16-31 instead.
  */
 export const INSTANCE_FLAG = {
@@ -181,6 +181,42 @@ export function checkInstanceMask(mask: number | undefined, instanceIndex: numbe
         throw new RangeError(`instance ${instanceIndex}: mask must be an integer in 0-255, got ${mask}`);
     }
     return mask;
+}
+
+/**
+ * The per-instance material: bits 16-31 of the instance `flags` word, and of
+ * the triangle `flags` word in a merged mesh (where each triangle carries its
+ * source instance's), stored as `material + 1` so that 0 means none. The walk
+ * reports it as `BvhHit.material`, {@link NO_MATERIAL} for none. Written only
+ * by this package (`buildTopLevel`, `assembleTraceScene`); a mesh input's
+ * `triangleFlags` may still set bit 0 only.
+ */
+export const MATERIAL_SHIFT = 16;
+/** The material's bits in an instance or triangle `flags` word. */
+export const MATERIAL_BITS = 0xffff0000;
+/** Largest material index (16 bits, minus the "none" code 0). */
+export const MAX_MATERIAL = 0xfffe;
+/** `BvhHit.material` (WGSL `BVH_NO_MATERIAL`) and `CpuHit.material` of a hit on an instance given no material. */
+export const NO_MATERIAL = 0xffffffff;
+
+/**
+ * Checks a material index from user input and returns its stored code
+ * (`material + 1`, the value of bits 16-31). Undefined or
+ * {@link NO_MATERIAL} give 0 (none); anything but an integer in
+ * 0-{@link MAX_MATERIAL} is a `RangeError`.
+ */
+export function materialCode(material: number | undefined, instanceIndex: number): number {
+    if (material === undefined || material === NO_MATERIAL) return 0;
+    if (!Number.isInteger(material) || material < 0 || material > MAX_MATERIAL) {
+        throw new RangeError(`instance ${instanceIndex}: material must be an integer in 0-${MAX_MATERIAL}, got ${material}`);
+    }
+    return material + 1;
+}
+
+/** The material index in an instance's or a merged triangle's `flags` word, or {@link NO_MATERIAL}. */
+export function materialFromFlags(flags: number): number {
+    const code = flags >>> MATERIAL_SHIFT;
+    return code === 0 ? NO_MATERIAL : code - 1;
 }
 
 /**

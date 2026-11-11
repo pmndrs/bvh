@@ -13,7 +13,7 @@
  */
 
 import type { Mat4 } from './top-level.ts';
-import { BVH_NODE_BYTES, TRACE_STACK_SIZE, TRIANGLE_BYTES, TRIANGLE_WORDS, checkInstanceMask } from './layout.ts';
+import { BVH_NODE_BYTES, TRACE_STACK_SIZE, TRIANGLE_BYTES, TRIANGLE_WORDS, checkInstanceMask, materialCode } from './layout.ts';
 import { checkTriangleFlags } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
@@ -32,6 +32,12 @@ export interface TraceSceneInstance {
     readonly visible?: boolean;
     /** The instance mask, 0-255; defaults to 0xff, visible to every ray (see `TraceInstance.mask`). */
     readonly mask?: number;
+    /**
+     * The material index (0-65534), reported as `BvhHit.material`; omit for
+     * none (`NO_MATERIAL`). Not a merge-grouping key: a merged instance's
+     * material travels in its triangles' flags (see `TraceInstance.material`).
+     */
+    readonly material?: number;
     /**
      * The instance never moves. With `mergeStaticInstances` on, a static
      * instance whose mesh no other instance uses is merged into a world-space
@@ -173,6 +179,7 @@ export function assembleTraceScene(
             contributesToGi: instance.contributesToGi,
             visible: instance.visible,
             mask: instance.mask,
+            material: instance.material,
         };
     };
 
@@ -239,7 +246,7 @@ export function assembleTraceScene(
     };
 }
 
-/** The plan must be for these instances, unmoved, with the same mask and flags, and each tree for its group. */
+/** The plan must be for these instances, unmoved, with the same mask, flags and material, and each tree for its group. */
 function checkMergedTrees(merged: MergedStaticTrees, instances: readonly TraceSceneInstance[]): void {
     const { plan } = merged;
     if (plan.instanceCount !== instances.length) {
@@ -269,6 +276,13 @@ function checkMergedTrees(merged: MergedStaticTrees, instances: readonly TraceSc
                     `instance ${instance.instanceIndex} is a merged static instance, but its mask, visible or contributesToGi changed since the merge plan ` +
                         `(mask ${mask}, visible ${visible}, contributesToGi ${contributesToGi}; the plan has ${group.mask}, ${group.visible}, ${group.contributesToGi}): ` +
                         'make a new plan with mergeStaticGeometry, or leave it out of the merge (static: false)',
+                );
+            }
+            // The plan holds the material its triangles get; a changed one needs a new plan.
+            if (materialCode(instance.material, instance.instanceIndex) !== materialCode(source.material, source.instanceIndex)) {
+                throw new RangeError(
+                    `instance ${instance.instanceIndex} is a merged static instance, but its material changed since the merge plan (${describeMaterial(instance.material)}; the plan has ${describeMaterial(source.material)}): ` +
+                        'make a new plan with mergeStaticGeometry',
                 );
             }
         }
@@ -339,4 +353,9 @@ export function meshRefitPlacement(scene: TraceSceneData, meshIndex: number): { 
     }
     if (placement.triangleCount === 0) throw new RangeError(`meshRefitPlacement: mesh ${meshIndex} has no tree in this scene`);
     return { nodeWordOffset: placement.nodeOffset * (BVH_NODE_BYTES / 4), triangleWordOffset: placement.triangleOffset * TRIANGLE_WORDS };
+}
+
+/** A material for an error message: `none` for undefined or NO_MATERIAL (0xffffffff). */
+function describeMaterial(material: number | undefined): string {
+    return material === undefined || material >>> 0 === 0xffffffff ? 'none' : String(material);
 }

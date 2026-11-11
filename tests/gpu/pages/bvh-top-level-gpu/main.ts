@@ -81,6 +81,7 @@ await runGpuTest(
                         visible: instance.visible,
                         contributesToGi: instance.contributesToGi,
                         mask: instance.mask,
+                        material: instance.material,
                     }),
                 ),
             );
@@ -115,7 +116,7 @@ await runGpuTest(
                     const ok =
                         gpu !== undefined &&
                         gpu.subarray(0, 15).every((word, k) => word === cpu[k]) &&
-                        (gpu[INSTANCE_WORD.flags] & 0xffff) === cpu[INSTANCE_WORD.flags] &&
+                        gpu[INSTANCE_WORD.flags] === cpu[INSTANCE_WORD.flags] &&
                         gpu[INSTANCE_WORD.flags] >>> 16 === (material === undefined ? 0 : material + 1);
                     if (!ok && recordProblems++ < 4) failures.push(`${stage}: instance ${instanceIndex}'s record differs: GPU ${gpu ? Array.from(gpu).join(',') : 'none'} CPU ${Array.from(cpu).join(',')}`);
                 }

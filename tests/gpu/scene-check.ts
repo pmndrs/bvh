@@ -7,8 +7,9 @@
  */
 
 import { createCpuTracer, type CpuHit } from '../../src/trace/cpu-traversal.ts';
-import { HIT_RECORD_BYTES } from '../../src/trace/wgsl.ts';
+import { HIT_RECORD_BYTES, HIT_RECORD_WORD } from '../../src/trace/wgsl.ts';
 
+/** The kernel's default 40-byte record (with material and normal). */
 const HIT_RECORD_WORDS = HIT_RECORD_BYTES / 4;
 import { packRays, RAY_BYTES, type TraceRay } from '../../src/trace/rays.ts';
 import type { TraceSceneData } from '../../src/trace/scene-assembly.ts';
@@ -70,19 +71,33 @@ export async function traceOnGpu(device: GPUDevice, kernel: TraceBatchKernel, sc
             const base = index * HIT_RECORD_WORDS;
             const t = floats[base];
             if (!(t >= 0)) return null;
-            return { t, instanceIndex: words[base + 1], triangleIndex: words[base + 2], frontFace: words[base + 3] !== 0, u: floats[base + 4], v: floats[base + 5] };
+            const w = HIT_RECORD_WORD;
+            return {
+                t,
+                instanceIndex: words[base + w.instance],
+                triangleIndex: words[base + w.triangle],
+                frontFace: words[base + w.frontFace] !== 0,
+                u: floats[base + w.barycentrics],
+                v: floats[base + w.barycentrics + 1],
+                material: words[base + w.material],
+                normal: [floats[base + w.normal], floats[base + w.normal + 1], floats[base + w.normal + 2]],
+            };
         },
         any: (index) => anyWords[index] !== 0,
     };
 }
 
-/** Same hit: the same instance, triangle and side, `t` within rounding. An exact tie (same `t`) on another triangle also counts. */
+/** Same hit: the same instance, triangle, side and material, `t` within rounding. An exact tie (same `t`) on another triangle also counts. */
 export function sameHit(a: CpuHit | null, b: CpuHit | null): boolean {
     if (a === null || b === null) return a === b;
+    if (a.material !== b.material && a.instanceIndex === b.instanceIndex) return false;
     // T_TOLERANCE, as the oracle: the GPU walk runs in f32, the CPU walk in doubles.
     const close = Math.abs(a.t - b.t) <= 1e-4 * Math.max(1, b.t);
     if (!close) return false;
-    if (a.instanceIndex === b.instanceIndex && a.triangleIndex === b.triangleIndex) return a.frontFace === b.frontFace;
+    if (a.instanceIndex === b.instanceIndex && a.triangleIndex === b.triangleIndex) {
+        const normalClose = a.normal.every((value, axis) => Math.abs(value - b.normal[axis]) <= 1e-3);
+        return a.frontFace === b.frontFace && normalClose;
+    }
     return Math.abs(a.t - b.t) <= 1e-6 * Math.max(1, b.t);
 }
 

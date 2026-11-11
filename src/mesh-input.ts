@@ -16,9 +16,10 @@ export interface MeshInput {
      * Per-triangle flags, indexed by the original triangle number; they default
      * to 0. Only bit 0 (`TRIANGLE_FLAG_FILTER`: ask the triangle filter) may be
      * set. Bits 1-31 are reserved: bit 1 flips `frontFace` on merged static
-     * meshes' triangles, bits 2-15 are 0, and bits 16-31 are kept for a
-     * per-instance material. Every builder throws, naming the triangle, if a
-     * reserved bit is set.
+     * meshes' triangles, bits 2-15 are 0, and bits 16-31 carry a merged
+     * triangle's source material, which the scene assembly writes from the
+     * instance's `material` (not from here). Every builder throws, naming the
+     * triangle, if a reserved bit is set.
      */
     readonly triangleFlags?: Uint32Array | null;
 }
@@ -30,7 +31,7 @@ export const TRIANGLE_FLAGS_INPUT_MASK = 1;
  * Throws a `RangeError` naming `where` and the triangle if any of the first
  * `triangleCount` entries sets a reserved bit (anything but
  * {@link TRIANGLE_FLAGS_INPUT_MASK}). Masking them silently would hide a
- * caller's bug and break merged meshes' flip bit or a later material.
+ * caller's bug and break merged meshes' flip bit or material.
  */
 export function checkTriangleFlags(triangleFlags: Uint32Array | null | undefined, triangleCount: number, where: string): void {
     if (!triangleFlags) return;

@@ -8,13 +8,12 @@
 
 import { describe, expect, it } from 'vitest';
 import { createFakeGpu, type FakeBinding, type FakeBuffer } from '../../tests/support/fake-gpu.ts';
-import { INSTANCE_FLAG, INSTANCE_MASK_SHIFT, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS } from './layout.ts';
+import { INSTANCE_FLAG, INSTANCE_MASK_SHIFT, MATERIAL_SHIFT, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS } from './layout.ts';
 import { createRandom, randomAffine } from './oracle-fixtures.ts';
 import { MERGED_INSTANCE_INDEX } from './static-merge.ts';
 import { buildTopLevel, IDENTITY_TRANSFORM } from './top-level.ts';
 import {
     GpuTopLevel,
-    INSTANCE_MATERIAL_SHIFT,
     packTopLevelInstance,
     TOP_LEVEL_INSTANCE_ENTRY_WORD,
     TOP_LEVEL_INSTANCE_ENTRY_WORDS,
@@ -81,13 +80,13 @@ describe('the GPU top level', () => {
             const mask = index % 3 === 0 ? undefined : index;
             const material = index % 4 === 0 ? undefined : index * 3;
             expect(packTopLevelInstance({ meshSlot: 2, instanceIndex: 100 + index, objectToWorld, mask, material }, floats, words, 0)).toBe(true);
-            const cpu = buildTopLevel([{ instanceIndex: 100 + index, nodeOffset: 0, triangleOffset: 0, meshBounds: BOUNDS, objectToWorld, mask }]);
+            const cpu = buildTopLevel([{ instanceIndex: 100 + index, nodeOffset: 0, triangleOffset: 0, meshBounds: BOUNDS, objectToWorld, mask, material }]);
             const record = new Uint32Array(cpu.buffer, TOP_LEVEL_HEADER_WORDS * 4, INSTANCE_RECORD_WORDS);
             expect(words.subarray(TOP_LEVEL_INSTANCE_ENTRY_WORD.worldToObjectRow0, TOP_LEVEL_INSTANCE_ENTRY_WORD.worldToObjectRow0 + 12)).toEqual(record.subarray(0, 12));
             const flags = words[TOP_LEVEL_INSTANCE_ENTRY_WORD.flags];
-            // The low 16 bits are the CPU top level's; bits 16-31 carry material + 1.
-            expect(flags & 0xffff).toBe(record[INSTANCE_WORD.flags]);
-            expect(flags >>> INSTANCE_MATERIAL_SHIFT).toBe(material === undefined ? 0 : material + 1);
+            // Every bit as the CPU top level writes it, material + 1 in bits 16-31 included.
+            expect(flags).toBe(record[INSTANCE_WORD.flags]);
+            expect(flags >>> MATERIAL_SHIFT).toBe(material === undefined ? 0 : material + 1);
             expect((flags >>> INSTANCE_MASK_SHIFT) & 0xff).toBe(mask ?? 0xff);
         }
         // Merged: identity only, instance index 0xffffffff and bit 3.
@@ -96,6 +95,7 @@ describe('the GPU top level', () => {
         expect(words[TOP_LEVEL_INSTANCE_ENTRY_WORD.flags] & INSTANCE_FLAG.merged).toBe(INSTANCE_FLAG.merged);
         expect(() => packTopLevelInstance({ meshSlot: 0, instanceIndex: 5, objectToWorld: translation(1), merged: true }, floats, words, 0)).toThrow(/merged static instance/);
         expect(() => packTopLevelInstance({ meshSlot: 0, instanceIndex: 5, objectToWorld: IDENTITY_TRANSFORM, material: 0x10000 }, floats, words, 0)).toThrow(RangeError);
+        expect(() => packTopLevelInstance({ meshSlot: 0, instanceIndex: 5, objectToWorld: IDENTITY_TRANSFORM, merged: true, material: 1 }, floats, words, 0)).toThrow(/merged record/);
         expect(() => packTopLevelInstance({ meshSlot: 0, instanceIndex: 5, objectToWorld: IDENTITY_TRANSFORM, mask: 256 }, floats, words, 0)).toThrow(RangeError);
         // A singular transform is not live: rays never see it.
         expect(packTopLevelInstance({ meshSlot: 0, instanceIndex: 5, objectToWorld: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] }, floats, words, 0)).toBe(false);
@@ -135,7 +135,7 @@ describe('the GPU top level', () => {
             throw new Error(`no record for ${instanceIndex}`);
         };
         const cpu = buildTopLevel([
-            { instanceIndex: 7, nodeOffset: 10, triangleOffset: 20, meshBounds: BOUNDS, objectToWorld: translation(0) },
+            { instanceIndex: 7, nodeOffset: 10, triangleOffset: 20, meshBounds: BOUNDS, objectToWorld: translation(0), material: 4 },
             { instanceIndex: 8, nodeOffset: 10, triangleOffset: 20, meshBounds: BOUNDS, objectToWorld: translation(3), mask: 0x0f },
             { instanceIndex: MERGED_INSTANCE_INDEX, nodeOffset: 10, triangleOffset: 20, meshBounds: BOUNDS, objectToWorld: IDENTITY_TRANSFORM, merged: true },
         ]);
@@ -149,8 +149,7 @@ describe('the GPU top level', () => {
                 throw new Error('missing');
             })();
             expect(record.subarray(0, 15)).toEqual(expected.subarray(0, 15));
-            // Bits 16-31 (the material) are carried through; the rest is the CPU top level's.
-            expect(record[INSTANCE_WORD.flags] & 0xffff).toBe(expected[INSTANCE_WORD.flags]);
+            expect(record[INSTANCE_WORD.flags]).toBe(expected[INSTANCE_WORD.flags]);
         }
         expect(recordOf(7)[INSTANCE_WORD.flags] >>> 16).toBe(5);
 

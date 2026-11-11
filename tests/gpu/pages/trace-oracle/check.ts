@@ -21,6 +21,8 @@ import {
     compareAny,
     compareClosest,
     newTally,
+    NORMAL_COSINE_TOLERANCE,
+    normalCosine,
     T_TOLERANCE,
     type Comparison,
     type ComparisonTally,
@@ -66,6 +68,12 @@ export function describeExpectationFailure(actual: TracedHit | null, expected: E
     }
     if (expected.v !== undefined && Math.abs(actual.v - expected.v) > BARYCENTRIC_TOLERANCE) {
         problems.push(`v ${actual.v}, expected ${expected.v}`);
+    }
+    if (expected.material !== undefined && actual.material !== undefined && actual.material !== expected.material) {
+        problems.push(`material ${actual.material}, expected ${expected.material}`);
+    }
+    if (expected.normal !== undefined && actual.normal !== undefined && !(normalCosine(actual.normal, expected.normal) >= NORMAL_COSINE_TOLERANCE)) {
+        problems.push(`normal (${actual.normal.join(', ')}), expected (${expected.normal.join(', ')})`);
     }
     return problems.length > 0 ? problems.join('; ') : null;
 }
