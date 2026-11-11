@@ -64,9 +64,11 @@ export interface BvhTriangleLike {
 
 /** A plain point. */
 export class BvhVector3 implements BvhVector3Like {
-    x: number;
-    y: number;
-    z: number;
+    // Numbers from the start: a field declared without one starts as `undefined`, and V8 then
+    // stores every double written to it as a fresh heap number (garbage per write).
+    x = 0;
+    y = 0;
+    z = 0;
     constructor(x = 0, y = 0, z = 0) {
         this.x = x;
         this.y = y;
@@ -233,11 +235,9 @@ export function sphereIntersectsBox(sphere: BvhSphereLike, box: BvhBox3Like): bo
     return dx * dx + dy * dy + dz * dz <= sphere.radius * sphere.radius;
 }
 
-// ---- Vector helpers (three's arithmetic, in its order) ----
-
-function dot(a: BvhVector3Like, b: BvhVector3Like): number {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
-}
+// ---- Vector helpers (three's arithmetic, in its order). Products and sums that return a
+// number are written out in place (as `a.x * b.x + a.y * b.y + a.z * b.z`, three's order):
+// a helper returning a double that V8 doesn't inline allocates a heap number per call.
 
 function sub(a: BvhVector3Like, b: BvhVector3Like, out: BvhVector3Like): BvhVector3Like {
     out.x = a.x - b.x;
@@ -271,15 +271,6 @@ function addScaled(out: BvhVector3Like, v: BvhVector3Like, s: number): BvhVector
     return out;
 }
 
-function distanceSquared(a: BvhVector3Like, b: BvhVector3Like): number {
-    const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-    return dx * dx + dy * dy + dz * dz;
-}
-
-function length(v: BvhVector3Like): number {
-    return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-}
-
 // ---- Segments, planes, triangles (three's Line3, Plane, Triangle) ----
 
 const lineStartP = new BvhVector3();
@@ -289,9 +280,9 @@ const lineStartEnd = new BvhVector3();
 export function segmentClosestPointParameter(start: BvhVector3Like, end: BvhVector3Like, point: BvhVector3Like, clampToLine: boolean): number {
     sub(point, start, lineStartP);
     sub(end, start, lineStartEnd);
-    const startEnd2 = dot(lineStartEnd, lineStartEnd);
+    const startEnd2 = (lineStartEnd.x * lineStartEnd.x + lineStartEnd.y * lineStartEnd.y + lineStartEnd.z * lineStartEnd.z);
     if (startEnd2 === 0) return 0;
-    let t = dot(lineStartEnd, lineStartP) / startEnd2;
+    let t = (lineStartEnd.x * lineStartP.x + lineStartEnd.y * lineStartP.y + lineStartEnd.z * lineStartP.z) / startEnd2;
     if (clampToLine) t = Math.max(0, Math.min(1, t));
     return t;
 }
@@ -306,18 +297,29 @@ export function segmentAt(start: BvhVector3Like, end: BvhVector3Like, t: number,
 
 /** The point on segment `start`-`end` closest to `point` (three's `Line3.closestPointToPoint`). */
 export function segmentClosestPointToPoint(start: BvhVector3Like, end: BvhVector3Like, point: BvhVector3Like, clampToLine: boolean, target: BvhVector3Like): BvhVector3Like {
-    return segmentAt(start, end, segmentClosestPointParameter(start, end, point, clampToLine), target);
+    // segmentClosestPointParameter, written out (see the vector helpers' note).
+    const ex = end.x - start.x, ey = end.y - start.y, ez = end.z - start.z;
+    const startEnd2 = ex * ex + ey * ey + ez * ez;
+    let t = 0;
+    if (startEnd2 !== 0) {
+        t = (ex * (point.x - start.x) + ey * (point.y - start.y) + ez * (point.z - start.z)) / startEnd2;
+        if (clampToLine) t = Math.max(0, Math.min(1, t));
+    }
+    target.x = ex * t + start.x;
+    target.y = ey * t + start.y;
+    target.z = ez * t + start.z;
+    return target;
 }
 
 /** `normal · point + constant` (three's `Plane.distanceToPoint`). */
 export function planeDistanceToPoint(plane: BvhPlaneLike, point: BvhVector3Like): number {
-    return dot(plane.normal, point) + plane.constant;
+    return (plane.normal.x * point.x + plane.normal.y * point.y + plane.normal.z * point.z) + plane.constant;
 }
 
 /** three's `Plane.setFromNormalAndCoplanarPoint`. */
 export function setPlaneFromNormalAndPoint(plane: BvhPlaneLike, normal: BvhVector3Like, point: BvhVector3Like): void {
     copy(normal, plane.normal);
-    plane.constant = -dot(point, plane.normal);
+    plane.constant = -(point.x * plane.normal.x + point.y * plane.normal.y + point.z * plane.normal.z);
 }
 
 const planeDirection = new BvhVector3();
@@ -325,15 +327,15 @@ const planeDirection = new BvhVector3();
 /** Where segment `start`-`end` crosses the plane, into `target`; false when it doesn't (three's `Plane.intersectLine`, clamped). */
 export function planeIntersectSegment(plane: BvhPlaneLike, start: BvhVector3Like, end: BvhVector3Like, target: BvhVector3Like): boolean {
     const direction = sub(end, start, planeDirection);
-    const denominator = dot(plane.normal, direction);
+    const denominator = (plane.normal.x * direction.x + plane.normal.y * direction.y + plane.normal.z * direction.z);
     if (denominator === 0) {
-        if (planeDistanceToPoint(plane, start) === 0) {
+        if ((plane.normal.x * start.x + plane.normal.y * start.y + plane.normal.z * start.z + plane.constant) === 0) {
             copy(start, target);
             return true;
         }
         return false;
     }
-    const t = -(dot(start, plane.normal) + plane.constant) / denominator;
+    const t = -((start.x * plane.normal.x + start.y * plane.normal.y + start.z * plane.normal.z) + plane.constant) / denominator;
     if (t < 0 || t > 1) return false;
     addScaled(copy(start, target), direction, t);
     return true;
@@ -368,11 +370,11 @@ export function triangleGetBarycoord(point: BvhVector3Like, a: BvhVector3Like, b
     sub(c, a, baryV0);
     sub(b, a, baryV1);
     sub(point, a, baryV2);
-    const dot00 = dot(baryV0, baryV0);
-    const dot01 = dot(baryV0, baryV1);
-    const dot02 = dot(baryV0, baryV2);
-    const dot11 = dot(baryV1, baryV1);
-    const dot12 = dot(baryV1, baryV2);
+    const dot00 = (baryV0.x * baryV0.x + baryV0.y * baryV0.y + baryV0.z * baryV0.z);
+    const dot01 = (baryV0.x * baryV1.x + baryV0.y * baryV1.y + baryV0.z * baryV1.z);
+    const dot02 = (baryV0.x * baryV2.x + baryV0.y * baryV2.y + baryV0.z * baryV2.z);
+    const dot11 = (baryV1.x * baryV1.x + baryV1.y * baryV1.y + baryV1.z * baryV1.z);
+    const dot12 = (baryV1.x * baryV2.x + baryV1.y * baryV2.y + baryV1.z * baryV2.z);
     const denom = dot00 * dot11 - dot01 * dot01;
     if (denom === 0) {
         target.x = target.y = target.z = 0;
@@ -406,12 +408,12 @@ export function triangleClosestPointToPoint(a: BvhVector3Like, b: BvhVector3Like
     sub(b, a, vab);
     sub(c, a, vac);
     sub(p, a, vap);
-    const d1 = dot(vab, vap);
-    const d2 = dot(vac, vap);
+    const d1 = (vab.x * vap.x + vab.y * vap.y + vab.z * vap.z);
+    const d2 = (vac.x * vap.x + vac.y * vap.y + vac.z * vap.z);
     if (d1 <= 0 && d2 <= 0) return copy(a, target);
     sub(p, b, vbp);
-    const d3 = dot(vab, vbp);
-    const d4 = dot(vac, vbp);
+    const d3 = (vab.x * vbp.x + vab.y * vbp.y + vab.z * vbp.z);
+    const d4 = (vac.x * vbp.x + vac.y * vbp.y + vac.z * vbp.z);
     if (d3 >= 0 && d4 <= d3) return copy(b, target);
     const vc = d1 * d4 - d3 * d2;
     if (vc <= 0 && d1 >= 0 && d3 <= 0 && d1 - d3 > 0) {
@@ -419,8 +421,8 @@ export function triangleClosestPointToPoint(a: BvhVector3Like, b: BvhVector3Like
         return addScaled(copy(a, target), vab, v);
     }
     sub(p, c, vcp);
-    const d5 = dot(vab, vcp);
-    const d6 = dot(vac, vcp);
+    const d5 = (vab.x * vcp.x + vab.y * vcp.y + vab.z * vcp.z);
+    const d6 = (vac.x * vcp.x + vac.y * vcp.y + vac.z * vcp.z);
     if (d6 >= 0 && d5 <= d6) return copy(c, target);
     const vb = d5 * d2 - d1 * d6;
     if (vb <= 0 && d2 >= 0 && d6 <= 0) {
@@ -452,11 +454,11 @@ function closestPointLineToLine(l1: BvhSegmentLike, l2: BvhSegmentLike, result: 
     sub(l1.start, l2.start, lineV02);
     sub(l1.end, l1.start, lineDir1);
     sub(l2.end, l2.start, lineDir2);
-    const d0232 = dot(lineV02, v32);
-    const d3210 = dot(v32, v10);
-    const d3232 = dot(v32, v32);
-    const d0210 = dot(lineV02, v10);
-    const d1010 = dot(v10, v10);
+    const d0232 = (lineV02.x * v32.x + lineV02.y * v32.y + lineV02.z * v32.z);
+    const d3210 = (v32.x * v10.x + v32.y * v10.y + v32.z * v10.z);
+    const d3232 = (v32.x * v32.x + v32.y * v32.y + v32.z * v32.z);
+    const d0210 = (lineV02.x * v10.x + lineV02.y * v10.y + lineV02.z * v10.z);
+    const d1010 = (v10.x * v10.x + v10.y * v10.y + v10.z * v10.z);
     const denom = d1010 * d3232 - d3210 * d3210;
     const d = denom !== 0 ? (d0232 * d3210 - d0210 * d3232) / denom : 0;
     result.x = d;
@@ -489,7 +491,7 @@ export function closestPointsSegmentToSegment(l1: BvhSegmentLike, l2: BvhSegment
     const p2 = d2 < 0 ? l2.start : l2.end;
     segmentClosestPointToPoint(l1.start, l1.end, p2, true, segmentTemp1);
     segmentClosestPointToPoint(l2.start, l2.end, p, true, segmentTemp2);
-    if (distanceSquared(segmentTemp1, p2) <= distanceSquared(segmentTemp2, p)) {
+    if (((segmentTemp1.x - p2.x) * (segmentTemp1.x - p2.x) + (segmentTemp1.y - p2.y) * (segmentTemp1.y - p2.y) + (segmentTemp1.z - p2.z) * (segmentTemp1.z - p2.z)) <= ((segmentTemp2.x - p.x) * (segmentTemp2.x - p.x) + (segmentTemp2.y - p.y) * (segmentTemp2.y - p.y) + (segmentTemp2.z - p.z) * (segmentTemp2.z - p.z))) {
         copy(segmentTemp1, target1);
         copy(p2, target2);
     } else {
@@ -506,20 +508,23 @@ const spherePlane = new BvhPlane();
 export function sphereIntersectsTriangle(sphere: BvhSphereLike, triangle: BvhTriangleLike): boolean {
     const { radius, center } = sphere;
     const { a, b, c } = triangle;
-    if (Math.sqrt(distanceSquared(segmentClosestPointToPoint(a, b, center, true, sphereClosest), center)) <= radius) return true;
-    if (Math.sqrt(distanceSquared(segmentClosestPointToPoint(a, c, center, true, sphereClosest), center)) <= radius) return true;
-    if (Math.sqrt(distanceSquared(segmentClosestPointToPoint(b, c, center, true, sphereClosest), center)) <= radius) return true;
+    segmentClosestPointToPoint(a, b, center, true, sphereClosest);
+    if (Math.sqrt((sphereClosest.x - center.x) * (sphereClosest.x - center.x) + (sphereClosest.y - center.y) * (sphereClosest.y - center.y) + (sphereClosest.z - center.z) * (sphereClosest.z - center.z)) <= radius) return true;
+    segmentClosestPointToPoint(a, c, center, true, sphereClosest);
+    if (Math.sqrt((sphereClosest.x - center.x) * (sphereClosest.x - center.x) + (sphereClosest.y - center.y) * (sphereClosest.y - center.y) + (sphereClosest.z - center.z) * (sphereClosest.z - center.z)) <= radius) return true;
+    segmentClosestPointToPoint(b, c, center, true, sphereClosest);
+    if (Math.sqrt((sphereClosest.x - center.x) * (sphereClosest.x - center.x) + (sphereClosest.y - center.y) * (sphereClosest.y - center.y) + (sphereClosest.z - center.z) * (sphereClosest.z - center.z)) <= radius) return true;
     // three's Triangle.getPlane: setFromCoplanarPoints, the normal normalized by its length.
     const n = cross(sub(c, b, spherePlane.normal), sub(a, b, normalScratch), spherePlane.normal);
     // Vector3.normalize: divideScalar(length || 1), which multiplies by the reciprocal.
-    const s = 1 / (length(n) || 1);
+    const s = 1 / (Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z) || 1);
     n.x *= s;
     n.y *= s;
     n.z *= s;
-    spherePlane.constant = -dot(a, n);
-    const dp = Math.abs(planeDistanceToPoint(spherePlane, center));
+    spherePlane.constant = -(a.x * n.x + a.y * n.y + a.z * n.z);
+    const dp = Math.abs((spherePlane.normal.x * center.x + spherePlane.normal.y * center.y + spherePlane.normal.z * center.z + spherePlane.constant));
     if (dp <= radius) {
-        addScaled(copy(center, sphereProjected), spherePlane.normal, -planeDistanceToPoint(spherePlane, center));
+        addScaled(copy(center, sphereProjected), spherePlane.normal, -(spherePlane.normal.x * center.x + spherePlane.normal.y * center.y + spherePlane.normal.z * center.z + spherePlane.constant));
         if (triangleContainsPoint(sphereProjected, a, b, c)) return true;
     }
     return false;
@@ -548,7 +553,7 @@ export class SeparatingAxisBounds {
         let min = Infinity;
         let max = -Infinity;
         for (let i = 0, l = points.length; i < l; i++) {
-            const val = dot(axis, points[i]);
+            const val = (axis.x * points[i].x + axis.y * points[i].y + axis.z * points[i].z);
             min = val < min ? val : min;
             max = val > max ? val : max;
         }
@@ -568,7 +573,7 @@ export class SeparatingAxisBounds {
                     p.x = boxMin.x * x + boxMax.x * (1 - x);
                     p.y = boxMin.y * y + boxMax.y * (1 - y);
                     p.z = boxMin.z * z + boxMax.z * (1 - z);
-                    const val = dot(axis, p);
+                    const val = (axis.x * p.x + axis.y * p.y + axis.z * p.z);
                     min = Math.min(val, min);
                     max = Math.max(val, max);
                 }
@@ -641,9 +646,9 @@ export function updateExtendedTriangle(t: ExtendedTriangleState): void {
     satBounds[2].setFromPoints(axis2, points);
     const axis3 = sub(c, a, satAxes[3]);
     satBounds[3].setFromPoints(axis3, points);
-    const lengthAB = length(axis1);
-    const lengthBC = length(axis2);
-    const lengthCA = length(axis3);
+    const lengthAB = Math.sqrt(axis1.x * axis1.x + axis1.y * axis1.y + axis1.z * axis1.z);
+    const lengthBC = Math.sqrt(axis2.x * axis2.x + axis2.y * axis2.y + axis2.z * axis2.z);
+    const lengthCA = Math.sqrt(axis3.x * axis3.x + axis3.y * axis3.y + axis3.z * axis3.z);
     t.isDegenerateIntoPoint = false;
     t.isDegenerateIntoSegment = false;
     const segment = t.degenerateSegment;
@@ -691,8 +696,8 @@ export function triangleClosestPointToSegment(t: ExtendedTriangleState, segment:
     const points = t.points;
     let distSq: number;
     let closestDistanceSq = Infinity;
-    const startDist = planeDistanceToPoint(t.plane, start);
-    const endDist = planeDistanceToPoint(t.plane, end);
+    const startDist = (t.plane.normal.x * start.x + t.plane.normal.y * start.y + t.plane.normal.z * start.z + t.plane.constant);
+    const endDist = (t.plane.normal.x * end.x + t.plane.normal.y * end.y + t.plane.normal.z * end.z + t.plane.constant);
     if (startDist * endDist < 0 && planeIntersectSegment(t.plane, start, end, segPoint1) && triangleContainsPoint(segPoint1, t.a, t.b, t.c)) {
         if (target1) copy(segPoint1, target1);
         if (target2) copy(segPoint1, target2);
@@ -703,7 +708,7 @@ export function triangleClosestPointToSegment(t: ExtendedTriangleState, segment:
         copy(points[i], segEdge.start);
         copy(points[next], segEdge.end);
         closestPointsSegmentToSegment(segEdge, segment, segPoint1, segPoint2);
-        distSq = distanceSquared(segPoint1, segPoint2);
+        distSq = ((segPoint1.x - segPoint2.x) * (segPoint1.x - segPoint2.x) + (segPoint1.y - segPoint2.y) * (segPoint1.y - segPoint2.y) + (segPoint1.z - segPoint2.z) * (segPoint1.z - segPoint2.z));
         if (distSq < closestDistanceSq) {
             closestDistanceSq = distSq;
             if (target1) copy(segPoint1, target1);
@@ -711,14 +716,14 @@ export function triangleClosestPointToSegment(t: ExtendedTriangleState, segment:
         }
     }
     triangleClosestPointToPoint(t.a, t.b, t.c, start, segPoint1);
-    distSq = distanceSquared(start, segPoint1);
+    distSq = ((start.x - segPoint1.x) * (start.x - segPoint1.x) + (start.y - segPoint1.y) * (start.y - segPoint1.y) + (start.z - segPoint1.z) * (start.z - segPoint1.z));
     if (distSq < closestDistanceSq) {
         closestDistanceSq = distSq;
         if (target1) copy(segPoint1, target1);
         if (target2) copy(start, target2);
     }
     triangleClosestPointToPoint(t.a, t.b, t.c, end, segPoint1);
-    distSq = distanceSquared(end, segPoint1);
+    distSq = ((end.x - segPoint1.x) * (end.x - segPoint1.x) + (end.y - segPoint1.y) * (end.y - segPoint1.y) + (end.z - segPoint1.z) * (end.z - segPoint1.z));
     if (distSq < closestDistanceSq) {
         closestDistanceSq = distSq;
         if (target1) copy(segPoint1, target1);
@@ -732,7 +737,7 @@ const pointTarget = new BvhVector3();
 /** Distance from the triangle to a point (three-mesh-bvh's `ExtendedTriangle.distanceToPoint`). */
 export function triangleDistanceToPoint(t: BvhTriangleLike, point: BvhVector3Like): number {
     triangleClosestPointToPoint(t.a, t.b, t.c, point, pointTarget);
-    return Math.sqrt(distanceSquared(point, pointTarget));
+    return Math.sqrt(((point.x - pointTarget.x) * (point.x - pointTarget.x) + (point.y - pointTarget.y) * (point.y - pointTarget.y) + (point.z - pointTarget.z) * (point.z - pointTarget.z)));
 }
 
 // intersectsTriangle's scratch.
@@ -839,8 +844,8 @@ function findIntersectionLineBounds(
 
 function intersectTriangleSegment(triangle: ExtendedTriangleState, degenerate: ExtendedTriangleState, target: BvhSegmentLike | null, suppressLog: boolean): boolean {
     const segment = degenerate.degenerateSegment;
-    const startDist = planeDistanceToPoint(triangle.plane, segment.start);
-    const endDist = planeDistanceToPoint(triangle.plane, segment.end);
+    const startDist = (triangle.plane.normal.x * segment.start.x + triangle.plane.normal.y * segment.start.y + triangle.plane.normal.z * segment.start.z + triangle.plane.constant);
+    const endDist = (triangle.plane.normal.x * segment.end.x + triangle.plane.normal.y * segment.end.y + triangle.plane.normal.z * segment.end.z + triangle.plane.constant);
     if (isNearZero(startDist)) {
         if (isNearZero(endDist)) return coplanarIntersectsTriangle(triangle, degenerate, target, suppressLog);
         setSegment(target, segment.start, segment.start);
@@ -857,7 +862,7 @@ function intersectTriangleSegment(triangle: ExtendedTriangleState, degenerate: E
 
 function intersectTrianglePoint(triangle: ExtendedTriangleState, degenerate: ExtendedTriangleState, target: BvhSegmentLike | null): boolean {
     const point = degenerate.a;
-    if (isNearZero(planeDistanceToPoint(triangle.plane, point)) && triangleContainsPoint(point, triangle.a, triangle.b, triangle.c)) {
+    if (isNearZero((triangle.plane.normal.x * point.x + triangle.plane.normal.y * point.y + triangle.plane.normal.z * point.z + triangle.plane.constant)) && triangleContainsPoint(point, triangle.a, triangle.b, triangle.c)) {
         setSegment(target, point, point);
         return true;
     }
@@ -868,7 +873,7 @@ function intersectSegmentPoint(segmentTriangle: ExtendedTriangleState, pointTria
     const segment = segmentTriangle.degenerateSegment;
     const point = pointTriangle.a;
     segmentClosestPointToPoint(segment.start, segment.end, point, true, tmpVec);
-    if (distanceSquared(point, tmpVec) < ZERO_EPSILON_SQR) {
+    if (((point.x - tmpVec.x) * (point.x - tmpVec.x) + (point.y - tmpVec.y) * (point.y - tmpVec.y) + (point.z - tmpVec.z) * (point.z - tmpVec.z)) < ZERO_EPSILON_SQR) {
         setSegment(target, point, point);
         return true;
     }
@@ -904,7 +909,7 @@ function handleDegenerateCases(self: ExtendedTriangleState, other: ExtendedTrian
         return intersectTriangleSegment(other, self, target, suppressLog);
     } else if (self.isDegenerateIntoPoint) {
         if (other.isDegenerateIntoPoint) {
-            if (distanceSquared(other.a, self.a) < ZERO_EPSILON_SQR) {
+            if (((other.a.x - self.a.x) * (other.a.x - self.a.x) + (other.a.y - self.a.y) * (other.a.y - self.a.y) + (other.a.z - self.a.z) * (other.a.z - self.a.z)) < ZERO_EPSILON_SQR) {
                 setSegment(target, self.a, self.a);
                 return true;
             }
@@ -951,18 +956,18 @@ export function triangleIntersectsTriangle(self: ExtendedTriangleState, otherTri
     if (res !== undefined) return res;
     const plane1 = self.plane;
     const plane2 = other.plane;
-    let a1Dist = planeDistanceToPoint(plane2, self.a);
-    let b1Dist = planeDistanceToPoint(plane2, self.b);
-    let c1Dist = planeDistanceToPoint(plane2, self.c);
+    let a1Dist = (plane2.normal.x * self.a.x + plane2.normal.y * self.a.y + plane2.normal.z * self.a.z + plane2.constant);
+    let b1Dist = (plane2.normal.x * self.b.x + plane2.normal.y * self.b.y + plane2.normal.z * self.b.z + plane2.constant);
+    let c1Dist = (plane2.normal.x * self.c.x + plane2.normal.y * self.c.y + plane2.normal.z * self.c.z + plane2.constant);
     if (isNearZero(a1Dist)) a1Dist = 0;
     if (isNearZero(b1Dist)) b1Dist = 0;
     if (isNearZero(c1Dist)) c1Dist = 0;
     const a1b1Dist = a1Dist * b1Dist;
     const a1c1Dist = a1Dist * c1Dist;
     if (a1b1Dist > 0 && a1c1Dist > 0) return false;
-    let a2Dist = planeDistanceToPoint(plane1, other.a);
-    let b2Dist = planeDistanceToPoint(plane1, other.b);
-    let c2Dist = planeDistanceToPoint(plane1, other.c);
+    let a2Dist = (plane1.normal.x * other.a.x + plane1.normal.y * other.a.y + plane1.normal.z * other.a.z + plane1.constant);
+    let b2Dist = (plane1.normal.x * other.b.x + plane1.normal.y * other.b.y + plane1.normal.z * other.b.z + plane1.constant);
+    let c2Dist = (plane1.normal.x * other.c.x + plane1.normal.y * other.c.y + plane1.normal.z * other.c.z + plane1.constant);
     if (isNearZero(a2Dist)) a2Dist = 0;
     if (isNearZero(b2Dist)) b2Dist = 0;
     if (isNearZero(c2Dist)) c2Dist = 0;
@@ -1048,7 +1053,7 @@ export function triangleDistanceToTriangle(self: ExtendedTriangleState, other: B
         const field = cornerFields[i];
         const otherVec = other[field];
         triangleClosestPointToPoint(self.a, self.b, self.c, otherVec, distPoint);
-        dist = distanceSquared(otherVec, distPoint);
+        dist = ((otherVec.x - distPoint.x) * (otherVec.x - distPoint.x) + (otherVec.y - distPoint.y) * (otherVec.y - distPoint.y) + (otherVec.z - distPoint.z) * (otherVec.z - distPoint.z));
         if (dist < closestDistanceSq) {
             closestDistanceSq = dist;
             if (target1) copy(distPoint, target1);
@@ -1056,7 +1061,7 @@ export function triangleDistanceToTriangle(self: ExtendedTriangleState, other: B
         }
         const thisVec = self[field];
         triangleClosestPointToPoint(other.a, other.b, other.c, thisVec, distPoint);
-        dist = distanceSquared(thisVec, distPoint);
+        dist = ((thisVec.x - distPoint.x) * (thisVec.x - distPoint.x) + (thisVec.y - distPoint.y) * (thisVec.y - distPoint.y) + (thisVec.z - distPoint.z) * (thisVec.z - distPoint.z));
         if (dist < closestDistanceSq) {
             closestDistanceSq = dist;
             if (target1) copy(thisVec, target1);
@@ -1070,7 +1075,7 @@ export function triangleDistanceToTriangle(self: ExtendedTriangleState, other: B
             copy(other[cornerFields[i2]], distLine2.start);
             copy(other[cornerFields[(i2 + 1) % 3]], distLine2.end);
             closestPointsSegmentToSegment(distLine1, distLine2, distPoint, distPoint2);
-            const dist = distanceSquared(distPoint, distPoint2);
+            const dist = ((distPoint.x - distPoint2.x) * (distPoint.x - distPoint2.x) + (distPoint.y - distPoint2.y) * (distPoint.y - distPoint2.y) + (distPoint.z - distPoint2.z) * (distPoint.z - distPoint2.z));
             if (dist < closestDistanceSq) {
                 closestDistanceSq = dist;
                 if (target1) copy(distPoint, target1);
@@ -1296,7 +1301,7 @@ const obbPointTarget = new BvhVector3();
 /** Distance from the oriented box to a point (three-mesh-bvh's `OrientedBox.distanceToPoint`). */
 export function orientedBoxDistanceToPoint(obb: OrientedBoxState, point: BvhVector3Like): number {
     orientedBoxClosestPointToPoint(obb, point, obbPointTarget);
-    return Math.sqrt(distanceSquared(point, obbPointTarget));
+    return Math.sqrt(((point.x - obbPointTarget.x) * (point.x - obbPointTarget.x) + (point.y - obbPointTarget.y) * (point.y - obbPointTarget.y) + (point.z - obbPointTarget.z) * (point.z - obbPointTarget.z)));
 }
 
 const boxSegments1 = Array.from({ length: 12 }, () => new BvhSegment());
@@ -1336,7 +1341,7 @@ export function orientedBoxDistanceToBox(obb: OrientedBoxState, box: BvhBox3Like
         boxPoint2.x = Math.max(min.x, Math.min(max.x, p.x));
         boxPoint2.y = Math.max(min.y, Math.min(max.y, p.y));
         boxPoint2.z = Math.max(min.z, Math.min(max.z, p.z));
-        const dist = distanceSquared(p, boxPoint2);
+        const dist = ((p.x - boxPoint2.x) * (p.x - boxPoint2.x) + (p.y - boxPoint2.y) * (p.y - boxPoint2.y) + (p.z - boxPoint2.z) * (p.z - boxPoint2.z));
         if (dist < closestDistanceSq) {
             closestDistanceSq = dist;
             if (target1) copy(p, target1);
@@ -1376,7 +1381,7 @@ export function orientedBoxDistanceToBox(obb: OrientedBoxState, box: BvhBox3Like
                 boxPoint2.y = y ? max.y : min.y;
                 boxPoint2.z = z ? max.z : min.z;
                 orientedBoxClosestPointToPoint(obb, boxPoint2, boxPoint1);
-                const dist = distanceSquared(boxPoint2, boxPoint1);
+                const dist = ((boxPoint2.x - boxPoint1.x) * (boxPoint2.x - boxPoint1.x) + (boxPoint2.y - boxPoint1.y) * (boxPoint2.y - boxPoint1.y) + (boxPoint2.z - boxPoint1.z) * (boxPoint2.z - boxPoint1.z));
                 if (dist < closestDistanceSq) {
                     closestDistanceSq = dist;
                     if (target1) copy(boxPoint1, target1);
@@ -1389,7 +1394,7 @@ export function orientedBoxDistanceToBox(obb: OrientedBoxState, box: BvhBox3Like
     for (let i = 0; i < 12; i++) {
         for (let i2 = 0; i2 < 12; i2++) {
             closestPointsSegmentToSegment(boxSegments1[i], boxSegments2[i2], boxPoint1, boxPoint2);
-            const dist = distanceSquared(boxPoint1, boxPoint2);
+            const dist = ((boxPoint1.x - boxPoint2.x) * (boxPoint1.x - boxPoint2.x) + (boxPoint1.y - boxPoint2.y) * (boxPoint1.y - boxPoint2.y) + (boxPoint1.z - boxPoint2.z) * (boxPoint1.z - boxPoint2.z));
             if (dist < closestDistanceSq) {
                 closestDistanceSq = dist;
                 if (target1) copy(boxPoint1, target1);

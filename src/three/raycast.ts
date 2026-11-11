@@ -83,6 +83,7 @@ import {
     type BvhRayLike,
     type BvhRaycastOptions,
     type BvhShapecastCallbacks,
+    type BvhBvhcastCallbacks,
     type BvhTriangleAccept,
     type CpuMeshBvhBuildOptions,
 } from '../query/cpu-mesh-bvh.ts';
@@ -357,6 +358,22 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
             return this.shapecastWith(callbacks, triangle, new Box3());
         } finally {
             threeTrianglePool.push(triangle);
+        }
+    }
+
+    /**
+     * three-mesh-bvh's `bvhcast(otherBvh, matrixToLocal, { intersectsRanges, intersectsTriangles })`
+     * with three's types: the triangles as `ExtendedTriangle`, the other's
+     * moved into this space; offsets and indices are tree positions
+     * (`resolveTriangleIndex` maps them, as with three-mesh-bvh's `indirect`).
+     */
+    override bvhcast(other: CpuMeshBvh<unknown>, matrixToLocal: Matrix4 | BvhMatrix4Like | null | undefined, callbacks: BvhBvhcastCallbacks<ExtendedTriangle>): boolean {
+        const triangle1 = threeTrianglePool.pop() ?? new ExtendedTriangle();
+        const triangle2 = threeTrianglePool.pop() ?? new ExtendedTriangle();
+        try {
+            return this.bvhcastWith(other, matrixToLocal, callbacks, triangle1, triangle2);
+        } finally {
+            threeTrianglePool.push(triangle1, triangle2);
         }
     }
 

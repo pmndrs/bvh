@@ -58,8 +58,11 @@ import { buildTopLevel, IDENTITY_TRANSFORM, type TopLevelBvh } from '../trace/to
 import type { TriangleCandidate } from '../trace/triangle-filter.ts';
 import {
     BvhBox3,
+    boxArraysIntersect,
     ExtendedTriangle,
     invertMatrix,
+    matrixElements,
+    transformBoxArray,
     BvhMatrix4,
     OrientedBox,
     sphereIntersectsBox,
@@ -745,41 +748,26 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
     /**
      * Whether any triangle touches a triangle of `other` placed by
      * `geometryToBvh` (into this tree's space; default identity),
-     * three-mesh-bvh's `intersectsGeometry`. `other` is a tree (fast) or a
-     * mesh (`{ positions, indices }`, every triangle tested against the
-     * leaves its bounding box reaches).
+     * three-mesh-bvh's `intersectsGeometry`. `other` is a tree or a mesh
+     * (`{ positions, indices }`). Against a tree it is a {@link bvhcast}
+     * testing each pair as three-mesh-bvh does (the other's triangle, moved,
+     * against this one's), so the answer is the same; three-mesh-bvh 0.9.18
+     * shapecasts the other tree from each leaf instead, which measured 1.5x
+     * slower here. Against a mesh, every triangle of it is tested against
+     * the leaves its bounding box reaches, as three-mesh-bvh does.
      */
     intersectsGeometry(other: CpuMeshBvh<unknown> | MeshInput, geometryToBvh?: BvhMatrix4Like | null): boolean {
         const toBvh = new BvhMatrix4().copy(geometryToBvh ?? IDENTITY_MATRIX);
+        if (other instanceof CpuMeshBvh) {
+            return CpuMeshBvh.prototype.bvhcast.call(this, other, toBvh, { intersectsTriangles: (triangle1, triangle2) => triangleIntersectsTriangle(triangle2, triangle1) });
+        }
         const inverse = new BvhMatrix4();
         invertMatrix(toBvh, inverse);
-        const otherBounds = other instanceof CpuMeshBvh ? other.getBoundingBox() : meshBounds(other);
+        const otherBounds = meshBounds(other);
         const obb = new OrientedBox().set({ x: otherBounds[0], y: otherBounds[1], z: otherBounds[2] }, { x: otherBounds[3], y: otherBounds[4], z: otherBounds[5] }, toBvh);
         const thisTriangle = trianglePool.pop() ?? new ExtendedTriangle();
         const otherTriangle = trianglePool.pop() ?? new ExtendedTriangle();
         try {
-            if (other instanceof CpuMeshBvh) {
-                // three-mesh-bvh's: each leaf of this tree, as a box in the other's space, shapecast against the other tree.
-                const leafBox = new OrientedBox();
-                return this.traverse({
-                    intersectsBounds: (array) => obb.intersectsBox(boxOfArray(array)),
-                    intersectsRange: (offset, count, _contained, _depth, _nodeIndex, array) => {
-                        leafBox.set({ x: array[0], y: array[1], z: array[2] }, { x: array[3], y: array[4], z: array[5] }, inverse);
-                        return other.coreShapecast({
-                            intersectsBounds: (bounds) => leafBox.intersectsBox(bounds),
-                            intersectsTriangle: (triangle) => {
-                                for (const point of triangle.points) transformPoint(point, toBvh.elements);
-                                triangle.needsUpdate = true;
-                                for (let position = offset, end = offset + count; position < end; position++) {
-                                    this.readTriangleInto(position, thisTriangle);
-                                    if (triangleIntersectsTriangle(triangle, thisTriangle)) return true;
-                                }
-                                return false;
-                            },
-                        });
-                    },
-                });
-            }
             // A mesh: this tree's triangles moved into its space, against each of its triangles.
             const { positions, indices } = other;
             const otherCount = indices ? Math.floor(indices.length / 3) : Math.floor(positions.length / 9);
@@ -808,6 +796,58 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
         } finally {
             trianglePool.push(thisTriangle, otherTriangle);
         }
+    }
+
+    /**
+     * three-mesh-bvh's `bvhcast` (0.9.18): walks this tree and `other`
+     * together, `other` placed by `matrixToLocal` (its space to this one's),
+     * and hands over every pair of leaves whose boxes overlap
+     * (`intersectsRanges`) and every pair of their triangles
+     * (`intersectsTriangles`, the other's moved into this space). The walk is
+     * three-mesh-bvh's, step for step: descend the other tree while both its
+     * children overlap, switch trees when one doesn't or a leaf is reached.
+     * Offsets and indices are tree positions (indirect mode). Returns true
+     * when a callback stopped the cast. Casts may nest.
+     */
+    bvhcast(other: CpuMeshBvh<unknown>, matrixToLocal: BvhMatrix4Like | null | undefined, callbacks: BvhBvhcastCallbacks): boolean {
+        const triangle1 = trianglePool.pop() ?? new ExtendedTriangle();
+        const triangle2 = trianglePool.pop() ?? new ExtendedTriangle();
+        try {
+            return this.bvhcastWith(other, matrixToLocal, callbacks, triangle1, triangle2);
+        } finally {
+            trianglePool.push(triangle1, triangle2);
+        }
+    }
+
+    /** The one bvhcast: {@link bvhcast} with the caller's scratch triangles (an engine adapter passes its own type). */
+    protected bvhcastWith<T extends ExtendedTriangleState>(other: CpuMeshBvh<unknown>, matrixToLocal: BvhMatrix4Like | null | undefined, callbacks: BvhBvhcastCallbacks<T>, triangle1: T, triangle2: T): boolean {
+        if (!(other instanceof CpuMeshBvh)) throw new TypeError('CpuMeshBvh.bvhcast: the other tree must be a CpuMeshBvh');
+        const { intersectsRanges, intersectsTriangles } = callbacks;
+        if (!intersectsRanges && !intersectsTriangles) throw new TypeError('CpuMeshBvh.bvhcast: pass intersectsRanges or intersectsTriangles');
+        const toLocal = matrixElements(matrixToLocal);
+        let report: RangesReport;
+        if (intersectsTriangles) {
+            const pairs: RangesReport = (offset1, count1, offset2, count2, depth1, nodeIndex1, depth2, nodeIndex2) => {
+                for (let i2 = offset2, end2 = offset2 + count2; i2 < end2; i2++) {
+                    other.readTriangleInto(i2, triangle2);
+                    for (const point of triangle2.points) transformPoint(point, toLocal);
+                    for (let i1 = offset1, end1 = offset1 + count1; i1 < end1; i1++) {
+                        this.readTriangleInto(i1, triangle1);
+                        if (intersectsTriangles.call(callbacks, triangle1, triangle2, i1, i2, depth1, nodeIndex1, depth2, nodeIndex2)) return true;
+                    }
+                }
+                return false;
+            };
+            report = intersectsRanges ? (o1, c1, o2, c2, d1, n1, d2, n2) => Boolean(intersectsRanges.call(callbacks, o1, c1, o2, c2, d1, n1, d2, n2)) || pairs(o1, c1, o2, c2, d1, n1, d2, n2) : pairs;
+        } else {
+            report = (o1, c1, o2, c2, d1, n1, d2, n2) => Boolean(intersectsRanges!.call(callbacks, o1, c1, o2, c2, d1, n1, d2, n2));
+        }
+        return dualTraverse(this.walkView(), other.walkView(), toLocal, report);
+    }
+
+    /** This tree as {@link dualTraverse} reads it. */
+    private walkView(): TreeView {
+        return { words: this.nodeWords, floats: this.nodeFloats, bounds: this.layout.bounds };
     }
 
     /** {@link shapecast} with the core's types, whatever an adapter made of `shapecast`: the derived queries use it. */
@@ -1039,4 +1079,161 @@ function meshBounds(input: MeshInput): Float64Array {
         }
     }
     return out;
+}
+
+/** A tree's arrays, for {@link dualTraverse}. */
+interface TreeView {
+    readonly words: Uint32Array;
+    readonly floats: Float32Array;
+    readonly bounds: ArrayLike<number>;
+}
+
+/**
+ * A node of a {@link TreeView}: a child slot (`>= 0`: its box and reference
+ * are in the parent), or `-(node + 1)` for the root node (its box the tree's
+ * bounds).
+ */
+type NodeHandle = number;
+
+type RangesReport = (offset1: number, count1: number, offset2: number, count2: number, depth1: number, nodeIndex1: number, depth2: number, nodeIndex2: number) => boolean;
+
+/** The root's handle: the first node with two children, or the one leaf of a one-leaf tree (as `traverse` finds it). */
+function rootHandle(tree: TreeView): NodeHandle {
+    const words = tree.words;
+    let root = 0;
+    while (words[root * GPU_LAYOUT_NODE_WORDS + GPU_LAYOUT_NODE_WORD.rightIndex] === GPU_LAYOUT_EMPTY_CHILD) {
+        const base = root * GPU_LAYOUT_NODE_WORDS;
+        if (words[base + GPU_LAYOUT_NODE_WORD.leftCount] > 0) return root * 2;
+        root = words[base + GPU_LAYOUT_NODE_WORD.leftIndex];
+    }
+    return -(root + 1);
+}
+
+/** Triangles in a handle's leaf; 0 for an inner node. */
+function handleCount(tree: TreeView, handle: NodeHandle): number {
+    if (handle < 0) return 0;
+    return tree.words[(handle >> 1) * GPU_LAYOUT_NODE_WORDS + ((handle & 1) === 0 ? GPU_LAYOUT_NODE_WORD.leftCount : GPU_LAYOUT_NODE_WORD.rightCount)];
+}
+
+/** A leaf's first tree position, or an inner node's node index. */
+function handleIndex(tree: TreeView, handle: NodeHandle): number {
+    if (handle < 0) return -handle - 1;
+    return tree.words[(handle >> 1) * GPU_LAYOUT_NODE_WORDS + ((handle & 1) === 0 ? GPU_LAYOUT_NODE_WORD.leftIndex : GPU_LAYOUT_NODE_WORD.rightIndex)];
+}
+
+/** An inner node's right child, or -1 when it has none (then never overlapping). */
+function rightChild(tree: TreeView, node: number): NodeHandle {
+    return tree.words[node * GPU_LAYOUT_NODE_WORDS + GPU_LAYOUT_NODE_WORD.rightIndex] === GPU_LAYOUT_EMPTY_CHILD ? -1 : node * 2 + 1;
+}
+
+function readHandleBox(tree: TreeView, handle: NodeHandle, out: Float64Array): Float64Array {
+    if (handle < 0) {
+        for (let i = 0; i < 6; i++) out[i] = tree.bounds[i];
+        return out;
+    }
+    const base = (handle >> 1) * GPU_LAYOUT_NODE_WORDS + ((handle & 1) === 0 ? GPU_LAYOUT_NODE_WORD.leftMin : GPU_LAYOUT_NODE_WORD.rightMin);
+    const floats = tree.floats;
+    out[0] = floats[base];
+    out[1] = floats[base + 1];
+    out[2] = floats[base + 2];
+    out[3] = floats[base + 4];
+    out[4] = floats[base + 5];
+    out[5] = floats[base + 6];
+    return out;
+}
+
+/**
+ * three-mesh-bvh 0.9.18's `bvhcast` walk (`core/cast/bvhcast.js`) on our
+ * nodes; `matrix2to1` takes tree B into tree A's space. The order, the box
+ * tests (three's `Box3.applyMatrix4` and `intersectsBox`) and the depth
+ * bookkeeping are three-mesh-bvh's, including the depth it passes on a switch.
+ */
+function dualTraverse(treeA: TreeView, treeB: TreeView, matrix2to1: ArrayLike<number>, report: RangesReport): boolean {
+    const inverse = new BvhMatrix4();
+    invertMatrix(matrix2to1, inverse);
+    const matrix1to2 = inverse.elements;
+    // three-mesh-bvh's _leftBox1/_rightBox1/_leftBox2/_rightBox2 (read and tested before any recursion), and a pool for switched boxes.
+    const left1 = new Float64Array(6);
+    const right1 = new Float64Array(6);
+    const left2 = new Float64Array(6);
+    const right2 = new Float64Array(6);
+    const pool: Float64Array[] = [];
+    const take = (): Float64Array => pool.pop() ?? new Float64Array(6);
+    const overlaps = (box: Float64Array, tree: TreeView, handle: NodeHandle, scratch: Float64Array): boolean => handle >= 0 && boxArraysIntersect(box, readHandleBox(tree, handle, scratch));
+
+    /** Switches trees: `box` (node `from` of tree2, in tree1's space) against node1's children, descending tree1. */
+    const descendOther = (
+        from: NodeHandle,
+        node1: NodeHandle,
+        tree1: TreeView,
+        tree2: TreeView,
+        m2to1: ArrayLike<number>,
+        m1to2: ArrayLike<number>,
+        depth1: number,
+        depth2: number,
+        box: Float64Array,
+        reversed: boolean,
+    ): boolean => {
+        const inner1 = handleIndex(tree1, node1);
+        const cl1 = inner1 * 2;
+        const cr1 = rightChild(tree1, inner1);
+        const intersectCl1 = overlaps(box, tree1, cl1, left1);
+        const intersectCr1 = overlaps(box, tree1, cr1, right1);
+        return (
+            (intersectCl1 && walk(from, cl1, tree2, tree1, m1to2, m2to1, depth2, depth1 + 1, box, !reversed)) ||
+            (intersectCr1 && walk(from, cr1, tree2, tree1, m1to2, m2to1, depth2, depth1 + 1, box, !reversed))
+        );
+    };
+
+    const walk = (
+        node1: NodeHandle,
+        node2: NodeHandle,
+        tree1: TreeView,
+        tree2: TreeView,
+        m2to1: ArrayLike<number>,
+        m1to2: ArrayLike<number>,
+        depth1: number,
+        depth2: number,
+        currBox: Float64Array,
+        reversed: boolean,
+    ): boolean => {
+        const count1 = handleCount(tree1, node1);
+        const count2 = handleCount(tree2, node2);
+        if (count1 > 0 && count2 > 0) {
+            const offset1 = handleIndex(tree1, node1);
+            const offset2 = handleIndex(tree2, node2);
+            return reversed ? report(offset2, count2, offset1, count1, depth2, node2, depth1, node1) : report(offset1, count1, offset2, count2, depth1, node1, depth2, node2);
+        }
+        if (count2 > 0) {
+            // tree2 reached a leaf: carry on down tree1 with that leaf's box.
+            const newBox = take();
+            transformBoxArray(readHandleBox(tree2, node2, newBox), m2to1, newBox);
+            const result = descendOther(node2, node1, tree1, tree2, m2to1, m1to2, depth1, depth2, newBox, reversed);
+            pool.push(newBox);
+            return result;
+        }
+        const inner2 = handleIndex(tree2, node2);
+        const cl2 = inner2 * 2;
+        const cr2 = rightChild(tree2, inner2);
+        const leftIntersects = overlaps(currBox, tree2, cl2, left2);
+        const rightIntersects = overlaps(currBox, tree2, cr2, right2);
+        if (leftIntersects && rightIntersects) {
+            return walk(node1, cl2, tree1, tree2, m2to1, m1to2, depth1, depth2 + 1, currBox, reversed) || walk(node1, cr2, tree1, tree2, m2to1, m1to2, depth1, depth2 + 1, currBox, reversed);
+        }
+        if (!leftIntersects && !rightIntersects) return false;
+        const child2 = leftIntersects ? cl2 : cr2;
+        if (count1 > 0) return walk(node1, child2, tree1, tree2, m2to1, m1to2, depth1, depth2 + 1, currBox, reversed);
+        // Only one child overlaps: switch, and carry on down tree1 with that child's box.
+        const newBox = take();
+        transformBoxArray(leftIntersects ? left2 : right2, m2to1, newBox);
+        const result = descendOther(child2, node1, tree1, tree2, m2to1, m1to2, depth1, depth2, newBox, reversed);
+        pool.push(newBox);
+        return result;
+    };
+
+    const rootA = rootHandle(treeA);
+    const rootB = rootHandle(treeB);
+    const localBox = new Float64Array(6);
+    transformBoxArray(readHandleBox(treeA, rootA, localBox), matrix1to2, localBox);
+    return walk(rootA, rootB, treeA, treeB, matrix2to1, matrix1to2, 0, 0, localBox, false);
 }
