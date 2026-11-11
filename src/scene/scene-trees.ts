@@ -75,10 +75,14 @@
  *   nothing into them (no copies, growth, identity pass or refit that its
  *   encoder, maybe not submitted yet, still has to run). Otherwise, and when
  *   the room runs out, the batch waits for the next update as uncapped
- *   batches do, and the batches behind it wait with it; `whenBuilt` then
- *   takes tinybvh's tree for the meshes behind it rather than wait for an
- *   update that may not come. A growth between updates bumps
- *   {@link SceneTrees.version} then, not in an update.
+ *   batches do, and the batches behind it wait with it; `whenBuilt`, and the
+ *   update, then take tinybvh's tree for the meshes behind it rather than
+ *   wait for an update that may not come. That update copies the batch out
+ *   in a submit of its own and lets its outputs go at once, so a stall costs
+ *   one update, not two. A growth between updates bumps
+ *   {@link SceneTrees.version} then, not in an update. (The contract this
+ *   rests on: the caller submits each update's encoder before the next
+ *   update.)
  *
  * A mesh bigger than the cap builds alone in its batch. While later batches
  * wait, their meshes' geometry stays with the GPU build, so it is copied into
@@ -1037,7 +1041,10 @@ export class SceneTrees {
      * Brings the buffers up to date: starts builds for meshes added since the
      * last update, places trees that arrived (writes, and copies recorded in
      * `encoder`), and brings the top level up to date. Call once per frame
-     * before anything traces; the caller submits `encoder`.
+     * before anything traces; the caller submits `encoder`, **before the next
+     * update** (the next update frees what this frame's commands still read,
+     * and a capped batch stored between updates relies on it: see the file
+     * comment).
      *
      * Throws in two ways:
      *
@@ -1347,19 +1354,31 @@ export class SceneTrees {
         let waiting = 0;
         const adoptionPending = this.gpuTreeOutputs === 'adopt' && this.nothingStored();
         const loadBatchBuilding = adoptionPending && this.loadBatchBuilding();
-        // A capped batch waits for an update that may not come: tinybvh's trees count for the meshes behind it.
-        const gpuStalled = this.outputsWaitingForUpdate.size > 0;
         for (const state of this.meshes.values()) {
             if (state.mergedInto !== null || (state.group < 0 && state.users === 0)) continue;
             if (this.placed.has(state.slot)) continue;
-            // An arrived tree counts (it is placed at the next update), except a tinybvh tree that waits for the GPU's.
-            const waitsForGpu = !gpuStalled && ((state.gpu === 'building' && this.holdsRefinement(state.slot)) || (adoptionPending && (state.gpu === 'building' || loadBatchBuilding)));
+            // An arrived tree counts (it is placed at the next update), except a tinybvh tree that waits: the same rule as takeArrived's.
+            const waitsForGpu = this.tinybvhTreeWaits(state, state.gpu === 'building', adoptionPending, loadBatchBuilding);
             const gpuWaits = loadBatchBuilding && (this.deforming?.has(state.slot) ?? false);
             const arrived = this.arrived.some((tree) => tree.slot === state.slot && tree.generation === state.generation && (tree.source === 'gpu' ? !gpuWaits : !waitsForGpu));
             if (arrived) continue;
             if (state.gpu === 'building' || state.tinybvh === 'building') waiting++;
         }
         return waiting;
+    }
+
+    /**
+     * Whether a mesh's arrived tinybvh tree waits rather than being placed at
+     * the next update: held while the GPU's tree comes first
+     * (`holdRefinements`), or while the buffers wait for an adoption. One rule
+     * for `takeArrived` (what an update places) and `whenBuilt` (what counts
+     * as arrived), so they never disagree. Except: while a capped batch waits
+     * for an update (`outputsWaitingForUpdate`), a mesh with no tree whose GPU
+     * build hasn't arrived takes tinybvh's tree rather than wait behind it.
+     */
+    private tinybvhTreeWaits(state: MeshSlot, gpuTreeFirst: boolean, waitForAdoption: boolean, loadBatchBuilding: boolean): boolean {
+        if (this.outputsWaitingForUpdate.size > 0 && state.gpu === 'building' && !this.placed.has(state.slot)) return false;
+        return (gpuTreeFirst && this.holdsRefinement(state.slot)) || (waitForAdoption && (state.gpu === 'building' || loadBatchBuilding));
     }
 
     /** No tree is placed, and none stored for the next update: the storages are empty (what adoption needs). */
@@ -1400,7 +1419,7 @@ export class SceneTrees {
             if (!state || tree.source !== 'tinybvh') continue;
             const placed = this.placed.get(tree.slot);
             const gpuTreeFirst = state.gpu === 'building' || (placed?.source === 'gpu' && placed.generation === tree.generation) || gpuQueued.has(tree.slot);
-            if ((gpuTreeFirst && this.holdsRefinement(tree.slot)) || (waitForAdoption && (state.gpu === 'building' || loadBatchBuilding))) {
+            if (this.tinybvhTreeWaits(state, gpuTreeFirst, waitForAdoption, loadBatchBuilding)) {
                 waiting.push(tree);
             } else {
                 taken.push(tree);
@@ -1538,6 +1557,10 @@ export class SceneTrees {
         if (growth.grew) this.encoderWritesStorage = true;
 
         const freshAt = new Map(fresh.map((index, at) => [index, at]));
+        // Capped: a GPU tree that waited for this update is copied in a submit of its own (to the fresh ranges, which
+        // nothing in `encoder` touches), so its outputs go now and the queue behind it starts this frame.
+        const ownCopies = this.maxBatchBytes !== undefined ? this.device.createCommandEncoder({ label: `${this.label} waiting batch copy` }) : null;
+        const copiedNow: GpuTreeOutputs[] = [];
         arrived.forEach((tree, index) => {
             const size = sizes[index];
             if (tree.source === 'gpu' && tree.stored) {
@@ -1552,6 +1575,9 @@ export class SceneTrees {
                 if (state.group >= 0) writeMergedTriangleIdentity(tree.bvh.triangles, this.groups[state.group].group, 0, tree.bvh.triangleCount);
                 this.nodes.write(nodeOffset, tree.bvh.nodes, size.nodeCount * BVH_NODE_BYTES);
                 this.triangles.write(triangleOffset, tree.bvh.triangles, size.triangleCount * TRIANGLE_BYTES);
+            } else if (ownCopies) {
+                this.copyGpuTree(ownCopies, tree, size, nodeOffset, triangleOffset);
+                copiedNow.push(tree.built.outputs);
             } else {
                 this.copyGpuTree(encoder, tree, size, nodeOffset, triangleOffset);
                 // Let go of at the next update, once the caller has submitted these copies.
@@ -1561,6 +1587,10 @@ export class SceneTrees {
             // The tree's own sizes, at the scene's offsets (a GPU tree's range also carries its offsets in the batch's buffers).
             this.recordPlacement(tree, size, nodeOffset, triangleOffset, replaced.get(tree.slot) ?? null);
         });
+        if (ownCopies && copiedNow.length > 0) {
+            this.device.queue.submit([ownCopies.finish()]);
+            for (const outputs of copiedNow) this.releaseOutputs(outputs);
+        }
         this.reconcileReserve();
     }
 
@@ -1732,8 +1762,9 @@ export class SceneTrees {
         const nodeRanges = takeRanges(this.nodes, this.reserve.nodes, nodeCounts, fromReserve);
         const triangleRanges = takeRanges(this.triangles, this.reserve.triangles, triangleCounts, fromReserve);
         if (nodeRanges === null || triangleRanges === null) {
-            // Growing now copies the buffers in a submit that runs before the last update's encoder: only safe when that encoder writes nothing into them.
-            let canGrow = !this.encoderWritesStorage;
+            // Growing now copies the buffers in a submit that runs before the last update's encoder: only safe when that encoder writes
+            // nothing into them, or when they hold nothing (no range to copy, and nothing placed for a refit or a copy to write).
+            let canGrow = !this.encoderWritesStorage || this.storagesEmpty();
             try {
                 if (canGrow && nodeRanges === null) this.nodes.checkGrowth(sum(nodeCounts));
                 if (canGrow && triangleRanges === null) this.triangles.checkGrowth(sum(triangleCounts));
@@ -1770,6 +1801,8 @@ export class SceneTrees {
      * the peak-memory saving goes to the big one. Null: everything is copied.
      */
     private adoptableBatch(arrived: readonly ArrivedTree[]): GpuArrivedTree[] | null {
+        // A stalled capped batch's update also places tinybvh trees (tinybvhTreeWaits): copy, so they all land in this update (an adoption defers them by one).
+        if (this.outputsWaitingForUpdate.size > 0 && arrived.some((tree) => tree.source === 'tinybvh')) return null;
         // Trees stored between updates (or waiting to be freed) hold ranges: the buffers can't be swapped then.
         if (arrived.some((tree) => tree.source === 'gpu' && tree.stored) || this.arrived.some((tree) => tree.source === 'gpu' && tree.stored) || this.reserve.nodes.units > 0 || this.reserve.triangles.units > 0) return null;
         const placedUnits = { nodes: 0, triangles: 0 };

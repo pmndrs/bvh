@@ -733,22 +733,57 @@ describe('SceneTrees with gpuMaxBatchBytes (the real queue, a stand-in H-PLOC)',
         scene.dispose();
     });
 
-    it('when a batch cannot be stored between updates, whenBuilt takes tinybvh\'s trees for the meshes behind it, and updates finish the GPU batches', async () => {
-        const { scene, frame, hploc } = await setUpCapped({ holdRefinements: true });
-        const { geometries, instances, rays } = sceneOf(4);
+    for (const mode of ['copy', 'adopt'] as const) {
+        it(`${mode}: when a batch cannot be stored between updates, whenBuilt and the next update agree (every mesh gets a tree), and the stall costs one update`, async () => {
+            const { scene, frame, hploc } = await setUpCapped({ holdRefinements: true, gpuTreeOutputs: mode });
+            const { instances, rays } = sceneOf(5);
+            const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+            // A small mesh first, so the buffers hold something (adopt: they are its batch's outputs).
+            const seed = tessellatedQuad(2, 1);
+            scene.addInstance({ mesh: scene.addMesh(seed), instanceIndex: 99, objectToWorld: identity });
+            frame();
+            await withinTime(scene.whenBuilt(), 'whenBuilt (seed)');
+            frame();
+            // Then meshes too big for the room left, each a batch of its own.
+            const geometries = instances.slice(0, 4).map((_, index) => tessellatedQuad(40 + 4 * index, 1));
+            const { meshes } = addAll(scene, geometries, instances.slice(0, 4));
+            frame();
+            // As if that update had recorded storage writes its frame has still to run (a refit does, every frame): growing between updates isn't safe.
+            (scene as unknown as { encoderWritesStorage: boolean }).encoderWritesStorage = true;
+            await withinTime(scene.whenBuilt(), 'whenBuilt');
+            expect((scene as unknown as { outputsWaitingForUpdate: Set<unknown> }).outputsWaitingForUpdate.size).toBe(1);
+            expect(scene.counts.waitingForFirstTree).toBe(0);
+            // One update: what whenBuilt counted is what it places. Mesh 0 on its (stalled) GPU tree, the meshes behind on tinybvh's.
+            frame();
+            expect(meshes.map((mesh) => scene.meshStatus(mesh).builtBy)).toEqual(['gpu', 'tinybvh', 'tinybvh', 'tinybvh']);
+            // That same update let the stalled batch's outputs go (its copy in a submit of its own): the next batch started without another.
+            await settle();
+            expect(hploc.events).toContain('let go 1');
+            expect(hploc.events).toContain('start 2');
+            for (let update = 0; update < 20 && scene.counts.gpuBatches < 5; update++) {
+                frame();
+                await settle(2);
+            }
+            frame();
+            expect(scene.counts.gpuBatches).toBe(5);
+            expect(hploc.violations).toEqual([]);
+            const all = [{ mesh: -1, meshIndex: 4, instanceIndex: 99, objectToWorld: identity }, ...instances.slice(0, 4)];
+            expect(disagreements(readScene(scene), await reference([...geometries, seed], all), rays)).toEqual([]);
+            scene.dispose();
+        });
+    }
+
+    it('grows between updates into empty buffers even when the last update recorded storage writes (nothing to lose), so the load never stalls', async () => {
+        const { scene, frame } = await setUpCapped({ holdRefinements: true });
+        const { instances } = sceneOf(3);
+        const geometries = instances.map((_, index) => tessellatedQuad(40 + 4 * index, 1));
         addAll(scene, geometries, instances);
         frame();
-        // As if the last update had recorded storage writes its frame has still to run: growing between updates isn't safe.
         (scene as unknown as { encoderWritesStorage: boolean }).encoderWritesStorage = true;
         await withinTime(scene.whenBuilt(), 'whenBuilt');
-        for (let update = 0; update < 20 && scene.counts.gpuBatches < geometries.length; update++) {
-            frame();
-            await settle(2);
-        }
+        expect((scene as unknown as { outputsWaitingForUpdate: Set<unknown> }).outputsWaitingForUpdate.size).toBe(0);
         frame();
-        expect(scene.counts.gpuBatches).toBe(planGpuHplocBatches(createFakeGpu().device, geometries, { maxBatchBytes: SMALL_CAP }).batches.length);
-        expect(hploc.violations).toEqual([]);
-        expect(disagreements(readScene(scene), await reference(geometries, instances), rays)).toEqual([]);
+        expect(scene.counts).toMatchObject({ onGpuTrees: 3, onTinybvhTrees: 0 });
         scene.dispose();
     });
 
