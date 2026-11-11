@@ -17,6 +17,8 @@
  * - `watertight-hploc`: the same with the GPU H-PLOC builder (B2);
  * - `watertight-tinybvh-nomasks`: tinybvh trees through a kernel built with
  *   `rayMasks: false`, the walk with its mask code compiled out;
+ * - `watertight-tinybvh-compact`: tinybvh trees through a kernel built with
+ *   `hitNormal: false`, whose 24-byte records carry no material or normal;
  * - `merged-tinybvh`, `merged-hploc`: `mergeStaticInstances`. Each instance
  *   gets its own copy of its mesh and two of every three are marked static,
  *   so they merge into world-space meshes (one per flags-and-mask group)
@@ -25,8 +27,12 @@
  *   instance, its triangle and its authored side. The hook cases also run
  *   merged (`[hooks-merged]`), with the filter flags in the merged geometry.
  * The variants above trace through the masked batch kernel (the default) with
- * a mask of all ones. Then the hook cases (hooks.ts) run on tinybvh trees, with
- * ray masks on and off: a filter on flagged triangles, a filter that depends on
+ * a mask of all ones. Except for `-compact`, each closest hit's material and
+ * world normal (`BvhHit.material`, `BvhHit.normal`) are checked against the
+ * reference too (normals to a cosine of 0.9999), merged variants included:
+ * several cases give most instances a material, and every variant must report
+ * some hits with one. Then the hook cases (hooks.ts) run on tinybvh trees,
+ * with ray masks on and off: a filter on flagged triangles, a filter that depends on
  * the query (a surface that casts no shadow), and instance masks against
  * several ray masks with a filter that reads the ray mask. Each traced mask is
  * checked against the reference given the same filter and mask.
@@ -45,7 +51,10 @@ import {
     type TraceSceneInstance,
     createCpuTracer,
     createMeshBvhBuilder,
-    HIT_RECORD_BYTES,
+    HIT_RECORD_COMPACT_WORD,
+    HIT_RECORD_WORD,
+    hitRecordBytes,
+    NO_MATERIAL,
     newTraceStats,
     TRACE_MODULE_ENTRIES,
     type MeshBvhBuilder,
@@ -89,6 +98,8 @@ interface OracleVariant {
     rayMasks?: boolean;
     /** Merge static instances (see above). */
     merged?: boolean;
+    /** The batch kernel's `hitNormal`; default true. */
+    hitNormal?: boolean;
 }
 
 const VARIANTS: OracleVariant[] = [
@@ -97,6 +108,7 @@ const VARIANTS: OracleVariant[] = [
     { name: 'watertight-lbvh', treeSource: 'gpu-lbvh' },
     { name: 'watertight-hploc', treeSource: 'gpu-hploc' },
     { name: 'watertight-tinybvh-nomasks', treeSource: 'tinybvh', rayMasks: false },
+    { name: 'watertight-tinybvh-compact', treeSource: 'tinybvh', hitNormal: false },
     { name: 'merged-tinybvh', treeSource: 'tinybvh', merged: true },
     { name: 'merged-hploc', treeSource: 'gpu-hploc', merged: true },
 ];
@@ -119,12 +131,12 @@ const STACK_PROBE_RAYS = 2000;
 /** Rays of each shared-edge scene also checked against the brute-force reference. */
 const SHARED_EDGE_REFERENCE_RAYS = 20000;
 
-const HIT_RECORD_WORDS = HIT_RECORD_BYTES / 4;
-
 interface GpuAnswers {
     closest: Float32Array;
     closestWords: Uint32Array;
     blocked: Uint32Array;
+    /** The records have material and normal (`hitNormal`), 40 bytes; else the compact 24. */
+    hitNormal: boolean;
 }
 
 async function readBuffer(device: GPUDevice, source: GPUBuffer, byteLength: number): Promise<ArrayBuffer> {
@@ -147,11 +159,11 @@ async function readBuffer(device: GPUDevice, source: GPUBuffer, byteLength: numb
 type EncodeBatch = (encoder: GPUCommandEncoder, batch: { mode: 'closest' | 'any'; rays: GPUBuffer; results: GPUBuffer; count: number }) => void;
 
 /** Traces the packed rays on the GPU in both modes and reads the results back. */
-async function traceOnGpu(device: GPUDevice, encodeBatch: EncodeBatch, packedRays: Float32Array): Promise<GpuAnswers> {
+async function traceOnGpu(device: GPUDevice, encodeBatch: EncodeBatch, packedRays: Float32Array, hitNormal = true): Promise<GpuAnswers> {
     const count = packedRays.length / 8;
     const rays = device.createBuffer({ label: 'oracle rays', size: count * RAY_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(rays, 0, packedRays as Float32Array<ArrayBuffer>);
-    const hitBytes = count * HIT_RECORD_BYTES;
+    const hitBytes = count * hitRecordBytes(hitNormal);
     const anyBytes = count * 4;
     const hits = device.createBuffer({ label: 'oracle hits', size: hitBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     const occlusion = device.createBuffer({ label: 'oracle occlusion', size: anyBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -170,24 +182,40 @@ async function traceOnGpu(device: GPUDevice, encodeBatch: EncodeBatch, packedRay
         closest: new Float32Array(hitData),
         closestWords: new Uint32Array(hitData),
         blocked: new Uint32Array(anyData),
+        hitNormal,
     };
 }
 
 
 /** One ray's closest-hit record as the comparison code wants it. */
 function hitAt(answers: GpuAnswers, index: number): TracedHit | null {
-    const base = index * HIT_RECORD_WORDS;
-    const t = answers.closest[base];
+    const word = answers.hitNormal ? HIT_RECORD_WORD : HIT_RECORD_COMPACT_WORD;
+    const base = (index * hitRecordBytes(answers.hitNormal)) / 4;
+    const t = answers.closest[base + word.t];
     if (!(t >= 0)) return null;
-    return {
+    const hit: TracedHit = {
         hit: true,
         t,
-        instanceIndex: answers.closestWords[base + 1],
-        triangleIndex: answers.closestWords[base + 2],
-        frontFace: answers.closestWords[base + 3] !== 0,
-        u: answers.closest[base + 4],
-        v: answers.closest[base + 5],
+        instanceIndex: answers.closestWords[base + word.instance],
+        triangleIndex: answers.closestWords[base + word.triangle],
+        frontFace: answers.closestWords[base + word.frontFace] !== 0,
+        u: answers.closest[base + word.barycentrics],
+        v: answers.closest[base + word.barycentrics + 1],
     };
+    if (!answers.hitNormal) return hit;
+    // Material and normal are compared with the reference (and hand-worked values) when given.
+    const normal = answers.closest.subarray(base + HIT_RECORD_WORD.normal, base + HIT_RECORD_WORD.normal + 3);
+    return { ...hit, material: answers.closestWords[base + HIT_RECORD_WORD.material], normal: [normal[0], normal[1], normal[2]] };
+}
+
+/** Closest hits whose record names a material (0 with compact records). */
+function countMaterialHits(answers: GpuAnswers, rayCount: number): number {
+    let count = 0;
+    for (let index = 0; index < rayCount; index++) {
+        const material = hitAt(answers, index)?.material;
+        if (material !== undefined && material !== NO_MATERIAL) count++;
+    }
+    return count;
 }
 
 /** The read-back results in the form the checks (check.ts) take. */
@@ -275,7 +303,7 @@ async function traceCase(
     const built = await buildScene(builder, oracleCase, variant);
     const buffers = uploadTraceScene(device, built.data, oracleCase.name);
     try {
-        return { answers: await traceOnGpu(device, (encoder, batch) => kernel.encode(encoder, buffers, batch), oracleCase.rays), built };
+        return { answers: await traceOnGpu(device, (encoder, batch) => kernel.encode(encoder, buffers, batch), oracleCase.rays, variant.hitNormal ?? true), built };
     } finally {
         buffers.destroy();
     }
@@ -349,6 +377,7 @@ await runGpuTest(async ({ device, log }) => {
 
     for (const kind of ['gpu-lbvh', 'gpu-hploc'] as const) gpuBuilders.set(kind, await createMeshLayoutBuilder(device, { prefer: kind, label: `oracle ${kind}` }));
     const skipped: string[] = [];
+    const materialHitsByVariant = new Map<string, number>();
     for (const variant of VARIANTS) {
         const gpuBuilder = variant.treeSource === 'gpu-lbvh' || variant.treeSource === 'gpu-hploc' ? gpuBuilders.get(variant.treeSource) : undefined;
         if (gpuBuilder && gpuBuilder.kind === 'tinybvh') {
@@ -356,7 +385,7 @@ await runGpuTest(async ({ device, log }) => {
             log(`[${variant.name}] skipped: ${gpuBuilder.fallbackReason}`);
             continue;
         }
-        const kernel = await TraceBatchKernel.create(device, { label: variant.name, rayMasks: variant.rayMasks ?? true });
+        const kernel = await TraceBatchKernel.create(device, { label: variant.name, rayMasks: variant.rayMasks ?? true, hitNormal: variant.hitNormal ?? true });
         const results = { cases: {} as Record<string, unknown>, sharedEdges: [] as SharedEdgeReport[] };
         byTest[variant.name] = results;
 
@@ -367,7 +396,9 @@ await runGpuTest(async ({ device, log }) => {
             const stackUsed = probeStackDepth(built.data, oracleCase);
             deepestStackUsed = Math.max(deepestStackUsed, stackUsed);
             deepestRequired = Math.max(deepestRequired, built.data.requiredStackSize);
-            results.cases[oracleCase.name] = summarize(result, stackUsed, built.data, built.buildMs);
+            const materialHits = countMaterialHits(answers, oracleCase.rays.length / 8);
+            if (answers.hitNormal) materialHitsByVariant.set(variant.name, (materialHitsByVariant.get(variant.name) ?? 0) + materialHits);
+            results.cases[oracleCase.name] = { ...summarize(result, stackUsed, built.data, built.buildMs), materialHits };
             log(
                 `[${variant.name}] ${oracleCase.name}: ${result.rays} rays, closest ${result.closest.mismatches} mismatches / ${result.closest.ambiguous} ambiguous, ` +
                     `any ${result.any.mismatches} / ${result.any.ambiguous}, ` +
@@ -429,6 +460,8 @@ await runGpuTest(async ({ device, log }) => {
         }
     }
     builder.dispose();
+    // The material comparison only means something if hits carry materials.
+    for (const [name, count] of materialHitsByVariant) if (count === 0) failures.push(`[${name}] no closest hit reported a material`);
 
     const limits = device.limits;
     assert(failures.length === 0, failures.slice(0, 12).join('\n'));
@@ -443,6 +476,7 @@ await runGpuTest(async ({ device, log }) => {
         slippedTotals,
         byTest,
         hooks,
+        materialHits: Object.fromEntries(materialHitsByVariant),
         traceStorageBuffers: TRACE_MODULE_ENTRIES.length,
         batchKernelStorageBuffers: TRACE_MODULE_ENTRIES.length + 2,
         maxStorageBuffersPerShaderStage: limits.maxStorageBuffersPerShaderStage,

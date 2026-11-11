@@ -24,7 +24,8 @@
  * The public WGSL API (stable from 0.1):
  *
  *     struct BvhRay  { origin: vec3f, tMin: f32, direction: vec3f, tMax: f32 }   // 32 bytes
- *     struct BvhHit  { t: f32, instance: u32, triangle: u32, barycentrics: vec2f, frontFace: bool }
+ *     struct BvhHit  { t: f32, instance: u32, triangle: u32, barycentrics: vec2f, frontFace: bool,
+ *                      material: u32, normal: vec3f }
  *     fn bvhTraceClosest(ray: BvhRay) -> BvhHit
  *     fn bvhTraceAny(ray: BvhRay) -> bool
  *     fn bvhTraceClosestMasked(ray: BvhRay, mask: u32) -> BvhHit   // unless rayMasks: false
@@ -54,6 +55,8 @@ import {
     INSTANCE_FLAG,
     INSTANCE_MASK_SHIFT,
     INSTANCE_MASK_ALL,
+    MATERIAL_SHIFT,
+    NO_MATERIAL,
     RAY_MASK_ALL,
     BVH_QUERY_CLOSEST,
     BVH_QUERY_ANY,
@@ -102,7 +105,12 @@ struct BvhHit {
     triangle: u32,       // triangle index within the instance's mesh
     barycentrics: vec2f, // weights of vertices 1 and 2
     frontFace: bool,     // true on the side the mesh was authored as front (also when mirrored)
+    material: u32,       // the instance's material index (a merged hit: its source's), BVH_NO_MATERIAL for none
+    normal: vec3f,       // world-space geometric normal of the authored front side, unit length; 0 on a miss
 }
+
+// BvhHit.material of a hit on an instance given no material, and of a miss.
+const BVH_NO_MATERIAL: u32 = ${hex(NO_MATERIAL)};
 
 // What the triangle filter (bvhTrianglePasses, trace/triangle-filter.ts) is
 // told about a candidate hit on a flagged triangle. A struct, so fields can be
@@ -152,7 +160,7 @@ struct BvhInstance {
     rootNodeOffset: u32,   // where this mesh's nodes start, in nodes
     triangleOffset: u32,   // where this mesh's triangles start, in triangles
     instanceIndex: u32,    // platform instance index
-    flags: u32,
+    flags: u32,            // INSTANCE_FLAG bits 0-3, the mask in 8-15, material + 1 in 16-31 (0: none)
 }
 
 // Mesh trees and the top level use the same 64-byte node.
@@ -216,7 +224,16 @@ function walkWgsl(kind: 'closest' | 'any', rayMasks: boolean): string {
     const name = closest ? 'bvhWalkClosest' : 'bvhWalkAny';
     const returnType = closest ? 'BvhHit' : 'bool';
     const noHit = closest ? 'result' : 'false';
-    const resultDeclaration = closest ? 'var result = BvhHit(-1.0, 0u, 0u, vec2f(0.0), true);' : '';
+    // Closest-hit keeps where its hit came from (the instance record and the triangle's
+    // slot), and works out the normal and material once, after the walk (bvhFinishClosest).
+    const resultDeclaration = closest
+        ? `var result = BvhHit(-1.0, 0u, 0u, vec2f(0.0), true, BVH_NO_MATERIAL, vec3f(0.0));
+    var hitRecord = 0u;     // instance record of the closest hit
+    var hitSlot = 0u;       // its triangle, in the scene's triangle buffer`
+        : '';
+    const noHitAfterWalk = closest ? 'bvhFinishClosest(result, hitRecord, hitSlot)' : 'false';
+    const recordDeclaration = closest ? 'var instanceRecord = 0u;   // the record of the instance being walked' : '';
+    const recordAssignment = closest ? 'instanceRecord = index;' : '';
     // Closest-hit narrows the ray after every hit; any-hit never needs to.
     const farDeclaration = closest ? 'var farthest = ray.tMax;   // hits beyond this are not interesting any more' : 'let farthest = ray.tMax;';
     const onTriangleHit = closest
@@ -224,7 +241,9 @@ function walkWgsl(kind: 'closest' | 'any', rayMasks: boolean): string {
                     // authored with, so frontFacing is the authored side even for a mirrored
                     // instance (DECISIONS 2026-11-04); a merged mesh's triangle from a mirrored
                     // source carries the flip bit instead (see hitInstance above).
-                    result = BvhHit(triangleHit.t, hitInstance, triangle.originalIndex, triangleHit.barycentrics, frontFace);
+                    result = BvhHit(triangleHit.t, hitInstance, triangle.originalIndex, triangleHit.barycentrics, frontFace, BVH_NO_MATERIAL, vec3f(0.0));
+                    hitRecord = instanceRecord;
+                    hitSlot = slot;
                     farthest = triangleHit.t;`
         : 'return true;';
     return /* wgsl */ `
@@ -243,6 +262,7 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
 
     var insideInstance = false;
     var instance: BvhInstance;
+    ${recordDeclaration}
     ${farDeclaration}
 
     var stack: array<u32, BVH_STACK_SIZE>;
@@ -298,6 +318,7 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
             // A top-level leaf is one instance. Move the ray into its object space
             // and start at the root of its mesh tree.
             instance = bvhLoadInstance(index);
+            ${recordAssignment}
             ${rayMasks ? `// A masked trace skips an instance whose mask shares no bit with the
             // ray's, before entering its tree (it falls through to pop).
             if ((bvhInstanceMask(instance) & rayMask) != 0u) {` : '{'}
@@ -314,7 +335,8 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
         } else {
             // A mesh leaf: 'count' triangles starting at 'index'.
             for (var i = 0u; i < count; i += 1u) {
-                let triangle = bvhLoadTriangle(instance.triangleOffset + index + i);
+                let slot = instance.triangleOffset + index + i;
+                let triangle = bvhLoadTriangle(slot);
                 let triangleHit = bvhIntersectWatertight(triangle, setup, ray.tMin, farthest);
                 if (!triangleHit.hit) {
                     continue;
@@ -345,7 +367,7 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
         // Nothing left to descend into here: take the next entry off the stack.
         loop {
             if (stackSize == 0u) {
-                return ${noHit};
+                return ${noHitAfterWalk};
             }
             stackSize -= 1u;
             let entry = stack[stackSize];
@@ -568,6 +590,48 @@ fn bvhTransformDirection(instance: BvhInstance, direction: vec3f) -> vec3f {
     );
 }
 
+// The material code (material + 1, 0: none) in bits 16-31 of an instance's or
+// a merged triangle's flags word, as BvhHit.material.
+const BVH_MATERIAL_SHIFT: u32 = ${MATERIAL_SHIFT}u;
+
+fn bvhMaterialFromFlags(flags: u32) -> u32 {
+    let code = flags >> BVH_MATERIAL_SHIFT;
+    return select(code - 1u, BVH_NO_MATERIAL, code == 0u);
+}
+
+// The closest hit's normal and material, worked out once after the walk from
+// the instance record and the triangle slot it kept (not per triangle test).
+//
+// The normal is the authored front side's: cross(v1 - v0, v2 - v0) of the
+// stored corners. A normal instance stores them in object space, so the
+// normal goes to world space by the inverse transpose of object-to-world,
+// which is the transpose of the stored world-to-object rows; for a mirrored
+// instance that keeps the authored side (the winding flips, the normal does
+// not), as frontFace does. A merged mesh stores world-space corners, so the
+// cross is already in world space, and the flip bit (a mirrored source)
+// turns it back to the authored side. Either way frontFace is
+// dot(normal, direction) < 0. The material is the instance's, or, in a
+// merged mesh, the triangle's (its source's).
+fn bvhFinishClosest(found: BvhHit, record: u32, slot: u32) -> BvhHit {
+    var hit = found;
+    if (hit.t < 0.0) {
+        return hit;
+    }
+    let instance = bvhLoadInstance(record);
+    let triangle = bvhLoadTriangle(slot);
+    let merged = (instance.flags & BVH_INSTANCE_FLAG_MERGED) != 0u;
+    var normal = cross(triangle.vertex1 - triangle.vertex0, triangle.vertex2 - triangle.vertex0);
+    if (merged) {
+        normal = select(normal, -normal, (triangle.flags & BVH_TRIANGLE_FLAG_FLIP_FRONT_FACE) != 0u);
+    } else {
+        normal = instance.worldToObjectRow0.xyz * normal.x + instance.worldToObjectRow1.xyz * normal.y + instance.worldToObjectRow2.xyz * normal.z;
+    }
+    let normalLength = length(normal);
+    hit.normal = select(vec3f(0.0), normal / normalLength, normalLength > 0.0);
+    hit.material = bvhMaterialFromFlags(select(instance.flags, triangle.flags, merged));
+    return hit;
+}
+
 // ---- Intersection tests ----------------------------------------------------------
 
 // Slab test. Returns the distance at which the ray enters the box, or
@@ -725,17 +789,24 @@ fn bvhTraceAny(ray: BvhRay) -> bool {
 `;
 
 /**
- * What a batch writes per ray in closest-hit mode. `BvhHit` itself cannot live
- * in a buffer because `bool` is not host-shareable in WGSL, so `frontFace`
- * is stored as 0 or 1.
+ * What a batch writes per ray in closest-hit mode, with `hitNormal` (the
+ * default): `BvhHitRecord`, 40 bytes. `BvhHit` itself cannot live in a buffer
+ * because `bool` is not host-shareable in WGSL, so `frontFace` is stored as 0
+ * or 1, and the normal as three f32 (a `vec3f` would pad the record to 48).
+ *
+ *     word 0 t: f32            word 4-5 barycentrics: vec2f
+ *     word 1 instance: u32     word 6   material: u32 (NO_MATERIAL for none)
+ *     word 2 triangle: u32     word 7-9 normal x, y, z: f32
+ *     word 3 frontFace: u32
  */
-export const HIT_RECORD_BYTES = 24;
+export const HIT_RECORD_BYTES = 40;
 
 /**
- * Word positions inside a `BvhHitRecord`, for code that reads batch results
- * back. `frontFace` sits before `barycentrics` so the `vec2f` starts on an
- * 8-byte boundary and the record has no padding (`wgsl.test.ts` checks this
- * against the struct in `batchEntryWgsl`).
+ * Word positions inside a `BvhHitRecord` (the 40-byte record of
+ * {@link HIT_RECORD_BYTES}), for code that reads batch results back.
+ * `frontFace` sits before `barycentrics` so the `vec2f` starts on an 8-byte
+ * boundary and the record has no padding (`wgsl.test.ts` checks this against
+ * the struct in `batchEntryWgsl`).
  */
 export const HIT_RECORD_WORD = {
     t: 0,
@@ -743,7 +814,33 @@ export const HIT_RECORD_WORD = {
     triangle: 2,
     frontFace: 3,
     barycentrics: 4,
+    material: 6,
+    normal: 7,
 } as const;
+
+/**
+ * The compact record of a batch kernel built with `hitNormal: false`:
+ * `BvhHitRecordCompact`, 24 bytes, words 0-5 as in {@link HIT_RECORD_WORD}
+ * and nothing else. It has no padding to hold the material in (a seventh word
+ * would round the record up to 32 bytes, as the `vec2f` aligns it to 8), so
+ * it carries no material either: `instance` (the source instance, also for a
+ * merged hit) names it in the caller's own per-instance table.
+ */
+export const HIT_RECORD_COMPACT_BYTES = 24;
+
+/** Word positions inside the compact record ({@link HIT_RECORD_COMPACT_BYTES}). */
+export const HIT_RECORD_COMPACT_WORD = {
+    t: 0,
+    instance: 1,
+    triangle: 2,
+    frontFace: 3,
+    barycentrics: 4,
+} as const;
+
+/** Bytes per closest-hit result of a batch kernel built with this `hitNormal` (default true). */
+export function hitRecordBytes(hitNormal = true): number {
+    return hitNormal ? HIT_RECORD_BYTES : HIT_RECORD_COMPACT_BYTES;
+}
 
 /** Workgroup size of the batch kernels. */
 export const BATCH_WORKGROUP_SIZE = 64;
@@ -759,26 +856,47 @@ export const BATCH_WORKGROUP_SIZE = 64;
  * The ray count is the size of the bound `rays` range, so it needs no uniform.
  * The mask does: dispatches with different masks recorded into one command
  * buffer need a uniform buffer each.
+ *
+ * Closest-hit results are `BvhHitRecord` ({@link HIT_RECORD_BYTES}, 40 bytes,
+ * with material and normal) or, with `hitNormal: false`,
+ * `BvhHitRecordCompact` ({@link HIT_RECORD_COMPACT_BYTES}, 24 bytes).
  */
-export function batchEntryWgsl(mode: 'closest' | 'any', group: number, rayMasks = true): string {
-    const resultDeclaration =
-        mode === 'closest'
-            ? `struct BvhHitRecord {
+export function batchEntryWgsl(mode: 'closest' | 'any', group: number, rayMasks = true, hitNormal = true): string {
+    const recordType = hitNormal ? 'BvhHitRecord' : 'BvhHitRecordCompact';
+    const recordStruct = hitNormal
+        ? `struct BvhHitRecord {
     t: f32,
     instance: u32,
     triangle: u32,
     frontFace: u32,   // 0 or 1
     barycentrics: vec2f,
-}
+    material: u32,    // BVH_NO_MATERIAL for none
+    normalX: f32,     // three scalars, not a vec3f, so the record has no padding
+    normalY: f32,
+    normalZ: f32,
+}`
+        : `struct BvhHitRecordCompact {
+    t: f32,
+    instance: u32,
+    triangle: u32,
+    frontFace: u32,   // 0 or 1
+    barycentrics: vec2f,
+}`;
+    const recordValue = hitNormal
+        ? 'BvhHitRecord(hit.t, hit.instance, hit.triangle, select(0u, 1u, hit.frontFace), hit.barycentrics, hit.material, hit.normal.x, hit.normal.y, hit.normal.z)'
+        : 'BvhHitRecordCompact(hit.t, hit.instance, hit.triangle, select(0u, 1u, hit.frontFace), hit.barycentrics)';
+    const resultDeclaration =
+        mode === 'closest'
+            ? `${recordStruct}
 
-@group(${group}) @binding(1) var<storage, read_write> bvhBatchResults: array<BvhHitRecord>;`
+@group(${group}) @binding(1) var<storage, read_write> bvhBatchResults: array<${recordType}>;`
             : `// 1 when the ray is blocked, 0 when it is clear.
 @group(${group}) @binding(1) var<storage, read_write> bvhBatchResults: array<u32>;`;
 
     const body =
         mode === 'closest'
             ? `let hit = ${rayMasks ? 'bvhTraceClosestMasked(bvhBatchRays[rayIndex], bvhBatchParams.rayMask)' : 'bvhTraceClosest(bvhBatchRays[rayIndex])'};
-    bvhBatchResults[rayIndex] = BvhHitRecord(hit.t, hit.instance, hit.triangle, select(0u, 1u, hit.frontFace), hit.barycentrics);`
+    bvhBatchResults[rayIndex] = ${recordValue};`
             : `bvhBatchResults[rayIndex] = select(0u, 1u, ${rayMasks ? 'bvhTraceAnyMasked(bvhBatchRays[rayIndex], bvhBatchParams.rayMask)' : 'bvhTraceAny(bvhBatchRays[rayIndex])'});`;
 
     // One ray mask for the whole batch (no per-ray mask buffer).
@@ -825,6 +943,14 @@ export interface BatchKernelOptions {
      * the batch has no binding 2.
      */
     readonly rayMasks?: boolean;
+    /**
+     * Default true: closest-hit results are the 40-byte `BvhHitRecord` with
+     * the hit's material and normal ({@link HIT_RECORD_BYTES},
+     * {@link HIT_RECORD_WORD}). False: the 24-byte `BvhHitRecordCompact`
+     * without either ({@link HIT_RECORD_COMPACT_BYTES},
+     * {@link HIT_RECORD_COMPACT_WORD}). Any-hit results are one u32 either way.
+     */
+    readonly hitNormal?: boolean;
 }
 
 /** Bytes of the batch kernel's uniform (`BvhBatchParams`, group 1 binding 2, only with ray masks). Padded to 16. */
@@ -847,5 +973,5 @@ export function batchKernelWgsl(mode: 'closest' | 'any', options: BatchKernelOpt
     rejectOldPositionalCall('batchKernelWgsl', options);
     const rayMasks = options.rayMasks ?? true;
     return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks })}
-${batchEntryWgsl(mode, 1, rayMasks)}`;
+${batchEntryWgsl(mode, 1, rayMasks, options.hitNormal ?? true)}`;
 }

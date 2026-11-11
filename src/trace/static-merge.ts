@@ -23,16 +23,28 @@
  * ({@link writeMergedTriangleIdentity}): the original index becomes the
  * triangle's index in its source mesh, the padding word the source instance
  * index, and flags bit 1 marks triangles of a mirrored source (world-space
- * winding is the reverse of the authored one). The walk takes the hit's
- * instance from the triangle when the record has `INSTANCE_FLAG.merged`, and
- * flips `frontFace` on bit 1. Nothing grows: the words were already there.
+ * winding is the reverse of the authored one), and flags bits 16-31 the
+ * source's material + 1 (0 for none). The walk takes the hit's instance and
+ * material from the triangle when the record has `INSTANCE_FLAG.merged`, and
+ * flips `frontFace` (and the hit normal) on bit 1. Nothing grows: the words
+ * were already there. Material is not a grouping key.
  *
  * **Watertightness.** Each source mesh's vertices are transformed once each
  * (the indices are kept), so a vertex two triangles share has identical
  * world-space bits in both, and the watertight test still holds.
  */
 
-import { MAX_REFERENCE_INDEX, TRIANGLE_FLAG_FILTER, TRIANGLE_FLAG_FLIP_FRONT_FACE, TRIANGLE_WORD, TRIANGLE_WORDS, checkInstanceMask } from './layout.ts';
+import {
+    MATERIAL_SHIFT,
+    MAX_REFERENCE_INDEX,
+    NO_MATERIAL,
+    TRIANGLE_FLAG_FILTER,
+    TRIANGLE_FLAG_FLIP_FRONT_FACE,
+    TRIANGLE_WORD,
+    TRIANGLE_WORDS,
+    checkInstanceMask,
+    materialCode,
+} from './layout.ts';
 import type { MeshGeometry } from './mesh-bvh.ts';
 import { checkTriangleFlags } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
@@ -55,6 +67,8 @@ export interface StaticMergeSource {
     readonly mirrored: boolean;
     /** The transform the triangles were moved with (a copy). Assembly refuses the instance if its transform differs. */
     readonly objectToWorld: Float64Array;
+    /** The instance's material index, `NO_MATERIAL` for none. Assembly refuses the instance if its material differs. */
+    readonly material: number;
 }
 
 /** One merged mesh: what to build, and the ids assembly writes into the built records. */
@@ -67,6 +81,8 @@ export interface StaticMergeGroup {
     readonly sourceTriangles: Uint32Array;
     /** Per triangle of `geometry`: 1 when it comes from a mirrored source (`TRIANGLE_FLAG_FLIP_FRONT_FACE`). */
     readonly flipFrontFace: Uint8Array;
+    /** Per triangle of `geometry`: its source's material as stored in flags bits 16-31 (material + 1, 0 for none). */
+    readonly sourceMaterials: Uint16Array;
     readonly sources: readonly StaticMergeSource[];
     /** Always true: instances that don't contribute to GI, or aren't visible, never merge. */
     readonly contributesToGi: boolean;
@@ -99,7 +115,9 @@ export interface StaticMergeOptions {
  * source ids and flip bits kept beside it. Pure: nothing is built.
  *
  * Throws if a merged source's `triangleFlags` set a reserved bit (only bit 0
- * may be set), or if two merged sources share an `instanceIndex`.
+ * may be set), if two merged sources share an `instanceIndex`, or for a
+ * `material` outside 0-65534. Material doesn't split groups: each triangle
+ * carries its own source's.
  *
  * **Static means static.** The source transforms are baked into the
  * geometry. Only assembling the scene again (`assembleTraceScene` with this
@@ -136,6 +154,7 @@ export function mergeStaticGeometry(
     const mergedInstanceIndices = new Map<number, number>();
     instances.forEach((instance, inputIndex) => {
         const mask = checkInstanceMask(instance.mask, instance.instanceIndex);
+        materialCode(instance.material, instance.instanceIndex);
         const geometry = meshes[instance.meshIndex];
         const triangles = countTriangles(geometry);
         // The top level skips hidden and non-GI instances, so they stay instances: the scene is then what it is with the option off.
@@ -181,6 +200,7 @@ export function mergeStaticGeometry(
         const sourceInstances = new Uint32Array(pending.triangles);
         const sourceTriangles = new Uint32Array(pending.triangles);
         const flipFrontFace = new Uint8Array(pending.triangles);
+        const sourceMaterials = new Uint16Array(pending.triangles);
         const anyFlags = pending.members.some((member) => meshes[instances[member.inputIndex].meshIndex].triangleFlags);
         const triangleFlags = anyFlags ? new Uint32Array(pending.triangles) : null;
         const sources: StaticMergeSource[] = [];
@@ -202,6 +222,8 @@ export function mergeStaticGeometry(
             sourceInstances.fill(instance.instanceIndex, triangleBase, triangleBase + triangles);
             for (let triangle = 0; triangle < triangles; triangle++) sourceTriangles[triangleBase + triangle] = triangle;
             if (member.mirrored) flipFrontFace.fill(1, triangleBase, triangleBase + triangles);
+            const material = materialCode(instance.material, instance.instanceIndex);
+            if (material !== 0) sourceMaterials.fill(material, triangleBase, triangleBase + triangles);
             if (triangleFlags && mesh.triangleFlags) {
                 if (mesh.triangleFlags.length < triangles) throw new RangeError(`mesh ${instance.meshIndex}: triangleFlags must have one entry per triangle`);
                 triangleFlags.set(mesh.triangleFlags.subarray(0, triangles), triangleBase);
@@ -214,6 +236,7 @@ export function mergeStaticGeometry(
                 triangleCount: triangles,
                 mirrored: member.mirrored,
                 objectToWorld: Float64Array.from({ length: 16 }, (_, k) => instance.objectToWorld[k]),
+                material: material === 0 ? NO_MATERIAL : material - 1,
             });
             vertexBase += vertexCount;
             triangleBase += triangles;
@@ -223,6 +246,7 @@ export function mergeStaticGeometry(
             sourceInstances,
             sourceTriangles,
             flipFrontFace,
+            sourceMaterials,
             sources,
             contributesToGi: true,
             visible: true,
@@ -255,9 +279,10 @@ function transformPositions(source: Float32Array, e: Mat4, out: Float32Array, of
  * Writes a merged group's hit identity into a tree's triangle records, built
  * from `group.geometry` by any builder: each record's original index (the
  * builder's, an index into the group's geometry) becomes the source mesh's
- * triangle index, the padding word the source instance index, and flags bit 1
- * is set for a mirrored source. Bit 0 (the filter flag) is kept; a record
- * with any other flag bit set throws, since builders only write bit 0.
+ * triangle index, the padding word the source instance index, flags bit 1
+ * is set for a mirrored source, and flags bits 16-31 get the source's
+ * material + 1 (0 for none). Bit 0 (the filter flag) is kept; a record with
+ * any other flag bit set throws, since builders only write bit 0.
  *
  * Call it once on fresh records (it reads the builder's original index):
  * `assembleTraceScene` does, on its own copy, so a `MeshBvh` can be
@@ -281,6 +306,7 @@ export function writeMergedTriangleIdentity(records: ArrayBuffer, group: StaticM
         }
         words[base + TRIANGLE_WORD.originalIndex] = group.sourceTriangles[merged];
         words[base + TRIANGLE_WORD.padding] = group.sourceInstances[merged];
-        if (group.flipFrontFace[merged]) words[base + TRIANGLE_WORD.flags] |= TRIANGLE_FLAG_FLIP_FRONT_FACE;
+        words[base + TRIANGLE_WORD.flags] =
+            (flags | (group.flipFrontFace[merged] ? TRIANGLE_FLAG_FLIP_FRONT_FACE : 0) | (group.sourceMaterials[merged] << MATERIAL_SHIFT)) >>> 0;
     }
 }

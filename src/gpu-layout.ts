@@ -23,6 +23,10 @@
  * static meshes. Instance flags bit 3 (`merged`) says the hit's instance is
  * the triangle's `padding` word (the source instance index), and triangle
  * flags bit 1 flips `frontFace`. Builders still write 0 to both; nothing moved.
+ * Also in 2, before its release: bits 16-31 of the instance `flags` word hold
+ * the instance's material + 1 (0 for none), and in a merged mesh bits 16-31
+ * of each triangle's `flags` word hold its source instance's. Builders write
+ * 0 there; the scene assembly writes them.
  */
 export const GPU_LAYOUT_VERSION = 2;
 

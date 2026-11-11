@@ -35,6 +35,7 @@ import {
     BVH_QUERY_CLOSEST,
     RAY_MASK_ALL,
     instanceMaskFromFlags,
+    materialFromFlags,
     TRIANGLE_WORDS,
     REF_INSTANCE_MARKER,
     makeReference,
@@ -52,6 +53,10 @@ export interface CpuHit {
     readonly u: number;
     readonly v: number;
     readonly frontFace: boolean;
+    /** The instance's material index (a merged hit: its source's), or `NO_MATERIAL`. As `BvhHit.material`. */
+    readonly material: number;
+    /** World-space geometric normal of the authored front side, unit length. As `BvhHit.normal`. */
+    readonly normal: readonly [number, number, number];
 }
 
 /** Counters the walk fills in when asked. */
@@ -178,9 +183,14 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
         let triangleOffset = 0;
         let instanceIndex = 0;
         let instanceMerged = false;
+        let instanceRecord = 0;
 
         let closestT = ray.tMax;
         let result: CpuHit | null = null;
+        // As the WGSL: where the closest hit came from, for its normal and material after the walk.
+        let hitRecord = 0;
+        let hitBase = 0;
+        const finish = (): CpuHit | null => (result === null || stopAtFirstHit ? result : finishClosest(result, hitRecord, hitBase));
 
         const stack: number[] = [];
         let current = makeReference(0, 0);
@@ -231,6 +241,7 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
                 // As the WGSL: a masked-out instance is skipped before entering its tree (fall through to pop).
             } else if (!insideInstance) {
                 const record = TOP_LEVEL_HEADER_WORDS + index * INSTANCE_RECORD_WORDS;
+                instanceRecord = record;
                 rootNodeOffset = topWords[record + INSTANCE_WORD.rootNodeOffset];
                 triangleOffset = topWords[record + INSTANCE_WORD.triangleOffset];
                 instanceIndex = topWords[record + INSTANCE_WORD.instanceIndex];
@@ -288,7 +299,11 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
                         // Object-space winding is the authored one, so this is the authored side even when
                         // mirrored; a merged mesh's mirrored-source triangle carries the flip bit instead.
                         frontFace,
+                        material: 0,
+                        normal: [0, 0, 0],
                     };
+                    hitRecord = instanceRecord;
+                    hitBase = base;
                     closestT = hit.t;
                     if (stopAtFirstHit) return result;
                 }
@@ -304,7 +319,7 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
 
             // Pop.
             for (;;) {
-                if (stack.length === 0) return result;
+                if (stack.length === 0) return finish();
                 const entry = stack.pop() as number;
                 if (entry === REF_INSTANCE_MARKER) {
                     insideInstance = false;
@@ -315,6 +330,32 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
                 break;
             }
         }
+    }
+
+    /** As the WGSL `bvhFinishClosest`: the normal and material, once per closest hit. */
+    function finishClosest(hit: CpuHit, record: number, base: number): CpuHit {
+        const flags = topWords[record + INSTANCE_WORD.flags];
+        const merged = (flags & INSTANCE_FLAG.merged) !== 0;
+        const triangleFlags = triangleWords[base + TRIANGLE_WORD.flags];
+        const corner = (word: number, axis: number): number => triangleFloats[base + word + axis];
+        const e1 = [0, 1, 2].map((axis) => corner(TRIANGLE_WORD.vertex1, axis) - corner(TRIANGLE_WORD.vertex0, axis));
+        const e2 = [0, 1, 2].map((axis) => corner(TRIANGLE_WORD.vertex2, axis) - corner(TRIANGLE_WORD.vertex0, axis));
+        const n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        let world: number[];
+        if (merged) {
+            // World-space corners already; the flip bit turns a mirrored source's normal back to its authored side.
+            const sign = (triangleFlags & TRIANGLE_FLAG_FLIP_FRONT_FACE) !== 0 ? -1 : 1;
+            world = n.map((value) => value * sign);
+        } else {
+            // The transpose of the world-to-object rows: the inverse transpose of object-to-world.
+            const row = (start: number, axis: number): number => topFloats[record + start + axis];
+            world = [0, 1, 2].map(
+                (axis) => row(INSTANCE_WORD.worldToObjectRow0, axis) * n[0] + row(INSTANCE_WORD.worldToObjectRow1, axis) * n[1] + row(INSTANCE_WORD.worldToObjectRow2, axis) * n[2],
+            );
+        }
+        const length = Math.hypot(world[0], world[1], world[2]);
+        const normal: [number, number, number] = length > 0 ? [world[0] / length, world[1] / length, world[2] / length] : [0, 0, 0];
+        return { ...hit, material: materialFromFlags(merged ? triangleFlags : flags), normal };
     }
 
     return {

@@ -91,12 +91,13 @@ export function countedWalkWgsl(options: CountedWalkOptions): string {
     text = replaceAnchor(text, 'stack[stackSize] = BVH_REF_INSTANCE_MARKER;', 'stack[stackSize] = BVH_REF_INSTANCE_MARKER;\n                counts.instanceEntries += 1u;\n                hitInThisInstance = false;');
     text = replaceAnchor(
         text,
-        'let triangle = bvhLoadTriangle(instance.triangleOffset + index + i);',
-        'let triangle = bvhLoadTriangle(instance.triangleOffset + index + i);\n                counts.triangleTests += 1u;',
+        'let triangle = bvhLoadTriangle(slot);',
+        'let triangle = bvhLoadTriangle(slot);\n                counts.triangleTests += 1u;',
     );
     if (closest) {
         text = replaceAnchor(text, 'result = BvhHit(triangleHit.t', 'if (!hitInThisInstance) { counts.instancesWithHit += 1u; hitInThisInstance = true; }\n                    result = BvhHit(triangleHit.t');
-        text = replaceAnchor(text, 'return result;', 'return benchFinishClosest(counts, result);', 2);
+        text = replaceAnchor(text, 'return result;', 'return benchFinishClosest(counts, result);');
+        text = replaceAnchor(text, 'return bvhFinishClosest(result, hitRecord, hitSlot);', 'return benchFinishClosest(counts, bvhFinishClosest(result, hitRecord, hitSlot));');
     } else {
         text = replaceAnchor(text, 'return true;', 'counts.instancesWithHit += 1u;\n                return benchFinishAny(counts, true);');
         text = replaceAnchor(text, 'return false;', 'return benchFinishAny(counts, false);', 2);

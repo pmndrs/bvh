@@ -12,6 +12,9 @@ import { REFERENCE_TOLERANCE, type ReferenceHit, type ReferenceOcclusion, type T
 /** Largest accepted difference in hit distance, relative to max(1, t). f32 error is around 1e-6. */
 export const T_TOLERANCE = 1e-4;
 
+/** Smallest accepted cosine between a tracer's hit normal and the reference's. f32 corners and transforms stay far above it. */
+export const NORMAL_COSINE_TOLERANCE = 0.9999;
+
 /** What a tracer returned for one ray. `t < 0` or `hit: false` means a miss. */
 export interface TracedHit {
     readonly hit: boolean;
@@ -21,6 +24,10 @@ export interface TracedHit {
     readonly u: number;
     readonly v: number;
     readonly frontFace: boolean;
+    /** Compared when given: the hit's material index (`NO_MATERIAL` for none). */
+    readonly material?: number;
+    /** Compared when given: the world-space geometric normal of the authored front side (unit). */
+    readonly normal?: readonly [number, number, number];
 }
 
 export interface Comparison {
@@ -63,10 +70,19 @@ export function compareClosest(actual: TracedHit | null, expected: ReferenceHit 
     if (sameTriangle && (Math.abs(hit.u - reference.u) > REFERENCE_TOLERANCE || Math.abs(hit.v - reference.v) > REFERENCE_TOLERANCE)) {
         problems.push(`barycentrics (${hit.u}, ${hit.v}) vs (${reference.u}, ${reference.v})`);
     }
+    if (sameTriangle && hit.material !== undefined && hit.material !== reference.material) problems.push(`material ${hit.material} vs ${reference.material}`);
+    if (sameTriangle && hit.normal !== undefined && !(normalCosine(hit.normal, reference.normal) >= NORMAL_COSINE_TOLERANCE)) {
+        problems.push(`normal (${hit.normal.join(', ')}) vs (${reference.normal.join(', ')})`);
+    }
     if (problems.length === 0) return { verdict: 'match', tError };
     return reference.ambiguous
         ? { verdict: 'ambiguous', reason: problems.join('; '), tError }
         : { verdict: 'mismatch', reason: problems.join('; '), tError };
+}
+
+/** Cosine between two unit normals. */
+export function normalCosine(a: readonly number[], b: readonly number[]): number {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
 export function compareAny(actualBlocked: boolean, expected: ReferenceOcclusion): Comparison {
