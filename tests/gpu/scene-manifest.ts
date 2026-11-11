@@ -40,4 +40,6 @@ export interface SceneManifest {
     lights: ManifestLight[];
     /** The box the probe grid fills. */
     volume: { center: Vec3; size: Vec3 };
+    /** Camera bookmarks; the surface-ray benches place their screen probes from the first. */
+    cameras?: { name: string; position: Vec3; target: Vec3; fovYDeg: number }[];
 }

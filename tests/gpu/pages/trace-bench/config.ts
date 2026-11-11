@@ -229,3 +229,14 @@ export function parseBenchConfig(
         volume,
     };
 }
+
+// ---- Surface-ray sets (trace-bench-surface-*) ----------------------------------------------------
+// Screen probes shaped like Capsaicin GI-1.2's defaults (the radiance-cache team's RC1.5 set), at 1280x720.
+
+export const RC_VIEW = { width: 1280, height: 720 } as const;
+export const RC_TILE_SIZE = 16;
+export const RC_RAYS_PER_PROBE = 64;
+/** Fixed seed for the per-probe rotation and jitter of the surface set. */
+export const RC_SEED = 0x0c4b_5a1c;
+/** Each tile's placement ray is jittered by the Halton (2, 3) point of index `tile + RC_HALTON_FIRST_INDEX` (index 0 is the corner). */
+export const RC_HALTON_FIRST_INDEX = 1;
