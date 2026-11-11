@@ -6,6 +6,10 @@
  * against the brute-force reference, with no GPU. It also reports the deepest
  * stack the walk used, which the GPU cannot tell us without a debug counter.
  * It runs in doubles, so it matches the GPU's decisions but not its rounding.
+ *
+ * The triangle filter, as in the WGSL walk: a triangle whose flag bit 0 is set
+ * asks `options.triangleFilter`, and a ray it lets through goes on without
+ * narrowing. Without a filter, flagged triangles block (triangle-filter.ts).
  */
 
 import {
@@ -17,6 +21,7 @@ import {
     TOP_HEADER_WORD,
     TOP_LEVEL_HEADER_WORDS,
     TRACE_STACK_SIZE,
+    TRIANGLE_FLAG_FILTER,
     TRIANGLE_WORD,
     TRIANGLE_WORDS,
     REF_INSTANCE_MARKER,
@@ -26,6 +31,7 @@ import {
 } from './layout.ts';
 import type { TraceRay } from './rays.ts';
 import type { TraceSceneData } from './scene-assembly.ts';
+import type { TriangleFilter } from './triangle-filter.ts';
 
 export interface CpuHit {
     readonly t: number;
@@ -97,7 +103,13 @@ interface TriangleHit {
     frontFace: boolean;
 }
 
-export function createCpuTracer(scene: TraceSceneData): CpuTracer {
+export interface CpuTracerOptions {
+    /** The CPU twin of the kernel's `giTriangleFilter`, for flagged triangles; without it they block. */
+    readonly triangleFilter?: TriangleFilter;
+}
+
+export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions = {}): CpuTracer {
+    const triangleFilter = options.triangleFilter;
     const nodeFloats = new Float32Array(scene.nodes);
     const nodeWords = new Uint32Array(scene.nodes);
     const triangleFloats = new Float32Array(scene.triangles);
@@ -215,10 +227,15 @@ export function createCpuTracer(scene: TraceSceneData): CpuTracer {
                     const base = (triangleOffset + index + i) * TRIANGLE_WORDS;
                     const hit = intersectWatertight(triangleFloats, base, setup, ray.tMin, closestT);
                     if (hit === null) continue;
+                    const triangleIndex = triangleWords[base + TRIANGLE_WORD.originalIndex];
+                    // As the WGSL leaf test: a flagged triangle's filter may let the ray through,
+                    // and then nothing is recorded and closestT stays.
+                    const consult = (triangleWords[base + TRIANGLE_WORD.flags] & TRIANGLE_FLAG_FILTER) !== 0;
+                    if (consult && triangleFilter && triangleFilter(instanceIndex, triangleIndex, hit)) continue;
                     result = {
                         t: hit.t,
                         instanceIndex,
-                        triangleIndex: triangleWords[base + TRIANGLE_WORD.originalIndex],
+                        triangleIndex,
                         u: hit.u,
                         v: hit.v,
                         // Object-space winding is the authored one, so this is the authored side even when mirrored.

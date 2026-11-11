@@ -74,8 +74,15 @@ export const TRIANGLE_WORD = {
     padding: 11,
 } as const;
 
-/** Triangle `flags` bit 0: the material needs an alpha test (used from M4). */
-export const TRIANGLE_FLAG_ALPHA_TEST = 1;
+/**
+ * Triangle `flags` bit 0: consult the triangle filter. The walk asks the
+ * kernel's `giTriangleFilter` (the CPU walk its `triangleFilter`) whether the
+ * ray passes before taking the hit (triangle-filter.ts).
+ */
+export const TRIANGLE_FLAG_FILTER = 1;
+
+/** @deprecated The old name of {@link TRIANGLE_FLAG_FILTER}, from when the bit only meant an alpha test. */
+export const TRIANGLE_FLAG_ALPHA_TEST = TRIANGLE_FLAG_FILTER;
 
 /**
  * An instance record: the world-to-object transform as three rows of

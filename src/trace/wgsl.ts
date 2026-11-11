@@ -32,7 +32,9 @@ import {
     BVH_NODE_BYTES,
     TRIANGLE_BYTES,
     TRACE_STACK_SIZE,
+    TRIANGLE_FLAG_FILTER,
 } from './layout.ts';
+import { NO_TRIANGLE_FILTER_WGSL } from './triangle-filter.ts';
 
 /** Where the trace module's bindings land inside a kernel (structurally the same as ddgi's `BindingSlot`). */
 export interface BindingSlot {
@@ -259,7 +261,11 @@ fn ${name}(ray: GiRay) -> ${returnType} {
             for (var i = 0u; i < count; i += 1u) {
                 let triangle = giLoadTriangle(instance.triangleOffset + index + i);
                 let candidate = giIntersectWatertight(triangle, setup, ray.tMin, farthest);
-                if (candidate.hit) {
+                // A flagged triangle asks the kernel's filter first (triangle-filter.ts).
+                // A ray that passes records nothing and leaves 'farthest' alone, so what
+                // lies behind the triangle is still found.
+                let consultFilter = (triangle.flags & GI_TRIANGLE_FLAG_FILTER) != 0u;
+                if (candidate.hit && !(consultFilter && giTriangleFilter(instance.instanceIndex, triangle.originalIndex, candidate.t, candidate.barycentrics, candidate.frontFacing))) {
                     ${onTriangleHit}
                 }
             }
@@ -289,7 +295,10 @@ fn ${name}(ray: GiRay) -> ${returnType} {
 
 /**
  * The trace module: contract types, layout, and `giTraceClosest` / `giTraceAny`.
- * Bindings land at `slot`: nodes, triangles, top level, in that order.
+ * Bindings land at `slot`: nodes, triangles, top level, in that order. The
+ * walk calls `giTriangleFilter` for flagged triangles, which the kernel
+ * supplies as its own piece: a filter of its own, or
+ * `NO_TRIANGLE_FILTER_WGSL` (triangle-filter.ts).
  */
 export function traceModuleWgsl(slot: BindingSlot): string {
     const group = slot.group;
@@ -310,6 +319,10 @@ fn giMakeReference(index: u32, count: u32) -> u32 {
 // ---- Loading mesh nodes and triangles -----------------------------------------
 
 const GI_VEC4_PER_TRIANGLE: u32 = ${TRIANGLE_BYTES / 16}u;
+
+// Triangle flags bit 0: consult the triangle filter (giTriangleFilter, which
+// the kernel supplies as its own piece; trace/triangle-filter.ts).
+const GI_TRIANGLE_FLAG_FILTER: u32 = ${TRIANGLE_FLAG_FILTER}u;
 
 fn giLoadMeshNode(nodeIndex: u32) -> GiBvhNode {
     let base = nodeIndex * GI_VEC4_PER_NODE;
@@ -547,12 +560,12 @@ fn giIntersectWatertight(triangle: GiBvhTriangle, setup: GiRaySetup, tMin: f32, 
 
 ${walkWgsl('closest')}
 ${walkWgsl('any')}
-// Nearest hit, honouring alpha cutouts and blocksLight (cutouts arrive in M4).
+// Nearest hit; flagged triangles the filter lets through are skipped.
 fn giTraceClosest(ray: GiRay) -> GiHit {
     return giWalkClosest(ray);
 }
 
-// True if anything blocks the ray. Stops at the first blocker found.
+// True if anything blocks the ray (the filter has the same say as above). Stops at the first blocker found.
 fn giTraceAny(ray: GiRay) -> bool {
     return giWalkAny(ray);
 }
@@ -633,8 +646,17 @@ fn giBatch(
 `;
 }
 
-/** A whole batch kernel: the trace module at `traceSlot` plus the batch's own group 1. */
-export function batchKernelWgsl(mode: 'closest' | 'any', traceSlot: BindingSlot = { group: 0, firstBinding: 0 }): string {
+/**
+ * A whole batch kernel: the trace module at `traceSlot`, the triangle filter
+ * (`giTriangleFilter`; by default none, so every triangle blocks), and the
+ * batch's own group 1.
+ */
+export function batchKernelWgsl(
+    mode: 'closest' | 'any',
+    traceSlot: BindingSlot = { group: 0, firstBinding: 0 },
+    triangleFilterWgsl: string = NO_TRIANGLE_FILTER_WGSL,
+): string {
     return `${traceModuleWgsl(traceSlot)}
+${triangleFilterWgsl}
 ${batchEntryWgsl(mode, 1)}`;
 }
