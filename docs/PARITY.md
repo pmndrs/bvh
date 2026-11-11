@@ -1,6 +1,6 @@
 # Parity with three-mesh-bvh 0.9.18 (BX.16)
 
-The audit P8 asks for (`docs/design/bvh-package-split.md`, P8). It compares our package, as of `main` on 2026-11-11 (rows 1.1-1.7, 2.1, 2.2, 4.1-4.4, 4.7, 6.1, 6.2, 6.5, 7.1, 7.2 and 9.1 updated after build-out items 1 to 6), with three-mesh-bvh 0.9.18 as installed in `node_modules/three-mesh-bvh`. The sources are its `src/index.js`, `src/index.d.ts`, `src/webgpu/index.js` and `index.d.ts`, `src/workers/index.js` and `index.d.ts`, and its README example list (the package ships no `example/` folder).
+The audit P8 asks for (`docs/design/bvh-package-split.md`, P8). It compares our package, as of `main` on 2026-11-11 (rows 1.1-1.7, 2.1, 2.2, 4.1-4.4, 4.7, 6.1, 6.2, 6.5, 7.1-7.4 and 9.1 updated after build-out items 1 to 6 and part of 12), with three-mesh-bvh 0.9.18 as installed in `node_modules/three-mesh-bvh`. The sources are its `src/index.js`, `src/index.d.ts`, `src/webgpu/index.js` and `index.d.ts`, `src/workers/index.js` and `index.d.ts`, and its README example list (the package ships no `example/` folder).
 
 **Status**
 - **have**: we have an equivalent. Our code is cited.
@@ -96,9 +96,9 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 | # | three-mesh-bvh | Status | Ours / what is missing | Who needs it |
 | --- | --- | --- | --- | --- |
 | 7.1 | `MeshBVH.serialize` / `deserialize` | partial | `CpuMeshBvh.serialize()` / `CpuMeshBvh.deserialize(bytes)`, `deserializeBoundsTree(bytes, geometry)` in `/three`, over `serializeLayout` (`src/serialize.ts`). Our layout's format, not three-mesh-bvh's, and no `setIndex` | None |
-| 7.2 | `estimateMemoryInBytes` | have | `CpuMeshBvh.estimateMemoryInBytes()` per tree (layout, top level, lookups; not the source geometry); `SceneTrees.memory` per scene (`src/scene/scene-trees.ts`) | None |
-| 7.3 | `getBVHExtremes` | partial | `treeSahCost` (`src/layout-check.ts:256`) and `checkGpuLayout`'s counts (depth, leaf count); no depth or leaf-size histogram (unverified) | None |
-| 7.4 | `validateBounds` | have | `checkGpuLayout` checks every child box bit for bit, plus the tree's shape (`src/layout-check.ts`) | None |
+| 7.2 | `estimateMemoryInBytes` | have | `CpuMeshBvh.estimateMemoryInBytes()` per tree (layout, top level, lookups; not the source geometry), and three-mesh-bvh's function `estimateMemoryInBytes(tree)` over it (`src/query/debug.ts`, from `@pmndrs/bvh` and `/three`); `SceneTrees.memory` per scene (`src/scene/scene-trees.ts`) | None |
+| 7.3 | `getBVHExtremes` | have | `getBVHExtremes(tree)` (`src/query/debug.ts`, from `@pmndrs/bvh` and `/three`): three-mesh-bvh's output (`nodeCount`, `leafNodeCount`, `depth`, `primitives`, `splits`, `surfaceAreaScore` with its costs), one entry for our one root, over `CpuMeshBvh.traverseNodes` (three-mesh-bvh's node walk). The split axis isn't stored in our layout: it is the axis the children's centres lie furthest apart on. `treeSahCost` (`src/layout-check.ts`) is the normalised SAH cost | None |
+| 7.4 | `validateBounds` | have | `validateBounds(tree)` (`src/query/debug.ts`, from `@pmndrs/bvh` and `/three`): three-mesh-bvh's checks and `console.assert` messages, reading the source geometry (`writePrimitiveRangeBounds`), so edits without `refit()` fail as in three-mesh-bvh. `checkGpuLayout` checks every child box bit for bit, plus the tree's shape (`src/layout-check.ts`) | None |
 | 7.5 | `getJSONStructure` | missing | | None |
 
 ## 8. GPU
@@ -127,7 +127,7 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 
 ## Counts
 
-51 rows: **27 have, 6 partial, 15 missing, 3 won't** (4.8, 8.12, 9.2). At the audit, before items 1 to 5: 12 have, 13 partial, 23 missing. Every "won't" has its reason in its row; P8's done-when also wants them in the "Coming from three-mesh-bvh" docs page.
+51 rows: **28 have, 5 partial, 15 missing, 3 won't** (4.8, 8.12, 9.2). At the audit, before items 1 to 5: 12 have, 13 partial, 23 missing. Every "won't" has its reason in its row; P8's done-when also wants them in the "Coming from three-mesh-bvh" docs page.
 
 ## Proposed build-out order
 
@@ -153,7 +153,7 @@ P8's order was: Q2 closest point and shapecast plus shapes; the drop-in three in
 | 9 | CPU object BVH queries: scene `raycast`, `shapecast`, frustum culling | 5.2, 5.3, 5.6 | M | none found; P8 lists it |
 | 10 | GPU closest point and shapecast in WGSL, with `sampleTrianglePoint`, then SDF; `ClusteredBVH` after | 8.5-8.10 | L | none found (needs a user first, e.g. the SDF compare) |
 | 11 | Points, lines, `SkinnedMeshBVH` | 3.2-3.4 | L | none found |
-| 12 | Per-tree utilities: `estimateMemoryInBytes`, `getBVHExtremes`, three-mesh-bvh-format `serialize`, `getJSONStructure` | 7.1-7.3, 7.5 | S | none found |
+| 12 (part done) | Per-tree utilities: `estimateMemoryInBytes` and `getBVHExtremes` (done); three-mesh-bvh-format `serialize`, `getJSONStructure` (left) | 7.1-7.3, 7.5 | S | none found |
 
 A project's full switch waits on every item in its column:
 - csg needs nothing more (2, 3 and 4 are done). Its `Brush` builds `new MeshBVH(geometry, { maxLeafSize: 3, indirect: true, useSharedArrayBuffer })`, which `/three`'s `MeshBVH` accepts.

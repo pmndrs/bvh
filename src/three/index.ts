@@ -51,6 +51,8 @@ export { ExtendedTriangle, OrientedBox, SeparatingAxisBounds } from './shapes.ts
 // three-mesh-bvh's names for what intersectsBounds returns.
 export { BVH_CONTAINED as CONTAINED, BVH_INTERSECTED as INTERSECTED, BVH_NOT_INTERSECTED as NOT_INTERSECTED } from '../query/cpu-mesh-bvh.ts';
 export { GenerateMeshBvhWorker, type GenerateMeshBvhWorkerOptions } from './generate.ts';
+// three-mesh-bvh's debug functions (the core's, which take any CpuMeshBvh, so a BvhBoundsTree too).
+export { estimateMemoryInBytes, getBVHExtremes, validateBounds, type BvhExtremes, type BvhExtremes as ExtremeInfo } from '../query/debug.ts';
 
 // The walk in three's node system (three-mesh-bvh's BVHComputeData pattern), for TSL and wgslFn.
 export { BvhTraceNodes, bvhTraceHitStruct, type BvhTraceBufferSource, type BvhTraceNodesOptions, type BvhTslNode } from './trace-nodes.ts';

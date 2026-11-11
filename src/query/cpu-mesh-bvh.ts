@@ -662,6 +662,105 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
         return false;
     }
 
+    /**
+     * three-mesh-bvh's node walk (`BVH.traverse(callback)`, 0.9.18), for the
+     * debug utilities and the helper: every node in depth-first order, left
+     * before right, starting with the root at depth 0 (its box the tree's
+     * bounds; a one-leaf tree's root is that leaf). `box` is a new
+     * `Float32Array(6)`, `[minX, minY, minZ, maxX, maxY, maxZ]`, per node. A
+     * leaf gets its first tree position and triangle count; an inner node
+     * gets its split axis (0, 1, 2), which our layout doesn't store: it is
+     * taken as the axis along which the children's centres lie furthest
+     * apart. A truthy return skips the node's children.
+     */
+    traverseNodes(callback: (depth: number, isLeaf: boolean, box: Float32Array, offsetOrSplit: number, count: number) => unknown): void {
+        const words = this.nodeWords;
+        const floats = this.nodeFloats;
+        const left = new Float32Array(6);
+        const right = new Float32Array(6);
+        const splitAxis = (node: number): number => {
+            readSlotBox(floats, node * 2, left);
+            readSlotBox(floats, node * 2 + 1, right);
+            let axis = 0;
+            let widest = -1;
+            for (let i = 0; i < 3; i++) {
+                const gap = Math.abs(left[i] + left[i + 3] - right[i] - right[i + 3]);
+                if (gap > widest) {
+                    widest = gap;
+                    axis = i;
+                }
+            }
+            return axis;
+        };
+        let root = 0;
+        while (words[root * GPU_LAYOUT_NODE_WORDS + GPU_LAYOUT_NODE_WORD.rightIndex] === GPU_LAYOUT_EMPTY_CHILD) {
+            const base = root * GPU_LAYOUT_NODE_WORDS;
+            const count = words[base + GPU_LAYOUT_NODE_WORD.leftCount];
+            if (count > 0) {
+                callback(0, true, Float32Array.from(this.layout.bounds.subarray(0, 6)), words[base + GPU_LAYOUT_NODE_WORD.leftIndex], count);
+                return;
+            }
+            root = words[base + GPU_LAYOUT_NODE_WORD.leftIndex];
+        }
+        if (callback(0, false, Float32Array.from(this.layout.bounds.subarray(0, 6)), splitAxis(root), 0)) return;
+        // Child slots and their depths, right pushed first so left comes out first.
+        const slots = [root * 2 + 1, root * 2];
+        const depths = [1, 1];
+        while (slots.length > 0) {
+            const slot = slots.pop()!;
+            const depth = depths.pop()!;
+            const { index, count } = readSlot(words, slot);
+            const box = new Float32Array(6);
+            readSlotBox(floats, slot, box);
+            if (count > 0) {
+                callback(depth, true, box, index, count);
+                continue;
+            }
+            if (callback(depth, false, box, splitAxis(index), 0)) continue;
+            if (words[index * GPU_LAYOUT_NODE_WORDS + GPU_LAYOUT_NODE_WORD.rightIndex] !== GPU_LAYOUT_EMPTY_CHILD) {
+                slots.push(index * 2 + 1);
+                depths.push(depth + 1);
+            }
+            slots.push(index * 2);
+            depths.push(depth + 1);
+        }
+    }
+
+    /**
+     * three-mesh-bvh's `writePrimitiveRangeBounds`: the box around the
+     * triangles at tree positions `offset` to `offset + count - 1`, into
+     * `target` at `targetOffset` as `[minX, minY, minZ, maxX, maxY, maxZ]`.
+     * Read from the source geometry when the tree has one (so edits made
+     * since the build or the last {@link refit} show, as three-mesh-bvh reads
+     * the geometry), else from the corners the tree stores.
+     */
+    writePrimitiveRangeBounds(offset: number, count: number, target: Float32Array | Float64Array | number[], targetOffset = 0): void {
+        for (let axis = 0; axis < 3; axis++) {
+            target[targetOffset + axis] = Infinity;
+            target[targetOffset + 3 + axis] = -Infinity;
+        }
+        const source = this.source;
+        const corners = new Array<number>(9);
+        for (let position = offset, end = offset + count; position < end; position++) {
+            if (source) {
+                const triangle = this.resolveTriangleIndex(position);
+                for (let corner = 0; corner < 3; corner++) {
+                    const vertex = source.indices ? source.indices[triangle * 3 + corner] : triangle * 3 + corner;
+                    for (let axis = 0; axis < 3; axis++) corners[corner * 3 + axis] = Math.fround(source.positions[vertex * 3 + axis]);
+                }
+            } else {
+                this.getTriangle(position, corners);
+            }
+            for (let corner = 0; corner < 3; corner++) {
+                for (let axis = 0; axis < 3; axis++) {
+                    const value = corners[corner * 3 + axis];
+                    if (value < target[targetOffset + axis]) target[targetOffset + axis] = value;
+                    if (value > target[targetOffset + 3 + axis]) target[targetOffset + 3 + axis] = value;
+                }
+            }
+        }
+    }
+
     /** A contained box: its subtree's range, one run of tree positions (the constructor sees to it), in one call. True when told to stop. */
     private reportContained(callbacks: BvhTraverseCallbacks, slot: number, depth: number, box: Float32Array): boolean {
         const words = this.nodeWords;

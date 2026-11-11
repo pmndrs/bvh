@@ -132,6 +132,9 @@ export {
     type CpuMeshBvhOptions,
 } from './query/cpu-mesh-bvh.ts';
 
+// three-mesh-bvh's debug functions on a CpuMeshBvh.
+export { BVH_PRIMITIVE_INTERSECT_COST, BVH_TRAVERSAL_COST, estimateMemoryInBytes, getBVHExtremes, validateBounds, type BvhExtremes } from './query/debug.ts';
+
 // Query shapes (three-mesh-bvh's ExtendedTriangle and OrientedBox, engine-free) and their math.
 export {
     BvhBox3,
