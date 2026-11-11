@@ -1,32 +1,32 @@
 # BVH builders: how they work
 
-How each builder in `packages/bvh` works inside. To learn what the package is and how to use it, read [packages/bvh/README.md](../../packages/bvh/README.md) first. The plan and the stages are in [bvh-framework.md](bvh-framework.md), and the measured numbers are in PROGRESS (B0, B0b, B1a, B1, B2, B3).
+How each builder in this package works inside. To learn what the package is and how to use it, read [README.md](../../README.md) first. The plan and the stages are in [bvh-framework.md](bvh-framework.md), and the measured numbers are in PROGRESS (B0, B0b, B1a, B1, B2, B3).
 
-Paths below are relative to `packages/bvh/`.
+Paths below are relative to the repository root.
 
 The sections run in build order: tinybvh (B0) first, then the GPU refit (B1a), then the GPU LBVH (B1), then H-PLOC (B2), which reuses most of the LBVH.
 
 ## tinybvh in WebAssembly (stages B0 and B0b)
 
-`src/tinybvh.ts` runs [tinybvh](https://github.com/jbikker/tinybvh) 1.9.1 (MIT, Jacco Bikker), compiled to WebAssembly. The `.wasm` is committed, base64-encoded, in `src/tinybvh-wasm.ts`, so it loads the same way in a worker, on a page, in Node and in any bundler. It is single-threaded; ddgi-core runs it in a worker (`mesh-bvh-async.ts`).
+`src/tinybvh.ts` runs [tinybvh](https://github.com/jbikker/tinybvh) 1.9.1 (MIT, Jacco Bikker), compiled to WebAssembly. The `.wasm` is committed, base64-encoded, in `src/tinybvh-wasm.ts`, so it loads the same way in a worker, on a page, in Node and in any bundler. It is single-threaded; the tracer runs it in a worker (`src/trace/mesh-bvh-async.ts`).
 
 It uses tinybvh's default builder, which with SIMD is Bonsai (Ganestam et al., 2015). From one tree it gives either output:
 
 - `build(geometry)` returns the tree's shape (`MeshTreeTopology`, `src/topology.ts`).
 - `buildLayout(geometry)` (stage B0b) returns the tracer's GPU layout, written inside the WASM by `native/tinybvh-wasm.cpp`: 64-byte nodes, 48-byte triangles in tree order, parents, and the mesh's box.
-  - The bytes are exactly what ddgi-core's `buildMeshBvhFromTopology` makes from `build`'s shape. A test there checks it (`mesh-bvh-tinybvh-layout.test.ts`).
+  - The bytes are exactly what `src/trace/`'s `buildMeshBvhFromTopology` makes from `build`'s shape. A test checks it (`src/trace/mesh-bvh-tinybvh-layout.test.ts`).
   - As there, the boxes are recomputed from the triangles, not taken from tinybvh.
   - It is several times faster than doing the conversion in JavaScript. The JavaScript walks every node and triangle through typed arrays and is bound by memory traffic; the WASM packs each leaf's triangles and computes its box in one pass, with SIMD compares instead of branches.
 - `buildLayout(geometry, { builder: 'hploc' })` runs tinybvh's scalar `BuildHPLOC` instead (leaves of one triangle). It is slow, and is there only as the oracle for the GPU H-PLOC (B2).
 
-`tools/bvh/layout-identity.ts` rebuilds every mesh of Sponza and both Bistro scenes both ways and reports how many differ (it should be none):
+`tools/layout-identity.ts` rebuilds every mesh of Sponza and both Bistro scenes both ways and reports how many differ (it should be none):
 
 ```sh
-node tools/bvh/layout-identity.ts            # all three scenes
-node tools/bvh/layout-identity.ts sponza     # one scene
+node tools/layout-identity.ts            # all three scenes
+node tools/layout-identity.ts sponza     # one scene
 ```
 
-The layout itself is defined in `packages/ddgi-core/src/platform/trace/layout.ts`; `src/gpu-layout.ts` holds its sizes and word positions, which layout.ts imports. The C++ repeats it as structs with `static_assert`s on every offset; change both together.
+The layout itself is defined in `src/trace/layout.ts`; `src/gpu-layout.ts` holds its sizes and word positions, which layout.ts imports. The C++ repeats it as structs with `static_assert`s on every offset; change both together.
 
 The build needs WebAssembly SIMD (SIMD128), which every current Chrome, Edge, Firefox and Safari has (Chrome 91, Firefox 89 and Safari 16.4 onwards), so there is no scalar fallback build.
 
@@ -56,7 +56,7 @@ Needs: Node 24, git and network access. On Linux and macOS it also needs Python 
 
 `licenses/tinybvh.txt` is tinybvh's licence; the build checks it against tinybvh's own `LICENSE` file. `licenses/emscripten-runtime.txt` covers the parts of Emscripten's runtime that the `.wasm` contains: Emscripten's own code and musl (MIT), dlmalloc (public domain), and LLVM's libc++ and compiler-rt (Apache 2.0 with LLVM Exceptions).
 
-The generated `src/tinybvh-wasm.ts` starts with both texts in a `/*! */` comment, which bundlers keep. So every built file that contains the `.wasm` also contains its licences. `packages/ddgi/scripts/verify-artifacts.mjs` fails the package build if one doesn't.
+The generated `src/tinybvh-wasm.ts` starts with both texts in a `/*! */` comment, which bundlers keep. So every built file that contains the `.wasm` also contains its licences. ddgi's `packages/ddgi/scripts/verify-artifacts.mjs` (in webgpu-ddgi) fails its package build if one doesn't; this repo's own check is still to be ported.
 
 ## GPU refit (stage B1a)
 
@@ -71,7 +71,7 @@ The generated `src/tinybvh-wasm.ts` starts with both texts in a `/*! */` comment
 
 `src/gpu-instance-box.ts` is the WGSL for an instance's padded world box (Arvo's method). `src/refit-cpu.ts` holds the CPU twins: leaf and parent slots, the cost signal, and a plain refit the tests compare the GPU with (box unions are exact, so a correct GPU refit matches it bit for bit).
 
-The tracer's top level (ddgi-core `trace/top-level-gpu.ts`) uses all three: a gather kernel writes each instance's world box, the refit runs every frame something moved, and a worker builds a new shape on the CPU now and then (instances added or removed, or the refit tree's cost past a limit).
+The tracer's top level (ddgi-core's `trace/top-level-gpu.ts`, still in webgpu-ddgi) uses all three: a gather kernel writes each instance's world box, the refit runs every frame something moved, and a worker builds a new shape on the CPU now and then (instances added or removed, or the refit tree's cost past a limit).
 
 ## GPU LBVH (stage B1)
 
@@ -135,7 +135,7 @@ The smallest subgroup size comes from `device.adapterInfo.subgroupMinSize`. If t
 - The GPU's trees match the twin's (same SAH cost and node count).
 - With tinybvh's options the GPU's trees match tinybvh's: SAH cost within 1% on the `bvh-hploc` page, and on whole scenes in the trace bench.
 
-`tools/bvh/tree-quality.ts` compares the CPU builders and twins on real scenes without a GPU (`node tools/bvh/tree-quality.ts sponza`).
+`tools/tree-quality.ts` compares the CPU builders and twins on real scenes without a GPU (`node tools/tree-quality.ts sponza`).
 
 GPU pages: `bvh-hploc`, `bvh-hploc-profile` (manual), the `watertight-hploc` variant of `trace-oracle`, and `trace-bench-hploc-sponza` / `-quick`.
 
