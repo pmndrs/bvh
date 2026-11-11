@@ -1,0 +1,4 @@
+{
+    "description": "@pmndrs/bvh/three on a WebGPURenderer: a three scene (groups, InstancedMesh, BatchedMesh, mirrored, hidden, off-layer) in SceneTrees on the renderer's device via SceneTreesObject3DSync, traced by TSL compute kernels through BvhTraceNodes (TSL helpers and a wgslFn calling bvhTraceClosest); hits must match the package's batch kernel on the same buffers and the CPU walk over a CPU-assembled scene, on first trees, tinybvh trees and after moves and buffer growth (rebinding).",
+    "timeoutMs": 300000
+}

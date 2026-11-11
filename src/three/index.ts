@@ -17,3 +17,6 @@ export {
     type BvhThreeSource,
 } from './scene.ts';
 export { SceneTreesObject3DSync, type Object3DSyncCounts, type SceneTreesTarget } from './scene-trees-sync.ts';
+
+// The walk in three's node system (three-mesh-bvh's BVHComputeData pattern), for TSL and wgslFn.
+export { BvhTraceNodes, bvhTraceHitStruct, type BvhTraceBufferSource, type BvhTraceNodesOptions, type BvhTslNode } from './trace-nodes.ts';
