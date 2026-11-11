@@ -30,6 +30,15 @@ import {
     TRIANGLE_FLAG_FLIP_FRONT_FACE,
     TRIANGLE_WORD,
     TRIANGLE_WORD_SOURCE_INSTANCE,
+    INDEXED_FLAG_SHIFT,
+    INDEXED_ID_MASK,
+    INDEXED_TRIANGLE_WORD,
+    INDEXED_TRIANGLE_WORDS,
+    MATERIAL_SHIFT,
+    MERGED_SIDE_MATERIAL_SHIFT,
+    MERGED_SIDE_SOURCE_BITS,
+    MESH_HEADER_WORD,
+    positionStrideFloats,
     INSTANCE_FLAG,
     BVH_QUERY_ANY,
     BVH_QUERY_CLOSEST,
@@ -156,8 +165,24 @@ export interface CpuTracerOptions {
     readonly filterEveryTriangle?: boolean;
 }
 
-/** The parts of a {@link TraceSceneData} the walk reads. */
-export type CpuTraceScene = Pick<TraceSceneData, 'nodes' | 'triangles' | 'topLevel'>;
+/**
+ * The parts of a {@link TraceSceneData} the walk reads. `triangleLeaves`
+ * (default `'records'`), `positions` and `positionLayout` (default `'vec4'`)
+ * only matter for an indexed scene.
+ */
+export type CpuTraceScene = Pick<TraceSceneData, 'nodes' | 'triangles' | 'topLevel'> & Partial<Pick<TraceSceneData, 'triangleLeaves' | 'positions' | 'positionLayout'>>;
+
+/** Where a triangle's corners and ids are, for either format: word offsets into `floats`, and its id and flags. */
+interface TriangleSource {
+    /** Holds the corners: the records themselves, or the positions buffer. */
+    floats: Float32Array;
+    a: number;
+    b: number;
+    c: number;
+    original: number;
+    /** Record flags bits 0-1 (filter, flip), and for records bits 16-31. */
+    flags: number;
+}
 
 export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions = {}): CpuTracer {
     const triangleFilter = options.triangleFilter;
@@ -167,6 +192,46 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
     const nodeWords = new Uint32Array(scene.nodes);
     const triangleFloats = new Float32Array(scene.triangles);
     const triangleWords = new Uint32Array(scene.triangles);
+    const indexed = scene.triangleLeaves === 'indexed';
+    const positionFloats = indexed ? new Float32Array(scene.positions ?? new ArrayBuffer(0)) : triangleFloats;
+    const stride = positionStrideFloats(scene.positionLayout);
+    /** Indexed: the vertex base in the header before a mesh's triangles. */
+    const vertexBaseOf = (triangleOffset: number): number => (indexed ? triangleWords[(triangleOffset - 1) * INDEXED_TRIANGLE_WORDS + MESH_HEADER_WORD.vertexBase] : 0);
+    /** The triangle at `slot` (in the scene's triangle buffer), read as the WGSL's bvhLoadTriangle reads it. */
+    const loadTriangle = (slot: number, vertexBase: number, out: TriangleSource): TriangleSource => {
+        if (indexed) {
+            const base = slot * INDEXED_TRIANGLE_WORDS;
+            out.a = (vertexBase + triangleWords[base]) * stride;
+            out.b = (vertexBase + triangleWords[base + 1]) * stride;
+            out.c = (vertexBase + triangleWords[base + 2]) * stride;
+            const idFlags = triangleWords[base + INDEXED_TRIANGLE_WORD.idFlags];
+            out.original = idFlags & INDEXED_ID_MASK;
+            out.flags = idFlags >>> INDEXED_FLAG_SHIFT;
+        } else {
+            const base = slot * TRIANGLE_WORDS;
+            out.a = base + TRIANGLE_WORD.vertex0;
+            out.b = base + TRIANGLE_WORD.vertex1;
+            out.c = base + TRIANGLE_WORD.vertex2;
+            out.original = triangleWords[base + TRIANGLE_WORD.originalIndex];
+            out.flags = triangleWords[base + TRIANGLE_WORD.flags];
+        }
+        return out;
+    };
+    /**
+     * A merged mesh's triangle: its source instance and material code. Records
+     * hold both in the triangle (word 11, flags bits 16-31); an indexed scene
+     * reads the group's side table and source table (`writeMergedIndexedIdentity`).
+     */
+    const mergedSource = (triangleOffset: number, slot: number, flags: number): { instance: number; materialCode: number } => {
+        if (!indexed) return { instance: triangleWords[slot * TRIANGLE_WORDS + TRIANGLE_WORD_SOURCE_INSTANCE], materialCode: flags >>> MATERIAL_SHIFT };
+        const header = (triangleOffset - 1) * INDEXED_TRIANGLE_WORDS;
+        const local = slot - triangleOffset;
+        const side = triangleWords[(triangleOffset - triangleWords[header + MESH_HEADER_WORD.sideTableDistance]) * INDEXED_TRIANGLE_WORDS + local];
+        const sourceSlot = side & MERGED_SIDE_SOURCE_BITS;
+        const instance = triangleWords[(triangleOffset - triangleWords[header + MESH_HEADER_WORD.sourceTableDistance]) * INDEXED_TRIANGLE_WORDS + sourceSlot];
+        return { instance, materialCode: side >>> MERGED_SIDE_MATERIAL_SHIFT };
+    };
+    const scratch: TriangleSource = { floats: positionFloats, a: 0, b: 0, c: 0, original: 0, flags: 0 };
     const topFloats = new Float32Array(scene.topLevel.buffer);
     const topWords = new Uint32Array(scene.topLevel.buffer);
 
@@ -209,6 +274,7 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
         let insideInstance = false;
         let rootNodeOffset = 0;
         let triangleOffset = 0;
+        let vertexBase = 0;
         let instanceIndex = 0;
         let instanceMerged = false;
         let instanceRecord = 0;
@@ -217,8 +283,8 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
         let result: CpuHit | null = null;
         // As the WGSL: where the closest hit came from, for its normal and material after the walk.
         let hitRecord = 0;
-        let hitBase = 0;
-        const finish = (): CpuHit | null => (result === null || stopAtFirstHit ? result : finishClosest(result, hitRecord, hitBase));
+        let hitSlot = 0;
+        const finish = (): CpuHit | null => (result === null || stopAtFirstHit ? result : finishClosest(result, hitRecord, hitSlot));
 
         const stack: number[] = [];
         let current = makeReference(0, 0);
@@ -272,6 +338,7 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
                 instanceRecord = record;
                 rootNodeOffset = topWords[record + INSTANCE_WORD.rootNodeOffset];
                 triangleOffset = topWords[record + INSTANCE_WORD.triangleOffset];
+                vertexBase = vertexBaseOf(triangleOffset);
                 instanceIndex = topWords[record + INSTANCE_WORD.instanceIndex];
                 instanceMerged = (topWords[record + INSTANCE_WORD.flags] & INSTANCE_FLAG.merged) !== 0;
                 const row = (rowStart: number): number[] => [
@@ -292,19 +359,21 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
             } else {
                 for (let i = 0; i < count; i++) {
                     if (stats) stats.trianglesTested++;
-                    const base = (triangleOffset + index + i) * TRIANGLE_WORDS;
-                    const hit = intersectWatertight(triangleFloats, base, setup, ray.tMin, closestT);
+                    const slot = triangleOffset + index + i;
+                    const triangle = loadTriangle(slot, vertexBase, scratch);
+                    const hit = intersectWatertight(positionFloats, triangle.a, triangle.b, triangle.c, setup, ray.tMin, closestT);
                     if (hit === null) continue;
-                    const triangleIndex = triangleWords[base + TRIANGLE_WORD.originalIndex];
+                    const triangleIndex = triangle.original;
+                    const triangleFlags = triangle.flags;
                     // As the WGSL: a merged mesh's triangle names its source instance, and the
                     // flip bit marks one from a mirrored source (world-space winding reversed).
-                    const hitInstance = instanceMerged ? triangleWords[base + TRIANGLE_WORD_SOURCE_INSTANCE] : instanceIndex;
-                    const frontFace = hit.frontFace !== ((triangleWords[base + TRIANGLE_WORD.flags] & TRIANGLE_FLAG_FLIP_FRONT_FACE) !== 0);
+                    const hitInstance = instanceMerged ? mergedSource(triangleOffset, slot, triangleFlags).instance : instanceIndex;
+                    const frontFace = hit.frontFace !== ((triangleFlags & TRIANGLE_FLAG_FLIP_FRONT_FACE) !== 0);
                     // CPU only: side culling passes the ray through the other side's faces.
                     if (cull && frontFace !== keepFront) continue;
                     // As the WGSL leaf test: a flagged triangle's filter may let the ray through,
                     // and then nothing is recorded and closestT stays.
-                    const consult = filterEveryTriangle || (triangleWords[base + TRIANGLE_WORD.flags] & TRIANGLE_FLAG_FILTER) !== 0;
+                    const consult = filterEveryTriangle || (triangleFlags & TRIANGLE_FLAG_FILTER) !== 0;
                     if (
                         consult &&
                         triangleFilter &&
@@ -333,7 +402,7 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
                         normal: [0, 0, 0],
                     };
                     hitRecord = instanceRecord;
-                    hitBase = base;
+                    hitSlot = slot;
                     closestT = hit.t;
                     if (stopAtFirstHit) return result;
                 }
@@ -363,13 +432,14 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
     }
 
     /** As the WGSL `bvhFinishClosest`: the normal and material, once per closest hit. */
-    function finishClosest(hit: CpuHit, record: number, base: number): CpuHit {
+    function finishClosest(hit: CpuHit, record: number, slot: number): CpuHit {
         const flags = topWords[record + INSTANCE_WORD.flags];
         const merged = (flags & INSTANCE_FLAG.merged) !== 0;
-        const triangleFlags = triangleWords[base + TRIANGLE_WORD.flags];
-        const corner = (word: number, axis: number): number => triangleFloats[base + word + axis];
-        const e1 = [0, 1, 2].map((axis) => corner(TRIANGLE_WORD.vertex1, axis) - corner(TRIANGLE_WORD.vertex0, axis));
-        const e2 = [0, 1, 2].map((axis) => corner(TRIANGLE_WORD.vertex2, axis) - corner(TRIANGLE_WORD.vertex0, axis));
+        const offset = topWords[record + INSTANCE_WORD.triangleOffset];
+        const triangle = loadTriangle(slot, vertexBaseOf(offset), { floats: positionFloats, a: 0, b: 0, c: 0, original: 0, flags: 0 });
+        const triangleFlags = triangle.flags;
+        const e1 = [0, 1, 2].map((axis) => positionFloats[triangle.b + axis] - positionFloats[triangle.a + axis]);
+        const e2 = [0, 1, 2].map((axis) => positionFloats[triangle.c + axis] - positionFloats[triangle.a + axis]);
         const n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
         let world: number[];
         if (merged) {
@@ -385,7 +455,8 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
         }
         const length = Math.hypot(world[0], world[1], world[2]);
         const normal: [number, number, number] = length > 0 ? [world[0] / length, world[1] / length, world[2] / length] : [0, 0, 0];
-        return { ...hit, material: materialFromFlags(merged ? triangleFlags : flags), normal };
+        const material = merged ? materialFromFlags((mergedSource(offset, slot, triangleFlags).materialCode << MATERIAL_SHIFT) >>> 0) : materialFromFlags(flags);
+        return { ...hit, material, normal };
     }
 
     return {
@@ -394,10 +465,16 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
     };
 }
 
-/** Woop, Benthin and Wald 2013. Triangles store `v0`, `v1`, `v2`. Edge-function zeros count for both sides. */
+/**
+ * Woop, Benthin and Wald 2013. The corners are at words `aWord`, `bWord`,
+ * `cWord` of `floats` (a record's, or the positions buffer's). Edge-function
+ * zeros count for both sides.
+ */
 function intersectWatertight(
     floats: Float32Array,
-    base: number,
+    aWord: number,
+    bWord: number,
+    cWord: number,
     setup: RaySetup,
     tMin: number,
     tMax: number,
@@ -409,9 +486,9 @@ function intersectWatertight(
         floats[word + 1] - setup.origin[1],
         floats[word + 2] - setup.origin[2],
     ];
-    const a = relative(base + TRIANGLE_WORD.vertex0);
-    const b = relative(base + TRIANGLE_WORD.vertex1);
-    const c = relative(base + TRIANGLE_WORD.vertex2);
+    const a = relative(aWord);
+    const b = relative(bWord);
+    const c = relative(cWord);
 
     const ax = a[kx] - shearX * a[kz];
     const ay = a[ky] - shearY * a[kz];

@@ -35,7 +35,18 @@
  * its group's range, by source instance.
  */
 
-import { TRIANGLE_FLAG_FILTER, TRIANGLE_WORD, TRIANGLE_WORDS, type BvhQuery } from './layout.ts';
+import {
+    INDEXED_FLAG_FILTER,
+    INDEXED_ID_MASK,
+    INDEXED_TRIANGLE_WORDS,
+    MERGED_SIDE_SOURCE_BITS,
+    MESH_HEADER_WORD,
+    TRIANGLE_FLAG_FILTER,
+    TRIANGLE_WORD,
+    TRIANGLE_WORDS,
+    type BvhQuery,
+    type TriangleLeaves,
+} from './layout.ts';
 
 /** A candidate hit on a flagged triangle, as the filter sees it. The same fields as the WGSL `BvhCandidate`. */
 export interface TriangleCandidate {
@@ -120,7 +131,9 @@ export function writeTriangleFilterFlags(
     triangles: ArrayBuffer | Uint32Array,
     filtered: (originalIndex: number, sourceInstance: number | undefined) => boolean,
     range?: TriangleRecordRange,
+    triangleLeaves: TriangleLeaves = 'records',
 ): number {
+    if (triangleLeaves === 'indexed') return writeIndexedFilterFlags(triangles, filtered, range);
     if (range?.mergedInto !== undefined && range.triangleCount === 0) {
         throw new RangeError(
             `writeTriangleFilterFlags: this mesh was merged into static group ${range.mergedInto} and has no records of its own; ` +
@@ -141,6 +154,44 @@ export function writeTriangleFilterFlags(
         const base = triangle * TRIANGLE_WORDS;
         const on = filtered(words[base + TRIANGLE_WORD.originalIndex], merged ? words[base + TRIANGLE_WORD.padding] : undefined);
         words[word] = ((words[word] & ~TRIANGLE_FLAG_FILTER) | (on ? TRIANGLE_FLAG_FILTER : 0)) >>> 0;
+        if (on) flagged++;
+    }
+    return flagged;
+}
+
+/**
+ * {@link writeTriangleFilterFlags} on an indexed scene's (or tree's)
+ * triangles: the filter flag is bit 28 of word 3, and on a merged group's
+ * range the source instance comes from the group's side and source tables.
+ */
+function writeIndexedFilterFlags(
+    triangles: ArrayBuffer | Uint32Array,
+    filtered: (originalIndex: number, sourceInstance: number | undefined) => boolean,
+    range?: TriangleRecordRange,
+): number {
+    if (range?.mergedInto !== undefined && range.triangleCount === 0) {
+        throw new RangeError(
+            `writeTriangleFilterFlags: this mesh was merged into static group ${range.mergedInto} and has no triangles of its own; ` +
+                `pass TraceSceneData.mergedGroups[${range.mergedInto}] as the range and decide by the callback's second argument, the source instance`,
+        );
+    }
+    const words = triangles instanceof Uint32Array ? triangles : new Uint32Array(triangles);
+    const merged = range?.merged === true;
+    const unitCount = Math.floor(words.length / INDEXED_TRIANGLE_WORDS);
+    const first = range?.triangleOffset ?? 0;
+    const count = range ? range.triangleCount : unitCount;
+    if (!Number.isInteger(first) || !Number.isInteger(count) || first < 0 || count < 0 || first + count > unitCount || (merged && first < 1)) {
+        throw new RangeError(`writeTriangleFilterFlags: triangles ${first}..${first + count} are outside the buffer's ${unitCount}`);
+    }
+    const header = (first - 1) * INDEXED_TRIANGLE_WORDS;
+    const sideStart = merged ? (first - words[header + MESH_HEADER_WORD.sideTableDistance]) * INDEXED_TRIANGLE_WORDS : 0;
+    const sourceStart = merged ? (first - words[header + MESH_HEADER_WORD.sourceTableDistance]) * INDEXED_TRIANGLE_WORDS : 0;
+    let flagged = 0;
+    for (let triangle = first; triangle < first + count; triangle++) {
+        const word = triangle * INDEXED_TRIANGLE_WORDS + 3;
+        const source = merged ? words[sourceStart + (words[sideStart + triangle - first] & MERGED_SIDE_SOURCE_BITS)] : undefined;
+        const on = filtered(words[word] & INDEXED_ID_MASK, source);
+        words[word] = ((words[word] & ~INDEXED_FLAG_FILTER) | (on ? INDEXED_FLAG_FILTER : 0)) >>> 0;
         if (on) flagged++;
     }
     return flagged;

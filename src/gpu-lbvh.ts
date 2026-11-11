@@ -57,6 +57,7 @@ import {
     GPU_LAYOUT_TRIANGLE_BYTES,
     type GpuLayoutMeshBvh,
 } from './gpu-layout.ts';
+import { checkTriangleLeaves } from './indexed-leaves.ts';
 import {
     LBVH_FIRST_ROUND_TRIANGLES,
     LBVH_INDEX_FORMAT,
@@ -157,7 +158,7 @@ export function checkOptions(options: GpuBuildOptions): Required<GpuBuildOptions
     const traversalCost = options.traversalCost ?? 1;
     const intersectionCost = options.intersectionCost ?? 1;
     if (!(traversalCost > 0) || !(intersectionCost > 0)) throw new RangeError('the SAH costs must be positive');
-    return { maxLeafPrimitives: maxLeaf, traversalCost, intersectionCost };
+    return { maxLeafPrimitives: maxLeaf, traversalCost, intersectionCost, triangleLeaves: checkTriangleLeaves(options.triangleLeaves, 'GPU build') };
 }
 
 export function checkGeometry(geometry: GpuMeshGeometry, index: number): void {

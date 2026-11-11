@@ -141,6 +141,10 @@ function readScene(scene: SceneTrees): TraceSceneData {
     return {
         nodes: bytes(nodes),
         triangles: bytes(triangles),
+        triangleLeaves: 'records',
+        positions: new ArrayBuffer(0),
+        positionLayout: 'vec4',
+        vertexCount: 0,
         topLevel: { buffer: top, instanceCount: header[TOP_HEADER_WORD.instanceCount], nodeCount: header[TOP_HEADER_WORD.nodeCount] } as TopLevelBvh,
         meshes: [],
         maxMeshDepth: 0,

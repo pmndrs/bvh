@@ -29,6 +29,7 @@ import {
 import { singleLeafTopology, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from './topology.ts';
 import { TINYBVH_WASM_BASE64 } from './tinybvh-wasm.ts';
 import { checkTriangleFlags, type MeshInput } from './mesh-input.ts';
+import { checkTriangleLeaves, indexedTrianglesFromRecordWords } from './indexed-leaves.ts';
 
 /** tinybvh's node: aabbMin (3 floats), leftFirst, aabbMax (3 floats), triCount. 32 bytes. */
 const TINYBVH_NODE_WORDS = 8;
@@ -112,6 +113,12 @@ export interface TinyBvhBuildOptions {
 export interface TinyBvhLayoutOptions extends TinyBvhBuildOptions {
     /** Leaves with more triangles than this are cut in half until they fit. 1 to 8; default 8. */
     readonly maxLeafPrimitives?: number;
+    /**
+     * `'indexed'`: 16-byte indexed triangles (docs/design/indexed-leaves.md).
+     * The WASM writes records; they are converted on the way out of its
+     * memory, with no 48-byte copy in JavaScript. Default `'records'`.
+     */
+    readonly triangleLeaves?: 'records' | 'indexed';
 }
 
 export interface TinyBvhLayoutBuild {
@@ -286,6 +293,7 @@ function buildGpuLayout(wasm: TinyBvhExports, geometry: MeshInput, options: Tiny
         throw new RangeError(`maxLeafPrimitives must be an integer from 1 to ${GPU_LAYOUT_MAX_LEAF_PRIMITIVES}, got ${maxLeaf}`);
     }
     const { triangleFlags } = geometry;
+    const indexed = checkTriangleLeaves(options.triangleLeaves, 'tinybvh') === 'indexed';
     const { vertexCount, triangleCount } = countInput(geometry);
     if (triangleFlags && triangleFlags.length < triangleCount) throw new RangeError('triangleFlags must have one entry per triangle');
     checkTriangleFlags(triangleFlags, triangleCount, 'mesh');
@@ -306,7 +314,12 @@ function buildGpuLayout(wasm: TinyBvhExports, geometry: MeshInput, options: Tiny
             const trianglesAt = wasm.tbvh_layout_triangles();
             const layout: GpuLayoutMeshBvh = {
                 nodes: memory.slice(nodesAt, nodesAt + nodeCount * GPU_LAYOUT_NODE_BYTES),
-                triangles: memory.slice(trianglesAt, trianglesAt + triangleCount * GPU_LAYOUT_TRIANGLE_BYTES),
+                ...(indexed
+                    ? {
+                          triangles: indexedTrianglesFromRecordWords(new Uint32Array(memory, trianglesAt, triangleCount * (GPU_LAYOUT_TRIANGLE_BYTES / 4)), triangleCount, geometry),
+                          triangleLeaves: 'indexed' as const,
+                      }
+                    : { triangles: memory.slice(trianglesAt, trianglesAt + triangleCount * GPU_LAYOUT_TRIANGLE_BYTES) }),
                 parents: new Uint32Array(memory, wasm.tbvh_layout_parents(), nodeCount).slice(),
                 nodeCount,
                 triangleCount,

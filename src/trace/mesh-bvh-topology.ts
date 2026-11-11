@@ -21,6 +21,7 @@ import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { checkGeometry, packTriangles } from './triangle-packing.ts';
 import { TOPOLOGY_EMPTY_CHILD, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from '../topology.ts';
 import { type TinyBvhBuilder } from '../tinybvh.ts';
+import { checkTriangleLeaves, indexedFromRecords } from '../indexed-leaves.ts';
 
 // The tree description is the BVH package's Builder contract, so any builder there fits.
 export { TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from '../topology.ts';
@@ -28,6 +29,8 @@ export { TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from '../topology.ts';
 export interface MeshTreeTopologyOptions {
     /** Leaves with more triangles than this are cut in half until they fit. At most {@link MAX_LEAF_PRIMITIVES} (the default). */
     readonly maxLeafPrimitives?: number;
+    /** The triangle format: `'records'` (48 bytes, the default) or `'indexed'` (16 bytes; docs/design/indexed-leaves.md). */
+    readonly triangleLeaves?: 'records' | 'indexed';
 }
 
 /**
@@ -164,7 +167,7 @@ export function buildMeshBvhFromTopology(geometry: MeshGeometry, topology: MeshT
     const triangles = packTriangles(geometry, checked, order);
     const bounds = computeBoxes(new Float32Array(nodeBuffer), nodeWords, nodeCount, new Float32Array(triangles));
 
-    return {
+    const tree: MeshBvh = {
         nodes: nodeBuffer.slice(0, nodeCount * BVH_NODE_BYTES),
         triangles,
         parents: parents.slice(0, nodeCount),
@@ -174,6 +177,7 @@ export function buildMeshBvhFromTopology(geometry: MeshGeometry, topology: MeshT
         leafCount,
         bounds,
     };
+    return checkTriangleLeaves(options.triangleLeaves, 'buildMeshBvhFromTopology') === 'indexed' ? indexedFromRecords(tree, geometry) : tree;
 }
 
 function checkOrder(order: Uint32Array, triangleCount: number): void {

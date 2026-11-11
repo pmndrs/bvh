@@ -305,7 +305,7 @@ export function hplocLayout(geometry: MeshInput, tree: HplocClusterTree, options
     const traversalCost = f(options.traversalCost ?? 1);
     const intersectionCost = f(options.intersectionCost ?? 1);
     const { triangleCount: count, order, leafBoxes, left, right, innerBoxes, root } = tree;
-    if (count === 1) return singleTriangleLayout(geometry, leafBoxes.subarray(0, 6));
+    if (count === 1) return singleTriangleLayout(geometry, leafBoxes.subarray(0, 6), options.triangleLeaves);
     const halfArea = (box: Float32Array): number => {
         const x = f(box[3] - box[0]);
         const y = f(box[4] - box[1]);
@@ -403,7 +403,8 @@ export function hplocLayout(geometry: MeshInput, tree: HplocClusterTree, options
     const rootBox = boxOf(root);
     return {
         nodes: nodeBuffer,
-        triangles: packTrianglesInOrder(geometry, treeOrder),
+        triangles: packTrianglesInOrder(geometry, treeOrder, options.triangleLeaves),
+        ...(options.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const } : {}),
         parents,
         nodeCount: keptCount,
         triangleCount: count,

@@ -14,7 +14,7 @@ const HIT_RECORD_WORDS = HIT_RECORD_BYTES / 4;
 import { packRays, RAY_BYTES, type TraceRay } from '../../src/trace/rays.ts';
 import type { TraceSceneData } from '../../src/trace/scene-assembly.ts';
 import type { TopLevelBvh } from '../../src/trace/top-level.ts';
-import { TOP_HEADER_WORD } from '../../src/trace/layout.ts';
+import { TOP_HEADER_WORD, type PositionLayout, type TriangleLeaves } from '../../src/trace/layout.ts';
 import type { TraceBatchKernel, TraceSceneBuffers } from '../../src/trace/trace-gpu.ts';
 
 export async function readBuffer(device: GPUDevice, source: GPUBuffer, byteLength = source.size): Promise<ArrayBuffer> {
@@ -30,9 +30,22 @@ export async function readBuffer(device: GPUDevice, source: GPUBuffer, byteLengt
     return copy;
 }
 
-/** The three buffers as a `TraceSceneData` the CPU walk can read (only `nodes`, `triangles` and `topLevel.buffer` are used). */
-export async function readScene(device: GPUDevice, buffers: { nodes: GPUBuffer; triangles: GPUBuffer; topLevel: GPUBuffer }): Promise<TraceSceneData> {
-    const [nodes, triangles, topLevelBytes] = await Promise.all([readBuffer(device, buffers.nodes), readBuffer(device, buffers.triangles), readBuffer(device, buffers.topLevel)]);
+/**
+ * The buffers as a `TraceSceneData` the CPU walk can read (only `nodes`,
+ * `triangles`, `topLevel.buffer` and, for an indexed scene, `positions` and
+ * the format are used).
+ */
+export async function readScene(
+    device: GPUDevice,
+    buffers: { nodes: GPUBuffer; triangles: GPUBuffer; topLevel: GPUBuffer; positions?: GPUBuffer | null },
+    format: { triangleLeaves?: TriangleLeaves; positionLayout?: PositionLayout } = {},
+): Promise<TraceSceneData> {
+    const [nodes, triangles, topLevelBytes, positions] = await Promise.all([
+        readBuffer(device, buffers.nodes),
+        readBuffer(device, buffers.triangles),
+        readBuffer(device, buffers.topLevel),
+        format.triangleLeaves === 'indexed' && buffers.positions ? readBuffer(device, buffers.positions) : Promise.resolve(new ArrayBuffer(0)),
+    ]);
     const header = new Uint32Array(topLevelBytes, 0, 4);
     const topLevel: TopLevelBvh = {
         buffer: topLevelBytes,
@@ -42,7 +55,20 @@ export async function readScene(device: GPUDevice, buffers: { nodes: GPUBuffer; 
         skippedSingular: 0,
         recordOrder: new Uint32Array(0),
     };
-    return { nodes, triangles, topLevel, meshes: [], maxMeshDepth: 0, requiredStackSize: 0, byteLength: nodes.byteLength + triangles.byteLength + topLevelBytes.byteLength, mergedGroups: [] };
+    return {
+        nodes,
+        triangles,
+        triangleLeaves: format.triangleLeaves ?? 'records',
+        positions,
+        positionLayout: format.positionLayout ?? 'vec4',
+        vertexCount: 0,
+        topLevel,
+        meshes: [],
+        maxMeshDepth: 0,
+        requiredStackSize: 0,
+        byteLength: nodes.byteLength + triangles.byteLength + topLevelBytes.byteLength + positions.byteLength,
+        mergedGroups: [],
+    };
 }
 
 export interface GpuHits {

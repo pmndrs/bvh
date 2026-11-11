@@ -13,13 +13,28 @@
  */
 
 import type { Mat4 } from './top-level.ts';
-import { BVH_NODE_BYTES, TRACE_STACK_SIZE, TRIANGLE_BYTES, TRIANGLE_WORDS, checkInstanceMask, materialCode } from './layout.ts';
+import {
+    BVH_NODE_BYTES,
+    INDEXED_TRIANGLE_BYTES,
+    INDEXED_TRIANGLE_WORDS,
+    MESH_HEADER_WORD,
+    TRACE_STACK_SIZE,
+    TRIANGLE_BYTES,
+    TRIANGLE_WORDS,
+    checkInstanceMask,
+    indexedLeadingUnits,
+    materialCode,
+    positionStrideFloats,
+    type PositionLayout,
+    type TriangleLeaves,
+} from './layout.ts';
+import { checkTriangleLeaves, indexedFromRecords, weldExactBits, weldPositions } from '../indexed-leaves.ts';
 import { checkTriangleFlags } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { buildTopLevel, IDENTITY_TRANSFORM, throwMergedTransformChange, type TopLevelBvh, type TraceInstance } from './top-level.ts';
 import type { SahBuildOptions } from './sah-builder.ts';
-import { MERGED_INSTANCE_INDEX, mergeStaticGeometry, writeMergedTriangleIdentity, type StaticMergeOptions, type StaticMergePlan } from './static-merge.ts';
+import { MERGED_INSTANCE_INDEX, mergeStaticGeometry, writeMergedIndexedIdentity, writeMergedTriangleIdentity,type StaticMergeOptions, type StaticMergePlan } from './static-merge.ts';
 
 /** One placed copy of one of the meshes passed to {@link assembleTraceScene}. */
 export interface TraceSceneInstance {
@@ -66,8 +81,24 @@ export interface TraceSceneMeshPlacement {
 export interface TraceSceneData {
     /** Every mesh's nodes, one after another. */
     readonly nodes: ArrayBuffer;
-    /** Every mesh's triangles, one after another. */
+    /**
+     * Every mesh's triangles, one after another. Indexed scenes: 16-byte
+     * units, and each mesh's region starts with its header (and a merged
+     * mesh's side tables) before `triangleOffset`.
+     */
     readonly triangles: ArrayBuffer;
+    /** How `triangles` stores them. `'records'` unless assembled with `triangleLeaves: 'indexed'`. */
+    readonly triangleLeaves: TriangleLeaves;
+    /**
+     * Indexed scenes: every mesh's positions (welded unless `weld: false`),
+     * one after another at each mesh's vertex base, in {@link positionLayout}.
+     * Empty for records.
+     */
+    readonly positions: ArrayBuffer;
+    /** How {@link positions} stores a vertex: `'vec4'` (16 bytes) or `'packed'` (12). */
+    readonly positionLayout: PositionLayout;
+    /** Vertices in {@link positions}. 0 for records. */
+    readonly vertexCount: number;
     readonly topLevel: TopLevelBvh;
     /**
      * Where each input mesh landed. The scene holds copies of the meshes'
@@ -81,7 +112,7 @@ export interface TraceSceneData {
     readonly maxMeshDepth: number;
     /** Stack entries the worst case needs: top-level depth + one marker + mesh depth. */
     readonly requiredStackSize: number;
-    /** Bytes the three buffers hold. */
+    /** Bytes the three buffers hold (four with an indexed scene's positions). */
     readonly byteLength: number;
     /**
      * The merged meshes, one per {@link StaticMergePlan} group, after the
@@ -122,6 +153,27 @@ export interface TraceSceneAssemblyOptions {
      * normal instance, exactly as without this option.
      */
     readonly merged?: MergedStaticTrees;
+    /**
+     * The scene's triangle format (docs/design/indexed-leaves.md). Default
+     * `'records'`: the scene is byte for byte what it was before the option
+     * existed. `'indexed'` needs {@link geometries}; trees built as records
+     * are converted (`indexedFromRecords`), indexed trees are placed as they are.
+     */
+    readonly triangleLeaves?: TriangleLeaves;
+    /** Indexed scenes: `'vec4'` (the default) or `'packed'` positions. */
+    readonly positionLayout?: PositionLayout;
+    /**
+     * Indexed scenes: each mesh's geometry, parallel to `meshes` (null where
+     * the mesh is null), whose positions go into the scene's positions buffer.
+     * Merged groups take theirs from the plan.
+     */
+    readonly geometries?: readonly (MeshGeometry | null)[];
+    /**
+     * Indexed scenes: weld each mesh's vertices by exact bits as they are
+     * copied (`weldExactBits`). It changes no coordinate, so hits are the
+     * same, and saves memory. Default true.
+     */
+    readonly weld?: boolean;
 }
 
 export function assembleTraceScene(
@@ -138,32 +190,51 @@ export function assembleTraceScene(
         for (const source of group.sources) if (!merged.plan.meshNeeded[source.meshIndex]) mergedInto.set(source.meshIndex, groupIndex);
     });
 
+    const leaves = checkTriangleLeaves(options.triangleLeaves, 'assembleTraceScene');
+    const indexed = leaves === 'indexed';
+    const positionLayout: PositionLayout = options.positionLayout ?? 'vec4';
+    if (positionLayout !== 'vec4' && positionLayout !== 'packed') throw new RangeError(`assembleTraceScene: positionLayout must be 'vec4' or 'packed', got ${String(positionLayout)}`);
+    const geometryOf = (index: number): MeshGeometry => {
+        if (index >= meshes.length) return merged!.plan.groups[index - meshes.length].geometry;
+        const geometry = options.geometries?.[index];
+        if (!geometry) throw new RangeError(`assembleTraceScene: an indexed scene needs geometries[${index}], the positions of mesh ${index}`);
+        return geometry;
+    };
+    if (!indexed && (options.geometries || options.weld !== undefined || options.positionLayout !== undefined)) {
+        throw new RangeError("assembleTraceScene: geometries, weld and positionLayout are for triangleLeaves: 'indexed'");
+    }
+
     let totalNodes = 0;
     let totalTriangles = 0;
     const allPlacements = placed.map((mesh, index): TraceSceneMeshPlacement => {
+        const sources = index >= meshes.length ? merged!.plan.groups[index - meshes.length].sources.length : 0;
+        const leading = indexed && mesh ? indexedLeadingUnits(mesh.triangleCount, sources) : 0;
         const placement: TraceSceneMeshPlacement = {
             nodeOffset: totalNodes,
             nodeCount: mesh?.nodeCount ?? 0,
-            triangleOffset: totalTriangles,
+            triangleOffset: totalTriangles + leading,
             triangleCount: mesh?.triangleCount ?? 0,
             ...(mergedInto.has(index) ? { mergedInto: mergedInto.get(index) } : {}),
         };
         totalNodes += placement.nodeCount;
-        totalTriangles += placement.triangleCount;
+        totalTriangles += leading + placement.triangleCount;
         return placement;
     });
 
     const nodes = new ArrayBuffer(Math.max(1, totalNodes) * BVH_NODE_BYTES);
-    const triangles = new ArrayBuffer(Math.max(1, totalTriangles) * TRIANGLE_BYTES);
+    const triangles = new ArrayBuffer(Math.max(1, totalTriangles) * (indexed ? INDEXED_TRIANGLE_BYTES : TRIANGLE_BYTES));
     placed.forEach((mesh, index) => {
         if (!mesh) return;
         new Uint8Array(nodes, allPlacements[index].nodeOffset * BVH_NODE_BYTES, mesh.nodeCount * BVH_NODE_BYTES).set(
             new Uint8Array(mesh.nodes, 0, mesh.nodeCount * BVH_NODE_BYTES),
         );
+        if (indexed) return;
+        if (mesh.triangleLeaves === 'indexed') throw new RangeError(`assembleTraceScene: mesh ${index} is indexed; assemble with triangleLeaves: 'indexed'`);
         new Uint8Array(triangles, allPlacements[index].triangleOffset * TRIANGLE_BYTES, mesh.triangleCount * TRIANGLE_BYTES).set(
             new Uint8Array(mesh.triangles, 0, mesh.triangleCount * TRIANGLE_BYTES),
         );
     });
+    const placedPositions = indexed ? placeIndexedTriangles(placed, allPlacements, geometryOf, triangles, positionLayout, options.weld ?? true) : null;
 
     let maxMeshDepth = 0;
     const placeInstance = (instance: TraceSceneInstance): TraceInstance => {
@@ -197,7 +268,8 @@ export function assembleTraceScene(
             const tree = merged.meshes[groupIndex];
             const placement = allPlacements[meshes.length + groupIndex];
             // The ids go into the scene's copy, so the tree itself stays as its builder wrote it.
-            writeMergedTriangleIdentity(triangles, group, placement.triangleOffset * TRIANGLE_BYTES, tree.triangleCount);
+            if (indexed) writeMergedIndexedIdentity(new Uint32Array(triangles), group, placement.triangleOffset, tree.triangleCount);
+            else writeMergedTriangleIdentity(triangles, group, placement.triangleOffset * TRIANGLE_BYTES, tree.triangleCount);
             maxMeshDepth = Math.max(maxMeshDepth, tree.maxDepth);
             traceInstances.push({
                 instanceIndex: MERGED_INSTANCE_INDEX,
@@ -234,16 +306,82 @@ export function assembleTraceScene(
         );
     }
 
+    const positions = placedPositions?.positions ?? new ArrayBuffer(0);
     return {
         nodes,
         triangles,
+        triangleLeaves: leaves,
+        positions,
+        positionLayout,
+        vertexCount: placedPositions?.vertexCount ?? 0,
         topLevel,
         meshes: allPlacements.slice(0, meshes.length),
         maxMeshDepth,
         requiredStackSize,
-        byteLength: nodes.byteLength + triangles.byteLength + topLevel.buffer.byteLength,
+        byteLength: nodes.byteLength + triangles.byteLength + topLevel.buffer.byteLength + positions.byteLength,
         mergedGroups,
     };
+}
+
+/**
+ * An indexed scene's triangles and positions: each placed tree's indexed
+ * triangles (converted from records if need be) with its vertex indices
+ * through the mesh's weld, its header's vertex base, and its positions at
+ * that base. Merged identity is written afterwards.
+ */
+function placeIndexedTriangles(
+    placed: readonly (MeshBvh | null)[],
+    placements: readonly TraceSceneMeshPlacement[],
+    geometryOf: (index: number) => MeshGeometry,
+    triangles: ArrayBuffer,
+    positionLayout: PositionLayout,
+    weld: boolean,
+): { positions: ArrayBuffer; vertexCount: number } {
+    const words = new Uint32Array(triangles);
+    const welds = placed.map((mesh, index) => {
+        if (!mesh) return null;
+        const geometry = geometryOf(index);
+        if (weld) return weldExactBits(geometry.positions);
+        const count = geometry.positions.length / 3;
+        return { positions: geometry.positions, remap: Uint32Array.from({ length: count }, (_, k) => k), vertexCount: count };
+    });
+    let vertexCount = 0;
+    const bases = welds.map((result) => {
+        const base = vertexCount;
+        vertexCount += result?.vertexCount ?? 0;
+        return base;
+    });
+    const stride = positionStrideFloats(positionLayout);
+    const positions = new ArrayBuffer(Math.max(1, vertexCount) * stride * 4);
+    const bits = new Uint32Array(positions);
+    placed.forEach((mesh, index) => {
+        const result = welds[index];
+        if (!mesh || !result) return;
+        const tree = indexedFromRecords(mesh, geometryOf(index));
+        const source = new Uint32Array(tree.triangles, 0, tree.triangleCount * INDEXED_TRIANGLE_WORDS);
+        const offset = placements[index].triangleOffset;
+        const { remap } = result;
+        for (let slot = 0; slot < tree.triangleCount; slot++) {
+            const from = slot * INDEXED_TRIANGLE_WORDS;
+            const to = (offset + slot) * INDEXED_TRIANGLE_WORDS;
+            for (let corner = 0; corner < 3; corner++) {
+                const vertex = source[from + corner];
+                if (vertex >= remap.length) throw new RangeError(`assembleTraceScene: mesh ${index} triangle slot ${slot} uses vertex ${vertex}, its geometry has ${remap.length}`);
+                words[to + corner] = remap[vertex];
+            }
+            words[to + 3] = source[from + 3];
+        }
+        words[(offset - 1) * 4 + MESH_HEADER_WORD.vertexBase] = bases[index];
+        // Bits, not values: the walk must see exactly the bits the builders' boxes came from.
+        const kept = new Uint32Array(result.positions.buffer, result.positions.byteOffset, result.vertexCount * 3);
+        for (let vertex = 0; vertex < result.vertexCount; vertex++) {
+            const at = (bases[index] + vertex) * stride;
+            bits[at] = kept[vertex * 3];
+            bits[at + 1] = kept[vertex * 3 + 1];
+            bits[at + 2] = kept[vertex * 3 + 2];
+        }
+    });
+    return { positions, vertexCount };
 }
 
 /** The plan must be for these instances, unmoved, with the same mask, flags and material, and each tree for its group. */
@@ -301,6 +439,20 @@ export interface TraceSceneBuildOptions extends StaticMergeOptions {
      */
     readonly mergeStaticInstances?: boolean;
     readonly topLevel?: Partial<SahBuildOptions>;
+    /** The scene's triangle format (see `TraceSceneAssemblyOptions.triangleLeaves`). Default `'records'`. */
+    readonly triangleLeaves?: TriangleLeaves;
+    /** Indexed scenes: `'vec4'` (the default) or `'packed'` positions. */
+    readonly positionLayout?: PositionLayout;
+    /** Indexed scenes: the exact-bit weld at assembly. Default true. */
+    readonly weld?: boolean;
+    /**
+     * Opt-in: weld each mesh's vertices closer than this on every axis before
+     * building (`weldPositions`), in either format. It moves geometry away
+     * from what the app draws by up to this much, and closes seams whose
+     * copies differ by an ulp or so (which leak otherwise, in both formats).
+     * Within one mesh only. Default 0: off.
+     */
+    readonly weldTolerance?: number;
 }
 
 /**
@@ -320,19 +472,25 @@ export interface TraceSceneBuildOptions extends StaticMergeOptions {
  * {@link meshRefitPlacement}, which refuses merged meshes, to get refit offsets.
  */
 export async function buildTraceScene(
-    geometries: readonly MeshGeometry[],
+    inputs: readonly MeshGeometry[],
     instances: readonly TraceSceneInstance[],
     options: TraceSceneBuildOptions,
 ): Promise<TraceSceneData> {
-    geometries.forEach((geometry, index) => checkTriangleFlags(geometry.triangleFlags, countTriangles(geometry), `mesh ${index}`));
+    inputs.forEach((geometry, index) => checkTriangleFlags(geometry.triangleFlags, countTriangles(geometry), `mesh ${index}`));
+    const tolerance = options.weldTolerance ?? 0;
+    const geometries = tolerance > 0 ? inputs.map((geometry) => weldPositions(geometry, { tolerance })) : inputs;
+    const indexed = checkTriangleLeaves(options.triangleLeaves, 'buildTraceScene') === 'indexed';
+    const layoutOptions: TraceSceneAssemblyOptions = indexed
+        ? { triangleLeaves: 'indexed', geometries, positionLayout: options.positionLayout, weld: options.weld }
+        : {};
     if (!options.mergeStaticInstances) {
         const meshes = await Promise.all(geometries.map((geometry) => options.build(geometry)));
-        return assembleTraceScene(meshes, instances, options.topLevel);
+        return assembleTraceScene(meshes, instances, options.topLevel, layoutOptions);
     }
     const plan = mergeStaticGeometry(geometries, instances, options);
     const meshes = await Promise.all(geometries.map((geometry, index) => (plan.meshNeeded[index] ? options.build(geometry) : null)));
     const mergedMeshes = await Promise.all(plan.groups.map((group) => options.build(group.geometry)));
-    return assembleTraceScene(meshes, instances, options.topLevel, { merged: { plan, meshes: mergedMeshes } });
+    return assembleTraceScene(meshes, instances, options.topLevel, { ...layoutOptions, merged: { plan, meshes: mergedMeshes } });
 }
 
 /**
@@ -342,7 +500,7 @@ export async function buildTraceScene(
  * world space and name source-mesh triangles, so a refit from the source's
  * object-space vertices would corrupt them. Merged ranges are never refit.
  */
-export function meshRefitPlacement(scene: Pick<TraceSceneData, 'meshes'>, meshIndex: number): { nodeWordOffset: number; triangleWordOffset: number } {
+export function meshRefitPlacement(scene: Pick<TraceSceneData, 'meshes'> & Partial<Pick<TraceSceneData, 'triangleLeaves'>>, meshIndex: number): { nodeWordOffset: number; triangleWordOffset: number } {
     const placement = scene.meshes[meshIndex];
     if (!placement) throw new RangeError(`meshRefitPlacement: the scene has no mesh ${meshIndex}`);
     if (placement.mergedInto !== undefined) {
@@ -352,7 +510,7 @@ export function meshRefitPlacement(scene: Pick<TraceSceneData, 'meshes'>, meshIn
         );
     }
     if (placement.triangleCount === 0) throw new RangeError(`meshRefitPlacement: mesh ${meshIndex} has no tree in this scene`);
-    return { nodeWordOffset: placement.nodeOffset * (BVH_NODE_BYTES / 4), triangleWordOffset: placement.triangleOffset * TRIANGLE_WORDS };
+    return { nodeWordOffset: placement.nodeOffset * (BVH_NODE_BYTES / 4), triangleWordOffset: placement.triangleOffset * (scene.triangleLeaves === 'indexed' ? INDEXED_TRIANGLE_WORDS : TRIANGLE_WORDS) };
 }
 
 /** A material for an error message: `none` for undefined or NO_MATERIAL (0xffffffff). */

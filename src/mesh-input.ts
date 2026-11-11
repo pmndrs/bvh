@@ -80,6 +80,12 @@ export interface GpuBuildOptions {
     readonly traversalCost?: number;
     /** SAH cost of testing one triangle. Default 1. */
     readonly intersectionCost?: number;
+    /**
+     * The triangle format the tree is written in: `'records'` (48 bytes, the
+     * default) or `'indexed'` (16 bytes, mesh-relative vertex indices;
+     * docs/design/indexed-leaves.md). The nodes are the same either way.
+     */
+    readonly triangleLeaves?: 'records' | 'indexed';
 }
 
 /** One mesh's tree inside a batch's shared buffers ({@link GpuTreeBuffers}). */
@@ -107,7 +113,7 @@ export interface GpuMeshTreeRange {
 export interface GpuTreeBuffers {
     /** 64-byte nodes. */
     readonly nodes: GPUBuffer;
-    /** 48-byte triangles, each mesh's in tree order. */
+    /** 48-byte triangles (16 with `triangleLeaves: 'indexed'`), each mesh's in tree order. */
     readonly triangles: GPUBuffer;
     /** One `u32` per node: its parent within its mesh, or 0xffffffff for a root. */
     readonly parents: GPUBuffer;

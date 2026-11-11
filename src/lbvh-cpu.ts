@@ -22,8 +22,10 @@ import {
     GPU_LAYOUT_TRIANGLE_BYTES,
     GPU_LAYOUT_TRIANGLE_WORD,
     type GpuLayoutMeshBvh,
+    type GpuLayoutTriangleLeaves,
 } from './gpu-layout.ts';
 import { checkTriangleFlags, type GpuBuildOptions, type MeshInput } from './mesh-input.ts';
+import { packIndexedTrianglesInOrder } from './indexed-leaves.ts';
 
 const f = Math.fround;
 const FLOAT_MAX = 3.4028234663852886e38;
@@ -124,7 +126,7 @@ export function buildLbvhFromSorted(
     };
     const triangleBox = (position: number): Float32Array => boxes.subarray(values[position] * 6, values[position] * 6 + 6);
 
-    if (count === 1) return { ...singleTriangleLayout(geometry, triangleBox(0)), rootSplit: 0 };
+    if (count === 1) return { ...singleTriangleLayout(geometry, triangleBox(0), options.triangleLeaves), rootSplit: 0 };
 
     // HIPRT's delta with the position tie-break, compared as (key xor, position xor).
     const less = (a: number, b: number): boolean => {
@@ -266,7 +268,8 @@ export function buildLbvhFromSorted(
     }
     return {
         nodes: nodeBuffer,
-        triangles: packTrianglesInOrder(geometry, values),
+        triangles: packTrianglesInOrder(geometry, values, options.triangleLeaves),
+        ...(options.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const } : {}),
         parents,
         nodeCount: keptCount,
         triangleCount: count,
@@ -285,7 +288,7 @@ export function buildLbvhOnCpu(geometry: MeshInput, options: GpuBuildOptions = {
 }
 
 /** The layout of a one-triangle mesh: a root holding the triangle on the left and nothing on the right. */
-export function singleTriangleLayout(geometry: MeshInput, box: Float32Array): GpuLayoutMeshBvh {
+export function singleTriangleLayout(geometry: MeshInput, box: Float32Array, triangleLeaves?: GpuLayoutTriangleLeaves): GpuLayoutMeshBvh {
     const nodes = new ArrayBuffer(GPU_LAYOUT_NODE_BYTES);
     const words = new Uint32Array(nodes);
     const floats = new Float32Array(nodes);
@@ -300,7 +303,8 @@ export function singleTriangleLayout(geometry: MeshInput, box: Float32Array): Gp
     words[word.rightCount] = 0;
     return {
         nodes,
-        triangles: packTrianglesInOrder(geometry, Uint32Array.of(0)),
+        triangles: packTrianglesInOrder(geometry, Uint32Array.of(0), triangleLeaves),
+        ...(triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const } : {}),
         parents: Uint32Array.of(GPU_LAYOUT_NO_PARENT),
         nodeCount: 1,
         triangleCount: 1,
@@ -311,7 +315,8 @@ export function singleTriangleLayout(geometry: MeshInput, box: Float32Array): Gp
 }
 
 /** Triangles in tree order (`order[position]` is the triangle there), 48 bytes each, corners as they are. */
-export function packTrianglesInOrder(geometry: MeshInput, order: Uint32Array): ArrayBuffer {
+export function packTrianglesInOrder(geometry: MeshInput, order: Uint32Array, triangleLeaves?: GpuLayoutTriangleLeaves): ArrayBuffer {
+    if (triangleLeaves === 'indexed') return packIndexedTrianglesInOrder(geometry, order);
     const { positions, indices, triangleFlags } = geometry;
     const buffer = new ArrayBuffer(order.length * GPU_LAYOUT_TRIANGLE_BYTES);
     const words = new Uint32Array(buffer);
