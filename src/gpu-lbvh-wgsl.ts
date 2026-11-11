@@ -76,6 +76,8 @@
 
 import {
     GPU_LAYOUT_EMPTY_CHILD,
+    GPU_LAYOUT_INDEXED_FLAG_SHIFT,
+    GPU_LAYOUT_INDEXED_ID_MASK,
     GPU_LAYOUT_NO_PARENT,
     GPU_LAYOUT_NODE_WORD,
     GPU_LAYOUT_NODE_WORDS,
@@ -177,7 +179,7 @@ export const LBVH_MESH_WORDS = 16;
 export const LBVH_TILE_WORDS = 2;
 
 /** Bytes of the uniform block (`LbvhParams`). */
-export const LBVH_PARAMS_BYTES = 32;
+export const LBVH_PARAMS_BYTES = 48;
 
 /** `LbvhMesh.indexFormat` values. */
 export const LBVH_INDEX_FORMAT = { none: 0, uint16: 16, uint32: 32 } as const;
@@ -205,6 +207,10 @@ struct LbvhParams {
     traversalCost: f32,      // SAH cost of visiting a node
     intersectionCost: f32,   // SAH cost of testing a triangle
     climbLimit: u32,         // the climb's first round stops at nodes this big (LBVH_FIRST_ROUND_TRIANGLES)
+    indexedLeaves: u32,      // 1: write 16-byte indexed triangles (indexed-leaves.ts), 0: 48-byte records
+    unused0: u32,
+    unused1: u32,
+    unused2: u32,
 }
 
 // ---- Bindings ----------------------------------------------------------------------
@@ -1078,7 +1084,22 @@ fn lbvhFinish(@builtin(global_invocation_id) id: vec3u) {
 
 // The triangle record of the mesh's triangle 'triangle' at its tree position 'position':
 // three corners as they are, the original index and the flags.
+//
+// With lbvhParams.indexedLeaves (H-PLOC only; indexed-leaves.ts): a 16-byte indexed
+// triangle instead, vec4u(i0, i1, i2, triangle | flags << 28), the mesh's own vertex indices.
 fn lbvhWriteTriangle(mesh: LbvhMesh, triangle: u32, position: u32) {
+    if (lbvhParams.indexedLeaves == 1u) {
+        let base = (mesh.triangleStart + position) * 4u;
+        for (var corner = 0u; corner < 3u; corner += 1u) {
+            lbvhOutTriangles[base + corner] = min(lbvhVertexOf(mesh, triangle, corner), max(mesh.vertexCount, 1u) - 1u);
+        }
+        var indexedFlags = 0u;
+        if (mesh.hasFlags == 1u) {
+            indexedFlags = lbvhFlags[mesh.flagsOffset + triangle];
+        }
+        lbvhOutTriangles[base + 3u] = (triangle & ${hex(GPU_LAYOUT_INDEXED_ID_MASK)}) | ((indexedFlags & 3u) << ${GPU_LAYOUT_INDEXED_FLAG_SHIFT}u);
+        return;
+    }
     let base = (mesh.triangleStart + position) * LBVH_TRIANGLE_WORDS;
     for (var corner = 0u; corner < 3u; corner += 1u) {
         // A bad index was counted by lbvhBoxes (and the build refused); clamping only keeps the read in range.

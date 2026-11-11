@@ -55,6 +55,8 @@ import {
     GPU_LAYOUT_MAX_TRIANGLES,
     GPU_LAYOUT_NODE_BYTES,
     GPU_LAYOUT_TRIANGLE_BYTES,
+    gpuLayoutTriangleBytes,
+    type GpuLayoutTriangleLeaves,
     type GpuLayoutMeshBvh,
 } from './gpu-layout.ts';
 import { checkTriangleLeaves } from './indexed-leaves.ts';
@@ -205,7 +207,7 @@ export function positionBytes(geometry: GpuMeshGeometry): number {
  * bigger than the cap on its own still builds, alone in its batch.
  */
 export function planGpuLbvhBatches(device: GPUDevice, geometries: readonly GpuMeshGeometry[], options: BatchPlanOptions = {}): { batches: number[][]; tooBig: number[] } {
-    return planMeshBatches(device, geometries, LARGEST_BYTES_PER_TRIANGLE, GPU_LAYOUT_MAX_TRIANGLES, budgetOf(options, (totals) => lbvhBatchBytes(totals).total));
+    return planMeshBatches(device, geometries, LARGEST_BYTES_PER_TRIANGLE, GPU_LAYOUT_MAX_TRIANGLES, budgetOf(options, (totals) => lbvhBatchBytes(totals, options.triangleLeaves).total));
 }
 
 /** Options of the batch planners. */
@@ -216,6 +218,8 @@ export interface BatchPlanOptions {
      * Default: no cap (batches as big as the device's buffers allow).
      */
     readonly maxBatchBytes?: number;
+    /** The trees' triangle format, whose output size the cap counts. Default `'records'`. */
+    readonly triangleLeaves?: GpuLayoutTriangleLeaves;
 }
 
 /** A cap on a batch's bytes, as a function of its totals. */
@@ -351,6 +355,10 @@ export class GpuLbvhBuilder {
         if (!this.pipelines || !this.sortPipelines) throw new Error('@pmndrs/bvh: call prepare() before building');
         if (geometries.length === 0) throw new RangeError('a batch needs at least one mesh');
         const settings = checkOptions(options);
+        if (settings.triangleLeaves === 'indexed') {
+            // Its emit pass reads leaf boxes back from the 48-byte records, and has no binding left for positions (8 per stage).
+            throw new RangeError("the GPU LBVH writes records only; build indexed trees with the GPU H-PLOC, or convert records with indexedFromRecords");
+        }
         geometries.forEach(checkGeometry);
         const plan = planGpuLbvhBatches(this.device, geometries);
         if (plan.batches.length !== 1 || plan.tooBig.length > 0) {
@@ -374,7 +382,8 @@ export async function readTreeLayouts(device: GPUDevice, trees: GpuTreeBuffers, 
         triangleEnd = Math.max(triangleEnd, mesh.triangleOffset + mesh.triangleCount);
     }
     const nodeBytes = nodeEnd * GPU_LAYOUT_NODE_BYTES;
-    const triangleBytes = triangleEnd * GPU_LAYOUT_TRIANGLE_BYTES;
+    const triangleSize = gpuLayoutTriangleBytes(trees.triangleLeaves);
+    const triangleBytes = triangleEnd * triangleSize;
     const parentBytes = nodeEnd * 4;
     const readback = device.createBuffer({ label: `${label} readback`, size: nodeBytes + triangleBytes + parentBytes, usage: USAGE.MAP_READ | USAGE.COPY_DST });
     try {
@@ -388,11 +397,12 @@ export async function readTreeLayouts(device: GPUDevice, trees: GpuTreeBuffers, 
         return trees.meshes.map((mesh) => {
             if (mesh.problem) return null;
             const nodeStart = mesh.nodeOffset * GPU_LAYOUT_NODE_BYTES;
-            const triangleStart = nodeBytes + mesh.triangleOffset * GPU_LAYOUT_TRIANGLE_BYTES;
+            const triangleStart = nodeBytes + mesh.triangleOffset * triangleSize;
             const parentStart = nodeBytes + triangleBytes + mesh.nodeOffset * 4;
             return {
                 nodes: bytes.slice(nodeStart, nodeStart + mesh.nodeCount * GPU_LAYOUT_NODE_BYTES),
-                triangles: bytes.slice(triangleStart, triangleStart + mesh.triangleCount * GPU_LAYOUT_TRIANGLE_BYTES),
+                triangles: bytes.slice(triangleStart, triangleStart + mesh.triangleCount * triangleSize),
+                ...(trees.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const } : {}),
                 parents: new Uint32Array(bytes.slice(parentStart, parentStart + mesh.nodeCount * 4)),
                 nodeCount: mesh.nodeCount,
                 triangleCount: mesh.triangleCount,
@@ -616,7 +626,7 @@ export function summarizeBatchBuffers<Name extends string>(requested: Readonly<R
 }
 
 /** The LBVH batch's buffers, as {@link GpuLbvhBatch} asks for them (before {@link allocatedBytes}). */
-export function lbvhBatchBuffers(totals: BatchTotals) {
+export function lbvhBatchBuffers(totals: BatchTotals, triangleLeaves: GpuLayoutTriangleLeaves = 'records') {
     const { meshes, triangles, inner } = totals;
     const sortOffsetWords = totals.sortTiles * RADIX_BINS;
     const rankScanRecord = 1 + radixPassCount(LBVH_MORTON_BITS) + 1;
@@ -627,7 +637,7 @@ export function lbvhBatchBuffers(totals: BatchTotals) {
         // Every mesh's stats, then the climb's queue count.
         stats: meshes * LBVH_STATS_BYTES + 16,
         outNodes: inner * GPU_LAYOUT_NODE_BYTES,
-        outTriangles: triangles * GPU_LAYOUT_TRIANGLE_BYTES,
+        outTriangles: triangles * gpuLayoutTriangleBytes(triangleLeaves),
         outParents: inner * 4,
         continueArgs: 16,
         tables: tableWords(totals) * 4,
@@ -648,8 +658,8 @@ export function lbvhBatchBuffers(totals: BatchTotals) {
 }
 
 /** GPU bytes an LBVH batch of these totals holds while it builds, by buffer. */
-export function lbvhBatchBytes(totals: BatchTotals): BatchBytes<keyof ReturnType<typeof lbvhBatchBuffers>> {
-    return summarizeBatchBuffers(lbvhBatchBuffers(totals));
+export function lbvhBatchBytes(totals: BatchTotals, triangleLeaves: GpuLayoutTriangleLeaves = 'records'): BatchBytes<keyof ReturnType<typeof lbvhBatchBuffers>> {
+    return summarizeBatchBuffers(lbvhBatchBuffers(totals, triangleLeaves));
 }
 
 type BatchBuffer = 'positions' | 'indices' | 'flags' | 'stats' | 'outNodes' | 'outTriangles' | 'outParents';
@@ -657,6 +667,8 @@ type BatchBuffer = 'positions' | 'indices' | 'flags' | 'stats' | 'outNodes' | 'o
 /** One batch of mesh builds: inputs, scratch and outputs, recorded into one compute pass. */
 export class GpuLbvhBatch {
     readonly meshCount: number;
+    /** The triangle format the batch writes. */
+    readonly triangleLeaves: GpuLayoutTriangleLeaves;
     private readonly device: GPUDevice;
     private readonly label: string;
     private readonly pipelines: Record<LbvhKernel, GPUComputePipeline>;
@@ -683,6 +695,7 @@ export class GpuLbvhBatch {
         options: Required<GpuBuildOptions>,
     ) {
         this.device = device;
+        this.triangleLeaves = options.triangleLeaves;
         this.label = label;
         this.pipelines = pipelines;
         this.sortPipelines = sortPipelines;
@@ -701,7 +714,7 @@ export class GpuLbvhBatch {
             return buffer;
         };
         // Sizes from lbvhBatchBuffers, which the planner's byte cap also uses.
-        const sizes = lbvhBatchBuffers(batchTotals(this.meshes));
+        const sizes = lbvhBatchBuffers(batchTotals(this.meshes), options.triangleLeaves);
         this.buffers = {
             positions: make('positions', sizes.positions, storage),
             indices: make('indices', sizes.indices, storage),
@@ -744,6 +757,7 @@ export class GpuLbvhBatch {
         floats[5] = options.traversalCost; // traversalCost
         floats[6] = options.intersectionCost; // intersectionCost
         words[7] = LBVH_FIRST_ROUND_TRIANGLES; // climbLimit
+        words[8] = options.triangleLeaves === 'indexed' ? 1 : 0; // indexedLeaves
 
         const resources: Record<BindingName, GPUBindingResource> = {
             positions: { buffer: this.buffers.positions },
@@ -892,6 +906,7 @@ export class GpuLbvhBatch {
             return {
                 nodes: outNodes,
                 triangles: outTriangles,
+                triangleLeaves: this.triangleLeaves,
                 parents: outParents,
                 meshes: this.meshes.map((mesh, index) => meshResult(mesh, index, words.subarray(index * LBVH_STATS_WORDS, (index + 1) * LBVH_STATS_WORDS))),
                 destroy() {

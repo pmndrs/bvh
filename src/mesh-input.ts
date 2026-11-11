@@ -115,6 +115,8 @@ export interface GpuTreeBuffers {
     readonly nodes: GPUBuffer;
     /** 48-byte triangles (16 with `triangleLeaves: 'indexed'`), each mesh's in tree order. */
     readonly triangles: GPUBuffer;
+    /** How `triangles` stores them; omitted means `'records'`. */
+    readonly triangleLeaves?: 'records' | 'indexed';
     /** One `u32` per node: its parent within its mesh, or 0xffffffff for a root. */
     readonly parents: GPUBuffer;
     readonly meshes: readonly GpuMeshTreeRange[];

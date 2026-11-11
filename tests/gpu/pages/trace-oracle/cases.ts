@@ -503,8 +503,37 @@ export interface SharedEdgeCase extends OracleCase {
  * six triangles meet. With `transformed`, the quad is instanced with a rotation,
  * non-uniform scale and mirror, so edges are not axis-aligned in world space
  * and the transformed ray's arithmetic is exercised too.
+ *
+ * `seam` changes how the quad's triangles share their corners
+ * (docs/design/indexed-leaves.md, section 2):
+ * - `'shared'` (the default): by index, as `tessellatedQuad` writes them;
+ * - `'split'`: every corner its own vertex (an unindexed soup), with the same
+ *   bits, as an exporter writes a UV seam. Nothing may slip, in either
+ *   triangle format;
+ * - `'ulp'`: split, and every odd triangle's interior corners one ulp off in
+ *   x. Such a seam is not watertight in either format: rays may slip there,
+ *   and the same rays in both, unless a tolerance weld closes it.
  */
-export function sharedEdgeCase(rayCount: number, transformed: boolean): SharedEdgeCase {
+export type SeamKind = 'shared' | 'split' | 'ulp';
+
+export function seamQuad(cells: number, half: number, seam: SeamKind): MeshGeometry {
+    const quad = tessellatedQuad(cells, half);
+    if (seam === 'shared') return quad;
+    const indices = quad.indices!;
+    const positions = new Float32Array(indices.length * 3);
+    const bits = new Uint32Array(positions.buffer);
+    indices.forEach((vertex, entry) => {
+        positions.set(quad.positions.subarray(vertex * 3, vertex * 3 + 3), entry * 3);
+        const triangle = Math.floor(entry / 3);
+        const x = positions[entry * 3];
+        const y = positions[entry * 3 + 1];
+        // One ulp further from zero. Corners at x = 0 stay (a denormal could be flushed back to 0).
+        if (seam === 'ulp' && triangle % 2 === 1 && x !== 0 && Math.abs(x) < half && Math.abs(y) < half) bits[entry * 3] += 1;
+    });
+    return { positions };
+}
+
+export function sharedEdgeCase(rayCount: number, transformed: boolean, seam: SeamKind = 'shared'): SharedEdgeCase {
     const cells = 8;
     const half = 2;
     const step = (2 * half) / cells;
@@ -548,9 +577,9 @@ export function sharedEdgeCase(rayCount: number, transformed: boolean): SharedEd
     }
 
     return {
-        name: transformed ? 'shared-edges-transformed' : 'shared-edges',
-        description: `${rayCount} rays aimed at the seams of a tessellated quad${transformed ? ' seen through a rotated, non-uniform, mirrored instance' : ''}.`,
-        meshes: [tessellatedQuad(cells, half)],
+        name: `${seam === 'shared' ? 'shared-edges' : `${seam}-seams`}${transformed ? '-transformed' : ''}`,
+        description: `${rayCount} rays aimed at the seams of a tessellated quad${seam === 'shared' ? '' : ` (${seam} seams)`}${transformed ? ' seen through a rotated, non-uniform, mirrored instance' : ''}.`,
+        meshes: [seamQuad(cells, half, seam)],
         instances: [{ meshIndex: 0, instanceIndex: 5, objectToWorld: objectToWorld }],
         rays: packRays(rays),
         categories,

@@ -24,6 +24,24 @@ import { createRandom, randomAffine, randomRays, randomTriangleSoup, tessellated
 import { assembleTraceScene, buildTraceScene, meshRefitPlacement, type TraceSceneData, type TraceSceneInstance } from './scene-assembly.ts';
 import { writeTriangleFilterFlags, type TrianglePasses } from './triangle-filter.ts';
 import type { TraceRay } from './rays.ts';
+import { TRACE_MODULE_ENTRIES, traceModuleEntries, traceModuleWgsl } from './wgsl.ts';
+
+describe('the indexed walk module', () => {
+    it('declares a fourth binding, the positions, read as vec4f or packed f32, around the same walk', () => {
+        const recordsModule = traceModuleWgsl();
+        const indexedModule = traceModuleWgsl({ triangleLeaves: 'indexed', traceSlot: { group: 2, firstBinding: 4 } });
+        const packed = traceModuleWgsl({ triangleLeaves: 'indexed', positionLayout: 'packed' });
+        expect(recordsModule).not.toContain('bvhTracePositions');
+        expect(indexedModule).toContain('@group(2) @binding(7) var<storage, read> bvhTracePositions: array<vec4f>;');
+        expect(indexedModule).toContain('var<storage, read> bvhTraceTriangles: array<vec4u>;');
+        expect(packed).toContain('bvhTracePositions: array<f32>;');
+        expect(traceModuleEntries({ triangleLeaves: 'indexed' })).toHaveLength(4);
+        expect(traceModuleEntries()).toBe(TRACE_MODULE_ENTRIES);
+        const walk = (module: string) => module.slice(module.indexOf('fn bvhWalkClosest('), module.indexOf('fn bvhWalkAny('));
+        expect(walk(indexedModule)).toBe(walk(recordsModule));
+        expect(() => traceModuleWgsl({ triangleLeaves: 'packed' as never })).toThrow(RangeError);
+    });
+});
 
 const tinyBvh = await createTinyBvhBuilder();
 const records = (geometry: MeshGeometry): MeshBvh => buildMeshBvhWithTinyBvh(geometry, tinyBvh);

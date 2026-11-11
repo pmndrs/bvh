@@ -17,7 +17,18 @@
  * they are copied in: it reads the builder's index.
  */
 
-import { MATERIAL_SHIFT, materialCode, TRIANGLE_FLAG_FLIP_FRONT_FACE, TRIANGLE_WORD, TRIANGLE_WORDS } from '../trace/layout.ts';
+import {
+    INDEXED_FLAG_SHIFT,
+    INDEXED_ID_MASK,
+    INDEXED_TRIANGLE_WORDS,
+    MATERIAL_BITS,
+    MATERIAL_SHIFT,
+    MESH_HEADER_WORD,
+    materialCode,
+    TRIANGLE_FLAG_FLIP_FRONT_FACE,
+    TRIANGLE_WORD,
+    TRIANGLE_WORDS,
+} from '../trace/layout.ts';
 import type { StaticMergeGroup } from '../trace/static-merge.ts';
 import { dispatchWorkgroups2d, WORKGROUP_INDEX_WGSL } from '../gpu-workgroup-scan.ts';
 
@@ -32,7 +43,7 @@ struct BvhMergedParams {
     triangleWordOffset: u32,
     triangleCount: u32,
     sourceCount: u32,
-    unused: u32,
+    sideWordOffset: u32,   // indexed: where the group's side table starts, in words
 }
 
 @group(0) @binding(0) var<storage, read_write> bvhMergedTriangles: array<u32>;
@@ -71,6 +82,39 @@ fn bvhMergedIdentity(
     bvhMergedTriangles[base + ${TRIANGLE_WORD.padding}u] = source.y;
     bvhMergedTriangles[base + ${TRIANGLE_WORD.flags}u] = bvhMergedTriangles[base + ${TRIANGLE_WORD.flags}u] | source.z;
 }
+
+// The indexed twin (writeMergedIndexedIdentity): word 3 of a 16-byte triangle becomes the
+// source triangle with the flip flag added (bit 29), and the group's side table, at
+// sideWordOffset, gets the slot's source number and material (source | material << 16).
+// The source table and the header are written by the CPU: they don't depend on tree order.
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn bvhMergedIdentityIndexed(
+    @builtin(workgroup_id) workgroup: vec3u,
+    @builtin(num_workgroups) groups: vec3u,
+    @builtin(local_invocation_index) localIndex: u32,
+) {
+    let slot = bvhMergedWorkgroupIndex(workgroup, groups) * BVH_MERGED_WORKGROUP_SIZE + localIndex;
+    if (slot >= bvhMergedParams.triangleCount) {
+        return;
+    }
+    let word = bvhMergedParams.triangleWordOffset + slot * ${INDEXED_TRIANGLE_WORDS}u + 3u;
+    let idFlags = bvhMergedTriangles[word];
+    let merged = idFlags & ${INDEXED_ID_MASK}u;
+    var low = 0u;
+    var high = bvhMergedParams.sourceCount;
+    while (high - low > 1u) {
+        let middle = (low + high) / 2u;
+        if (bvhMergedSources[middle].x <= merged) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    let source = bvhMergedSources[low];
+    let flags = (idFlags >> ${INDEXED_FLAG_SHIFT}u) | (source.z & ${TRIANGLE_FLAG_FLIP_FRONT_FACE}u);
+    bvhMergedTriangles[word] = (merged - source.x) | (flags << ${INDEXED_FLAG_SHIFT}u);
+    bvhMergedTriangles[bvhMergedParams.sideWordOffset + slot] = low | (source.z & ${MATERIAL_BITS}u);
+}
 `;
 }
 
@@ -90,6 +134,7 @@ export class GpuMergedIdentity {
     private readonly device: GPUDevice;
     private readonly label: string;
     private pipeline: GPUComputePipeline | null = null;
+    private indexedPipeline: GPUComputePipeline | null = null;
     private compiling: Promise<void> | null = null;
     /** Buffers of passes recorded since the last {@link releaseRetired}, freed once their frame was submitted. */
     private retired: GPUBuffer[] = [];
@@ -102,7 +147,9 @@ export class GpuMergedIdentity {
     prepare(): Promise<void> {
         this.compiling ??= (async () => {
             const module = this.device.createShaderModule({ label: this.label, code: mergedIdentityWgsl() });
-            this.pipeline = await this.device.createComputePipelineAsync({ label: this.label, layout: 'auto', compute: { module, entryPoint: 'bvhMergedIdentity' } });
+            [this.pipeline, this.indexedPipeline] = await Promise.all(
+                ['bvhMergedIdentity', 'bvhMergedIdentityIndexed'].map((entryPoint) => this.device.createComputePipelineAsync({ label: this.label, layout: 'auto', compute: { module, entryPoint } })),
+            );
         })();
         return this.compiling;
     }
@@ -121,15 +168,21 @@ export class GpuMergedIdentity {
      * at record `triangleOffset` of `triangles`, after whatever wrote them in
      * `encoder`.
      */
-    encode(encoder: GPUCommandEncoder, triangles: GPUBuffer, group: StaticMergeGroup, triangleOffset: number, triangleCount: number): void {
-        const pipeline = this.pipeline;
+    encode(encoder: GPUCommandEncoder, triangles: GPUBuffer, group: StaticMergeGroup, triangleOffset: number, triangleCount: number, indexed?: { readonly vertexBase: number }): void {
+        const pipeline = indexed ? this.indexedPipeline : this.pipeline;
         if (!pipeline) throw new Error('@pmndrs/bvh: call GpuMergedIdentity.prepare() before encode()');
         if (triangleCount !== group.sourceInstances.length) throw new RangeError(`the merged tree has ${triangleCount} triangles, its group ${group.sourceInstances.length}`);
         const table = mergedSourceTable(group);
         const sources = this.device.createBuffer({ label: `${this.label} sources`, size: table.byteLength, usage: USAGE.STORAGE | USAGE.COPY_DST });
         this.device.queue.writeBuffer(sources, 0, table);
         const params = this.device.createBuffer({ label: `${this.label} params`, size: 16, usage: USAGE.UNIFORM | USAGE.COPY_DST });
-        this.device.queue.writeBuffer(params, 0, new Uint32Array([triangleOffset * TRIANGLE_WORDS, triangleCount, group.sources.length, 0]));
+        if (indexed) {
+            this.writeIndexedTables(triangles, group, triangleOffset, triangleCount, indexed.vertexBase);
+            const sideStart = (triangleOffset - 1 - Math.ceil(triangleCount / 4)) * INDEXED_TRIANGLE_WORDS;
+            this.device.queue.writeBuffer(params, 0, new Uint32Array([triangleOffset * INDEXED_TRIANGLE_WORDS, triangleCount, group.sources.length, sideStart]));
+        } else {
+            this.device.queue.writeBuffer(params, 0, new Uint32Array([triangleOffset * TRIANGLE_WORDS, triangleCount, group.sources.length, 0]));
+        }
         this.retired.push(sources, params);
         const pass = encoder.beginComputePass({ label: this.label });
         pass.setPipeline(pipeline);
@@ -147,6 +200,27 @@ export class GpuMergedIdentity {
         );
         dispatchWorkgroups2d(pass, Math.ceil(triangleCount / WORKGROUP_SIZE), this.device.limits.maxComputeWorkgroupsPerDimension);
         pass.end();
+    }
+
+    /**
+     * An indexed group's region before its triangles: the source table
+     * (instance index per source) and the header (vertex base, side and
+     * source table distances), as `writeMergedIndexedIdentity` lays them out.
+     * The side table is the kernel's.
+     */
+    private writeIndexedTables(triangles: GPUBuffer, group: StaticMergeGroup, triangleOffset: number, triangleCount: number, vertexBase: number): void {
+        const sideUnits = Math.ceil(triangleCount / 4);
+        const sourceUnits = Math.ceil(group.sources.length / 4);
+        const sourceStart = triangleOffset - 1 - sideUnits - sourceUnits;
+        if (sourceStart < 0) throw new RangeError(`the merged group at ${triangleOffset} has no room for its side tables`);
+        const sources = new Uint32Array(sourceUnits * INDEXED_TRIANGLE_WORDS);
+        group.sources.forEach((source, slot) => (sources[slot] = source.instanceIndex));
+        this.device.queue.writeBuffer(triangles, sourceStart * 16, sources);
+        const header = new Uint32Array(INDEXED_TRIANGLE_WORDS);
+        header[MESH_HEADER_WORD.vertexBase] = vertexBase;
+        header[MESH_HEADER_WORD.sideTableDistance] = 1 + sideUnits;
+        header[MESH_HEADER_WORD.sourceTableDistance] = 1 + sideUnits + sourceUnits;
+        this.device.queue.writeBuffer(triangles, (triangleOffset - 1) * 16, header);
     }
 
     /** Frees the tables of passes recorded before the last submit. */

@@ -22,6 +22,7 @@ import {
     assembleTraceScene,
     createMeshBvhBuilder,
     TRACE_MODULE_ENTRIES,
+    TRACE_MODULE_ENTRIES_INDEXED,
     traceModuleWgsl,
     type TraceSceneData,
 } from '../../../../src/trace/index.ts';
@@ -48,6 +49,18 @@ const WORKGROUP_SIZE = 64;
 const RESULT_WORDS = 10;
 /** Written as the instance for a miss. */
 const NO_INSTANCE = 0xffffffff;
+
+/** The scene formats the page traces (docs/design/indexed-leaves.md): records, and indexed leaves with each position layout. */
+interface Format {
+    readonly name: string;
+    readonly triangleLeaves: 'records' | 'indexed';
+    readonly positionLayout?: 'vec4' | 'packed';
+}
+const FORMATS: readonly Format[] = [
+    { name: 'records', triangleLeaves: 'records' },
+    { name: 'indexed', triangleLeaves: 'indexed' },
+    { name: 'indexed-packed', triangleLeaves: 'indexed', positionLayout: 'packed' },
+];
 
 const KERNEL_WGSL = /* wgsl */ `
 struct InlineResult {
@@ -98,19 +111,20 @@ async function readBuffer(device: GPUDevice, source: GPUBuffer, size: number): P
 }
 
 /** Builds the case's trees with tinybvh and assembles the scene, as the oracle's tinybvh variant does. */
-async function assemble(oracleCase: OracleCase): Promise<TraceSceneData> {
+async function assemble(oracleCase: OracleCase, format: Format): Promise<TraceSceneData> {
     const builder = createMeshBvhBuilder({ worker: 'auto' });
     try {
-        const bvhs = await Promise.all(oracleCase.meshes.map((mesh) => builder.build(mesh)));
-        return assembleTraceScene(bvhs, oracleCase.instances);
+        const bvhs = await Promise.all(oracleCase.meshes.map((mesh) => builder.build(mesh, { triangleLeaves: format.triangleLeaves })));
+        if (format.triangleLeaves === 'records') return assembleTraceScene(bvhs, oracleCase.instances);
+        return assembleTraceScene(bvhs, oracleCase.instances, {}, { triangleLeaves: 'indexed', positionLayout: format.positionLayout, geometries: oracleCase.meshes });
     } finally {
         builder.dispose();
     }
 }
 
 /** Traces one oracle case's rays in the page's own kernel. */
-async function traceCase(device: GPUDevice, pipeline: GPUComputePipeline, oracleCase: OracleCase): Promise<TracerAnswers> {
-    const scene = uploadTraceScene(device, await assemble(oracleCase), `inline ${oracleCase.name}`);
+async function traceCase(device: GPUDevice, pipeline: GPUComputePipeline, oracleCase: OracleCase, format: Format): Promise<TracerAnswers> {
+    const scene = uploadTraceScene(device, await assemble(oracleCase, format), `inline ${oracleCase.name}`);
     const count = oracleCase.rays.length / 8;
     const rayBuffer = device.createBuffer({ label: 'trace-inline rays', size: count * RAY_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(rayBuffer, 0, oracleCase.rays as Float32Array<ArrayBuffer>);
@@ -124,6 +138,7 @@ async function traceCase(device: GPUDevice, pipeline: GPUComputePipeline, oracle
             { binding: 0, resource: { buffer: scene.nodes } },
             { binding: 1, resource: { buffer: scene.triangles } },
             { binding: 2, resource: { buffer: scene.topLevel } },
+            ...(scene.positions ? [{ binding: 3, resource: { buffer: scene.positions } }] : []),
         ],
     });
     const ownGroup = device.createBindGroup({
@@ -175,43 +190,49 @@ async function traceCase(device: GPUDevice, pipeline: GPUComputePipeline, oracle
 await runGpuTest(async ({ device, log }) => {
     // runGpuTest asks for no limits, so this is a default device.
     assert(device.limits.maxStorageBuffersPerShaderStage === 8, `expected a default-limits device, got ${device.limits.maxStorageBuffersPerShaderStage} storage buffers per stage`);
-    const pipeline = await device.createComputePipelineAsync({
-        label: 'trace-inline',
-        layout: 'auto',
-        compute: {
-            module: device.createShaderModule({ label: 'trace-inline', code: `${traceModuleWgsl({ traceSlot: { group: 0, firstBinding: 0 }, triangleFilter: null })}\n${DEFAULT_TRIANGLE_FILTER_WGSL}\n${KERNEL_WGSL}` }),
-            entryPoint: 'main',
-        },
-    });
     const failures: string[] = [];
     const cases: Record<string, unknown> = {};
-
-    for (const oracleCase of buildOracleCases(FULL_SIZES)) {
-        const reference = await computeReferenceAnswersYielding(oracleCase);
-        const answers = await traceCase(device, pipeline, oracleCase);
-        const result = evaluateCase(oracleCase, answers, reference);
-        cases[oracleCase.name] = {
-            rays: result.rays,
-            closest: { mismatches: result.closest.mismatches, ambiguous: result.closest.ambiguous },
-            any: { mismatches: result.any.mismatches, ambiguous: result.any.ambiguous },
-            escapes: result.closestEscapes.ordinary + result.closestEscapes.edgeAimed + result.anyEscapes.ordinary + result.anyEscapes.edgeAimed,
-        };
-        log(`${oracleCase.name}: ${result.rays} rays, closest ${result.closest.mismatches} mismatches, any ${result.any.mismatches}`);
-        for (const failure of result.failures) failures.push(`${oracleCase.name}: ${failure}`);
-    }
-
     const sharedEdges: Record<string, unknown> = {};
-    for (const transformed of [false, true]) {
-        const oracleCase = sharedEdgeCase(SHARED_EDGE_RAYS, transformed);
-        const report = evaluateSharedEdgeCase(oracleCase, await traceCase(device, pipeline, oracleCase), SHARED_EDGE_REFERENCE_RAYS);
-        sharedEdges[report.name] = { rays: report.rays, slipped: report.slipped, slippedAny: report.slippedAny };
-        log(`${report.name}: ${report.slipped} of ${report.rays} slipped (${report.slippedAny} any-hit)`);
-        for (const failure of sharedEdgeFailures(report)) failures.push(`${report.name}: ${failure}`);
+    const oracleCases = buildOracleCases(FULL_SIZES);
+    const references = [];
+    for (const oracleCase of oracleCases) references.push(await computeReferenceAnswersYielding(oracleCase));
+    for (const format of FORMATS) {
+        const module = traceModuleWgsl({ traceSlot: { group: 0, firstBinding: 0 }, triangleFilter: null, triangleLeaves: format.triangleLeaves, positionLayout: format.positionLayout });
+        const pipeline = await device.createComputePipelineAsync({
+            label: `trace-inline ${format.name}`,
+            layout: 'auto',
+            compute: {
+                module: device.createShaderModule({ label: `trace-inline ${format.name}`, code: `${module}\n${DEFAULT_TRIANGLE_FILTER_WGSL}\n${KERNEL_WGSL}` }),
+                entryPoint: 'main',
+            },
+        });
+
+        for (const [caseIndex, oracleCase] of oracleCases.entries()) {
+            const reference = references[caseIndex];
+            const answers = await traceCase(device, pipeline, oracleCase, format);
+            const result = evaluateCase(oracleCase, answers, reference);
+            cases[`${format.name} ${oracleCase.name}`] = {
+                rays: result.rays,
+                closest: { mismatches: result.closest.mismatches, ambiguous: result.closest.ambiguous },
+                any: { mismatches: result.any.mismatches, ambiguous: result.any.ambiguous },
+                escapes: result.closestEscapes.ordinary + result.closestEscapes.edgeAimed + result.anyEscapes.ordinary + result.anyEscapes.edgeAimed,
+            };
+            log(`[${format.name}] ${oracleCase.name}: ${result.rays} rays, closest ${result.closest.mismatches} mismatches, any ${result.any.mismatches}`);
+            for (const failure of result.failures) failures.push(`[${format.name}] ${oracleCase.name}: ${failure}`);
+        }
+
+        for (const transformed of [false, true]) {
+            const oracleCase = sharedEdgeCase(SHARED_EDGE_RAYS, transformed);
+            const report = evaluateSharedEdgeCase(oracleCase, await traceCase(device, pipeline, oracleCase, format), SHARED_EDGE_REFERENCE_RAYS);
+            sharedEdges[`${format.name} ${report.name}`] = { rays: report.rays, slipped: report.slipped, slippedAny: report.slippedAny };
+            log(`[${format.name}] ${report.name}: ${report.slipped} of ${report.rays} slipped (${report.slippedAny} any-hit)`);
+            for (const failure of sharedEdgeFailures(report)) failures.push(`[${format.name}] ${report.name}: ${failure}`);
+        }
     }
 
     assert(failures.length === 0, failures.slice(0, 12).join('\n'));
     return {
-        storageBuffers: { tracer: TRACE_MODULE_ENTRIES.length, own: 3, limit: device.limits.maxStorageBuffersPerShaderStage },
+        storageBuffers: { tracer: TRACE_MODULE_ENTRIES.length, tracerIndexed: TRACE_MODULE_ENTRIES_INDEXED.length, own: 3, limit: device.limits.maxStorageBuffersPerShaderStage },
         cases,
         sharedEdges,
     };

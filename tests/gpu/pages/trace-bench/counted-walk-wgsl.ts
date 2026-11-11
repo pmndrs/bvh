@@ -91,8 +91,8 @@ export function countedWalkWgsl(options: CountedWalkOptions): string {
     text = replaceAnchor(text, 'stack[stackSize] = BVH_REF_INSTANCE_MARKER;', 'stack[stackSize] = BVH_REF_INSTANCE_MARKER;\n                counts.instanceEntries += 1u;\n                hitInThisInstance = false;');
     text = replaceAnchor(
         text,
-        'let triangle = bvhLoadTriangle(slot);',
-        'let triangle = bvhLoadTriangle(slot);\n                counts.triangleTests += 1u;',
+        'let triangle = bvhLoadTriangle(slot, meshVertexBase);',
+        'let triangle = bvhLoadTriangle(slot, meshVertexBase);\n                counts.triangleTests += 1u;',
     );
     if (closest) {
         text = replaceAnchor(text, 'result = BvhHit(triangleHit.t', 'if (!hitInThisInstance) { counts.instancesWithHit += 1u; hitInThisInstance = true; }\n                    result = BvhHit(triangleHit.t');

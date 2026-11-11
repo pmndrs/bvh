@@ -60,6 +60,12 @@ import {
     RAY_MASK_ALL,
     BVH_QUERY_CLOSEST,
     BVH_QUERY_ANY,
+    INDEXED_FLAG_SHIFT,
+    INDEXED_ID_MASK,
+    MERGED_SIDE_MATERIAL_SHIFT,
+    MERGED_SIDE_SOURCE_BITS,
+    type PositionLayout,
+    type TriangleLeaves,
 } from './layout.ts';
 import { DEFAULT_TRIANGLE_FILTER_WGSL } from './triangle-filter.ts';
 
@@ -85,6 +91,22 @@ export const TRACE_MODULE_ENTRIES: readonly ModuleBindingEntry[] = [
     // Top level: header, instance records, top-level nodes.
     { visibility: SHADER_STAGE_COMPUTE, buffer: { type: 'read-only-storage' } },
 ];
+
+/**
+ * Bindings of a module built with `triangleLeaves: 'indexed'`: the three of
+ * {@link TRACE_MODULE_ENTRIES}, then the scene's positions (a fourth
+ * read-only storage buffer).
+ */
+export const TRACE_MODULE_ENTRIES_INDEXED: readonly ModuleBindingEntry[] = [
+    ...TRACE_MODULE_ENTRIES,
+    // Positions of every mesh, at each mesh's vertex base.
+    { visibility: SHADER_STAGE_COMPUTE, buffer: { type: 'read-only-storage' } },
+];
+
+/** The bindings a trace module built with these options declares, in order. */
+export function traceModuleEntries(options: { readonly triangleLeaves?: TriangleLeaves } = {}): readonly ModuleBindingEntry[] {
+    return options.triangleLeaves === 'indexed' ? TRACE_MODULE_ENTRIES_INDEXED : TRACE_MODULE_ENTRIES;
+}
 
 const hex = (value: number): string => `0x${value.toString(16)}u`;
 
@@ -262,6 +284,7 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
 
     var insideInstance = false;
     var instance: BvhInstance;
+    var meshVertexBase = 0u;   // indexed leaves: the instance's mesh's first vertex (0 for records)
     ${recordDeclaration}
     ${farDeclaration}
 
@@ -326,6 +349,7 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
                     bvhTransformPoint(instance, ray.origin),
                     bvhTransformDirection(instance, ray.direction),
                 );
+                meshVertexBase = bvhMeshVertexBase(instance.triangleOffset);
                 stack[stackSize] = BVH_REF_INSTANCE_MARKER;
                 stackSize += 1u;
                 insideInstance = true;
@@ -336,17 +360,17 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
             // A mesh leaf: 'count' triangles starting at 'index'.
             for (var i = 0u; i < count; i += 1u) {
                 let slot = instance.triangleOffset + index + i;
-                let triangle = bvhLoadTriangle(slot);
+                let triangle = bvhLoadTriangle(slot, meshVertexBase);
                 let triangleHit = bvhIntersectWatertight(triangle, setup, ray.tMin, farthest);
                 if (!triangleHit.hit) {
                     continue;
                 }
                 // A merged mesh (mergeStaticInstances, static-merge.ts) holds several source
-                // instances in world space: its triangles name their source instance in the
-                // padding word, and the flip bit marks those of a mirrored source, whose
-                // world-space winding is the reverse of the authored one. Elsewhere padding
-                // is 0 and the bit clear, so this is the instance's index and the side as tested.
-                let hitInstance = select(instance.instanceIndex, triangle.padding, (instance.flags & BVH_INSTANCE_FLAG_MERGED) != 0u);
+                // instances in world space: its triangles name their source instance (records:
+                // the padding word; indexed: the group's side table), and the flip bit marks
+                // those of a mirrored source, whose world-space winding is the reverse of the
+                // authored one. Elsewhere this is the instance's index and the side as tested.
+                let hitInstance = bvhHitInstance(instance, triangle, slot);
                 let frontFace = triangleHit.frontFacing != ((triangle.flags & BVH_TRIANGLE_FLAG_FLIP_FRONT_FACE) != 0u);
                 // A flagged triangle asks the filter first (triangle-filter.ts). A ray
                 // that passes records nothing and leaves 'farthest' alone, so what
@@ -386,6 +410,100 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
 `;
 }
 
+/**
+ * Triangle loading for 48-byte records: three contiguous `vec4f`. A merged
+ * triangle's source instance and material are in the record (padding word,
+ * flags bits 16-31). There is no vertex base.
+ */
+const RECORD_LOADERS_WGSL = /* wgsl */ `
+const BVH_VEC4_PER_TRIANGLE: u32 = ${TRIANGLE_BYTES / 16}u;
+
+fn bvhLoadTriangle(triangleIndex: u32, vertexBase: u32) -> BvhTriangle {
+    let base = triangleIndex * BVH_VEC4_PER_TRIANGLE;
+    let a = bvhTraceTriangles[base];
+    let b = bvhTraceTriangles[base + 1u];
+    let c = bvhTraceTriangles[base + 2u];
+    return BvhTriangle(a.xyz, bitcast<u32>(a.w), b.xyz, bitcast<u32>(b.w), c.xyz, bitcast<u32>(c.w));
+}
+
+// Records need no vertex base.
+fn bvhMeshVertexBase(triangleOffset: u32) -> u32 {
+    return 0u;
+}
+
+fn bvhHitInstance(instance: BvhInstance, triangle: BvhTriangle, slot: u32) -> u32 {
+    return select(instance.instanceIndex, triangle.padding, (instance.flags & BVH_INSTANCE_FLAG_MERGED) != 0u);
+}
+
+// A merged triangle's flags word, whose bits 16-31 hold its source's material.
+fn bvhMergedMaterialFlags(instance: BvhInstance, triangle: BvhTriangle, slot: u32) -> u32 {
+    return triangle.flags;
+}
+`;
+
+/**
+ * Triangle loading for indexed leaves (docs/design/indexed-leaves.md): one
+ * `vec4u(i0, i1, i2, id | flags << 28)`, then three dependent position reads
+ * at the mesh's vertex base (one `vec4f` each, or three `f32` each when
+ * packed). The result is the same `BvhTriangle`, so the triangle test, the
+ * filter and the hit are the records' code. `flags` holds bits 0-1 (filter,
+ * flip) as records do; a merged triangle's source instance and material come
+ * from its group's side table, read only on a hit.
+ */
+function indexedLoadersWgsl(packed: boolean): string {
+    const position = packed
+        ? `let at = vertex * 3u;
+    return vec3f(bvhTracePositions[at], bvhTracePositions[at + 1u], bvhTracePositions[at + 2u]);`
+        : 'return bvhTracePositions[vertex].xyz;';
+    return /* wgsl */ `
+const BVH_INDEXED_ID_MASK: u32 = ${hex(INDEXED_ID_MASK)};
+const BVH_INDEXED_FLAG_SHIFT: u32 = ${INDEXED_FLAG_SHIFT}u;
+const BVH_MERGED_SIDE_SOURCE_BITS: u32 = ${hex(MERGED_SIDE_SOURCE_BITS)};
+const BVH_MERGED_SIDE_MATERIAL_SHIFT: u32 = ${MERGED_SIDE_MATERIAL_SHIFT}u;
+
+fn bvhLoadPosition(vertex: u32) -> vec3f {
+    ${position}
+}
+
+fn bvhLoadTriangle(triangleIndex: u32, vertexBase: u32) -> BvhTriangle {
+    let ids = bvhTraceTriangles[triangleIndex];
+    return BvhTriangle(
+        bvhLoadPosition(vertexBase + ids.x), ids.w & BVH_INDEXED_ID_MASK,
+        bvhLoadPosition(vertexBase + ids.y), ids.w >> BVH_INDEXED_FLAG_SHIFT,
+        bvhLoadPosition(vertexBase + ids.z), 0u,
+    );
+}
+
+// The header before a mesh's triangles: x its vertex base, y and z (merged) how far
+// back its side table and source table start.
+fn bvhMeshVertexBase(triangleOffset: u32) -> u32 {
+    return bvhTraceTriangles[triangleOffset - 1u].x;
+}
+
+// A merged triangle's (source instance, material code), from its group's side table
+// (source slot | material << 16, by tree slot) and source table (instance index by slot).
+fn bvhMergedSource(triangleOffset: u32, slot: u32) -> vec2u {
+    let header = bvhTraceTriangles[triangleOffset - 1u];
+    let local = slot - triangleOffset;
+    let side = bvhTraceTriangles[triangleOffset - header.y + (local >> 2u)][local & 3u];
+    let source = side & BVH_MERGED_SIDE_SOURCE_BITS;
+    let instance = bvhTraceTriangles[triangleOffset - header.z + (source >> 2u)][source & 3u];
+    return vec2u(instance, side >> BVH_MERGED_SIDE_MATERIAL_SHIFT);
+}
+
+fn bvhHitInstance(instance: BvhInstance, triangle: BvhTriangle, slot: u32) -> u32 {
+    if ((instance.flags & BVH_INSTANCE_FLAG_MERGED) == 0u) {
+        return instance.instanceIndex;
+    }
+    return bvhMergedSource(instance.triangleOffset, slot).x;
+}
+
+fn bvhMergedMaterialFlags(instance: BvhInstance, triangle: BvhTriangle, slot: u32) -> u32 {
+    return bvhMergedSource(instance.triangleOffset, slot).y << BVH_MATERIAL_SHIFT;
+}
+`;
+}
+
 /** The old API took the slot `{ group, firstBinding }` as its first argument; in plain JS that would be silently misread. */
 function rejectOldPositionalCall(name: string, options: object | null | undefined): void {
     if (options !== null && typeof options === 'object' && ('group' in options || 'firstBinding' in options)) {
@@ -415,6 +533,17 @@ export interface TraceModuleOptions {
      * ones. It is the same walk either way, with the mask code left out.
      */
     readonly rayMasks?: boolean;
+    /**
+     * The scene's triangle format (docs/design/indexed-leaves.md), compiled
+     * in like `rayMasks`: `'records'` (the default, 48-byte records, three
+     * bindings) or `'indexed'` (16-byte indexed triangles read through the
+     * scene's positions buffer, a fourth binding after the top level,
+     * {@link TRACE_MODULE_ENTRIES_INDEXED}). Only the triangle loading
+     * differs; it is the same walk.
+     */
+    readonly triangleLeaves?: TriangleLeaves;
+    /** Indexed only: the positions buffer's layout, `'vec4'` (the default) or `'packed'`. */
+    readonly positionLayout?: PositionLayout;
 }
 
 const DEFAULT_TRACE_SLOT: BindingSlot = { group: 0, firstBinding: 0 };
@@ -435,20 +564,25 @@ export function traceModuleWgsl(options: TraceModuleOptions = {}): string {
     const nodes = slot.firstBinding;
     const triangles = slot.firstBinding + 1;
     const topLevel = slot.firstBinding + 2;
+    const indexed = (options.triangleLeaves ?? 'records') === 'indexed';
+    if (!indexed && options.triangleLeaves !== undefined && options.triangleLeaves !== 'records') {
+        throw new RangeError(`traceModuleWgsl: triangleLeaves must be 'records' or 'indexed', got ${String(options.triangleLeaves)}`);
+    }
+    const packed = options.positionLayout === 'packed';
     return /* wgsl */ `${COMMON_WGSL}
 // Nodes and triangles are read as plain vec4s, so every load is one 16-byte
 // read whatever the backend makes of a struct with vec3 members.
 @group(${group}) @binding(${nodes}) var<storage, read> bvhTraceNodes: array<vec4f>;
-@group(${group}) @binding(${triangles}) var<storage, read> bvhTraceTriangles: array<vec4f>;
-@group(${group}) @binding(${topLevel}) var<storage, read> bvhTraceTopLevel: array<vec4u>;
+@group(${group}) @binding(${triangles}) var<storage, read> bvhTraceTriangles: array<${indexed ? 'vec4u' : 'vec4f'}>;
+@group(${group}) @binding(${topLevel}) var<storage, read> bvhTraceTopLevel: array<vec4u>;${
+        indexed ? `\n@group(${group}) @binding(${slot.firstBinding + 3}) var<storage, read> bvhTracePositions: array<${packed ? 'f32' : 'vec4f'}>;` : ''
+    }
 
 fn bvhMakeReference(index: u32, count: u32) -> u32 {
     return index | (count << BVH_REF_COUNT_SHIFT);
 }
 
 // ---- Loading mesh nodes and triangles -----------------------------------------
-
-const BVH_VEC4_PER_TRIANGLE: u32 = ${TRIANGLE_BYTES / 16}u;
 
 // Triangle flags bit 0: consult the triangle filter (bvhTrianglePasses;
 // trace/triangle-filter.ts).
@@ -473,13 +607,7 @@ fn bvhLoadMeshNode(nodeIndex: u32) -> BvhNode {
     );
 }
 
-fn bvhLoadTriangle(triangleIndex: u32) -> BvhTriangle {
-    let base = triangleIndex * BVH_VEC4_PER_TRIANGLE;
-    let a = bvhTraceTriangles[base];
-    let b = bvhTraceTriangles[base + 1u];
-    let c = bvhTraceTriangles[base + 2u];
-    return BvhTriangle(a.xyz, bitcast<u32>(a.w), b.xyz, bitcast<u32>(b.w), c.xyz, bitcast<u32>(c.w));
-}
+${indexed ? indexedLoadersWgsl(packed) : RECORD_LOADERS_WGSL}
 
 // ---- Loading from the top-level buffer ---------------------------------------
 
@@ -618,7 +746,7 @@ fn bvhFinishClosest(found: BvhHit, record: u32, slot: u32) -> BvhHit {
         return hit;
     }
     let instance = bvhLoadInstance(record);
-    let triangle = bvhLoadTriangle(slot);
+    let triangle = bvhLoadTriangle(slot, bvhMeshVertexBase(instance.triangleOffset));
     let merged = (instance.flags & BVH_INSTANCE_FLAG_MERGED) != 0u;
     var normal = cross(triangle.vertex1 - triangle.vertex0, triangle.vertex2 - triangle.vertex0);
     if (merged) {
@@ -628,7 +756,11 @@ fn bvhFinishClosest(found: BvhHit, record: u32, slot: u32) -> BvhHit {
     }
     let normalLength = length(normal);
     hit.normal = select(vec3f(0.0), normal / normalLength, normalLength > 0.0);
-    hit.material = bvhMaterialFromFlags(select(instance.flags, triangle.flags, merged));
+    var materialFlags = instance.flags;
+    if (merged) {
+        materialFlags = bvhMergedMaterialFlags(instance, triangle, slot);
+    }
+    hit.material = bvhMaterialFromFlags(materialFlags);
     return hit;
 }
 
@@ -951,6 +1083,10 @@ export interface BatchKernelOptions {
      * {@link HIT_RECORD_COMPACT_WORD}). Any-hit results are one u32 either way.
      */
     readonly hitNormal?: boolean;
+    /** The trace module's triangle format (`TraceModuleOptions.triangleLeaves`). Default `'records'`. */
+    readonly triangleLeaves?: TriangleLeaves;
+    /** Indexed only: `'vec4'` (the default) or `'packed'` positions. */
+    readonly positionLayout?: PositionLayout;
 }
 
 /** Bytes of the batch kernel's uniform (`BvhBatchParams`, group 1 binding 2, only with ray masks). Padded to 16. */
@@ -972,6 +1108,6 @@ export function batchKernelWgsl(mode: 'closest' | 'any', options: BatchKernelOpt
     }
     rejectOldPositionalCall('batchKernelWgsl', options);
     const rayMasks = options.rayMasks ?? true;
-    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks })}
+    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout })}
 ${batchEntryWgsl(mode, 1, rayMasks, options.hitNormal ?? true)}`;
 }

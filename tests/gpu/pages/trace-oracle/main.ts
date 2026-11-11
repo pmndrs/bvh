@@ -26,6 +26,18 @@
  *   reference is the case's own instanced scene, so hits must name the source
  *   instance, its triangle and its authored side. The hook cases also run
  *   merged (`[hooks-merged]`), with the filter flags in the merged geometry.
+ * - `indexed-*`, `merged-indexed-*`: indexed leaves (docs/design/indexed-leaves.md),
+ *   16-byte triangles read through the scene's positions buffer, with tinybvh,
+ *   the GPU LBVH (records converted) and H-PLOC (written on the GPU, checked by
+ *   `checkGpuLayout`) trees, `vec4` and `packed` positions, masks compiled out,
+ *   and `-weld` (a tolerance weld at 1e-6 before building). The hook cases also
+ *   run indexed (`[hooks]` names starting `indexed`).
+ * Every variant also runs the seam fixtures (`seamQuad` in cases.ts): split
+ * seams, every corner its own vertex with the same bits, must let nothing
+ * through; one-ulp seams leak in every format (the double-precision reference
+ * misses there too), and the indexed tinybvh variants must leak exactly where
+ * `watertight-tinybvh` does, ray for ray; the `-weld` variant must close them.
+ * The leaks are reported as `oneUlpSeamLeaks`.
  * The variants above trace through the masked batch kernel (the default) with
  * a mask of all ones. Except for `-compact`, each closest hit's material and
  * world normal (`BvhHit.material`, `BvhHit.normal`) are checked against the
@@ -46,6 +58,7 @@ import {
     assembleTraceScene,
     mergeStaticGeometry,
     TRIANGLE_FLAG_FILTER,
+    INDEXED_FLAG_FILTER,
     type MeshBvh,
     type MeshGeometry,
     type TraceSceneInstance,
@@ -61,7 +74,7 @@ import {
     type TraceSceneData,
 } from '../../../../src/trace/index.ts';
 import { type TracedHit } from '../../../../src/trace/oracle-compare.ts';
-import { createMeshLayoutBuilder, createTinyBvhBuilder, type MeshLayoutBuilder } from '../../../../src/index.ts';
+import { checkGpuLayout, createMeshLayoutBuilder, createTinyBvhBuilder, weldPositions, type MeshLayoutBuilder } from '../../../../src/index.ts';
 import { buildMeshBvhWithTinyBvh } from '../../../../src/trace/mesh-bvh-topology.ts';
 import { RAY_BYTES } from '../../../../src/trace/rays.ts';
 import { TraceBatchKernel, uploadTraceScene } from '../../../../src/trace/trace-gpu.ts';
@@ -101,7 +114,16 @@ interface OracleVariant {
     merged?: boolean;
     /** The batch kernel's `hitNormal`; default true. */
     hitNormal?: boolean;
+    /** The scene's and kernel's triangle format (docs/design/indexed-leaves.md); default records. */
+    triangleLeaves?: 'records' | 'indexed';
+    /** Indexed: the positions layout; default vec4. */
+    positionLayout?: 'vec4' | 'packed';
+    /** Weld each mesh's vertices within this distance before building (`weldPositions`); default 0, off. */
+    weldTolerance?: number;
 }
+
+/** The tolerance weld's distance in the `-weld` variant: far below the quads' 0.5 grid, far above an ulp at 2 (2.4e-7). */
+const SEAM_WELD_TOLERANCE = 1e-6;
 
 const VARIANTS: OracleVariant[] = [
     { name: 'watertight-tinybvh', treeSource: 'tinybvh' },
@@ -112,7 +134,21 @@ const VARIANTS: OracleVariant[] = [
     { name: 'watertight-tinybvh-compact', treeSource: 'tinybvh', hitNormal: false },
     { name: 'merged-tinybvh', treeSource: 'tinybvh', merged: true },
     { name: 'merged-hploc', treeSource: 'gpu-hploc', merged: true },
+    { name: 'indexed-tinybvh', treeSource: 'tinybvh', triangleLeaves: 'indexed' },
+    { name: 'indexed-tinybvh-packed', treeSource: 'tinybvh', triangleLeaves: 'indexed', positionLayout: 'packed' },
+    { name: 'indexed-tinybvh-nomasks', treeSource: 'tinybvh', triangleLeaves: 'indexed', rayMasks: false },
+    { name: 'indexed-tinybvh-weld', treeSource: 'tinybvh', triangleLeaves: 'indexed', weldTolerance: SEAM_WELD_TOLERANCE },
+    { name: 'indexed-lbvh', treeSource: 'gpu-lbvh', triangleLeaves: 'indexed' },
+    { name: 'indexed-hploc', treeSource: 'gpu-hploc', triangleLeaves: 'indexed' },
+    { name: 'merged-indexed-tinybvh', treeSource: 'tinybvh', merged: true, triangleLeaves: 'indexed' },
+    { name: 'merged-indexed-hploc', treeSource: 'gpu-hploc', merged: true, triangleLeaves: 'indexed', positionLayout: 'packed' },
 ];
+
+/** Variants whose one-ulp seam slips must equal `watertight-tinybvh`'s: the same trees and corner bits, the other format. */
+/** The hooks' indexed passes build their trees and scene as this variant does. */
+const INDEXED_HOOK_VARIANT: OracleVariant = { name: 'indexed-hooks', treeSource: 'tinybvh', triangleLeaves: 'indexed' };
+
+const ULP_SAME_AS_RECORDS = ['indexed-tinybvh', 'indexed-tinybvh-packed'];
 
 /** Rays per hook case and traced mask (hooks.ts); the reference runs once per mask. */
 const HOOK_SIZES = { randomRays: 8000, thinBoxRays: 1200 };
@@ -125,6 +161,9 @@ const TMBUILD_LEAF_SIZE = 4;
 
 /** Rays per shared-edge scene. Two scenes, so 2 million in total for each triangle test. */
 const DEFAULT_SHARED_EDGE_RAYS = 1_000_000;
+
+/** Rays per seam scene (split and one-ulp seams, plain and transformed). */
+const SEAM_RAYS = 200_000;
 
 /** Rays the CPU port of the walk traces per case, to report the stack depth it needs. */
 const STACK_PROBE_RAYS = 2000;
@@ -237,11 +276,24 @@ async function buildTrees(builder: MeshBvhBuilder, meshes: readonly MeshGeometry
     if (variant.treeSource === 'gpu-lbvh' || variant.treeSource === 'gpu-hploc') {
         const gpuBuilder = gpuBuilders.get(variant.treeSource);
         assert(gpuBuilder, `the ${variant.treeSource} builder was not made`);
-        const results = await gpuBuilder.buildLayouts(meshes);
+        const results = await gpuBuilder.buildLayouts(meshes, { triangleLeaves: variant.triangleLeaves });
         for (const result of results) assert(result.builtBy === variant.treeSource, `a mesh fell back to ${result.builtBy}: ${result.fallbackReason}`);
+        // GPU-written indexed triangles (H-PLOC natively; the LBVH's records converted) must pass the layout check.
+        if (variant.triangleLeaves === 'indexed') results.forEach((result, index) => assert(result.layout.triangleLeaves === 'indexed' && checkGpuLayout(result.layout, meshes[index]).length === 0, `${variant.name}: mesh ${index}'s indexed layout fails the check: ${checkGpuLayout(result.layout, meshes[index]).slice(0, 2).join('; ')}`));
         return results.map((result) => result.layout);
     }
-    return Promise.all(meshes.map((mesh) => builder.build(mesh)));
+    return Promise.all(meshes.map((mesh) => builder.build(mesh, { triangleLeaves: variant.triangleLeaves })));
+}
+
+/** The assembly options of a variant's format: indexed scenes take the geometry for their positions. */
+function formatOptions(variant: OracleVariant, geometries: readonly (MeshGeometry | null)[]) {
+    return variant.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const, positionLayout: variant.positionLayout, geometries } : {};
+}
+
+/** The variant's input meshes: welded within its tolerance, or as they are. */
+function variantMeshes(variant: OracleVariant, meshes: readonly MeshGeometry[]): readonly MeshGeometry[] {
+    const tolerance = variant.weldTolerance ?? 0;
+    return tolerance > 0 ? meshes.map((mesh) => weldPositions(mesh, { tolerance })) : meshes;
 }
 
 /**
@@ -266,17 +318,18 @@ async function buildMergedScene(builder: MeshBvhBuilder, meshes: readonly MeshGe
     const trees = await buildTrees(builder, [...needed.map((index) => meshes[index]), ...plan.groups.map((group) => group.geometry)], variant);
     const sourceTrees: (MeshBvh | null)[] = meshes.map(() => null);
     needed.forEach((index, at) => (sourceTrees[index] = trees[at]));
-    return assembleTraceScene(sourceTrees, instances, {}, { merged: { plan, meshes: trees.slice(needed.length) } });
+    return assembleTraceScene(sourceTrees, instances, {}, { merged: { plan, meshes: trees.slice(needed.length) }, ...formatOptions(variant, meshes) });
 }
 
 async function buildScene(builder: MeshBvhBuilder, oracleCase: OracleCase, variant: OracleVariant): Promise<BuiltScene> {
     const start = performance.now();
+    const meshes = variantMeshes(variant, oracleCase.meshes);
     if (variant.merged) {
-        const unshared = unsharedForMerge(oracleCase.meshes, oracleCase.instances);
+        const unshared = unsharedForMerge(meshes, oracleCase.instances);
         const data = await buildMergedScene(builder, unshared.meshes, unshared.instances, variant);
         return { data, buildMs: performance.now() - start };
     }
-    const data = assembleTraceScene(await buildTrees(builder, oracleCase.meshes, variant), oracleCase.instances);
+    const data = assembleTraceScene(await buildTrees(builder, meshes, variant), oracleCase.instances, {}, formatOptions(variant, meshes));
     return { data, buildMs: performance.now() - start };
 }
 
@@ -379,6 +432,8 @@ await runGpuTest(async ({ device, log }) => {
     for (const kind of ['gpu-lbvh', 'gpu-hploc'] as const) gpuBuilders.set(kind, await createMeshLayoutBuilder(device, { prefer: kind, label: `oracle ${kind}` }));
     const skipped: string[] = [];
     const materialHitsByVariant = new Map<string, number>();
+    const seamReports = new Map<string, SharedEdgeReport[]>();
+    const seamLeaks: Record<string, { slipped: number; slippedAny: number; referenceMisses: number }> = {};
     for (const variant of VARIANTS) {
         const gpuBuilder = variant.treeSource === 'gpu-lbvh' || variant.treeSource === 'gpu-hploc' ? gpuBuilders.get(variant.treeSource) : undefined;
         if (gpuBuilder && gpuBuilder.kind === 'tinybvh') {
@@ -386,7 +441,13 @@ await runGpuTest(async ({ device, log }) => {
             log(`[${variant.name}] skipped: ${gpuBuilder.fallbackReason}`);
             continue;
         }
-        const kernel = await TraceBatchKernel.create(device, { label: variant.name, rayMasks: variant.rayMasks ?? true, hitNormal: variant.hitNormal ?? true });
+        const kernel = await TraceBatchKernel.create(device, {
+            label: variant.name,
+            rayMasks: variant.rayMasks ?? true,
+            hitNormal: variant.hitNormal ?? true,
+            triangleLeaves: variant.triangleLeaves,
+            positionLayout: variant.positionLayout,
+        });
         const results = { cases: {} as Record<string, unknown>, sharedEdges: [] as SharedEdgeReport[] };
         byTest[variant.name] = results;
 
@@ -418,22 +479,55 @@ await runGpuTest(async ({ device, log }) => {
             );
             for (const failure of sharedEdgeFailures(report)) failures.push(`[${variant.name}] ${report.name}: ${failure}`);
         }
+
+        // Seams (indexed-leaves.md, section 2): split seams must hold in every format; one-ulp
+        // seams leak alike in both formats, and the tolerance weld closes them.
+        const seams: SharedEdgeReport[] = [];
+        for (const seam of ['split', 'ulp'] as const) {
+            for (const transformed of [false, true]) {
+                const report = await runSharedEdgeCase(device, kernel, builder, sharedEdgeCase(SEAM_RAYS, transformed, seam), variant);
+                seams.push(report);
+                log(`[${variant.name}] ${report.name}: ${report.slipped} of ${report.rays} rays slipped (${report.slippedAny} any-hit)`);
+                // Split seams hold everywhere. A one-ulp seam leaks (the double-precision reference
+                // misses there too), except through a tolerance weld, which must close it.
+                const welded = (variant.weldTolerance ?? 0) > 0;
+                if (seam === 'split') for (const failure of sharedEdgeFailures(report)) failures.push(`[${variant.name}] ${report.name}: ${failure}`);
+                else if (welded && report.slipped + report.slippedAny > 0) failures.push(`[${variant.name}] ${report.name}: ${report.slipped} (${report.slippedAny} any-hit) rays slipped through the welded seam`);
+                if (seam === 'ulp') seamLeaks[`${variant.name} ${report.name}`] = { slipped: report.slipped, slippedAny: report.slippedAny, referenceMisses: report.referenceMisses };
+            }
+        }
+        seamReports.set(variant.name, seams);
         kernel.destroy();
+    }
+    // The one-ulp seams must behave as with records: the same slips, ray for ray.
+    const recordSeams = seamReports.get('watertight-tinybvh');
+    for (const name of ULP_SAME_AS_RECORDS) {
+        const seams = seamReports.get(name);
+        if (!recordSeams || !seams) continue;
+        seams.forEach((report, index) => {
+            const expected = recordSeams[index];
+            if (report.slipped !== expected.slipped || report.slippedAny !== expected.slippedAny || report.firstSlippedRays.join() !== expected.firstSlippedRays.join()) {
+                failures.push(`[${name}] ${report.name}: ${report.slipped}/${report.slippedAny} slipped, records ${expected.slipped}/${expected.slippedAny}`);
+            }
+        });
     }
 
     // The hooks: triangle filters and instance masks, with ray masks on and off.
     const hooks: Record<string, unknown> = {};
-    for (const [rayMasks, merged] of [[true, false], [false, false], [true, true]] as const) {
+    for (const [rayMasks, merged, indexed] of [[true, false, false], [false, false, false], [true, true, false], [true, false, true], [false, false, true], [true, true, true]] as const) {
+        const format = indexed ? INDEXED_HOOK_VARIANT : VARIANTS[0];
         for (const hook of buildHookCases(HOOK_SIZES)) {
-            const kernel = await TraceBatchKernel.create(device, { label: hook.name, triangleFilter: hook.filterWgsl, rayMasks });
+            const kernel = await TraceBatchKernel.create(device, { label: hook.name, triangleFilter: hook.filterWgsl, rayMasks, triangleLeaves: format.triangleLeaves });
             let scene: TraceSceneData;
             let flagged: number;
             if (merged) {
                 const unshared = unsharedForMerge(hook.base.meshes, hook.base.instances, hook.flagged);
-                scene = await buildMergedScene(builder, unshared.meshes, unshared.instances, VARIANTS[0]);
-                flagged = new Uint32Array(scene.triangles).filter((word, at) => at % 12 === 7 && (word & TRIANGLE_FLAG_FILTER) !== 0).length;
+                scene = await buildMergedScene(builder, unshared.meshes, unshared.instances, format);
+                flagged = indexed
+                    ? new Uint32Array(scene.triangles).filter((word, at) => at % 4 === 3 && (word & INDEXED_FLAG_FILTER) !== 0).length
+                    : new Uint32Array(scene.triangles).filter((word, at) => at % 12 === 7 && (word & TRIANGLE_FLAG_FILTER) !== 0).length;
             } else {
-                scene = assembleTraceScene(await Promise.all(hook.base.meshes.map((mesh) => builder.build(mesh))), hook.base.instances);
+                scene = assembleTraceScene(await buildTrees(builder, hook.base.meshes, format), hook.base.instances, {}, formatOptions(format, hook.base.meshes));
                 flagged = writeHookFlags(scene, hook);
             }
             const buffers = uploadTraceScene(device, scene, hook.name);
@@ -441,7 +535,7 @@ await runGpuTest(async ({ device, log }) => {
                 for (const mask of hookMasks(hook, rayMasks)) {
                     const answers = await traceOnGpu(device, (encoder, batch) => kernel.encode(encoder, buffers, { ...batch, mask }), hook.base.rays);
                     const result = evaluateCase(hook.base, tracerAnswers(answers), await hookReferenceAnswers(hook, mask, rayMasks));
-                    const name = `${merged ? 'merged ' : ''}${hookPassName(hook, mask, rayMasks)}`;
+                    const name = `${indexed ? 'indexed ' : ''}${merged ? 'merged ' : ''}${hookPassName(hook, mask, rayMasks)}`;
                     hooks[name] = {
                         rays: result.rays,
                         flaggedTriangles: flagged,
@@ -477,6 +571,7 @@ await runGpuTest(async ({ device, log }) => {
         slippedTotals,
         byTest,
         hooks,
+        oneUlpSeamLeaks: seamLeaks,
         materialHits: Object.fromEntries(materialHitsByVariant),
         traceStorageBuffers: TRACE_MODULE_ENTRIES.length,
         batchKernelStorageBuffers: TRACE_MODULE_ENTRIES.length + 2,
