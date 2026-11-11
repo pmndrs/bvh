@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      # The pnpm version comes from "packageManager" in package.json.
+      - uses: pnpm/action-setup@v4.1.0
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      # Builds dist/ and runs scripts/verify-artifacts.mjs (fails if a licence header is lost).
+      - run: pnpm build
+      - name: The built package imports in Node
+        run: node -e "import('./dist/index.js').then(m => console.log(Object.keys(m).length + ' exports'))"
+
+  wasm:
+    name: tinybvh wasm reproduces (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: pnpm/action-setup@v4.1.0
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # native/build-wasm.ts clones emsdk into tools/emsdk (gitignored), installs the pinned
+      # Emscripten there, and refuses a folder at another commit. The key holds the pins.
+      - uses: actions/cache@v4.2.3
+        with:
+          path: tools/emsdk
+          key: emsdk-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/build-wasm.ts') }}
+      - run: pnpm bvh:wasm --check
+
+  gpu-swiftshader:
+    name: GPU pages (headless Chrome, SwiftShader)
+    runs-on: ubuntu-latest
+    # UNVERIFIED: written without a CI run. Whether the runner's Chrome exposes a
+    # SwiftShader WebGPU adapter with these flags, and whether the runner's preflight
+    # accepts it, is not yet known. Remove continue-on-error once it passes.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: pnpm/action-setup@v4.1.0
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: browser-actions/setup-chrome@v1.7.3
+        id: chrome
+        with:
+          chrome-version: stable
+      - name: Asset-free correctness pages
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          # tests/gpu/chrome.ts appends these to Chrome's flags. SwiftShader has no
+          # `subgroups`, so bvh-lbvh-fallback exercises the tinybvh fallback.
+          BVH_CHROME_FLAGS: --no-sandbox --use-webgpu-adapter=swiftshader --use-angle=swiftshader --enable-unsafe-swiftshader
+        run: pnpm test:gpu:page bvh-lbvh-fallback,trace-inline,trace-oracle

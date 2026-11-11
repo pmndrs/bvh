@@ -86,6 +86,9 @@ export function buildChromeArgs(options: ChromeLaunchOptions): string[] {
     ];
     if (options.luid) args.push(`--use-adapter-luid=${options.luid.high},${options.luid.low}`);
     if (options.withoutGpu) args.push('--disable-gpu');
+    // CI on a machine without a GPU sets e.g. "--no-sandbox --use-webgpu-adapter=swiftshader --use-angle=swiftshader --enable-unsafe-swiftshader".
+    const extra = process.env.BVH_CHROME_FLAGS?.trim();
+    if (extra) args.push(...extra.split(/\s+/));
     args.push('about:blank');
     return args;
 }
