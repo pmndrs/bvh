@@ -75,6 +75,11 @@ export class GrowableStorage {
         this.allocator.release(offset, count);
     }
 
+    /** Marks a free range in use again (undoing a {@link release} when a plan fails). */
+    reserve(offset: number, count: number): void {
+        this.allocator.reserve(offset, count);
+    }
+
     /**
      * Grows so that `extraUnits` more units fit after the current high-water
      * mark, copying `resident` ranges into the new buffer. Throws a
@@ -86,14 +91,7 @@ export class GrowableStorage {
      * without another growth; a growth that doubles has room anyway.
      */
     grow(encoder: GPUCommandEncoder, extraUnits: number, resident: readonly ResidentRange[], headroom = 0): void {
-        const limits = this.device.limits;
-        const limitBytes = Math.min(limits.maxStorageBufferBindingSize, limits.maxBufferSize);
-        const limitUnits = Math.floor(limitBytes / this.unitBytes);
-        const minimumUnits = this.allocator.capacityToFit(extraUnits);
-        if (minimumUnits > limitUnits) {
-            const limit = limits.maxStorageBufferBindingSize <= limits.maxBufferSize ? 'maxStorageBufferBindingSize' : 'maxBufferSize';
-            throw new RangeError(`@pmndrs/bvh: the ${this.label} buffer needs ${limit} >= ${minimumUnits * this.unitBytes} bytes, the device allows ${limitBytes}`);
-        }
+        const { limitUnits, minimumUnits } = this.checkGrowth(extraUnits);
         // Doubling keeps reallocations logarithmic while a scene loads.
         const units = Math.min(limitUnits, Math.max(Math.ceil(minimumUnits * (1 + headroom)), this.allocator.capacity * 2));
         const buffer = this.createBuffer(units);
@@ -121,6 +119,22 @@ export class GrowableStorage {
         this.current = buffer;
         this.allocator.grow(units);
         this.version++;
+    }
+
+    /**
+     * Throws the `RangeError` {@link grow} would throw for `extraUnits`, without
+     * growing: a caller that grows two storages checks both first.
+     */
+    checkGrowth(extraUnits: number): { readonly limitUnits: number; readonly minimumUnits: number } {
+        const limits = this.device.limits;
+        const limitBytes = Math.min(limits.maxStorageBufferBindingSize, limits.maxBufferSize);
+        const limitUnits = Math.floor(limitBytes / this.unitBytes);
+        const minimumUnits = this.allocator.capacityToFit(extraUnits);
+        if (minimumUnits > limitUnits) {
+            const limit = limits.maxStorageBufferBindingSize <= limits.maxBufferSize ? 'maxStorageBufferBindingSize' : 'maxBufferSize';
+            throw new RangeError(`@pmndrs/bvh: the ${this.label} buffer needs ${limit} >= ${minimumUnits * this.unitBytes} bytes, the device allows ${limitBytes}`);
+        }
+        return { limitUnits, minimumUnits };
     }
 
     /**

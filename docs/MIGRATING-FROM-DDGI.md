@@ -172,3 +172,9 @@ Off by default, and nothing changes when it stays off. It targets the surface-ra
 
 The GPU top level's gather reads its own instance table, not the scene copy: hits name `instanceIndex` (ddgi passes its scene slot). ddgi's install hook for triangle flags (`requestTriangleFlags`) has no twin yet: write flags before the build (`MeshInput.triangleFlags`) or after placement on `meshStatus(mesh).placement`.
 
+
+Three rules differ from ddgi's:
+
+- **When `update` throws.** A storage limit (node or triangle buffer) or a failed tinybvh build is thrown before anything is recorded: the encoder is untouched and the scene unchanged, so the frame can be dropped. A top-level error (trace stack, a limit) comes after the frame was recorded: submit the encoder anyway.
+- **Merged-away meshes.** With `mergeStaticInstances`, a mesh that only merged instances used has no tree and no geometry after the first update; `addInstance` of it throws. Add the mesh again for new instances.
+- **`gpuMaxDepth` covers tinybvh's trees too.** A deeper tinybvh tree is refused (with `fallbackReason`), and the mesh keeps its GPU tree, if any.

@@ -16,7 +16,8 @@
 import { describe, expect, it } from 'vitest';
 import { createFakeGpu, type FakeBinding, type FakeBuffer, type FakeGpu } from '../../tests/support/fake-gpu.ts';
 import { createCpuTracer, type CpuHit } from '../trace/cpu-traversal.ts';
-import { TOP_HEADER_WORD, TRIANGLE_WORD, TRIANGLE_WORDS } from '../trace/layout.ts';
+import { INSTANCE_FLAG, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS, TRIANGLE_WORD, TRIANGLE_WORDS } from '../trace/layout.ts';
+import { MERGED_INSTANCE_INDEX } from '../trace/static-merge.ts';
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
 import type { MeshGeometry } from '../trace/mesh-bvh.ts';
 import { createRandom, randomAffine, randomRays, tessellatedQuad } from '../trace/oracle-fixtures.ts';
@@ -27,6 +28,7 @@ import { GpuTreeOutputs, type FirstTreeBuilder, type GpuTreeBatchResult, type Gp
 import { MERGED_SOURCE_WORDS } from './merged-identity-gpu.ts';
 import { SceneTrees, type SceneInstanceDescriptor, type SceneTreeEvent, type SceneTreesOptions } from './scene-trees.ts';
 import type { GpuMeshTreeRange } from '../mesh-input.ts';
+import { gatherStandIn } from '../../tests/support/top-level-gather.ts';
 
 /** The merged-identity WGSL, line by line on the CPU. */
 function mergedIdentityStandIn(bindings: ReadonlyMap<number, FakeBinding>): void {
@@ -76,8 +78,9 @@ class StandInGpuBuilder implements FirstTreeBuilder {
         return this.pending.length;
     }
 
-    async finishBatch(): Promise<void> {
-        const batch = this.pending.shift();
+    /** Answers the oldest batch waiting, or the one at `index`. */
+    async finishBatch(index = 0): Promise<void> {
+        const batch = this.pending.splice(index, 1)[0];
         if (!batch) throw new Error('no batch is waiting');
         const trees = await Promise.all(batch.members.map((member) => buildMeshBvhAsync(member.geometry, { maxLeafPrimitives: 1 })));
         // As H-PLOC's outputs: room for one node per triangle, the used nodes packed at the front.
@@ -302,12 +305,15 @@ describe('SceneTrees', () => {
         scene.dispose();
     });
 
-    it('leaves a refused or too-deep GPU tree to tinybvh and says why', async () => {
-        const { scene, stand, frame } = await setUp({ holdRefinements: true, gpuMaxDepth: 2 });
+    it('leaves a refused or too-deep GPU tree to tinybvh, refuses a too-deep tinybvh tree too, and says why', async () => {
+        // Depths (levels): quad(8) is 6 from tinybvh and 7 from the stand-in (one triangle a leaf); quad(16) is 8 and 9.
+        const warnings: string[] = [];
+        const { scene, stand, frame } = await setUp({ holdRefinements: true, gpuMaxDepth: 6, warn: (message) => warnings.push(message) });
         const big = scene.addMesh(tessellatedQuad(8, 1));
         const small = scene.addMesh(tessellatedQuad(1, 1));
         const refused = scene.addMesh(tessellatedQuad(2, 1));
-        for (const mesh of [big, small, refused]) scene.addInstance({ mesh, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] });
+        const tooDeep = scene.addMesh(tessellatedQuad(16, 1));
+        for (const mesh of [big, small, refused, tooDeep]) scene.addInstance({ mesh, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] });
         stand!.refuse.add(refused);
         frame();
         await stand!.finishBatch();
@@ -317,6 +323,12 @@ describe('SceneTrees', () => {
         expect(scene.meshStatus(big).builtBy).toBe('tinybvh');
         expect(scene.meshStatus(big).fallbackReason).toMatch(/gpuMaxDepth/);
         expect(scene.meshStatus(refused).fallbackReason).toBe('refused by the test');
+        // Neither tree of the deepest mesh is placed, so no frame can need more stack than gpuMaxDepth allows.
+        expect(scene.meshStatus(tooDeep).builtBy).toBeNull();
+        expect(scene.meshStatus(tooDeep).fallbackReason).toMatch(/tinybvh's tree is 8 levels deep, more than gpuMaxDepth \(6\)/);
+        expect(warnings.some((message) => /tinybvh's tree is 8 levels deep/.test(message))).toBe(true);
+        expect(scene.building).toBe(false);
+        frame();
         scene.dispose();
     });
 
@@ -398,5 +410,210 @@ describe('SceneTrees', () => {
         plain.scene.setPose(mesh, { positionBuffer: plain.gpu.device.createBuffer({ size: 64, usage: 0x80 }), vertexCount: 9 });
         expect(plain.scene.deformingCounts.posesSkipped).toBe(1);
         plain.scene.dispose();
+    });
+    it('throws when a merged-away mesh gets a new instance', async () => {
+        const { scene, frame } = await setUp({ stand: false, mergeStaticInstances: true });
+        const { meshes } = addAll(scene, ...(({ geometries, instances }) => [geometries, instances] as const)(sceneOf(3)));
+        frame();
+        expect(scene.meshStatus(meshes[0]).mergedInto).toBe(0);
+        expect(() => scene.addInstance({ mesh: meshes[0], objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] })).toThrow(new RegExp(`mesh ${meshes[0]} was merged away.*add the mesh again`));
+        expect(scene.counts.instances).toBe(3);
+        scene.dispose();
+    });
+
+    it('keeps no tree arrays on the heap: placed trees hold numbers only', async () => {
+        const { scene, stand, frame } = await setUp({ holdRefinements: true });
+        const { geometries, instances } = sceneOf(3);
+        addAll(scene, geometries, instances);
+        frame();
+        await stand!.finishBatch();
+        frame();
+        await scene.whenRefined();
+        scene.releaseRefinements();
+        frame();
+        const placed = (scene as unknown as { placed: Map<number, object> }).placed;
+        expect(placed.size).toBe(3);
+        const buffers: string[] = [];
+        const walk = (value: unknown, path: string, seen: Set<object>): void => {
+            if (typeof value !== 'object' || value === null || seen.has(value)) return;
+            seen.add(value);
+            if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+                buffers.push(path);
+                return;
+            }
+            for (const [key, child] of Object.entries(value)) walk(child, `${path}.${key}`, seen);
+        };
+        for (const [slot, tree] of placed) walk(tree, `placed[${slot}]`, new Set());
+        expect(buffers).toEqual([]);
+        scene.dispose();
+    });
+
+    it('reuses removed instance slots on the CPU top level', async () => {
+        const { scene, frame } = await setUp({ stand: false });
+        const mesh = scene.addMesh(tessellatedQuad(2, 1));
+        const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+        const first = scene.addInstance({ mesh, objectToWorld: identity });
+        const second = scene.addInstance({ mesh, objectToWorld: identity });
+        frame();
+        scene.removeInstance(first);
+        frame();
+        expect(scene.addInstance({ mesh, objectToWorld: identity })).toBe(first);
+        expect(scene.addInstance({ mesh, objectToWorld: identity })).toBe(second + 1);
+        scene.dispose();
+    });
+
+    it('adopt: reports the tree an adopted one replaced', async () => {
+        // A drift rebuild's batch adopted over the tree it replaces (started by hand: the fake GPU never reads drift back).
+        const { scene, stand, frame, events } = await setUp({ holdRefinements: true, gpuTreeOutputs: 'adopt' });
+        const mesh = scene.addMesh(tessellatedQuad(3, 1));
+        scene.addInstance({ mesh, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] });
+        frame();
+        await stand!.finishBatch();
+        frame();
+        expect(events.map((event) => event.replaced)).toEqual([null]);
+        const internal = scene as unknown as { startGpuBuilds(builder: unknown, requests: GpuTreeRequest[], kind: { readLayouts: boolean; rebuild: boolean }): boolean };
+        internal.startGpuBuilds(stand, [{ slot: mesh, generation: 1, geometry: tessellatedQuad(3, 1) }], { readLayouts: false, rebuild: true });
+        await stand!.finishBatch();
+        frame();
+        expect(events.map((event) => [event.builtBy, event.replaced])).toEqual([['gpu', null], ['gpu', 'gpu']]);
+        scene.dispose();
+    });
+
+    it("adopt: a deforming mesh's batch that finishes first waits for the main load batch, which is adopted", async () => {
+        const gpu = createFakeGpu({}, { features: ['subgroups'], kernels: { bvhMergedIdentity: mergedIdentityStandIn } });
+        const builder = new StandInGpuBuilder(gpu.device);
+        const deforming = await SceneTrees.create(gpu.device, { firstTreeBuilder: builder, topLevel: 'cpu', gpuTreeOutputs: 'adopt', holdRefinements: true });
+        const tick = () => {
+            const encoder = gpu.createEncoder();
+            deforming.update(encoder);
+            gpu.submit(encoder);
+        };
+        const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+        const cloth = deforming.addMesh(tessellatedQuad(2, 1), { deforming: true });
+        const rock = deforming.addMesh(tessellatedQuad(6, 1));
+        deforming.addInstance({ mesh: cloth, objectToWorld: identity });
+        deforming.addInstance({ mesh: rock, objectToWorld: identity });
+        tick();
+        expect(builder.requests.map((batch) => batch.map((request) => request.slot))).toEqual([[rock], [cloth]]);
+        await builder.finishBatch(1);
+        tick();
+        expect(deforming.meshStatus(cloth).builtBy).toBeNull();
+        expect(deforming.building).toBe(true);
+        await builder.finishBatch();
+        tick();
+        const [, mainNodes] = gpu.buffers.filter((buffer) => buffer.label === 'stand-in nodes');
+        expect(deforming.buffers.nodes === (mainNodes as unknown as GPUBuffer)).toBe(true);
+        expect(deforming.meshStatus(rock).builtBy).toBe('gpu');
+        tick();
+        expect(deforming.meshStatus(cloth).builtBy).toBe('gpu');
+        deforming.dispose();
+    });
+
+    it('throws before recording anything when a storage would pass a device limit, so a frame that is not submitted loses nothing', async () => {
+        // Nodes may grow to 128 KB, triangles can't pass 200 KB: the big mesh needs 240 KB of triangles.
+        const gpu = createFakeGpu({ maxStorageBufferBindingSize: 200 * 1024 });
+        const scene = await SceneTrees.create(gpu.device, { gpuFirstTrees: false });
+        const frame = () => {
+            const encoder = gpu.createEncoder();
+            scene.update(encoder);
+            gpu.submit(encoder);
+        };
+        const random = createRandom(5);
+        const small = tessellatedQuad(4, 1);
+        const first: Instance = { mesh: scene.addMesh(small), meshIndex: 0, instanceIndex: 0, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] };
+        scene.addInstance(first);
+        frame();
+        await scene.whenRefined();
+        frame();
+        const expected = await reference([small], [first]);
+        const rays = randomRays(random, 300, [-2, -2, -2, 2, 2, 2], 1);
+        expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+
+        const big = tessellatedQuad(50, 1);
+        scene.addInstance({ mesh: scene.addMesh(big), instanceIndex: 1, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 5, 1] });
+        frame();
+        await scene.whenRefined();
+        const version = scene.version;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const encoder = gpu.createEncoder();
+            // The caller drops the frame: no submit.
+            expect(() => scene.update(encoder)).toThrow(/trace triangles buffer needs maxStorageBufferBindingSize/);
+            expect((encoder as unknown as { commands: unknown[] }).commands).toEqual([]);
+        }
+        expect(scene.version).toBe(version);
+        expect(scene.memory.retired).toBe(0);
+        expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+        scene.dispose();
+    });
+
+    it('with the GPU top level (fake GPU, gather stand-in): mesh table, records, merged records and slot reuse', async () => {
+        const gpu = createFakeGpu({}, { features: ['subgroups'], kernels: { bvhTopLevelGather: gatherStandIn } });
+        const scene = await SceneTrees.create(gpu.device, { gpuFirstTrees: false, mergeStaticInstances: true });
+        expect(scene.topLevelPath).toBe('gpu');
+        const frame = () => {
+            const encoder = gpu.createEncoder();
+            scene.update(encoder);
+            gpu.submit(encoder);
+        };
+        const settle = async () => {
+            frame();
+            await scene.whenRefined();
+            frame();
+            await scene.whenBuilt();
+            frame();
+        };
+        const { geometries, instances } = sceneOf(4);
+        // Records by instance index: [root node offset, triangle offset]. The refit doesn't run here, so the top level's boxes aren't checked (the GPU pages trace it).
+        const records = () => {
+            const top = readScene(scene).topLevel;
+            const words = new Uint32Array(top.buffer);
+            return new Map(
+                Array.from({ length: top.instanceCount }, (_, record) => {
+                    const base = TOP_LEVEL_HEADER_WORDS + record * INSTANCE_RECORD_WORDS;
+                    return [words[base + INSTANCE_WORD.instanceIndex], { offsets: [words[base + INSTANCE_WORD.rootNodeOffset], words[base + INSTANCE_WORD.triangleOffset]], flags: words[base + INSTANCE_WORD.flags] }] as const;
+                }),
+            );
+        };
+        const offsetsOf = (mesh: number) => {
+            const placement = scene.meshStatus(mesh).placement!;
+            return [placement.nodeOffset, placement.triangleOffset];
+        };
+        // Meshes 0-1 static (merged into one group), 2-3 dynamic.
+        const live: Instance[] = instances.map((instance, index) => ({ ...instance, static: index < 2 }));
+        const { meshes, handles } = addAll(scene, geometries, live);
+        // A mesh with no instances: placed, but no frame counts its depth.
+        const unused = scene.addMesh(tessellatedQuad(2, 1));
+        await settle();
+        expect(scene.counts.mergedGroups).toBe(1);
+        expect(scene.topLevelInstanceCount).toBe(3);
+        const first = records();
+        expect([...first.keys()].sort()).toEqual([102, 103, MERGED_INSTANCE_INDEX]);
+        expect(first.get(102)!.offsets).toEqual(offsetsOf(meshes[2]));
+        expect(first.get(103)!.offsets).toEqual(offsetsOf(meshes[3]));
+        const group = scene.groupStatus(0).placement!;
+        expect(first.get(MERGED_INSTANCE_INDEX)!.offsets).toEqual([group.nodeOffset, group.triangleOffset]);
+        expect(first.get(MERGED_INSTANCE_INDEX)!.flags & INSTANCE_FLAG.merged).toBe(INSTANCE_FLAG.merged);
+        // The mesh table holds each placed tree's offsets.
+        const table = new Uint32Array((((scene as unknown as { gpuTopLevel: { meshTable: GPUBuffer } }).gpuTopLevel.meshTable) as unknown as FakeBuffer).bytes.buffer);
+        for (const mesh of [meshes[2], meshes[3]]) {
+            const placement = scene.meshStatus(mesh).placement!;
+            expect([table[mesh * 8 + 3], table[mesh * 8 + 7]]).toEqual([placement.nodeOffset, placement.triangleOffset]);
+        }
+        // An unused mesh's depth never reaches the stack check.
+        const placed = (scene as unknown as { placed: Map<number, { maxDepth: number }> }).placed;
+        placed.set(unused, { ...placed.get(unused)!, maxDepth: 63 });
+        frame();
+
+        // A removed instance's slot is reused by the next one.
+        scene.removeInstance(handles[3]);
+        await settle();
+        const again: Instance = { ...live[3], instanceIndex: 400 };
+        expect(scene.addInstance({ ...again, mesh: meshes[3] })).toBe(handles[3]);
+        await settle();
+        expect(scene.topLevelInstanceCount).toBe(3);
+        const after = records();
+        expect([...after.keys()].sort()).toEqual([102, 400, MERGED_INSTANCE_INDEX]);
+        expect(after.get(400)!.offsets).toEqual(offsetsOf(meshes[3]));
+        scene.dispose();
     });
 });

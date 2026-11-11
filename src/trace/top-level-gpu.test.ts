@@ -7,7 +7,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { createFakeGpu, type FakeBinding, type FakeBuffer } from '../../tests/support/fake-gpu.ts';
+import { createFakeGpu, type FakeBuffer } from '../../tests/support/fake-gpu.ts';
+import { gatherStandIn } from '../../tests/support/top-level-gather.ts';
 import { INSTANCE_FLAG, INSTANCE_MASK_SHIFT, MATERIAL_SHIFT, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS } from './layout.ts';
 import { createRandom, randomAffine } from './oracle-fixtures.ts';
 import { MERGED_INSTANCE_INDEX } from './static-merge.ts';
@@ -17,43 +18,10 @@ import {
     packTopLevelInstance,
     TOP_LEVEL_INSTANCE_ENTRY_WORD,
     TOP_LEVEL_INSTANCE_ENTRY_WORDS,
-    TOP_LEVEL_MESH_ABSENT,
-    TOP_LEVEL_MESH_ENTRY_WORDS,
     topLevelGatherWgsl,
 } from './top-level-gpu.ts';
 
 const BOUNDS = [-1, -0.5, -0.25, 1, 0.5, 0.25];
-
-/** The gather's WGSL, line by line on the CPU: what the fake device runs for `bvhTopLevelGather`. */
-function gatherStandIn(bindings: ReadonlyMap<number, FakeBinding>): void {
-    const words = (binding: number) => new Uint32Array(bindings.get(binding)!.buffer.bytes.buffer);
-    const topLevel = words(0);
-    const meshes = words(1);
-    const recordSlots = words(2);
-    const boxes = new Float32Array(bindings.get(3)!.buffer.bytes.buffer);
-    const [recordCount, meshCapacity, instanceCapacity] = words(4);
-    const instances = words(5);
-    const entry = TOP_LEVEL_INSTANCE_ENTRY_WORD;
-    for (let record = 0; record < recordCount; record++) {
-        const slot = recordSlots[record];
-        const base = TOP_LEVEL_HEADER_WORDS + record * INSTANCE_RECORD_WORDS;
-        const at = slot * TOP_LEVEL_INSTANCE_ENTRY_WORDS;
-        const ids = slot < instanceCapacity ? instances.subarray(at + entry.meshSlot, at + entry.meshSlot + 4) : new Uint32Array(4);
-        let traced = slot < instanceCapacity && ids[3] !== 0 && (ids[2] & 3) === 3 && ids[0] < meshCapacity;
-        if (traced) traced = meshes[ids[0] * TOP_LEVEL_MESH_ENTRY_WORDS + 3] !== TOP_LEVEL_MESH_ABSENT;
-        if (!traced) {
-            topLevel.fill(0, base, base + INSTANCE_RECORD_WORDS);
-            topLevel[base + INSTANCE_WORD.instanceIndex] = ids[1];
-            boxes.fill(0, record * 8, record * 8 + 8);
-            continue;
-        }
-        topLevel.set(instances.subarray(at + entry.worldToObjectRow0, at + entry.worldToObjectRow0 + 12), base);
-        topLevel[base + INSTANCE_WORD.rootNodeOffset] = meshes[ids[0] * TOP_LEVEL_MESH_ENTRY_WORDS + 3];
-        topLevel[base + INSTANCE_WORD.triangleOffset] = meshes[ids[0] * TOP_LEVEL_MESH_ENTRY_WORDS + 7];
-        topLevel[base + INSTANCE_WORD.instanceIndex] = ids[1];
-        topLevel[base + INSTANCE_WORD.flags] = ((ids[2] & ~3) | 3) >>> 0;
-    }
-}
 
 function setUp(options: { kernels?: boolean } = {}) {
     const gpu = createFakeGpu({}, { features: ['subgroups'], kernels: options.kernels === false ? {} : { bvhTopLevelGather: gatherStandIn } });

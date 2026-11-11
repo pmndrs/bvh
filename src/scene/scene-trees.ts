@@ -43,7 +43,10 @@
  *   or into the batch's spare node room. tinybvh trees that arrive before the
  *   load batch wait for it (so the buffers are still empty when it comes).
  *   Peak is about the outputs alone; the node buffer keeps the batch's size
- *   (one node per triangle) after the swaps.
+ *   (one node per triangle) after the swaps. A deforming mesh's own batch
+ *   (built apart, it reads its layout back) waits while the main load batch
+ *   builds, so the main one is adopted; trees that arrive with the adopted
+ *   batch are placed into its buffers at the next update.
  *
  * Call {@link SceneTrees.update} once per frame, before anything traces, with
  * the frame's encoder; it records copies and passes, and the caller submits.
@@ -71,7 +74,7 @@ import type { TraceSceneBuffers } from '../trace/trace-gpu.ts';
 import { countTriangles } from '../trace/triangle-packing.ts';
 import { createBvhWorkerPool, type BvhWorkerPool, type BvhWorkerPoolOptions } from '../worker/pool.ts';
 import { GpuFirstTrees, type FirstTreeBuilder, type GpuBuiltTree, type GpuTreeBatchResult, type GpuTreeOutputs, type GpuTreeRequest } from './gpu-first-trees.ts';
-import { GrowableStorage, type ResidentRange } from './growable-storage.ts';
+import { GrowableStorage } from './growable-storage.ts';
 import { GpuMergedIdentity } from './merged-identity-gpu.ts';
 
 /**
@@ -124,7 +127,11 @@ export interface SceneTreesOptions {
      * tinybvh's. For tools that check a scene mid-swap. Default false.
      */
     readonly holdRefinements?: boolean;
-    /** GPU trees deeper than this are refused, and the mesh waits for tinybvh. Default {@link GPU_TREE_MAX_DEPTH}. */
+    /**
+     * Trees deeper than this are refused, with a `fallbackReason`: a GPU tree leaves the mesh to tinybvh, a tinybvh
+     * tree leaves it on the tree it has (or none). Default {@link GPU_TREE_MAX_DEPTH}, which keeps every placed tree
+     * within the trace stack.
+     */
     readonly gpuMaxDepth?: number;
     /** `'auto'` (default): the GPU top level with subgroups, the CPU one without. `'cpu'`: always the CPU top level. */
     readonly topLevel?: 'auto' | 'cpu';
@@ -248,13 +255,14 @@ export interface SceneInstanceChange {
     readonly material?: number | null;
 }
 
+/** Where a mesh's tree sits. Numbers only: it must never hold a tree's arrays (they would stay on the heap). */
 interface PlacedTree {
     readonly nodeOffset: number;
     readonly nodeCount: number;
     readonly triangleOffset: number;
     readonly triangleCount: number;
     readonly maxDepth: number;
-    readonly bounds: Float32Array;
+    readonly bounds: readonly number[];
     readonly source: TreeBuilder;
     readonly generation: number;
 }
@@ -605,6 +613,12 @@ export class SceneTrees {
         this.checkLive();
         const mesh = this.meshes.get(descriptor.mesh);
         if (!mesh || mesh.group >= 0) throw new RangeError(`SceneTrees.addInstance: no mesh ${descriptor.mesh}`);
+        if (mesh.mergedInto !== null) {
+            throw new RangeError(
+                `SceneTrees.addInstance: mesh ${descriptor.mesh} was merged away into static group ${mesh.mergedInto} (only merged instances used it, so its geometry was dropped at the first update); ` +
+                    'add the mesh again with addMesh for new instances, or turn mergeStaticInstances off',
+            );
+        }
         const slot = this.instanceSlots.take();
         const mask = checkInstanceMask(descriptor.mask, descriptor.instanceIndex ?? slot);
         checkMaterial(descriptor.material);
@@ -839,9 +853,20 @@ export class SceneTrees {
      * Brings the buffers up to date: starts builds for meshes added since the
      * last update, places trees that arrived (writes, and copies recorded in
      * `encoder`), and brings the top level up to date. Call once per frame
-     * before anything traces; the caller submits `encoder`. Throws (after
-     * leaving everything consistent) if a buffer would pass a device limit or
-     * a build failed.
+     * before anything traces; the caller submits `encoder`.
+     *
+     * Throws in two ways:
+     *
+     * - **Before recording anything**: a tree that needs the node or triangle
+     *   buffer past a device limit (both growths are checked before either
+     *   happens; the trees stay queued, so the next update throws again), or a
+     *   tinybvh build that failed (reported once). The encoder is untouched and
+     *   the scene is as it was: the caller may drop the frame.
+     * - **After recording the frame** (`RangeError`s of the top level: one too
+     *   deep for the trace stack, or past a device limit). The frame's tree
+     *   copies, refits and growth copies are in `encoder`, and the buffers they
+     *   replace are destroyed at the next update: **submit the encoder anyway**,
+     *   or the scene's buffers hold empty trees.
      */
     update(encoder: GPUCommandEncoder): void {
         this.checkLive();
@@ -863,16 +888,18 @@ export class SceneTrees {
             this.startBuilds(this.newMeshes.splice(0));
         }
 
-        let failure: unknown = null;
+        // Errors before anything is recorded: the frame's encoder is untouched, the scene as it was.
+        if (this.buildFailure) {
+            const failure = this.buildFailure;
+            this.buildFailure = null;
+            throw failure;
+        }
         const arrived = this.takeArrived();
         if (arrived.length > 0) {
-            try {
-                this.placeTrees(encoder, arrived);
-            } catch (error) {
-                failure = error;
-            }
+            this.placeTrees(encoder, arrived);
             this.cpuTopLevelStale = true;
         }
+        let failure: unknown = null;
         // Poses and trees placed above, refit before anything traces; then a drift rebuild if one is due.
         this.deforming?.encode(encoder, { nodes: this.nodes.buffer, triangles: this.triangles.buffer }, this.updates);
         this.startDriftRebuild();
@@ -884,10 +911,6 @@ export class SceneTrees {
         }
         this.noteTimeline();
         this.samplePeak();
-        if (failure === null && this.buildFailure) {
-            failure = this.buildFailure;
-            this.buildFailure = null;
-        }
         if (failure !== null) throw failure;
     }
 
@@ -1082,6 +1105,13 @@ export class SceneTrees {
             const current = this.disposed ? undefined : this.currentState(state.slot, generation);
             if (current) {
                 current.abort = null;
+                if (bvh && bvh.maxDepth > this.gpuMaxDepth) {
+                    // Refused like a too-deep GPU tree: the mesh keeps the tree it has (or gets none), and the trace stack stays safe.
+                    const reason = `tinybvh's tree is ${bvh.maxDepth} levels deep, more than gpuMaxDepth (${this.gpuMaxDepth})`;
+                    current.fallbackReason = current.fallbackReason ? `${current.fallbackReason}; ${reason}` : reason;
+                    this.warn(`@pmndrs/bvh: ${reason}, so it is not used`);
+                    bvh = null;
+                }
                 current.tinybvh = bvh ? 'built' : 'failed';
                 if (bvh) this.arrived.push({ source: 'tinybvh', slot: state.slot, generation, bvh });
             }
@@ -1110,12 +1140,21 @@ export class SceneTrees {
             if (state.mergedInto !== null || (state.group < 0 && state.users === 0)) continue;
             if (this.placed.has(state.slot)) continue;
             // An arrived tree counts (it is placed at the next update), except a tinybvh tree that waits for the GPU's.
-            const waitsForGpu = state.gpu === 'building' && (this.holdsRefinement(state.slot) || (this.gpuTreeOutputs === 'adopt' && this.placed.size === 0));
-            const arrived = this.arrived.some((tree) => tree.slot === state.slot && tree.generation === state.generation && (tree.source === 'gpu' || !waitsForGpu));
+            const adoptionPending = this.gpuTreeOutputs === 'adopt' && this.placed.size === 0;
+            const loadBatchBuilding = adoptionPending && this.loadBatchBuilding();
+            const waitsForGpu = (state.gpu === 'building' && this.holdsRefinement(state.slot)) || (adoptionPending && (state.gpu === 'building' || loadBatchBuilding));
+            const gpuWaits = loadBatchBuilding && (this.deforming?.has(state.slot) ?? false);
+            const arrived = this.arrived.some((tree) => tree.slot === state.slot && tree.generation === state.generation && (tree.source === 'gpu' ? !gpuWaits : !waitsForGpu));
             if (arrived) continue;
             if (state.gpu === 'building' || state.tinybvh === 'building') waiting++;
         }
         return waiting;
+    }
+
+    /** A first-tree GPU build of a mesh that doesn't deform (the main load batch, for adoption) is still running. */
+    private loadBatchBuilding(): boolean {
+        for (const state of this.meshes.values()) if (state.gpu === 'building' && !(this.deforming?.has(state.slot) ?? false)) return true;
+        return false;
     }
 
     private notifyWaiters(): void {
@@ -1129,8 +1168,9 @@ export class SceneTrees {
      * dropped: it would only be worse. Held tinybvh trees (`holdRefinements`)
      * wait while the mesh's GPU build runs or would replace its GPU tree. With
      * `gpuTreeOutputs: 'adopt'`, tinybvh trees also wait while nothing is placed
-     * and the mesh's GPU build is running, so the load batch finds the
-     * buffers empty.
+     * and the mesh's GPU build (or the main load batch) is running, and so do a
+     * deforming mesh's GPU trees while the main load batch runs, so the load
+     * batch finds the buffers empty.
      */
     private takeArrived(): ArrivedTree[] {
         const taken: ArrivedTree[] = [];
@@ -1138,12 +1178,13 @@ export class SceneTrees {
         const tinybvhNow = new Set<number>();
         const gpuQueued = new Set(this.arrived.filter((tree) => tree.source === 'gpu' && !tree.rebuild && this.currentState(tree.slot, tree.generation)).map((tree) => tree.slot));
         const waitForAdoption = this.gpuTreeOutputs === 'adopt' && this.placed.size === 0;
+        const loadBatchBuilding = waitForAdoption && this.loadBatchBuilding();
         for (const tree of this.arrived) {
             const state = this.currentState(tree.slot, tree.generation);
             if (!state || tree.source !== 'tinybvh') continue;
             const placed = this.placed.get(tree.slot);
             const gpuTreeFirst = state.gpu === 'building' || (placed?.source === 'gpu' && placed.generation === tree.generation) || gpuQueued.has(tree.slot);
-            if ((gpuTreeFirst && this.holdsRefinement(tree.slot)) || (waitForAdoption && state.gpu === 'building')) {
+            if ((gpuTreeFirst && this.holdsRefinement(tree.slot)) || (waitForAdoption && (state.gpu === 'building' || loadBatchBuilding))) {
                 waiting.push(tree);
             } else {
                 taken.push(tree);
@@ -1152,6 +1193,11 @@ export class SceneTrees {
         }
         for (const tree of this.arrived) {
             if (tree.source !== 'gpu') continue;
+            if (loadBatchBuilding && !tree.rebuild && this.deforming?.has(tree.slot) && this.currentState(tree.slot, tree.generation)) {
+                // A deforming mesh's own batch waits for the main load batch, which is the one to adopt.
+                waiting.push(tree);
+                continue;
+            }
             const placed = this.placed.get(tree.slot);
             const hasTinybvhTree = tinybvhNow.has(tree.slot) || (placed?.source === 'tinybvh' && placed.generation === tree.generation);
             const state = this.currentState(tree.slot, tree.generation);
@@ -1179,6 +1225,11 @@ export class SceneTrees {
         if (!tree) return;
         this.nodes.release(tree.nodeOffset, tree.nodeCount);
         this.triangles.release(tree.triangleOffset, tree.triangleCount);
+        this.forgetTree(slot);
+    }
+
+    /** Everything of {@link releaseTree} but freeing the ranges. */
+    private forgetTree(slot: number): void {
         this.placed.delete(slot);
         this.gpuTopLevel?.setMeshTree(slot, null);
         this.deforming?.treeReleased(slot);
@@ -1193,42 +1244,77 @@ export class SceneTrees {
      * Places arrived trees: tinybvh's written from the CPU, GPU ones copied out
      * of their batch's buffers in `encoder` after any growth copies, or (adopt)
      * served in place. Merged groups get their identity written after.
+     *
+     * All or nothing: the ranges of every tree are planned first, both storages'
+     * growths checked against the device's limits, and only then is anything
+     * grown, written or recorded. On a failure it throws with the encoder
+     * untouched and the scene as it was (the trees stay queued for the next update).
      */
     private placeTrees(encoder: GPUCommandEncoder, arrived: readonly ArrivedTree[]): void {
         const replaced = new Map<number, TreeBuilder>();
         for (const tree of arrived) {
             const old = this.placed.get(tree.slot);
             if (old) replaced.set(tree.slot, old.source);
-            this.releaseTree(tree.slot);
         }
 
-        let rest = arrived;
-        const adoptedSlots = new Set<number>();
-        if (this.gpuTreeOutputs === 'adopt' && this.nodes.usedBytes === 0 && this.triangles.usedBytes === 0) {
-            const adopted = this.adoptLoadBatch(encoder, arrived);
-            if (adopted) {
-                for (const tree of adopted) adoptedSlots.add(tree.slot);
-                rest = arrived.filter((tree) => !adoptedSlots.has(tree.slot));
+        if (this.gpuTreeOutputs === 'adopt') {
+            const batch = this.adoptableBatch(arrived);
+            if (batch) {
+                this.adoptLoadBatch(encoder, batch, replaced);
+                // The others are placed at the next update, into the adopted buffers: nothing can fail after an adoption.
+                const adopted = new Set<ArrivedTree>(batch);
+                this.arrived.push(...arrived.filter((tree) => !adopted.has(tree)));
+                return;
             }
         }
 
-        const sizes = rest.map(treeSize);
+        const sizes = arrived.map(treeSize);
         const nodeCounts = sizes.map((size) => size.nodeCount);
         const triangleCounts = sizes.map((size) => size.triangleCount);
-        let nodeOffsets: number[] | null = null;
-        let triangleOffsets: number[];
+        // The replaced trees' ranges are freed in the allocators first, so a new tree can take its old range; undone on a failure.
+        const oldSlots = [...replaced.keys()];
+        const oldTrees = oldSlots.map((slot) => this.placed.get(slot)!);
+        for (const old of oldTrees) {
+            this.nodes.release(old.nodeOffset, old.nodeCount);
+            this.triangles.release(old.triangleOffset, old.triangleCount);
+        }
+        let nodeOffsets: number[] | null;
+        let triangleOffsets: number[] | null;
         try {
-            const nodeHeadroom = rest.some((tree) => tree.source === 'gpu') ? GPU_TREE_NODE_HEADROOM : 0;
-            nodeOffsets = this.allocateAll(this.nodes, encoder, nodeCounts, (placed) => ({ offset: placed.nodeOffset, count: placed.nodeCount }), nodeHeadroom);
-            triangleOffsets = this.allocateAll(this.triangles, encoder, triangleCounts, (placed) => ({ offset: placed.triangleOffset, count: placed.triangleCount }));
+            nodeOffsets = tryAllocateAll(this.nodes, nodeCounts);
+            triangleOffsets = tryAllocateAll(this.triangles, triangleCounts);
+            try {
+                // Both checks before either growth: they succeed or fail together.
+                if (nodeOffsets === null) this.nodes.checkGrowth(sum(nodeCounts));
+                if (triangleOffsets === null) this.triangles.checkGrowth(sum(triangleCounts));
+            } catch (error) {
+                nodeOffsets?.forEach((offset, index) => this.nodes.release(offset, nodeCounts[index]));
+                triangleOffsets?.forEach((offset, index) => this.triangles.release(offset, triangleCounts[index]));
+                throw error;
+            }
         } catch (error) {
-            // Nothing was written: keep the trees queued, so the next update tries again (and reports the same error).
-            nodeOffsets?.forEach((offset, index) => this.nodes.release(offset, nodeCounts[index]));
-            this.arrived.push(...rest);
+            for (const old of oldTrees) {
+                this.nodes.reserve(old.nodeOffset, old.nodeCount);
+                this.triangles.reserve(old.triangleOffset, old.triangleCount);
+            }
+            this.arrived.push(...arrived);
             throw error;
         }
 
-        rest.forEach((tree, index) => {
+        // From here on nothing throws: forget the replaced trees, grow, write and copy.
+        for (const slot of oldSlots) this.forgetTree(slot);
+        const resident = [...this.placed.values()];
+        if (nodeOffsets === null) {
+            const headroom = arrived.some((tree) => tree.source === 'gpu') ? GPU_TREE_NODE_HEADROOM : 0;
+            this.nodes.grow(encoder, sum(nodeCounts), resident.map((tree) => ({ offset: tree.nodeOffset, count: tree.nodeCount })), headroom);
+            nodeOffsets = allocateGrown(this.nodes, nodeCounts);
+        }
+        if (triangleOffsets === null) {
+            this.triangles.grow(encoder, sum(triangleCounts), resident.map((tree) => ({ offset: tree.triangleOffset, count: tree.triangleCount })));
+            triangleOffsets = allocateGrown(this.triangles, triangleCounts);
+        }
+
+        arrived.forEach((tree, index) => {
             const size = sizes[index];
             const nodeOffset = nodeOffsets[index];
             const triangleOffset = triangleOffsets[index];
@@ -1246,16 +1332,18 @@ export class SceneTrees {
                 if (state.group >= 0) this.identity.encode(encoder, this.triangles.buffer, this.groups[state.group].group, triangleOffset, size.triangleCount);
             }
             // The tree's own sizes, at the scene's offsets (a GPU tree's range also carries its offsets in the batch's buffers).
-            this.recordPlacement(tree, { ...size, nodeOffset, triangleOffset }, replaced.get(tree.slot) ?? null);
+            this.recordPlacement(tree, size, nodeOffset, triangleOffset, replaced.get(tree.slot) ?? null);
         });
     }
 
     /**
-     * The adopt lever: the arrived GPU trees of one batch, all of its usable
-     * trees, become the storage. Returns the adopted trees, or null when no
-     * batch qualifies (then everything is copied).
+     * The batch whose arrived GPU trees (all of its usable trees) can become the
+     * storage: every tree placed now is one of them (so the storages are empty
+     * once they are released). The main load batch comes before a deforming
+     * mesh's own batch (`takeArrived` holds those back while it builds), so
+     * the peak-memory saving goes to the big one. Null: everything is copied.
      */
-    private adoptLoadBatch(encoder: GPUCommandEncoder, arrived: readonly ArrivedTree[]): ArrivedTree[] | null {
+    private adoptableBatch(arrived: readonly ArrivedTree[]): Extract<ArrivedTree, { source: 'gpu' }>[] | null {
         const byOutputs = new Map<GpuTreeOutputs, Extract<ArrivedTree, { source: 'gpu' }>[]>();
         for (const tree of arrived) {
             if (tree.source !== 'gpu') continue;
@@ -1263,15 +1351,23 @@ export class SceneTrees {
             list.push(tree);
             byOutputs.set(tree.built.outputs, list);
         }
-        let best: { outputs: GpuTreeOutputs; trees: Extract<ArrivedTree, { source: 'gpu' }>[]; triangles: number } | null = null;
+        let best: { trees: Extract<ArrivedTree, { source: 'gpu' }>[]; deforming: boolean; triangles: number } | null = null;
         for (const [outputs, trees] of byOutputs) {
             const usable = outputs.meshes.filter((mesh) => mesh.problem === null).length;
             if (trees.length !== usable || outputs.isDestroyed) continue;
-            const triangles = trees.reduce((sum, tree) => sum + tree.built.tree.triangleCount, 0);
-            if (!best || triangles > best.triangles) best = { outputs, trees, triangles };
+            const slots = new Set(trees.map((tree) => tree.slot));
+            if ([...this.placed.keys()].some((slot) => !slots.has(slot))) continue;
+            const deforming = trees.some((tree) => this.deforming?.has(tree.slot) ?? false);
+            const triangles = trees.reduce((total, tree) => total + tree.built.tree.triangleCount, 0);
+            if (!best || (best.deforming && !deforming) || (best.deforming === deforming && triangles > best.triangles)) best = { trees, deforming, triangles };
         }
-        if (!best) return null;
-        const { outputs, trees } = best;
+        return best?.trees ?? null;
+    }
+
+    /** The adopt lever: the batch's output buffers become the storage, with its trees in place. */
+    private adoptLoadBatch(encoder: GPUCommandEncoder, trees: readonly Extract<ArrivedTree, { source: 'gpu' }>[], replaced: ReadonlyMap<number, TreeBuilder>): void {
+        for (const tree of trees) this.releaseTree(tree.slot);
+        const outputs = trees[0].built.outputs;
         this.nodes.adopt(outputs.nodes, trees.map((tree) => ({ offset: tree.built.tree.nodeOffset, count: tree.built.tree.nodeCount })));
         this.triangles.adopt(outputs.triangles, trees.map((tree) => ({ offset: tree.built.tree.triangleOffset, count: tree.built.tree.triangleCount })));
         outputs.markAdopted();
@@ -1281,22 +1377,30 @@ export class SceneTrees {
             const built = tree.built.tree;
             const state = this.meshes.get(tree.slot)!;
             if (state.group >= 0) this.identity.encode(encoder, this.triangles.buffer, this.groups[state.group].group, built.triangleOffset, built.triangleCount);
-            this.recordPlacement(tree, { ...treeSize(tree), nodeOffset: built.nodeOffset, triangleOffset: built.triangleOffset }, null);
+            this.recordPlacement(tree, treeSize(tree), built.nodeOffset, built.triangleOffset, replaced.get(tree.slot) ?? null);
         }
-        return trees;
     }
 
-    private recordPlacement(tree: ArrivedTree, at: { nodeOffset: number; triangleOffset: number; nodeCount: number; triangleCount: number; maxDepth: number; bounds: Float32Array }, replaced: TreeBuilder | null): void {
+    private recordPlacement(tree: ArrivedTree, size: TreeSize, nodeOffset: number, triangleOffset: number, replaced: TreeBuilder | null): void {
         const state = this.meshes.get(tree.slot)!;
         // A deforming mesh's box in the top level is the box every pose stays in, so a pose never changes the top level.
-        const bounds = Float32Array.from(this.deforming?.deformBox(tree.slot) ?? at.bounds);
-        const placed: PlacedTree = { ...at, bounds, source: tree.source, generation: tree.generation };
+        const box = this.deforming?.deformBox(tree.slot);
+        const placed: PlacedTree = {
+            nodeOffset,
+            nodeCount: size.nodeCount,
+            triangleOffset,
+            triangleCount: size.triangleCount,
+            maxDepth: size.maxDepth,
+            bounds: box ? Array.from(box) : size.bounds,
+            source: tree.source,
+            generation: tree.generation,
+        };
         this.placed.set(tree.slot, placed);
         this.gpuTopLevel?.setMeshTree(tree.slot, placed);
         if (this.deforming?.has(tree.slot)) {
             const layout: GpuLayoutMeshBvh | null = tree.source === 'tinybvh' ? tree.bvh : tree.built.layout;
             // meshRefitPlacement refuses merged meshes: merged ranges are never refit.
-            const placement = meshRefitPlacement({ meshes: [{ nodeOffset: at.nodeOffset, nodeCount: at.nodeCount, triangleOffset: at.triangleOffset, triangleCount: at.triangleCount, ...(state.mergedInto !== null ? { mergedInto: state.mergedInto } : {}) }] }, 0);
+            const placement = meshRefitPlacement({ meshes: [{ nodeOffset, nodeCount: placed.nodeCount, triangleOffset, triangleCount: placed.triangleCount, ...(state.mergedInto !== null ? { mergedInto: state.mergedInto } : {}) }] }, 0);
             this.deforming.treePlaced(tree.slot, placement, layout);
         }
         if (replaced === 'gpu' && tree.source === 'tinybvh') this.swaps++;
@@ -1306,28 +1410,9 @@ export class SceneTrees {
             builtBy: tree.source,
             replaced,
             fallbackReason: tree.source === 'tinybvh' && replaced === null ? state.fallbackReason : null,
-            triangleCount: at.triangleCount,
+            triangleCount: placed.triangleCount,
             ms: performance.now() - state.startedAt,
         });
-    }
-
-    private allocateAll(storage: GrowableStorage, encoder: GPUCommandEncoder, counts: readonly number[], rangeOf: (tree: PlacedTree) => ResidentRange, headroom = 0): number[] {
-        const offsets: number[] = [];
-        for (const count of counts) {
-            const offset = storage.allocate(count);
-            if (offset === null) {
-                offsets.forEach((placedOffset, index) => storage.release(placedOffset, counts[index]));
-                const total = counts.reduce((sum, value) => sum + value, 0);
-                storage.grow(encoder, total, [...this.placed.values()].map(rangeOf), headroom);
-                return counts.map((value) => {
-                    const grown = storage.allocate(value);
-                    if (grown === null) throw new Error('@pmndrs/bvh: trace buffer allocation failed after growing');
-                    return grown;
-                });
-            }
-            offsets.push(offset);
-        }
-        return offsets;
     }
 
     // -----------------------------------------------------------------------
@@ -1355,6 +1440,7 @@ export class SceneTrees {
 
     private syncInstances(): void {
         if (!this.gpuTopLevel) {
+            for (const slot of this.dirtyInstances) if (!this.instances.has(slot) && !this.groups.some((group) => group.instanceSlot === slot)) this.instanceSlots.give(slot);
             this.dirtyInstances.clear();
             return;
         }
@@ -1371,9 +1457,13 @@ export class SceneTrees {
         this.dirtyInstances.clear();
     }
 
+    /** The deepest placed tree that rays can reach: a mesh with instances, or a merged group. */
     private deepestPlacedMesh(): number {
         let deepest = 0;
-        for (const tree of this.placed.values()) deepest = Math.max(deepest, tree.maxDepth);
+        for (const [slot, tree] of this.placed) {
+            const state = this.meshes.get(slot);
+            if (state && (state.group >= 0 || state.users > 0)) deepest = Math.max(deepest, tree.maxDepth);
+        }
         return deepest;
     }
 
@@ -1458,7 +1548,43 @@ function checkMaterial(material: number | undefined): void {
     materialCode(material, -1);
 }
 
-function treeSize(tree: ArrivedTree): { readonly nodeCount: number; readonly triangleCount: number; readonly maxDepth: number; readonly bounds: Float32Array } {
-    return tree.source === 'tinybvh' ? tree.bvh : tree.built.tree;
+interface TreeSize {
+    readonly nodeCount: number;
+    readonly triangleCount: number;
+    readonly maxDepth: number;
+    readonly bounds: readonly number[];
+}
+
+/** A tree's counts, depth and box, copied out field by field (never a spread: a `MeshBvh` carries its node and triangle arrays). */
+function sum(values: readonly number[]): number {
+    return values.reduce((total, value) => total + value, 0);
+}
+
+/** Ranges for every count, or null (with nothing left allocated) when one doesn't fit. */
+function tryAllocateAll(storage: GrowableStorage, counts: readonly number[]): number[] | null {
+    const offsets: number[] = [];
+    for (const count of counts) {
+        const offset = storage.allocate(count);
+        if (offset === null) {
+            offsets.forEach((placed, index) => storage.release(placed, counts[index]));
+            return null;
+        }
+        offsets.push(offset);
+    }
+    return offsets;
+}
+
+/** Ranges after a growth, which made room for all of them after the high-water mark. */
+function allocateGrown(storage: GrowableStorage, counts: readonly number[]): number[] {
+    return counts.map((count) => {
+        const offset = storage.allocate(count);
+        if (offset === null) throw new Error('@pmndrs/bvh: trace buffer allocation failed after growing');
+        return offset;
+    });
+}
+
+function treeSize(tree: ArrivedTree): TreeSize {
+    const source = tree.source === 'tinybvh' ? tree.bvh : tree.built.tree;
+    return { nodeCount: source.nodeCount, triangleCount: source.triangleCount, maxDepth: source.maxDepth, bounds: Array.from(source.bounds) };
 }
 
