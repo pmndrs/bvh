@@ -758,9 +758,11 @@ describe('SceneTrees with gpuMaxBatchBytes (the real queue, a stand-in H-PLOC)',
         for (const gpuMaxBatchBytes of [undefined, Infinity, 1 << 20]) {
             const gpu = createFakeGpu();
             const stand = new StandInGpuBuilder(gpu.device);
-            const build = stand.build.bind(stand);
-            stand.build = (requests, options) => (asked.push(options?.maxBatchBytes), build(requests));
-            const scene = await SceneTrees.create(gpu.device, { firstTreeBuilder: stand, gpuMaxBatchBytes });
+            const recording: FirstTreeBuilder = {
+                prepare: () => stand.prepare(),
+                build: (requests, options) => (asked.push(options?.maxBatchBytes), stand.build(requests)),
+            };
+            const scene = await SceneTrees.create(gpu.device, { firstTreeBuilder: recording, gpuMaxBatchBytes });
             scene.addMesh(tessellatedQuad(2, 1));
             scene.update(gpu.createEncoder());
             scene.dispose();
