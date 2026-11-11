@@ -70,8 +70,22 @@ export function newTraceStats(): CpuTraceStats {
     return { maxStackSize: 0, nodesVisited: 0, trianglesTested: 0 };
 }
 
+/** {@link CpuTraceOptions.side}: which faces count as hits. The values are three's `FrontSide`, `BackSide` and `DoubleSide`. */
+export const CPU_TRACE_FRONT_SIDE = 0;
+export const CPU_TRACE_BACK_SIDE = 1;
+export const CPU_TRACE_DOUBLE_SIDE = 2;
+
 /** Per-trace options. */
 export interface CpuTraceOptions {
+    /**
+     * Side culling, CPU only (the WGSL walk has no side option):
+     * {@link CPU_TRACE_FRONT_SIDE} takes front-face hits only,
+     * {@link CPU_TRACE_BACK_SIDE} back-face hits only (the authored side, after
+     * the flip bit). A culled triangle is passed through like a filtered one:
+     * nothing is recorded, the filter isn't asked, and the closest distance
+     * stays. Default {@link CPU_TRACE_DOUBLE_SIDE}, the WGSL walk's behaviour.
+     */
+    readonly side?: number;
     /** The ray mask (the WGSL `*Masked` functions' `mask`). Default all ones. Ignored with `rayMasks: false`. */
     readonly mask?: number;
     /** Counters to fill in. */
@@ -136,8 +150,8 @@ export interface CpuTracerOptions {
     /**
      * Ask `triangleFilter` about every triangle, flagged or not, as if each had
      * `TRIANGLE_FLAG_FILTER` set. The CPU mesh tree (`CpuMeshBvh`) uses it for
-     * side culling and all-hit queries without writing the flag into a layout
-     * it may share. Default false. Not in the WGSL walk.
+     * all-hit queries and per-triangle acceptance (three's groups) without
+     * writing the flag into a layout it may share. Default false. Not in the WGSL walk.
      */
     readonly filterEveryTriangle?: boolean;
 }
@@ -185,6 +199,9 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
         if (topNodeCount === 0) return null;
         const stats = traceOptions.stats;
         const rayMask = rayMasks ? (traceOptions.mask ?? RAY_MASK_ALL) >>> 0 : RAY_MASK_ALL;
+        const side = traceOptions.side ?? CPU_TRACE_DOUBLE_SIDE;
+        const cull = side !== CPU_TRACE_DOUBLE_SIDE;
+        const keepFront = side === CPU_TRACE_FRONT_SIDE;
 
         const worldSetup = makeRaySetup(ray.origin, ray.direction);
         let setup = worldSetup;
@@ -283,6 +300,8 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
                     // flip bit marks one from a mirrored source (world-space winding reversed).
                     const hitInstance = instanceMerged ? triangleWords[base + TRIANGLE_WORD_SOURCE_INSTANCE] : instanceIndex;
                     const frontFace = hit.frontFace !== ((triangleWords[base + TRIANGLE_WORD.flags] & TRIANGLE_FLAG_FLIP_FRONT_FACE) !== 0);
+                    // CPU only: side culling passes the ray through the other side's faces.
+                    if (cull && frontFace !== keepFront) continue;
                     // As the WGSL leaf test: a flagged triangle's filter may let the ray through,
                     // and then nothing is recorded and closestT stays.
                     const consult = filterEveryTriangle || (triangleWords[base + TRIANGLE_WORD.flags] & TRIANGLE_FLAG_FILTER) !== 0;

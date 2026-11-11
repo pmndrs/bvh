@@ -11,6 +11,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { GPU_LAYOUT_EMPTY_CHILD, GPU_LAYOUT_NODE_WORD, GPU_LAYOUT_NODE_WORDS } from '../gpu-layout.ts';
 import type { MeshInput } from '../mesh-input.ts';
+import { serializeLayout } from '../serialize.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
 import { createRandom, randomAffine, randomTriangleSoup, randomUnitVector, tessellatedQuad, type Random } from '../trace/oracle-fixtures.ts';
 import { buildReferenceScene, REFERENCE_TOLERANCE, traceClosestReference } from '../trace/reference-tracer.ts';
@@ -24,6 +25,7 @@ import {
     BVH_NOT_INTERSECTED,
     CpuMeshBvh,
     type BvhRaycastHit,
+    type BvhTraverseCallbacks,
 } from './cpu-mesh-bvh.ts';
 
 let builder: TinyBvhBuilder;
@@ -246,11 +248,10 @@ describe('CpuMeshBvh', () => {
         const tree = CpuMeshBvh.build(soup, builder, { maxLeafPrimitives: 4 });
         // Everything: each tree position exactly once, each leaf at most 4.
         const seen = new Uint8Array(tree.triangleCount);
-        let rootAsked = 0;
+        let minDepth = Infinity;
         tree.traverse({
-            intersectsBounds: (_box, isLeaf, _score, depth) => {
-                if (depth === 0) rootAsked++;
-                if (depth === 0) expect(isLeaf).toBe(false);
+            intersectsBounds: (_box, _isLeaf, _score, depth) => {
+                minDepth = Math.min(minDepth, depth);
                 return true;
             },
             intersectsRange: (start, count) => {
@@ -259,7 +260,8 @@ describe('CpuMeshBvh', () => {
                 return false;
             },
         });
-        expect(rootAsked).toBe(1);
+        // As three-mesh-bvh: the root's box is never asked about; its children are at depth 1.
+        expect(minDepth).toBe(1);
         expect(seen.every((count) => count === 1)).toBe(true);
         // A box query: the triangles whose corners' box overlaps the query box, against brute force.
         const query = [-1, -0.5, -1.5, 1.2, 1, 0.5];
@@ -299,7 +301,7 @@ describe('CpuMeshBvh', () => {
                 scores.push(score!);
                 return true;
             },
-            intersectsRange: (_start, _count, _contained, _depth, box) => {
+            intersectsRange: (_start, _count, _contained, _depth, _nodeIndex, box) => {
                 firstLeafDistance = distance(box);
                 return true;
             },
@@ -362,5 +364,290 @@ describe('CpuMeshBvh', () => {
         const tree = await CpuMeshBvh.create(tessellatedQuad(2, 1));
         expect(tree.triangleCount).toBe(8);
         expect(() => new CpuMeshBvh({ ...tree.layout, nodeCount: tree.nodeCount + 1 })).toThrow(RangeError);
+    });
+});
+
+/** Child slot `slot`'s reference and box, read straight from the layout. */
+function slotOf(tree: CpuMeshBvh, slot: number): { index: number; count: number; box: number[]; empty: boolean } {
+    const words = new Uint32Array(tree.layout.nodes);
+    const floats = new Float32Array(tree.layout.nodes);
+    const base = (slot >> 1) * GPU_LAYOUT_NODE_WORDS;
+    const left = (slot & 1) === 0;
+    const index = words[base + (left ? GPU_LAYOUT_NODE_WORD.leftIndex : GPU_LAYOUT_NODE_WORD.rightIndex)];
+    const count = words[base + (left ? GPU_LAYOUT_NODE_WORD.leftCount : GPU_LAYOUT_NODE_WORD.rightCount)];
+    const min = base + (left ? GPU_LAYOUT_NODE_WORD.leftMin : GPU_LAYOUT_NODE_WORD.rightMin);
+    return { index, count, empty: index === GPU_LAYOUT_EMPTY_CHILD, box: [floats[min], floats[min + 1], floats[min + 2], floats[min + 4], floats[min + 5], floats[min + 6]] };
+}
+
+/** The tree positions under a slot, by brute force: [offset, count], and whether they are one run. */
+function subtreeRun(tree: CpuMeshBvh, slot: number): { offset: number; count: number; run: boolean } {
+    let low = Infinity;
+    let high = -Infinity;
+    let total = 0;
+    const pending = [slot];
+    while (pending.length > 0) {
+        const at = slotOf(tree, pending.pop()!);
+        if (at.empty) continue;
+        if (at.count > 0) {
+            low = Math.min(low, at.index);
+            high = Math.max(high, at.index + at.count);
+            total += at.count;
+        } else pending.push(at.index * 2, at.index * 2 + 1);
+    }
+    return { offset: low, count: high - low, run: high - low === total };
+}
+
+type TraverseCall = string;
+
+/**
+ * three-mesh-bvh 0.9.18's `shapecastTraverse` (src/core/cast/shapecast.js), line for line, over our
+ * layout: a node's children are its two slots, a contained child's range runs from its leftmost
+ * leaf's offset to its rightmost leaf's end. Logs every callback call.
+ */
+function threeShapecast(tree: CpuMeshBvh, callbacks: BvhTraverseCallbacks): { result: unknown; log: TraverseCall[] } {
+    const log: TraverseCall[] = [];
+    const bounds = (box: number[], isLeaf: boolean, score: number | undefined, depth: number, nodeIndex: number) => {
+        log.push(`bounds ${box.join()} ${isLeaf} ${score} ${depth} ${nodeIndex}`);
+        return callbacks.intersectsBounds(Float32Array.from(box), isLeaf, score, depth, nodeIndex);
+    };
+    const range = (offset: number, count: number, contained: boolean, depth: number, nodeIndex: number, box: number[]) => {
+        log.push(`range ${offset} ${count} ${contained} ${depth} ${nodeIndex} ${box.join()}`);
+        return callbacks.intersectsRange(offset, count, contained, depth, nodeIndex, Float32Array.from(box));
+    };
+    const score = (box: number[]) => {
+        log.push(`order ${box.join()}`);
+        return callbacks.boundsTraverseOrder!(Float32Array.from(box));
+    };
+    const visit = (slot: number, depth: number): unknown => {
+        const at = slotOf(tree, slot);
+        if (at.count > 0) return range(at.index, at.count, false, depth, slot, at.box);
+        return inner(at.index, depth);
+    };
+    const inner = (node: number, depth: number): unknown => {
+        let c1 = node * 2;
+        let c2 = node * 2 + 1;
+        let score1: number | undefined;
+        let score2: number | undefined;
+        if (callbacks.boundsTraverseOrder) {
+            score1 = score(slotOf(tree, c1).box);
+            score2 = score(slotOf(tree, c2).box);
+            if (score2 < score1) {
+                [c1, c2] = [c2, c1];
+                [score1, score2] = [score2, score1];
+            }
+        }
+        for (const [child, childScore] of [[c1, score1], [c2, score2]] as const) {
+            const at = slotOf(tree, child);
+            const answer = bounds(at.box, at.count > 0, childScore, depth + 1, child);
+            let stop: unknown;
+            if (answer === BVH_CONTAINED) {
+                const run = subtreeRun(tree, child);
+                stop = range(run.offset, run.count, true, depth + 1, child, at.box);
+            } else {
+                stop = answer && visit(child, depth + 1);
+            }
+            if (stop) return true;
+        }
+        return false;
+    };
+    return { result: inner(0, 0), log };
+}
+
+/** `callbacks` wrapped to log the calls as {@link threeShapecast} does. */
+function logged(callbacks: BvhTraverseCallbacks, log: TraverseCall[]): BvhTraverseCallbacks {
+    return {
+        intersectsBounds: (box, isLeaf, score, depth, nodeIndex) => {
+            log.push(`bounds ${Array.from(box).join()} ${isLeaf} ${score} ${depth} ${nodeIndex}`);
+            return callbacks.intersectsBounds(box, isLeaf, score, depth, nodeIndex);
+        },
+        intersectsRange: (offset, count, contained, depth, nodeIndex, box) => {
+            log.push(`range ${offset} ${count} ${contained} ${depth} ${nodeIndex} ${Array.from(box).join()}`);
+            return callbacks.intersectsRange(offset, count, contained, depth, nodeIndex, box);
+        },
+        ...(callbacks.boundsTraverseOrder
+            ? {
+                  boundsTraverseOrder: (box: Float32Array) => {
+                      log.push(`order ${Array.from(box).join()}`);
+                      return callbacks.boundsTraverseOrder!(box);
+                  },
+              }
+            : {}),
+    };
+}
+
+describe('CpuMeshBvh.traverse: three-mesh-bvh shapecast contract', () => {
+    it('makes the same calls, with the same arguments in the same order, as three-mesh-bvh 0.9.18 shapecast', () => {
+        const random = createRandom(51);
+        const soup = randomTriangleSoup(random, 700, 4, 0.5);
+        const tree = CpuMeshBvh.build(soup, builder, { maxLeafPrimitives: 3 });
+        // Answers by box: every kind three takes (falsy ones included), and a stop now and then.
+        const answers = [undefined, false, BVH_NOT_INTERSECTED, BVH_INTERSECTED, true, BVH_CONTAINED, BVH_INTERSECTED, true];
+        const hash = (box: Float32Array) => Math.abs(Math.floor((box[0] * 7919 + box[4] * 104729 + box[2] * 31) * 1000));
+        for (const ordered of [false, true]) {
+            for (const stopEvery of [0, 13]) {
+                const callbacks: BvhTraverseCallbacks = {
+                    intersectsBounds: (box, _isLeaf, _score, depth) => (depth === 1 ? true : answers[hash(box) % answers.length]),
+                    intersectsRange: (offset, count) => (stopEvery > 0 && (offset * 31 + count) % stopEvery === 0 ? 'stop' : undefined),
+                    ...(ordered ? { boundsTraverseOrder: (box: Float32Array) => box[0] + box[1] * 0.5 - box[5] } : {}),
+                };
+                const expected = threeShapecast(tree, callbacks);
+                const log: TraverseCall[] = [];
+                const result = tree.traverse(logged(callbacks, log));
+                expect(log, `ordered ${ordered}, stop ${stopEvery}`).toEqual(expected.log);
+                expect(result).toBe(Boolean(expected.result));
+                expect(log.filter((call) => call.startsWith('range') && call.includes(' true ')).length, 'contained ranges').toBeGreaterThan(0);
+            }
+        }
+    });
+
+    it('skips a box on any falsy answer (undefined, false, 0) and never asks about the root', () => {
+        const tree = CpuMeshBvh.build(randomTriangleSoup(createRandom(52), 200, 3, 0.5), builder);
+        for (const answer of [undefined, false, 0, null]) {
+            const depths: number[] = [];
+            let ranges = 0;
+            const stopped = tree.traverse({
+                intersectsBounds: (_box, _isLeaf, _score, depth) => {
+                    depths.push(depth);
+                    return answer;
+                },
+                intersectsRange: () => {
+                    ranges++;
+                    return false;
+                },
+            });
+            expect(ranges, String(answer)).toBe(0);
+            expect(stopped).toBe(false);
+            expect(depths, String(answer)).toEqual([1, 1]);
+        }
+    });
+
+    it('reports a contained inner box as one range over its whole subtree, and passes three\'s argument order', () => {
+        const tree = CpuMeshBvh.build(randomTriangleSoup(createRandom(53), 300, 3, 0.5), builder, { maxLeafPrimitives: 2 });
+        const left = slotOf(tree, 0);
+        expect(left.count).toBe(0); // an inner box
+        const calls: unknown[][] = [];
+        tree.traverse({
+            intersectsBounds: (box, isLeaf, score, depth, nodeIndex) => {
+                calls.push(['bounds', Array.from(box), isLeaf, score, depth, nodeIndex]);
+                return nodeIndex === 0 ? BVH_CONTAINED : BVH_NOT_INTERSECTED;
+            },
+            intersectsRange: (offset, count, contained, depth, nodeIndex, box) => {
+                calls.push(['range', offset, count, contained, depth, nodeIndex, Array.from(box)]);
+                return false;
+            },
+        });
+        const run = subtreeRun(tree, 0);
+        expect(run.run).toBe(true);
+        expect(calls).toEqual([
+            ['bounds', left.box, false, undefined, 1, 0],
+            ['range', run.offset, run.count, true, 1, 0, left.box],
+            ['bounds', slotOf(tree, 1).box, slotOf(tree, 1).count > 0, undefined, 1, 1],
+        ]);
+        // Both root children contained: two calls that cover every tree position once.
+        const covered: [number, number][] = [];
+        tree.traverse({ intersectsBounds: () => BVH_CONTAINED, intersectsRange: (offset, count) => void covered.push([offset, count]) });
+        covered.sort((a, b) => a[0] - b[0]);
+        expect(covered.length).toBe(2);
+        expect(covered[0][0]).toBe(0);
+        expect(covered[0][0] + covered[0][1]).toBe(covered[1][0]);
+        expect(covered[1][0] + covered[1][1]).toBe(tree.triangleCount);
+        // A tree of one leaf: that leaf is the root, reported unasked at depth 0.
+        const single = CpuMeshBvh.build({ positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]) }, builder);
+        const leafCalls: unknown[][] = [];
+        expect(single.traverse({ intersectsBounds: () => leafCalls.push(['bounds']), intersectsRange: (...args) => leafCalls.push(args.slice(0, 5)) })).toBe(true);
+        expect(leafCalls).toEqual([[0, 1, false, 0, 0]]);
+    });
+
+    it('keeps every subtree one run of tree positions, also over tinybvh trees whose records it reorders', () => {
+        const soup = randomTriangleSoup(createRandom(54), 2000, 4, 0.5);
+        const layout = builder.buildLayout(soup, {}).layout;
+        const before = new Uint32Array(layout.triangles.slice(0));
+        const tree = new CpuMeshBvh<BvhRaycastHit>(layout, { source: soup });
+        for (let slot = 0; slot < tree.nodeCount * 2; slot++) if (!slotOf(tree, slot).empty) expect(subtreeRun(tree, slot).run).toBe(true);
+        // The same records, moved: hits are unchanged against the reference.
+        expect(new Uint32Array(layout.triangles).length).toBe(before.length);
+        const { problems } = checkAgainstReference(tree, soup, 55, 200);
+        expect(problems.slice(0, 5)).toEqual([]);
+    });
+});
+
+describe('CpuMeshBvh: corrupt layouts and failed refits', () => {
+    const soup = randomTriangleSoup(createRandom(61), 120, 3, 0.5);
+    /** A copy of a fresh tree's layout with `edit` applied to its node and triangle words. */
+    const corrupt = (edit: (nodes: Uint32Array, triangles: Uint32Array, parents: Uint32Array) => void) => {
+        const layout = CpuMeshBvh.build(soup, builder).layout;
+        const copy = { ...layout, nodes: layout.nodes.slice(0), triangles: layout.triangles.slice(0), parents: layout.parents.slice(), bounds: layout.bounds.slice() };
+        edit(new Uint32Array(copy.nodes), new Uint32Array(copy.triangles), copy.parents);
+        return copy;
+    };
+    const innerSlot = (nodes: Uint32Array) => {
+        for (let node = 0; ; node++) {
+            if (nodes[node * GPU_LAYOUT_NODE_WORDS + GPU_LAYOUT_NODE_WORD.leftCount] === 0) return node * GPU_LAYOUT_NODE_WORDS + GPU_LAYOUT_NODE_WORD.leftIndex;
+        }
+    };
+    const leafSlot = (nodes: Uint32Array) => {
+        for (let node = 0; ; node++) {
+            if (nodes[node * GPU_LAYOUT_NODE_WORDS + GPU_LAYOUT_NODE_WORD.leftCount] > 0) return node * GPU_LAYOUT_NODE_WORDS + GPU_LAYOUT_NODE_WORD.leftIndex;
+        }
+    };
+
+    it('throws a clear error for out-of-range children, cycles, shared or unreached nodes, bad leaves and bad original indices', () => {
+        const cases: [string, (nodes: Uint32Array, triangles: Uint32Array, parents: Uint32Array) => void, RegExp][] = [
+            ['child past the nodes', (nodes) => (nodes[innerSlot(nodes)] = 1_000_000), /past the \d+ nodes/],
+            ['cycle to the root', (nodes) => (nodes[innerSlot(nodes)] = 0), /reached twice/],
+            [
+                'cycle to an ancestor',
+                (nodes, _triangles, parents) => {
+                    // Point some deep node's left child back at its own parent.
+                    for (let node = 1; ; node++) {
+                        const base = node * GPU_LAYOUT_NODE_WORDS;
+                        if (nodes[base + GPU_LAYOUT_NODE_WORD.leftCount] === 0) {
+                            nodes[base + GPU_LAYOUT_NODE_WORD.leftIndex] = parents[node];
+                            return;
+                        }
+                    }
+                },
+                /reached twice/,
+            ],
+            ['leaf past the triangles', (nodes) => (nodes[leafSlot(nodes)] = 1_000_000), /past the 120 triangles/],
+            ['leaf too big', (nodes) => (nodes[leafSlot(nodes) + 8] = 9), /more than 8/],
+            ['original index past the triangles', (_nodes, triangles) => (triangles[3] = 120), /original index 120/],
+            ['wrong parent', (nodes, _triangles, parents) => (parents[nodes[innerSlot(nodes)]] = 7777), /parent is 7777/],
+        ];
+        for (const [name, edit, message] of cases) expect(() => new CpuMeshBvh(corrupt(edit)), name).toThrow(message);
+        // Through deserialize as well: the bytes of a corrupt layout.
+        const bytes = serializeLayout(corrupt((nodes) => (nodes[innerSlot(nodes)] = 0)));
+        expect(() => CpuMeshBvh.deserialize(bytes)).toThrow(/reached twice/);
+    });
+
+    it('refit validates everything before writing: a bad vertex or index leaves the tree as it was', () => {
+        const tree = CpuMeshBvh.build(soup, builder);
+        const before = new Uint8Array(tree.serialize());
+        const nan = soup.positions.slice();
+        nan[nan.length - 1] = NaN;
+        expect(() => tree.refit({ positions: nan })).toThrow(/non-finite/);
+        expect(new Uint8Array(tree.serialize())).toEqual(before);
+        const indexed = tessellatedQuad(6, 1);
+        const grid = CpuMeshBvh.build(indexed, builder);
+        const gridBefore = new Uint8Array(grid.serialize());
+        const indices = indexed.indices!.slice();
+        indices[indices.length - 1] = 9999;
+        expect(() => grid.refit({ positions: indexed.positions, indices })).toThrow(/past the/);
+        expect(new Uint8Array(grid.serialize())).toEqual(gridBefore);
+        // The source is kept too: a plain refit afterwards still uses the original arrays.
+        grid.refit();
+        expect(new Uint8Array(grid.serialize())).toEqual(gridBefore);
+    });
+
+    it('refits a deserialized tree given a source, with the moved hits', () => {
+        const tree = CpuMeshBvh.build(soup, builder);
+        const loaded = CpuMeshBvh.deserialize(tree.serialize()) as CpuMeshBvh;
+        const moved = soup.positions.slice();
+        for (let i = 2; i < moved.length; i += 3) moved[i] += 10;
+        loaded.refit({ positions: moved });
+        const { problems, hits } = checkAgainstReference(loaded, { positions: moved }, 62, 200);
+        expect(problems.slice(0, 5)).toEqual([]);
+        expect(hits).toBeGreaterThan(3);
+        expect(loaded.getBoundingBox()[2]).toBe(Math.fround(boundsOf(moved)[2]));
     });
 });

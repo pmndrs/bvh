@@ -23,6 +23,8 @@ export {
     acceleratedRaycast,
     AVERAGE,
     BvhBoundsTree,
+    // three-mesh-bvh's name, so switching is an import change: `import { MeshBVH } from '@pmndrs/bvh/three'`.
+    BvhBoundsTree as MeshBVH,
     buildOptionsFromThreeMeshBvh,
     CENTER,
     computeBoundsTree,
@@ -33,9 +35,12 @@ export {
     prepareBoundsTrees,
     SAH,
     setBoundsTree,
+    snapshotGeometry,
     type BvhBoundsTreeHit,
     type BvhBoundsTreeOptions,
+    type BvhGeometrySnapshot,
     type BvhHitPointInfo,
+    type BvhHitPointInfoTarget,
     type BvhSplitStrategy,
 } from './raycast.ts';
 export { GenerateMeshBvhWorker, type GenerateMeshBvhWorkerOptions } from './generate.ts';

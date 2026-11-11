@@ -70,7 +70,7 @@ import {
 } from 'three';
 import type { GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import type { MeshInput } from '../mesh-input.ts';
-import { barycoordOnTriangle, clampLeafPrimitives, CpuMeshBvh, type BvhRayIntersection, type BvhRayLike, type BvhRaycastOptions, type BvhTriangleAccept, type CpuMeshBvhBuildOptions } from '../query/cpu-mesh-bvh.ts';
+import { barycoordOnTriangle, BVH_BACK_SIDE, BVH_DOUBLE_SIDE, BVH_FRONT_SIDE, clampLeafPrimitives, CpuMeshBvh, readVec3, type BvhRayIntersection, type BvhRayLike, type BvhRaycastOptions, type BvhTriangleAccept, type CpuMeshBvhBuildOptions } from '../query/cpu-mesh-bvh.ts';
 import { deserializeLayout } from '../serialize.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
 import { invertAffineInto } from '../trace/top-level.ts';
@@ -118,17 +118,17 @@ export interface BvhBoundsTreeOptions {
     /** three-mesh-bvh's deprecated name for {@link maxLeafSize}. */
     readonly maxLeafTris?: number;
     /**
-     * Accepted, not honoured: tinybvh decides the depth. The ray walk's stack
-     * holds 64 entries, and a raycast on a deeper tree throws a `RangeError`
-     * (a tinybvh tree that deep takes a degenerate mesh). `boundsTree.layout.maxDepth`
-     * has the depth. The box walk (`traverse`) has no limit.
+     * Accepted, not honoured: tinybvh decides the depth (`boundsTree.depth`),
+     * and a value below the built tree's depth logs a warning once. The ray
+     * walk's stack holds 64 entries, and a raycast on a deeper tree throws a
+     * `RangeError` (a tinybvh tree that deep takes a degenerate mesh). The box
+     * walk (`traverse`) has no such limit.
      */
     readonly maxDepth?: number;
     /**
-     * true: sets `geometry.boundingBox` from the tree when the geometry has
-     * none. Default **false**, unlike three-mesh-bvh (true): three's own
-     * raycast culls by that box, and a box set here goes stale when the
-     * positions are edited (three only computes it when asked).
+     * Sets `geometry.boundingBox` from the tree when the geometry has none.
+     * Default true, as three-mesh-bvh. `boundsTree.refit()` keeps a box set
+     * this way current; a box three computed (or you set) is left alone.
      */
     readonly setBoundingBox?: boolean;
     /**
@@ -151,7 +151,35 @@ export interface BvhBoundsTreeOptions {
      * hold the geometry's triangles, numbered in index order.
      */
     readonly layout?: GpuLayoutMeshBvh;
+    /**
+     * The geometry as `layout` was built from it ({@link snapshotGeometry},
+     * taken before the build started; `GenerateMeshBvhWorker` does this). The
+     * tree counts as built from those versions, so edits made while the build
+     * ran make it stale (raycasts fall back to three's until `refit`). Default:
+     * the geometry as it is now.
+     */
+    readonly snapshot?: BvhGeometrySnapshot;
 }
+
+/** A geometry's triangles and the versions of its position attribute and index at one moment ({@link snapshotGeometry}). */
+export interface BvhGeometrySnapshot {
+    readonly input: MeshInput;
+    readonly position: BufferAttribute | InterleavedBufferAttribute;
+    readonly positionVersion: number;
+    readonly index: BufferAttribute | null;
+    readonly indexVersion: number;
+}
+
+/** The geometry's triangles ({@link meshInputFromGeometry}) and its position and index versions, now. */
+export function snapshotGeometry(geometry: BufferGeometry): BvhGeometrySnapshot {
+    const input = meshInputFromGeometry(geometry);
+    const position = geometry.getAttribute('position') as BufferAttribute | InterleavedBufferAttribute;
+    const index = geometry.index;
+    return { input, position, positionVersion: positionVersionOf(position), index, indexVersion: index ? index.version : 0 };
+}
+
+/** Warned once that a `maxDepth` below a built tree's depth isn't honoured. */
+let maxDepthWarned = false;
 
 /** The core build options for three-mesh-bvh-style options (see {@link BvhBoundsTreeOptions}). Throws on a strategy or a range it can't take. */
 export function buildOptionsFromThreeMeshBvh(options: BvhBoundsTreeOptions): CpuMeshBvhBuildOptions {
@@ -237,6 +265,8 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
     readonly indexVersion: number;
     /** Warned once that the geometry changed since the build. */
     staleWarned = false;
+    /** The `geometry.boundingBox` this tree set (`setBoundingBox`), which `refit` keeps current. */
+    private ownBoundingBox: Box3 | null = null;
     private state: RaycastState | null = null;
     private readonly rangeCache = new WeakMap<object, RaycastState[]>();
     /** The walk's acceptance test for the current state: inside a range, and on a side its material shows. */
@@ -252,7 +282,8 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
 
     constructor(geometry: BufferGeometry, options: BvhBoundsTreeOptions = {}) {
         const buildOptions = buildOptionsFromThreeMeshBvh(options);
-        const input = meshInputFromGeometry(geometry);
+        const snapshot = options.snapshot ?? snapshotGeometry(geometry);
+        const input = snapshot.input;
         const triangleCount = input.indices ? input.indices.length / 3 : input.positions.length / 9;
         let layout = options.layout;
         if (layout) {
@@ -263,13 +294,16 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
             layout = CpuMeshBvh.buildLayout(input, builder, buildOptions);
         }
         super(layout, { source: input });
-        const position = geometry.getAttribute('position') as BufferAttribute | InterleavedBufferAttribute;
         this.geometry = geometry;
-        this.position = position;
-        this.positionVersion = positionVersionOf(position);
-        this.index = geometry.index;
-        this.indexVersion = geometry.index ? geometry.index.version : 0;
-        if (options.setBoundingBox === true && !geometry.boundingBox) geometry.boundingBox = this.getBoundingBox(new Box3());
+        this.position = snapshot.position;
+        this.positionVersion = snapshot.positionVersion;
+        this.index = snapshot.index;
+        this.indexVersion = snapshot.indexVersion;
+        if ((options.setBoundingBox ?? true) && !geometry.boundingBox) geometry.boundingBox = this.ownBoundingBox = this.getBoundingBox(new Box3());
+        if (options.maxDepth !== undefined && options.maxDepth < this.depth && !maxDepthWarned) {
+            maxDepthWarned = true;
+            console.warn(`@pmndrs/bvh/three: maxDepth ${options.maxDepth} is not honoured; tinybvh built a tree of depth ${this.depth} (warned once)`);
+        }
     }
 
     /**
@@ -282,6 +316,7 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
     override refit(input?: MeshInput): void {
         if (input) {
             super.refit(input);
+            this.updateOwnBoundingBox();
             return;
         }
         const position = this.geometry.getAttribute('position') as BufferAttribute | InterleavedBufferAttribute | undefined;
@@ -291,6 +326,12 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
         super.refit(meshInputFromGeometry(this.geometry));
         this.positionVersion = positionVersionOf(position);
         this.staleWarned = false;
+        this.updateOwnBoundingBox();
+    }
+
+    /** A `geometry.boundingBox` this tree set follows the refitted tree. */
+    private updateOwnBoundingBox(): void {
+        if (this.ownBoundingBox && this.geometry.boundingBox === this.ownBoundingBox) this.getBoundingBox(this.ownBoundingBox);
     }
 
     override raycast(ray: BvhRayLike, materialOrSide?: number | BvhRaycastOptions | Material | Material[], near?: number, far?: number): BvhBoundsTreeHit[] {
@@ -305,8 +346,8 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
 
     /** An array of materials: each group's triangles, with its material's side. */
     private raycastGroups(ray: BvhRayLike, materials: Material[], near: number, far: number, firstHitOnly: boolean): BvhBoundsTreeHit[] {
-        const origin = new Vector3().copy(ray.origin as Vector3);
-        const direction = new Vector3().copy(ray.direction as Vector3);
+        const origin = new Vector3(...readVec3(ray.origin));
+        const direction = new Vector3(...readVec3(ray.direction));
         const length = direction.length();
         if (!(length > 0)) return [];
         const hits = this.raycastLocal(
@@ -348,6 +389,14 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
         firstHitOnly: boolean,
     ): { t: number; triangle: number; u: number; v: number; materialIndex: number }[] {
         const state = this.stateFor(material, drawRange);
+        if (!state.ranges && state.first === 0 && state.end >= this.triangleCount) {
+            // One material over every triangle: its side culls natively in the walk, with no per-triangle callback.
+            const side = state.materials[0]?.side ?? FrontSide;
+            if (side !== FrontSide && side !== BackSide && side !== DoubleSide) return [];
+            const walkSide = side === FrontSide ? BVH_FRONT_SIDE : side === BackSide ? BVH_BACK_SIDE : BVH_DOUBLE_SIDE;
+            const materialIndex = state.groupIndices[0];
+            return this.intersectRay(origin, direction, near, far, firstHitOnly, null, walkSide).map((hit) => ({ t: hit.t, triangle: hit.triangle, u: hit.u, v: hit.v, materialIndex }));
+        }
         const previous = this.state;
         this.state = state;
         try {
@@ -483,6 +532,13 @@ export interface BvhHitPointInfo {
     barycoord: Vector3;
 }
 
+/** A target for {@link getTriangleHitPointInfo}: any of its fields may be missing, and are then made. */
+export interface BvhHitPointInfoTarget {
+    face?: Partial<Face>;
+    uv?: Vector2 | null;
+    barycoord?: Vector3;
+}
+
 /**
  * Where `point` (in the geometry's space) lies on `triangleIndex`
  * (three-mesh-bvh's `getTriangleHitPointInfo`): its face (vertex indices, face
@@ -491,7 +547,7 @@ export interface BvhHitPointInfo {
  * (`barycoordOnTriangle`, the point projected on the plane); a degenerate
  * triangle gets zero weights.
  */
-export function getTriangleHitPointInfo(point: Vector3, geometry: BufferGeometry, triangleIndex: number, target?: BvhHitPointInfo): BvhHitPointInfo {
+export function getTriangleHitPointInfo(point: Vector3, geometry: BufferGeometry, triangleIndex: number, target?: BvhHitPointInfoTarget): BvhHitPointInfo {
     const [a, b, c] = cornersOf(geometry, triangleIndex);
     const position = geometry.attributes.position;
     vA.fromBufferAttribute(position, a);
@@ -505,7 +561,11 @@ export function getTriangleHitPointInfo(point: Vector3, geometry: BufferGeometry
             break;
         }
     }
-    const info = target ?? { face: { a: 0, b: 0, c: 0, normal: new Vector3(), materialIndex: 0 }, uv: null, barycoord: new Vector3() };
+    // As three-mesh-bvh: a target's missing fields are made, and its uv is kept when the geometry has none.
+    const info = (target ?? { uv: null }) as BvhHitPointInfo;
+    info.face ??= { a: 0, b: 0, c: 0, normal: new Vector3(), materialIndex: 0 };
+    info.face.normal ??= new Vector3();
+    info.barycoord ??= new Vector3();
     info.face.a = a;
     info.face.b = b;
     info.face.c = c;
@@ -514,7 +574,7 @@ export function getTriangleHitPointInfo(point: Vector3, geometry: BufferGeometry
     info.barycoord.set(weights[0], weights[1], weights[2]);
     const uv = geometry.attributes.uv;
     if (uv) info.uv = Triangle.getInterpolatedAttribute(uv as BufferAttribute, a, b, c, info.barycoord, info.uv ?? new Vector2()) as Vector2;
-    else info.uv = null;
+    else if (info.uv === undefined) info.uv = null;
     return info;
 }
 

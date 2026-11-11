@@ -24,6 +24,7 @@ import {
     getTriangleHitPointInfo,
     prepareBoundsTrees,
     SAH,
+    setBoundsTree,
     type BvhBoundsTreeOptions,
 } from './raycast.ts';
 
@@ -76,7 +77,7 @@ describe('computeBoundsTree options (three-mesh-bvh names)', () => {
             const tree = computeBoundsTree.call(geometry, options);
             expect(largestLeaf(tree), name).toBeLessThanOrEqual(leaf);
             if (leaf === 1) expect(largestLeaf(tree), name).toBe(1);
-            expect(geometry.boundingBox !== null, name).toBe(options.setBoundingBox === true);
+            expect(geometry.boundingBox !== null, name).toBe(options.setBoundingBox !== false);
         }
         // targetLeafSize wins over the older names; below 1 gives 1.
         expect(largestLeaf(new BvhBoundsTree(new TorusKnotGeometry(1, 0.3, 64, 8), { targetLeafSize: 2, maxLeafSize: 8 }))).toBeLessThanOrEqual(2);
@@ -257,5 +258,153 @@ describe('GenerateMeshBvhWorker', () => {
         expect(many.map((t) => t.triangleCount)).toEqual([new SphereGeometry(1, 8, 6).index!.count / 3, 108]);
         await expect(generator.generate(geometry, { strategy: 9 })).rejects.toThrow(RangeError);
         generator.dispose();
+    });
+});
+
+describe('BvhBoundsTree review fixes', () => {
+    it('sets geometry.boundingBox by default (false opts out), keeps a box it set current on refit, and warns once about an unhonoured maxDepth', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const geometry = new SphereGeometry(1, 12, 8);
+        const tree = computeBoundsTree.call(geometry);
+        expect(geometry.boundingBox).not.toBeNull();
+        const optedOut = new SphereGeometry(1, 12, 8);
+        computeBoundsTree.call(optedOut, { setBoundingBox: false });
+        expect(optedOut.boundingBox).toBeNull();
+        // Refit moves the tree's box, and the geometry's box with it.
+        const position = geometry.attributes.position;
+        for (let i = 0; i < position.count; i++) position.setX(i, position.getX(i) * 3);
+        position.needsUpdate = true;
+        tree.refit();
+        const want = new SphereGeometry(1, 12, 8);
+        want.scale(3, 1, 1);
+        want.computeBoundingBox();
+        expect(geometry.boundingBox!.max.x).toBeCloseTo(want.boundingBox!.max.x, 5);
+        expect(geometry.boundingBox!.min.x).toBeCloseTo(want.boundingBox!.min.x, 5);
+        // A box the tree didn't set is left alone.
+        const own = new SphereGeometry(1, 12, 8);
+        own.computeBoundingBox();
+        const ownBox = own.boundingBox!.clone();
+        const ownTree = computeBoundsTree.call(own);
+        own.boundingBox = ownBox.clone();
+        own.attributes.position.setX(0, 50);
+        own.attributes.position.needsUpdate = true;
+        ownTree.refit();
+        expect(own.boundingBox.max.x).toBe(ownBox.max.x);
+        // maxDepth below the tree's depth: one warning, however many trees.
+        expect(warn).not.toHaveBeenCalled();
+        const deep = new BvhBoundsTree(new TorusKnotGeometry(1, 0.3, 64, 8), { maxDepth: 2 });
+        expect(deep.depth).toBeGreaterThan(2);
+        new BvhBoundsTree(new TorusKnotGeometry(1, 0.3, 64, 8), { maxDepth: 2 });
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(String(warn.mock.calls[0][0])).toMatch(/maxDepth 2/);
+    });
+
+    it('getTriangleHitPointInfo fills a partial target, and keeps target.uv when the geometry has no uv (as three-mesh-bvh)', () => {
+        const geometry = new SphereGeometry(1, 12, 8);
+        const point = new Vector3();
+        const triangle = 20;
+        const index = geometry.index!;
+        point.fromBufferAttribute(geometry.attributes.position, index.getX(triangle * 3)).multiplyScalar(0.98);
+        const full = getTriangleHitPointInfo(point, geometry, triangle);
+        const partial = getTriangleHitPointInfo(point, geometry, triangle, {});
+        expect(partial.face).toEqual(full.face);
+        expect(partial.barycoord.distanceTo(full.barycoord)).toBe(0);
+        expect(partial.uv!.distanceTo(full.uv!)).toBe(0);
+        const noUv = geometry.clone();
+        noUv.deleteAttribute('uv');
+        const kept = { uv: full.uv!.clone(), face: { a: 0 } };
+        const result = getTriangleHitPointInfo(point, noUv, triangle, kept);
+        expect(result.uv).toBe(kept.uv);
+        expect(result.face.normal.length()).toBeCloseTo(1, 6);
+        expect(tmbGetTriangleHitPointInfo(point, noUv, triangle, { uv: kept.uv } as never).uv).toBe(kept.uv);
+        expect(getTriangleHitPointInfo(point, noUv, triangle).uv).toBeNull();
+    });
+
+    it('raycasts with an array of materials on an array ray, as on a three Ray', () => {
+        const geometry = new BoxGeometry(1, 1, 1);
+        const tree = computeBoundsTree.call(geometry);
+        const materials = Array.from({ length: 6 }, () => new MeshBasicMaterial({ side: DoubleSide }));
+        const three = tree.raycast(new Ray(new Vector3(0.1, 0.2, 5), new Vector3(0, 0, -1)), materials);
+        const arrays = tree.raycast({ origin: [0.1, 0.2, 5], direction: [0, 0, -1] }, materials);
+        expect(three.length).toBe(2);
+        expect(arrays.map((hit) => [hit.distance, hit.faceIndex])).toEqual(three.map((hit) => [hit.distance, hit.faceIndex]));
+        expect(tree.raycastFirst({ origin: [0.1, 0.2, 5], direction: [0, 0, -1] }, materials)!.distance).toBeCloseTo(4.5, 6);
+    });
+
+    it('culls sides natively: a single-material raycast asks no per-triangle callback, and agrees with three', () => {
+        const geometry = new TorusKnotGeometry(1, 0.3, 48, 8);
+        const tree = computeBoundsTree.call(geometry);
+        const passes = vi.spyOn(tree as unknown as { passes: () => boolean }, 'passes');
+        const random = createRandom(71);
+        for (const side of [FrontSide, BackSide, DoubleSide]) {
+            const mesh = new Mesh(geometry, new MeshBasicMaterial({ side }));
+            mesh.raycast = acceleratedRaycast;
+            mesh.updateMatrixWorld();
+            for (let r = 0; r < 100; r++) {
+                const ray = randomRay(random);
+                const raycaster = new Raycaster(ray.origin, ray.direction) as Raycaster & { firstHitOnly?: boolean };
+                raycaster.firstHitOnly = true;
+                const ours = raycaster.intersectObject(mesh)[0];
+                const theirs = threeHits(geometry, side, ray)[0];
+                expect(ours?.faceIndex, `side ${side} ray ${r}`).toBe(theirs?.faceIndex);
+            }
+        }
+        expect(passes).not.toHaveBeenCalled();
+        // Every hit (no firstHitOnly) still collects through the filter.
+        let hits = 0;
+        for (let r = 0; r < 20; r++) hits += tree.raycast(randomRay(random), DoubleSide).length;
+        expect(hits).toBeGreaterThan(0);
+        expect(passes).toHaveBeenCalledTimes(hits);
+    });
+
+    it('is exported from /three as MeshBVH, so switching from three-mesh-bvh is an import change', async () => {
+        const three = await import('./index.ts');
+        expect(three.MeshBVH).toBe(BvhBoundsTree);
+        const tree = new three.MeshBVH(new SphereGeometry(1, 8, 6));
+        expect(tree).toBeInstanceOf(BvhBoundsTree);
+    });
+});
+
+describe('GenerateMeshBvhWorker review fixes', () => {
+    it('marks a tree stale when the positions were edited while it built', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const generator = new GenerateMeshBvhWorker();
+        const geometry = new SphereGeometry(1, 12, 8);
+        const pending = generator.generate(geometry);
+        // An edit after the copy was taken, before the build is back.
+        const position = geometry.attributes.position;
+        for (let i = 0; i < position.count; i++) position.setZ(i, position.getZ(i) + 5);
+        position.needsUpdate = true;
+        const tree = await pending;
+        expect(tree.current()).toBe(false);
+        setBoundsTree(geometry, tree);
+        const mesh = new Mesh(geometry, new MeshBasicMaterial({ side: DoubleSide }));
+        mesh.raycast = acceleratedRaycast;
+        mesh.updateMatrixWorld();
+        geometry.computeBoundingBox();
+        geometry.computeBoundingSphere();
+        // three's own raycast (the moved sphere), with the one warning; after refit, the tree again.
+        const hits = new Raycaster(new Vector3(0, 0, 10), new Vector3(0, 0, -1)).intersectObject(mesh);
+        expect(hits[0].distance).toBeCloseTo(4, 1);
+        expect(warn).toHaveBeenCalledTimes(1);
+        tree.refit();
+        expect(tree.current()).toBe(true);
+        expect(new Raycaster(new Vector3(0, 0, 10), new Vector3(0, 0, -1)).intersectObject(mesh)[0].distance).toBeCloseTo(4, 1);
+        generator.dispose();
+    });
+
+    it('rejects builds in flight on dispose, on its own pool and on a shared one', async () => {
+        const generator = new GenerateMeshBvhWorker();
+        const builds = [generator.generate(new SphereGeometry(1, 32, 24)), generator.generate(new TorusKnotGeometry(1, 0.3, 64, 8))];
+        generator.dispose();
+        for (const build of builds) await expect(build).rejects.toThrow();
+        const shared = new GenerateMeshBvhWorker().pool;
+        const user = new GenerateMeshBvhWorker({ pool: shared });
+        const build = user.generate(new SphereGeometry(1, 16, 12));
+        user.dispose();
+        await expect(build).rejects.toThrow(/cancelled/);
+        // The shared pool still builds for others.
+        expect((await new GenerateMeshBvhWorker({ pool: shared }).generate(new SphereGeometry(1, 8, 6))).triangleCount).toBeGreaterThan(0);
+        shared.dispose();
     });
 });
