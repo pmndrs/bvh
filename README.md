@@ -8,6 +8,8 @@ DDGI (`@pmndrs/ddgi`, in [webgpu-ddgi](https://github.com/DennisSmolek/webgpu-dd
 
 How the builders work inside: [docs/design/bvh-builders.md](docs/design/bvh-builders.md). The plan and its stages: [docs/design/bvh-framework.md](docs/design/bvh-framework.md).
 
+Every way our code differs from its sources (tinybvh, HIPRT, the watertight test), and why: [docs/DIVERGENCES.md](docs/DIVERGENCES.md).
+
 ## The builder contract
 
 Every builder follows the same contract, so one can replace another without changing the code that traces rays.
