@@ -32,7 +32,7 @@ import { buildTraceScene, createMeshBvhBuilder, HIT_RECORD_BYTES, HIT_RECORD_WOR
 import { createRandom } from '../../../../src/trace/oracle-fixtures.ts';
 import type { AdapterSummary } from '../../contract.ts';
 import { drainDevice, reportGpuTest, summarizeAdapterInfo, watchDevice } from '../../client.ts';
-import { TraceBatchKernel, uploadTraceScene, type TraceSceneBuffers } from '../../trace-gpu.ts';
+import { TraceBatchKernel, uploadTraceScene, type TraceSceneBuffers } from '../../../../src/trace/trace-gpu.ts';
 import { RAY_DIRECTION_SEED, RC_HALTON_FIRST_INDEX, RC_RAYS_PER_PROBE, RC_SEED, RC_TILE_SIZE, RC_VIEW } from './config.ts';
 import { COUNTED_WORD, COUNTED_WORDS, countedKernelWgsl } from './counted-walk-wgsl.ts';
 import { createDispatchTimer, measureDispatches } from './dispatch-timer.ts';

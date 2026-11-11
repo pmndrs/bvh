@@ -8,7 +8,7 @@ node tests/gpu/run.ts --filter trace-bench-smoke --verbose --json out.json
 
 `--filter` matches by substring of the page folder name (`bvh-lbvh` also runs `bvh-lbvh-fallback` and `-profile`). The runner starts a vite server on `tests/gpu/`, launches your installed Chrome headless with WebGPU, runs each `pages/<name>/` and fails on a failed report, any browser error or WebGPU validation warning, or a timeout. It was ported from webgpu-ddgi's `tools/gpu/`; most of what is below that is general (page contract, `test.json`, `--gpu`) is in `tests/gpu/RUNNER.md`, ddgi's README for the runner.
 
-Pages that run quickly and need no assets: `bvh-lbvh`, `bvh-hploc`, `bvh-blas-refit`, `bvh-lbvh-fallback`, `trace-inline`, `trace-oracle`. The `trace-bench-*` pages load scenes (see below); the Sponza and Bistro ones take minutes.
+Pages that run quickly and need no assets: `bvh-lbvh`, `bvh-hploc`, `bvh-blas-refit`, `bvh-lbvh-fallback`, `bvh-top-level-gpu`, `scene-trees-mid-swap`, `scene-trees-runtime`, `scene-trees-deforming`, `trace-inline`, `trace-oracle`. `scene-trees-sponza` (manual) loads Sponza and reports `SceneTrees` memory and load times. The `trace-bench-*` pages load scenes (see below); the Sponza and Bistro ones take minutes.
 
 ## Scene assets
 
@@ -33,4 +33,4 @@ node tests/gpu/pages/trace-bench/surface-to-csv.ts out.json [more.json ...] [--a
 ## Not here
 
 - `platform-bench.ts` and the `platform` tracer of `trace-bench` compared against ddgi's own platform tracer; the `platform*` variants of `trace-oracle` and the createGI/technique version of `trace-inline` tested ddgi's platform. They live on in webgpu-ddgi.
-- `trace-gpu.ts` here (batch kernel and scene upload for the pages) is a port of ddgi-core's file of the same name; it is not part of `src/`.
+- The batch kernel and scene upload the pages use (`TraceBatchKernel`, `uploadTraceScene`) are in `src/trace/trace-gpu.ts`.

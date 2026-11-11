@@ -1,0 +1,4 @@
+{
+    "description": "SceneTrees at run time: meshes and instances added (GPU trees at run time, then tinybvh), moved, hidden, re-masked, re-materialed and removed (one mesh while its builds run) over eight rounds, with merged static groups from the load; the GPU walk on the GPU top level must match the CPU-assembled scene after each round's first trees and once settled, and merged instances must refuse changes.",
+    "timeoutMs": 300000
+}

@@ -1,18 +1,19 @@
 /**
- * GPU harness for the pages: uploads an assembled scene's three buffers and runs
- * batches of rays through the WGSL walk (`batchKernelWgsl`). Ported from the
- * `trace-gpu.ts` that stayed behind in ddgi-core (its platform-module wrapper
- * and the material hook are left out; this repo's walk has neither).
+ * The GPU side of the walk for apps that don't write their own kernel: uploads an
+ * assembled scene's three buffers (`uploadTraceScene`) and runs batches of rays
+ * from buffers through the WGSL walk (`TraceBatchKernel`, over `batchKernelWgsl`).
+ * Ported from ddgi-core's `platform/trace/trace-gpu.ts`. Its platform-module
+ * wrapper (`createTraceModule`) stays in ddgi: an app that wants the walk inline
+ * in its own kernel includes `traceModuleWgsl` and binds the three buffers itself.
  *
- * The page owns the device; nothing here creates one.
+ * The caller owns the device (nothing here creates one), and errors are the
+ * caller's to listen for with `addEventListener('uncapturederror')`.
  */
 
-import type { TraceSceneData } from '../../src/trace/scene-assembly.ts';
-import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl } from '../../src/trace/wgsl.ts';
-import { RAY_MASK_ALL } from '../../src/trace/layout.ts';
-import { RAY_BYTES } from '../../src/trace/rays.ts';
-
-export { RAY_BYTES, RAY_FLOATS, packRays, unpackRay, type TraceRay } from '../../src/trace/rays.ts';
+import type { TraceSceneData } from './scene-assembly.ts';
+import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl } from './wgsl.ts';
+import { RAY_MASK_ALL } from './layout.ts';
+import { RAY_BYTES } from './rays.ts';
 
 /** The three storage buffers the tracer reads. */
 export interface TraceSceneBuffers {

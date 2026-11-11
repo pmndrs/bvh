@@ -2,6 +2,17 @@
 
 This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `packages/bvh`. The full plan is [docs/design/bvh-package-split.md](docs/design/bvh-package-split.md): the decisions (D1–D8), the target layout, phases P0–P9, examples, docs and tasks BX.0–BX.20. Read it first.
 
+## Update 2026-11-11, later: scene trees moved in (branch of BX.21)
+
+ddgi's scene-tree management is in the package now, engine-free:
+- `src/trace/trace-gpu.ts`: `TraceBatchKernel`, `uploadTraceScene` (from `tests/gpu/`), exported.
+- `@pmndrs/bvh/worker` (`src/worker/`): `createBvhWorkerPool` (single-threaded workers, size, transferables, AbortSignal, inline fallback), plus the old one-worker wrappers. The build now rewrites `new URL('./x.ts')` worker URLs to `.js` (they pointed at missing files in `dist/` before).
+- `src/trace/top-level-gpu.ts`: `GpuTopLevel` (own instance table, gather `bvhTopLevelGather`, refit, shapes from the worker), material via `materialCode`, mask bits 8-15.
+- `src/scene/`: `SceneTrees` (GPU H-PLOC first trees, tinybvh swapped in from the pool, growable storage, GPU or CPU top level, runtime adds/removals, `mergeStaticInstances` with a GPU identity pass for merged GPU trees, deforming meshes with GPU refit and drift rebuilds, events, memory stats); `gpuTreeOutputs: 'copy' | 'adopt'`.
+- Pages: `bvh-top-level-gpu`, `scene-trees-mid-swap` (the generic mid-swap oracle), `scene-trees-runtime`, `scene-trees-deforming`, `scene-trees-sponza` (manual).
+
+Sponza on the M5 (`scene-trees-sponza`, 132 meshes, 5.74 M triangles, pool of 4): first GPU trees 100-118 ms, every tinybvh tree built 366-369 ms (1.30 s with the merged group on one worker). Memory: `copy` 1,106 MB with the GPU trees in use, 470 MB settled; `adopt` 614 MB in use, 614 MB settled (the batch's node buffer, 351 MB, stays). The peak, 1,483 MB in every mode, is during the H-PLOC build itself (its scratch plus outputs), which ddgi's numbers didn't count; `copy` stays the default.
+
 ## Update 2026-11-11 (read this first; the sections below are the 2026-11-10 state)
 
 **Decisions (Dennis):**

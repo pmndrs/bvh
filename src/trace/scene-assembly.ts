@@ -342,7 +342,7 @@ export async function buildTraceScene(
  * world space and name source-mesh triangles, so a refit from the source's
  * object-space vertices would corrupt them. Merged ranges are never refit.
  */
-export function meshRefitPlacement(scene: TraceSceneData, meshIndex: number): { nodeWordOffset: number; triangleWordOffset: number } {
+export function meshRefitPlacement(scene: Pick<TraceSceneData, 'meshes'>, meshIndex: number): { nodeWordOffset: number; triangleWordOffset: number } {
     const placement = scene.meshes[meshIndex];
     if (!placement) throw new RangeError(`meshRefitPlacement: the scene has no mesh ${meshIndex}`);
     if (placement.mergedInto !== undefined) {

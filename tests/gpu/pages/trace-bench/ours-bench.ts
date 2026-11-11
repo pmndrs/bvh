@@ -14,7 +14,7 @@ import {
     type TraceInstance,
     type TraceSceneData,
 } from '../../../../src/trace/index.ts';
-import { TraceBatchKernel, uploadTraceScene } from '../../trace-gpu.ts';
+import { TraceBatchKernel, uploadTraceScene } from '../../../../src/trace/trace-gpu.ts';
 import { GpuHplocBuilder } from '../../../../src/gpu-hploc.ts';
 import { GpuLbvhBuilder } from '../../../../src/gpu-lbvh.ts';
 import type { GpuMeshGeometry } from '../../../../src/mesh-input.ts';

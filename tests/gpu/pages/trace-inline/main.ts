@@ -28,7 +28,8 @@ import {
 import type { TracedHit } from '../../../../src/trace/oracle-compare.ts';
 import { DEFAULT_TRIANGLE_FILTER_WGSL } from '../../../../src/trace/triangle-filter.ts';
 import { assert, runGpuTest } from '../../client.ts';
-import { RAY_BYTES, uploadTraceScene } from '../../trace-gpu.ts';
+import { RAY_BYTES } from '../../../../src/trace/rays.ts';
+import { uploadTraceScene } from '../../../../src/trace/trace-gpu.ts';
 import { buildOracleCases, FULL_SIZES, sharedEdgeCase, type OracleCase } from '../trace-oracle/cases.ts';
 import {
     computeReferenceAnswersYielding,

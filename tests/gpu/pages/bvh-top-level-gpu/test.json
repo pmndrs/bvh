@@ -1,0 +1,4 @@
+{
+    "description": "GpuTopLevel: the gather and the refit on the GPU against the CPU top level. 400 instances (mirrored, masked, hidden, with materials) over tinybvh meshes; the gathered records must equal buildTopLevel's bit for bit (bits 16-31 carry material + 1), and the GPU walk and the CPU walk over the read-back buffers must match the CPU-assembled scene, before and after moves, hides and removals.",
+    "timeoutMs": 180000
+}

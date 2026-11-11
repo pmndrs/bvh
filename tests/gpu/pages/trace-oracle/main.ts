@@ -63,7 +63,8 @@ import {
 import { type TracedHit } from '../../../../src/trace/oracle-compare.ts';
 import { createMeshLayoutBuilder, createTinyBvhBuilder, type MeshLayoutBuilder } from '../../../../src/index.ts';
 import { buildMeshBvhWithTinyBvh } from '../../../../src/trace/mesh-bvh-topology.ts';
-import { RAY_BYTES, TraceBatchKernel, uploadTraceScene } from '../../trace-gpu.ts';
+import { RAY_BYTES } from '../../../../src/trace/rays.ts';
+import { TraceBatchKernel, uploadTraceScene } from '../../../../src/trace/trace-gpu.ts';
 import { assert, runGpuTest } from '../../client.ts';
 import {
     buildOracleCases,

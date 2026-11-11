@@ -38,6 +38,7 @@ for (const [name, lines] of Object.entries(requiredLicenseText)) {
 
 // Any built file embedding WebAssembly (base64 of "\0asm", version 1) must carry the wasm licences.
 const embeddedWasmMarker = 'AGFzbQEAAAA';
+const workerEntries = new Set();
 for (const entry of existsSync(dist) ? readdirSync(dist, { recursive: true, withFileTypes: true }) : []) {
     if (!entry.isFile()) continue;
     const file = resolve(entry.parentPath, entry.name);
@@ -51,10 +52,24 @@ for (const entry of existsSync(dist) ? readdirSync(dist, { recursive: true, with
         problems.push(`${file} still imports a relative .ts file`);
     }
     if (/\.test\.(js|d\.ts)$/.test(entry.name)) problems.push(`${file} is a test file in dist`);
+    // Worker entries: `new URL('./x.js', import.meta.url)` must name a built file, never a .ts source.
+    if (entry.name.endsWith('.js')) {
+        for (const match of text.matchAll(/new URL\(\s*["'](\.{1,2}\/[^"']*)["']\s*,\s*import\.meta\.url\s*\)/g)) {
+            const target = resolve(entry.parentPath, match[1]);
+            if (match[1].endsWith('.ts')) problems.push(`${file} starts a worker from the source file ${match[1]}`);
+            else if (!existsSync(target)) problems.push(`${file} starts a worker from ${match[1]}, which is not in dist`);
+            else workerEntries.add(target);
+        }
+    }
+}
+
+// The /worker subpath must start its workers from built files (the mesh tree worker at least).
+if (manifest.exports['./worker'] && ![...workerEntries].some((file) => file.endsWith('mesh-bvh-worker.js'))) {
+    problems.push('no built file starts the mesh tree worker (dist/trace/mesh-bvh-worker.js)');
 }
 
 if (problems.length) {
     console.error(problems.join('\n'));
     process.exit(1);
 }
-console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl and gpu-hploc-wgsl, no .ts imports, no tests.');
+console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl and gpu-hploc-wgsl, no .ts imports, no tests, worker entries built (' + workerEntries.size + ').');
