@@ -84,7 +84,10 @@ import {
     type BvhRaycastOptions,
     type BvhShapecastCallbacks,
     type BvhBvhcastCallbacks,
+    type BvhClosestPoint,
+    type BvhClosestPointTarget,
     type BvhTriangleAccept,
+    type BvhVec3Like,
     type CpuMeshBvhBuildOptions,
 } from '../query/cpu-mesh-bvh.ts';
 import type { BvhMatrix4Like } from '../query/shapes.ts';
@@ -263,6 +266,9 @@ export function meshInputFromGeometry(geometry: BufferGeometry): MeshInput {
     return { positions, indices };
 }
 
+/** three-mesh-bvh's `HitPointInfo`: what `closestPointToPoint` and `closestPointToGeometry` return. */
+export type BvhClosestPointInfo = BvhClosestPoint<Vector3>;
+
 /** A three-mesh-bvh `raycast` result: three's `Intersection` in the geometry's space, without `object`. */
 export type BvhBoundsTreeHit = Omit<Intersection, 'object'>;
 
@@ -386,6 +392,44 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
         if (other instanceof CpuMeshBvh || !('isBufferGeometry' in other)) return super.intersectsGeometry(other, geometryToBvh);
         const tree = (other as unknown as WithBoundsTree).boundsTree;
         return super.intersectsGeometry(tree instanceof CpuMeshBvh ? tree : meshInputFromGeometry(other), geometryToBvh);
+    }
+
+    /**
+     * three-mesh-bvh's `closestPointToPoint(point, target, minThreshold, maxThreshold)`:
+     * the core's ({@link CpuMeshBvh.closestPointToPoint}), with the point a
+     * three `Vector3` (a new one when `target` has none). `faceIndex` is three's.
+     */
+    override closestPointToPoint(point: Vector3 | BvhVec3Like, target: BvhClosestPointTarget<Vector3> = {}, minThreshold = 0, maxThreshold = Infinity): BvhClosestPointInfo | null {
+        return super.closestPointToPoint(point, target, minThreshold, maxThreshold) as BvhClosestPointInfo | null;
+    }
+
+    /**
+     * three-mesh-bvh's `closestPointToGeometry(geometry, geometryToBvh, target1, target2, minThreshold, maxThreshold)`:
+     * the core's ({@link CpuMeshBvh.closestPointToGeometry}) against the
+     * geometry's own tree when it has one of ours (`geometry.boundsTree`), else
+     * against its triangles. A tree or `{ positions, indices }` pass too.
+     * Points are three `Vector3`s; `target2` gets the other geometry's point,
+     * in its space.
+     */
+    override closestPointToGeometry(
+        other: BufferGeometry | CpuMeshBvh<unknown> | MeshInput,
+        geometryToBvh?: Matrix4 | BvhMatrix4Like | null,
+        target1: BvhClosestPointTarget<Vector3> = {},
+        target2: BvhClosestPointTarget<Vector3> | null = {},
+        minThreshold = 0,
+        maxThreshold = Infinity,
+    ): BvhClosestPointInfo | null {
+        let input: CpuMeshBvh<unknown> | MeshInput;
+        if (other instanceof CpuMeshBvh || !('isBufferGeometry' in other)) input = other;
+        else {
+            const tree = (other as unknown as WithBoundsTree).boundsTree;
+            input = tree instanceof CpuMeshBvh ? tree : meshInputFromGeometry(other);
+        }
+        return super.closestPointToGeometry(input, geometryToBvh, target1, target2, minThreshold, maxThreshold) as BvhClosestPointInfo | null;
+    }
+
+    protected override createPoint(x: number, y: number, z: number): Vector3 {
+        return new Vector3(x, y, z);
     }
 
     /** A `geometry.boundingBox` this tree set follows the refitted tree. */

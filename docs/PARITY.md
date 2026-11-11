@@ -1,6 +1,6 @@
 # Parity with three-mesh-bvh 0.9.18 (BX.16)
 
-The audit P8 asks for (`docs/design/bvh-package-split.md`, P8). It compares our package, as of `main` on 2026-11-11 (rows 1.1-1.3, 1.6, 1.7, 2.1, 2.2, 4.1-4.4, 4.7, 6.1, 6.2, 6.5, 7.1, 7.2 and 9.1 updated after build-out items 1 to 5), with three-mesh-bvh 0.9.18 as installed in `node_modules/three-mesh-bvh`. The sources are its `src/index.js`, `src/index.d.ts`, `src/webgpu/index.js` and `index.d.ts`, `src/workers/index.js` and `index.d.ts`, and its README example list (the package ships no `example/` folder).
+The audit P8 asks for (`docs/design/bvh-package-split.md`, P8). It compares our package, as of `main` on 2026-11-11 (rows 1.1-1.7, 2.1, 2.2, 4.1-4.4, 4.7, 6.1, 6.2, 6.4, 6.5, 7.1-7.4 and 9.1 updated after build-out items 1 to 7 and part of 12), with three-mesh-bvh 0.9.18 as installed in `node_modules/three-mesh-bvh`. The sources are its `src/index.js`, `src/index.d.ts`, `src/webgpu/index.js` and `index.d.ts`, `src/workers/index.js` and `index.d.ts`, and its README example list (the package ships no `example/` folder).
 
 **Status**
 - **have**: we have an equivalent. Our code is cited.
@@ -34,8 +34,8 @@ Notes on the survey:
 | 1.1 | `MeshBVH.raycast` (all hits) | have | `CpuMeshBvh.raycast(ray, { side, near, far })` (`src/query/cpu-mesh-bvh.ts`); `geometry.boundsTree.raycast(ray, materialOrSide, near, far)` with three's types, and `acceleratedRaycast`, the same fields as three's `Mesh.raycast` (`src/three/raycast.ts`); `createCpuTracer().closest/any` for bare rays (`src/trace/cpu-traversal.ts`). All run the one CPU walk | homefig (`viewer/src/components/viewer/scene-bvh.tsx:84`, `editor/.../first-person-controls.tsx:332`), drei (`external/Performance/Bvh/Bvh.tsx:55,115`) |
 | 1.2 | `MeshBVH.raycastFirst(ray, materialOrSide, near, far)` | have | `CpuMeshBvh.raycastFirst` takes a ray (`[x, y, z]` arrays or a three `Ray`) and a side, `{ side, near, far }` or a material; `BvhBoundsTree.raycastFirst(ray, DoubleSide)` returns a three intersection with `face.normal`, as csg reads it (`src/three/bounds-tree.test.ts`) | csg (`core/operations/operationsUtils.js:50`, `raycastFirst(_ray, DoubleSide)`) |
 | 1.3 | `shapecast` (`intersectsBounds`, `intersectsTriangle`, `boundsTraverseOrder`, ...) | have | `CpuMeshBvh.shapecast({ intersectsBounds, intersectsTriangle, intersectsRange, boundsTraverseOrder })` (`src/query/cpu-mesh-bvh.ts`), on the one box walk (`traverse`): the triangle as a scratch `ExtendedTriangle`, its original index, `contained`, `depth`; `BvhBoundsTree.shapecast` hands over `Box3` and the three-flavoured `ExtendedTriangle`. Against three-mesh-bvh on oriented boxes, spheres and homefig's capsule pattern: the same triangles and closest points (`src/three/shapecast.test.ts`) | homefig (`editor/.../first-person/bvh-ecctrl.tsx:440,547`) |
-| 1.4 | `closestPointToPoint` | missing | Q2. Our reference tracer (`src/trace/reference-tracer.ts`) only casts rays | None (see note 2) |
-| 1.5 | `closestPointToGeometry` | missing | Q2 | None |
+| 1.4 | `closestPointToPoint` | have | `CpuMeshBvh.closestPointToPoint(point, target, minThreshold, maxThreshold)` (`src/query/cpu-mesh-bvh.ts`): three-mesh-bvh's shapecast step for step, `point` / `distance` / `faceIndex` (original triangle); `BvhBoundsTree`'s returns a `Vector3`. Against three-mesh-bvh: the same distance on 800 random points (`src/three/closest-point.test.ts`) and on 4,000 in a 270k-triangle room, the same triangle unless tied; 0.92x its time in the open, 1.1-1.2x near surfaces (`bench/closest-point.ts`) | None (see note 2) |
+| 1.5 | `closestPointToGeometry` | have | `CpuMeshBvh.closestPointToGeometry(treeOrMesh, geometryToBvh, target1, target2, minThreshold, maxThreshold)`; `BvhBoundsTree`'s takes a `BufferGeometry` (its `boundsTree` when it is ours). three-mesh-bvh's two nested shapecasts; both `faceIndex`es are original triangles (three-mesh-bvh 0.9.18's indirect mode gives tree positions). The same distances on 85 random pairs and 200 room placements (1.08x its time) | None |
 | 1.6 | `intersectsGeometry`, `intersectsBox`, `intersectsSphere` | have | `CpuMeshBvh.intersectsBox(box, boxToMesh)`, `intersectsSphere(sphere)`, `intersectsGeometry(treeOrMesh, geometryToBvh)`; `BvhBoundsTree.intersectsGeometry(geometry, matrix)` uses `geometry.boundsTree` when it is ours, else the bare triangles. Same booleans as three-mesh-bvh (`src/three/shapecast.test.ts`) | None directly. homefig gets the box test through `shapecast` (`intersectsBounds: box.intersectsBox`) |
 | 1.7 | `bvhcast` (tree against tree) | have | `CpuMeshBvh.bvhcast(other, matrixToLocal, { intersectsRanges, intersectsTriangles })`: three-mesh-bvh's walk step for step on our nodes, tree positions as in indirect mode; `BvhBoundsTree.bvhcast` hands over three-flavoured `ExtendedTriangle`s. three-bvh-csg's pattern finds the same pairs and segments on random mesh pairs (`src/three/bvhcast.test.ts`) and on a 270k-triangle room (`bench/query-parity.ts`: 100 / 100, 0.94x three-mesh-bvh's time). `intersectsGeometry` uses it against a tree | csg (`core/operations/operationsUtils.js:70`, the boolean-op core) |
 
@@ -88,7 +88,7 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 | 6.1 | `refit()` | have | `CpuMeshBvh.refit(input?)` rewrites the triangle records from the source positions and runs `refitOnCpu` (`src/refit-cpu.ts`); `geometry.boundsTree.refit()` rereads the position attribute and the raycast uses the tree again. GPU refit: `src/gpu-mesh-refit.ts`, `SceneTrees.setPose`, `src/scene/deforming-trees.ts` | pathtracer (`core/PathTracingSceneGenerator.js:219`), ddgi-research (own packer, `src/scene.js:49`, `src/provider.js:83`), reflections (`MeshBVHTraceProvider.ts:507`) |
 | 6.2 | `computeBoundsTree`, `disposeBoundsTree`, `acceleratedRaycast`, `firstHitOnly` | have | `src/three/raycast.ts` (`prepareBoundsTrees()` is awaited once first). `geometry.boundsTree` is a `BvhBoundsTree`, the core `CpuMeshBvh` with three's types. Options: rows 4.1-4.7. `docs/three.md` has the bench | homefig (`scene-bvh.tsx:78-116`, `build-collider-world.ts:12,288-297`, `first-person-controls.tsx:47,323-332`), drei (`Bvh.tsx:5,34,55-62,111-124`) |
 | 6.3 | `StaticGeometryGenerator` (skinned and morphed meshes to a static geometry) | missing | `SceneTrees.setPose` takes vertices you pose yourself | pathtracer (own copy, note 4: `core/PathTracingSceneGenerator.js:3,94`) |
-| 6.4 | `MeshBVHHelper` / `BVHHelper` | missing | HANDOFF lists "a helper" as to do in `/three` | drei (`Bvh.stories.tsx:5,29`, story only); csg: none in `src` |
+| 6.4 | `MeshBVHHelper` / `BVHHelper` | have | `BVHHelper` and `MeshBVHHelper` in `/three` (`src/three/helper.ts`): three-mesh-bvh's `Group` with `depth`, `displayParents`, `displayEdges`, `color`, `opacity`, `instanceId`, `edgeMaterial` / `meshMaterial`, `update()`, `dispose()`, the constructor forms `(mesh or bvh, depth)` and `(mesh, bvh, depth)`, following the mesh's transform. The boxes and indices come from the core (`bvhHelperPositions`, `bvhHelperIndices`). Segment counts tested in Node against the tree's node counts at each depth (`src/three/helper.test.ts`); not drawn in a browser yet. No `BatchedMesh` per-geometry tree (`boundsTrees`), as row 5.5 | drei (`Bvh.stories.tsx:5,29`, story only); csg: none in `src` |
 | 6.5 | `getTriangleHitPointInfo` | have | `getTriangleHitPointInfo(point, geometry, triangleIndex, target)` in `/three` (tested against three-mesh-bvh's), and `CpuMeshBvh.getTriangleHitPointInfo(point, triangle, { attributes })` in the core: barycentrics, corners, face normal and any attributes interpolated | None |
 
 ## 7. Utilities
@@ -96,9 +96,9 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 | # | three-mesh-bvh | Status | Ours / what is missing | Who needs it |
 | --- | --- | --- | --- | --- |
 | 7.1 | `MeshBVH.serialize` / `deserialize` | partial | `CpuMeshBvh.serialize()` / `CpuMeshBvh.deserialize(bytes)`, `deserializeBoundsTree(bytes, geometry)` in `/three`, over `serializeLayout` (`src/serialize.ts`). Our layout's format, not three-mesh-bvh's, and no `setIndex` | None |
-| 7.2 | `estimateMemoryInBytes` | have | `CpuMeshBvh.estimateMemoryInBytes()` per tree (layout, top level, lookups; not the source geometry); `SceneTrees.memory` per scene (`src/scene/scene-trees.ts`) | None |
-| 7.3 | `getBVHExtremes` | partial | `treeSahCost` (`src/layout-check.ts:256`) and `checkGpuLayout`'s counts (depth, leaf count); no depth or leaf-size histogram (unverified) | None |
-| 7.4 | `validateBounds` | have | `checkGpuLayout` checks every child box bit for bit, plus the tree's shape (`src/layout-check.ts`) | None |
+| 7.2 | `estimateMemoryInBytes` | have | `CpuMeshBvh.estimateMemoryInBytes()` per tree (layout, top level, lookups; not the source geometry), and three-mesh-bvh's function `estimateMemoryInBytes(tree)` over it (`src/query/debug.ts`, from `@pmndrs/bvh` and `/three`); `SceneTrees.memory` per scene (`src/scene/scene-trees.ts`) | None |
+| 7.3 | `getBVHExtremes` | have | `getBVHExtremes(tree)` (`src/query/debug.ts`, from `@pmndrs/bvh` and `/three`): three-mesh-bvh's output (`nodeCount`, `leafNodeCount`, `depth`, `primitives`, `splits`, `surfaceAreaScore` with its costs), one entry for our one root, over `CpuMeshBvh.traverseNodes` (three-mesh-bvh's node walk). The split axis isn't stored in our layout: it is the axis the children's centres lie furthest apart on. `treeSahCost` (`src/layout-check.ts`) is the normalised SAH cost | None |
+| 7.4 | `validateBounds` | have | `validateBounds(tree)` (`src/query/debug.ts`, from `@pmndrs/bvh` and `/three`): three-mesh-bvh's checks and `console.assert` messages, reading the source geometry (`writePrimitiveRangeBounds`), so edits without `refit()` fail as in three-mesh-bvh. `checkGpuLayout` checks every child box bit for bit, plus the tree's shape (`src/layout-check.ts`) | None |
 | 7.5 | `getJSONStructure` | missing | | None |
 
 ## 8. GPU
@@ -127,7 +127,7 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 
 ## Counts
 
-51 rows: **25 have, 6 partial, 17 missing, 3 won't** (4.8, 8.12, 9.2). At the audit, before items 1 to 5: 12 have, 13 partial, 23 missing. Every "won't" has its reason in its row; P8's done-when also wants them in the "Coming from three-mesh-bvh" docs page.
+51 rows: **29 have, 5 partial, 14 missing, 3 won't** (4.8, 8.12, 9.2). At the audit, before items 1 to 5: 12 have, 13 partial, 23 missing. Every "won't" has its reason in its row; P8's done-when also wants them in the "Coming from three-mesh-bvh" docs page.
 
 ## Proposed build-out order
 
@@ -147,17 +147,17 @@ P8's order was: Q2 closest point and shapecast plus shapes; the drop-in three in
 | 3 (done) | Public CPU tree object: `raycastFirst(ray, side)`, `refit()` on `BvhBoundsTree` (wiring in `refitOnCpu`), the indirect API (`resolveTriangleIndex`), `getTriangleHitPointInfo` | 1.2, 4.4, 6.1, 6.5 | M | csg (`raycastFirst`, indirect), pathtracer (`refit`, indirect) |
 | 4 (done) | `bvhcast` (tree against tree) | 1.7 | M | csg (booleans) |
 | 5 (done) | `generate(geometry, options)` drop-in over the worker pool | 9.1 | S | pathtracer (`setBVHWorker`) |
-| 6 | Q2 `closestPointToPoint` and `closestPointToGeometry` on the CPU | 1.4, 1.5 | M | no surveyed call site; the P8 `distancecast` compare and SDF need it. Lower than its P8 slot |
-| 7 | `MeshBVHHelper` in `/three` | 6.4 | S | drei (story only) |
+| 6 (done) | Q2 `closestPointToPoint` and `closestPointToGeometry` on the CPU | 1.4, 1.5 | M | no surveyed call site; the P8 `distancecast` compare and SDF need it. Lower than its P8 slot |
+| 7 (done) | `MeshBVHHelper` in `/three` | 6.4 | S | drei (story only) |
 | 8 | `StaticGeometryGenerator` | 6.3 | M | pathtracer (has its own) |
 | 9 | CPU object BVH queries: scene `raycast`, `shapecast`, frustum culling | 5.2, 5.3, 5.6 | M | none found; P8 lists it |
 | 10 | GPU closest point and shapecast in WGSL, with `sampleTrianglePoint`, then SDF; `ClusteredBVH` after | 8.5-8.10 | L | none found (needs a user first, e.g. the SDF compare) |
 | 11 | Points, lines, `SkinnedMeshBVH` | 3.2-3.4 | L | none found |
-| 12 | Per-tree utilities: `estimateMemoryInBytes`, `getBVHExtremes`, three-mesh-bvh-format `serialize`, `getJSONStructure` | 7.1-7.3, 7.5 | S | none found |
+| 12 (part done) | Per-tree utilities: `estimateMemoryInBytes` and `getBVHExtremes` (done); three-mesh-bvh-format `serialize`, `getJSONStructure` (left) | 7.1-7.3, 7.5 | S | none found |
 
 A project's full switch waits on every item in its column:
 - csg needs nothing more (2, 3 and 4 are done). Its `Brush` builds `new MeshBVH(geometry, { maxLeafSize: 3, indirect: true, useSharedArrayBuffer })`, which `/three`'s `MeshBVH` accepts.
 - homefig needs nothing more (1 and 2 are done).
-- drei needs nothing more (1 is done). Its refraction material is GLSL (won't, 8.12).
+- drei needs nothing more (1 and 7 are done; its story imports `MeshBVHHelper`, which `/three` exports). Its refraction material is GLSL (won't, 8.12).
 - pathtracer's CPU side has what it needs (1, 3 and 5 are done). Its shaders are GLSL (won't).
 - Denoiser, upscaler, ddgi-research and reflections need nothing beyond what is on `main` (rows 8.1 to 8.3 and 5.1), apart from the switch itself (`docs/three.md`, "Switching the known consumers").
