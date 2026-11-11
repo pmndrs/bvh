@@ -41,7 +41,10 @@ import {
 } from '../trace-oracle/check.ts';
 
 /** Rays per shared-edge scene; the oracle page runs a million, this checks the inline path. */
-const SHARED_EDGE_RAYS = 200_000;
+/** `?profile=ci` is trace-oracle's reduced profile for software adapters (same cases and formats, fewer rays). */
+const reduced = new URLSearchParams(location.search).get('profile') === 'ci';
+const SHARED_EDGE_RAYS = reduced ? 20_000 : 200_000;
+const CASE_SIZES = reduced ? { randomRays: 2000, thinBoxRays: 2400 } : FULL_SIZES;
 const SHARED_EDGE_REFERENCE_RAYS = 5000;
 
 const WORKGROUP_SIZE = 64;
@@ -198,7 +201,7 @@ await runGpuTest(async ({ device, log }) => {
     const failures: string[] = [];
     const cases: Record<string, unknown> = {};
     const sharedEdges: Record<string, unknown> = {};
-    const oracleCases = buildOracleCases(FULL_SIZES);
+    const oracleCases = buildOracleCases(CASE_SIZES);
     const references = [];
     for (const oracleCase of oracleCases) references.push(await computeReferenceAnswersYielding(oracleCase));
     for (const format of FORMATS) {
