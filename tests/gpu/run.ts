@@ -19,6 +19,7 @@ import { discoverPages, selectPages } from './pages.ts';
 import { BrowserSession, WebGpuUnavailableError, WrongAdapterError, type PageResult } from './session.ts';
 import { SITE_ROOT, startTestSite, type TestSiteServer } from './server.ts';
 import { summarizePage } from './summary.ts';
+import { examplePages, startExamplesSite } from './examples-site.ts';
 
 function describeAdapter(adapter: AdapterSummary): string {
     const parts = [`vendor=${adapter.vendor}`, `architecture=${adapter.architecture}`];
@@ -129,7 +130,7 @@ async function main(): Promise<number> {
     }
 
     const runStart = Date.now();
-    const allPages = await discoverPages(join(SITE_ROOT, 'pages'));
+    const allPages = options.examples ? examplePages() : await discoverPages(join(SITE_ROOT, 'pages'));
     const pages = selectPages(allPages, options.filters);
     if (pages.length === 0) {
         console.error(
@@ -159,7 +160,7 @@ async function main(): Promise<number> {
     let closeServer: () => Promise<void> = async () => {};
 
     try {
-        server = await startTestSite();
+        server = options.examples ? await startExamplesSite() : await startTestSite();
         closeServer = registerCleanup(server.close);
         console.log(`test site: ${server.origin}   gpu requested: ${options.gpu ?? 'any'}`);
 
@@ -194,7 +195,7 @@ async function main(): Promise<number> {
         }
 
         // The runner's own self-test belongs to the full run only; a --filter run is about one page.
-        if (options.filters.length === 0 && !options.withoutWebGpu) {
+        if (options.filters.length === 0 && !options.withoutWebGpu && !options.examples) {
             await session.close();
             session = null;
             const selfTest = await selfTestWebGpuDisabled(options, server);
