@@ -26,8 +26,10 @@ export interface MeshGeometry {
 export interface MeshBvh {
     /** `nodeCount` nodes, 64 bytes each. Node 0 is the root. */
     readonly nodes: ArrayBuffer;
-    /** `triangleCount` triangles, 48 bytes each, in tree order. */
+    /** `triangleCount` triangles in tree order: 48-byte records, or 16-byte indexed triangles with `triangleLeaves: 'indexed'`. */
     readonly triangles: ArrayBuffer;
+    /** How `triangles` stores them; omitted means `'records'` (`GpuLayoutTriangleLeaves`). */
+    readonly triangleLeaves?: 'records' | 'indexed';
     /** Parent of each node, for the bottom-up refit pass (M3). */
     readonly parents: Uint32Array;
     readonly nodeCount: number;
@@ -46,6 +48,8 @@ export function meshBvhTransferables(bvh: MeshBvh): ArrayBuffer[] {
 
 /** Options for building a mesh tree. */
 export interface MeshBvhBuildOptions {
+    /** The triangle format, `'records'` (the default) or `'indexed'` (docs/design/indexed-leaves.md). */
+    readonly triangleLeaves?: 'records' | 'indexed';
     /** Leaves with more triangles than this are cut in half until they fit. 1 to 8; default 8. */
     readonly maxLeafPrimitives?: number;
 }

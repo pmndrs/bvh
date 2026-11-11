@@ -17,6 +17,10 @@
 
 import {
     GPU_LAYOUT_EMPTY_CHILD,
+    GPU_LAYOUT_INDEXED_FLAG_SHIFT,
+    GPU_LAYOUT_INDEXED_ID_MASK,
+    GPU_LAYOUT_INDEXED_TRIANGLE_BYTES,
+    GPU_LAYOUT_INDEXED_TRIANGLE_WORD,
     GPU_LAYOUT_MAX_LEAF_PRIMITIVES,
     GPU_LAYOUT_NO_PARENT,
     GPU_LAYOUT_NODE_BYTES,
@@ -27,6 +31,7 @@ import {
     type GpuLayoutMeshBvh,
 } from './gpu-layout.ts';
 import type { MeshInput } from './mesh-input.ts';
+import { recordsFromIndexed } from './indexed-leaves.ts';
 
 const TRIANGLE_WORDS = GPU_LAYOUT_TRIANGLE_BYTES / 4;
 const CHILD_INDEX = [GPU_LAYOUT_NODE_WORD.leftIndex, GPU_LAYOUT_NODE_WORD.rightIndex] as const;
@@ -66,6 +71,7 @@ const FLIP_FRONT_FACE = 2;
 const MATERIAL_SHIFT = 16;
 
 export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, options: LayoutCheckOptions = {}): string[] {
+    if (layout.triangleLeaves === 'indexed') return checkIndexedLayout(layout, geometry, options);
     const maxLeaf = options.maxLeafPrimitives ?? GPU_LAYOUT_MAX_LEAF_PRIMITIVES;
     const maxProblems = options.maxProblems ?? 20;
     const problems: string[] = [];
@@ -282,4 +288,50 @@ export function treeSahCost(layout: GpuLayoutMeshBvh, traversalCost = 1, interse
         if (node === 0) rootArea = nodeArea;
     }
     return rootArea > 0 ? total / rootArea : 0;
+}
+
+/**
+ * An indexed tree (`triangleLeaves: 'indexed'`): each triangle's three vertex
+ * indices must be the mesh's own for its original triangle, in corner order,
+ * and word 3 its original index and input flag (bit 28) with bits 29-31
+ * clear. The rest (each triangle once, the topology, exact boxes over the
+ * corners the indices name) is the records check on the same tree with its
+ * corners copied out. A merged identity lives in an indexed scene's side
+ * tables, not in the tree, so `merged` is refused here.
+ */
+function checkIndexedLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, options: LayoutCheckOptions): string[] {
+    const maxProblems = options.maxProblems ?? 20;
+    const problems: string[] = [];
+    const report = (problem: string): boolean => {
+        if (problems.length < maxProblems) problems.push(problem);
+        return problems.length >= maxProblems;
+    };
+    if (options.merged) return ['an indexed tree carries no merged identity (the scene keeps it in side tables); check it without `merged`'];
+    const { positions, indices, triangleFlags } = geometry;
+    const triangleCount = indices ? indices.length / 3 : positions.length / 3 / 3;
+    const vertexCount = positions.length / 3;
+    if (layout.triangleCount !== triangleCount) return [`the layout has ${layout.triangleCount} triangles, the mesh ${triangleCount}`];
+    if (layout.triangles.byteLength !== triangleCount * GPU_LAYOUT_INDEXED_TRIANGLE_BYTES) return [`indexed triangles take ${layout.triangles.byteLength} bytes`];
+    const words = new Uint32Array(layout.triangles);
+    for (let slot = 0; slot < triangleCount; slot++) {
+        const base = slot * 4;
+        const idFlags = words[base + GPU_LAYOUT_INDEXED_TRIANGLE_WORD.idFlags];
+        const original = idFlags & GPU_LAYOUT_INDEXED_ID_MASK;
+        const flags = idFlags >>> GPU_LAYOUT_INDEXED_FLAG_SHIFT;
+        if (original >= triangleCount) {
+            if (report(`triangle slot ${slot} holds triangle ${original}, which is out of range`)) return problems;
+            continue;
+        }
+        const expected = triangleFlags ? triangleFlags[original] : 0;
+        if (flags !== expected) report(`triangle slot ${slot} has flags ${flags} above its index, not ${expected}`);
+        for (let corner = 0; corner < 3; corner++) {
+            const vertex = indices ? indices[original * 3 + corner] : original * 3 + corner;
+            const stored = words[base + corner];
+            if (stored !== vertex || stored >= vertexCount) {
+                if (report(`triangle slot ${slot} (triangle ${original}) corner ${corner} names vertex ${stored}, the mesh ${vertex}`)) return problems;
+            }
+        }
+    }
+    if (problems.length > 0) return problems;
+    return checkGpuLayout(recordsFromIndexed(layout, positions), geometry, options);
 }

@@ -9,6 +9,7 @@ import {
     MATERIAL_BITS,
     MATERIAL_SHIFT,
     MAX_MATERIAL,
+    MAX_MERGED_SOURCES,
     NO_MATERIAL,
     TOP_LEVEL_HEADER_WORDS,
     TRIANGLE_FLAG_FILTER,
@@ -116,6 +117,22 @@ describe('mergeStaticGeometry', () => {
         const plan = mergeStaticGeometry(meshes, instances, { maxTrianglesPerGroup: 200 });
         for (const group of plan.groups) expect(group.sourceInstances.length).toBeLessThanOrEqual(200);
         expect(plan.groups.length).toBeGreaterThan(3);
+    });
+
+    it('caps a group at 65,536 sources for an indexed scene only: records group as main did', () => {
+        const triangle: MeshGeometry = { positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]) };
+        const count = MAX_MERGED_SOURCES + 3;
+        const meshes = Array.from({ length: count }, () => triangle);
+        const instances: TraceSceneInstance[] = meshes.map((_, index) => ({
+            meshIndex: index,
+            instanceIndex: index,
+            objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, index, 0, 0, 1],
+            static: true,
+        }));
+        const sizes = (triangleLeaves?: 'records' | 'indexed') => mergeStaticGeometry(meshes, instances, { triangleLeaves }).groups.map((group) => group.sources.length);
+        expect(sizes()).toEqual([count]);
+        expect(sizes('records')).toEqual([count]);
+        expect(sizes('indexed')).toEqual([MAX_MERGED_SOURCES, 3]);
     });
 });
 

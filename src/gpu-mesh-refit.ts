@@ -113,8 +113,71 @@ fn meshRefitTriangles(
     refitBoxes[slot * 2u] = vec4f(lower, 0.0);
     refitBoxes[slot * 2u + 1u] = vec4f(upper, 0.0);
 }
-`;
+${INDEXED_REFIT_WGSL}`;
 }
+
+/**
+ * The indexed refit (docs/design/indexed-leaves.md, "Deforming meshes"): the
+ * triangles keep their vertex indices, so nothing is written to them. Step 1
+ * copies the posed vertices into the mesh's range of the scene's positions
+ * buffer (a copy, not the app's buffer: rays must keep the pose the boxes were
+ * built for when a refit is skipped); step 2 writes each slot's box from the
+ * corners its indices name there. The mesh's vertices must not be welded:
+ * vertex v of the posed buffer is scene vertex `vertexBase + v`.
+ */
+const INDEXED_REFIT_WGSL = /* wgsl */ `
+struct MeshRefitIndexedParams {
+    vertexBase: u32,           // the mesh's first vertex in the scene's positions
+    sceneStride: u32,          // floats per scene vertex: 4 (vec4) or 3 (packed)
+    unused0: u32,
+    unused1: u32,
+}
+
+@group(0) @binding(5) var<storage, read_write> refitScenePositions: array<f32>;
+@group(0) @binding(6) var<uniform> refitIndexed: MeshRefitIndexedParams;
+@group(0) @binding(7) var<storage, read> refitIndexedTriangles: array<u32>;
+
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn meshRefitCopyVertices(
+    @builtin(workgroup_id) workgroup: vec3u,
+    @builtin(num_workgroups) groups: vec3u,
+    @builtin(local_invocation_index) localIndex: u32,
+) {
+    let vertex = flatWorkgroupIndex(workgroup, groups) * REFIT_WORKGROUP_SIZE + localIndex;
+    if (vertex >= refitParams.vertexCount) {
+        return;
+    }
+    let source = refitParams.positionOffset + vertex * refitParams.positionStride;
+    let to = (refitIndexed.vertexBase + vertex) * refitIndexed.sceneStride;
+    refitScenePositions[to] = refitPositions[source];
+    refitScenePositions[to + 1u] = refitPositions[source + 1u];
+    refitScenePositions[to + 2u] = refitPositions[source + 2u];
+}
+
+@compute @workgroup_size(${WORKGROUP_SIZE})
+fn meshRefitIndexedBoxes(
+    @builtin(workgroup_id) workgroup: vec3u,
+    @builtin(num_workgroups) groups: vec3u,
+    @builtin(local_invocation_index) localIndex: u32,
+) {
+    let slot = flatWorkgroupIndex(workgroup, groups) * REFIT_WORKGROUP_SIZE + localIndex;
+    if (slot >= refitParams.triangleCount) {
+        return;
+    }
+    let base = refitParams.triangleWordOffset + slot * 4u;
+    var lower = vec3f(0x1.fffffep+127f);
+    var upper = vec3f(-0x1.fffffep+127f);
+    for (var corner = 0u; corner < 3u; corner += 1u) {
+        let vertex = min(refitIndexedTriangles[base + corner], max(refitParams.vertexCount, 1u) - 1u);
+        let at = (refitIndexed.vertexBase + vertex) * refitIndexed.sceneStride;
+        let position = vec3f(refitScenePositions[at], refitScenePositions[at + 1u], refitScenePositions[at + 2u]);
+        lower = min(lower, position);
+        upper = max(upper, position);
+    }
+    refitBoxes[slot * 2u] = vec4f(lower, 0.0);
+    refitBoxes[slot * 2u + 1u] = vec4f(upper, 0.0);
+}
+`;
 
 /** The moved vertices, on the GPU. Buffers need `STORAGE` usage. */
 export interface MeshRefitVertices {
@@ -136,6 +199,8 @@ export interface MeshRefitTarget {
     readonly nodes: GPUBuffer;
     /** Triangle records, the mesh's first at `triangleWordOffset`. */
     readonly triangles: GPUBuffer;
+    /** An indexed tree's positions buffer (the scene's), which the refit writes the posed vertices into. */
+    readonly positions?: GPUBuffer | null;
 }
 
 /**
@@ -151,6 +216,8 @@ export class GpuMeshRefitKernels {
     private readonly device: GPUDevice;
     private readonly label: string;
     private trianglePipeline: GPUComputePipeline | null = null;
+    private copyPipeline: GPUComputePipeline | null = null;
+    private indexedBoxPipeline: GPUComputePipeline | null = null;
     private compiling: Promise<void> | null = null;
 
     constructor(device: GPUDevice, label = 'mesh refit') {
@@ -162,11 +229,11 @@ export class GpuMeshRefitKernels {
     prepare(): Promise<void> {
         this.compiling ??= (async () => {
             const module = this.device.createShaderModule({ label: this.label, code: meshRefitTrianglesWgsl() });
-            const [pipeline] = await Promise.all([
-                this.device.createComputePipelineAsync({ label: this.label, layout: 'auto', compute: { module, entryPoint: 'meshRefitTriangles' } }),
-                this.refit.prepare(),
-            ]);
+            const entry = (entryPoint: string) => this.device.createComputePipelineAsync({ label: `${this.label} ${entryPoint}`, layout: 'auto', compute: { module, entryPoint } });
+            const [pipeline, copy, indexedBoxes] = await Promise.all([entry('meshRefitTriangles'), entry('meshRefitCopyVertices'), entry('meshRefitIndexedBoxes'), this.refit.prepare()]);
             this.trianglePipeline = pipeline;
+            this.copyPipeline = copy;
+            this.indexedBoxPipeline = indexedBoxes;
         })();
         return this.compiling;
     }
@@ -178,6 +245,11 @@ export class GpuMeshRefitKernels {
     /** The triangle step's pipeline, or null before `prepare` has finished. */
     get triangles(): GPUComputePipeline | null {
         return this.trianglePipeline;
+    }
+
+    /** The indexed refit's two pipelines (copy the posed vertices, then the boxes), or null before `prepare` has finished. */
+    get indexed(): { copy: GPUComputePipeline; boxes: GPUComputePipeline } | null {
+        return this.copyPipeline && this.indexedBoxPipeline ? { copy: this.copyPipeline, boxes: this.indexedBoxPipeline } : null;
     }
 }
 
@@ -202,6 +274,10 @@ export class GpuMeshRefit {
     private triangleCount = 0;
     private triangleWordOffset = 0;
     private group: { group: GPUBindGroup; key: readonly unknown[] } | null = null;
+    /** Indexed trees: the mesh's vertex base and the scene's floats per vertex; null for records. */
+    private indexed: { vertexBase: number; vertexCount: number | null; sceneStride: number } | null = null;
+    private readonly indexedParams: GPUBuffer;
+    private indexedGroups: { copy: GPUBindGroup; boxes: GPUBindGroup; key: readonly unknown[] } | null = null;
 
     constructor(device: GPUDevice, options: GpuMeshRefitOptions = {}) {
         this.device = device;
@@ -210,6 +286,7 @@ export class GpuMeshRefit {
         this.refit = new GpuBvhRefit(device, { label: this.label, diagnostics: options.diagnostics, kernels: this.kernels.refit });
         this.params = device.createBuffer({ label: `${this.label} params`, size: PARAM_WORDS * 4, usage: USAGE.UNIFORM | USAGE.COPY_DST });
         this.boxes = device.createBuffer({ label: `${this.label} boxes`, size: 64, usage: USAGE.STORAGE });
+        this.indexedParams = device.createBuffer({ label: `${this.label} indexed params`, size: 16, usage: USAGE.UNIFORM | USAGE.COPY_DST });
     }
 
     /** Compiles the kernels, or waits for the shared ones. */
@@ -230,7 +307,32 @@ export class GpuMeshRefit {
      * Takes the tree's shape from a CPU copy of its layout, and where the mesh
      * sits in the GPU buffers (in words; 0 for a tree in its own buffers).
      */
-    setTree(layout: GpuLayoutMeshBvh, placement: { nodeWordOffset?: number; triangleWordOffset?: number; generation?: number } = {}): void {
+    setTree(
+        layout: GpuLayoutMeshBvh,
+        placement: {
+            nodeWordOffset?: number;
+            triangleWordOffset?: number;
+            generation?: number;
+            /**
+             * Indexed trees, required: the mesh's first vertex in the target's
+             * positions buffer (0 for a tree in its own buffers;
+             * `meshRefitPlacement` for a scene mesh).
+             */
+            vertexBase?: number;
+            /** Indexed trees: the mesh's vertices there; `encode` then refuses a posed buffer of another size. */
+            vertexCount?: number;
+            /** Indexed trees: the positions buffer's layout. Default `'vec4'`. */
+            positionLayout?: 'vec4' | 'packed';
+        } = {},
+    ): void {
+        if (layout.triangleLeaves === 'indexed' && placement.vertexBase === undefined) {
+            throw new RangeError('GpuMeshRefit.setTree: an indexed tree needs placement.vertexBase (0 for a tree in its own buffers; meshRefitPlacement gives a scene mesh\'s)');
+        }
+        this.indexed =
+            layout.triangleLeaves === 'indexed'
+                ? { vertexBase: placement.vertexBase!, vertexCount: placement.vertexCount ?? null, sceneStride: placement.positionLayout === 'packed' ? 3 : 4 }
+                : null;
+        if (this.indexed) this.device.queue.writeBuffer(this.indexedParams, 0, new Uint32Array([this.indexed.vertexBase, this.indexed.sceneStride, 0, 0]));
         const words = new Uint32Array(layout.nodes, 0, layout.nodeCount * 16);
         const nodeWordOffset = placement.nodeWordOffset ?? 0;
         this.refit.setShape({
@@ -270,9 +372,26 @@ export class GpuMeshRefit {
                 0, // unused
             ]),
         );
-        pass.setPipeline(pipeline);
-        pass.setBindGroup(0, this.bindGroup(pipeline, target.triangles, vertices.positionBuffer, vertices.indexBuffer ?? vertices.positionBuffer));
-        dispatchWorkgroups2d(pass, Math.ceil(this.triangleCount / WORKGROUP_SIZE), this.device.limits.maxComputeWorkgroupsPerDimension);
+        const maxGroups = this.device.limits.maxComputeWorkgroupsPerDimension;
+        if (this.indexed) {
+            // Indexed: copy the posed vertices into the scene's positions, then the boxes from there; the triangles stay.
+            const pipelines = this.kernels.indexed!;
+            if (!target.positions) throw new Error('GpuMeshRefit: an indexed tree needs the target positions buffer');
+            if (this.indexed.vertexCount !== null && vertices.vertexCount !== this.indexed.vertexCount) {
+                throw new RangeError(`GpuMeshRefit: the posed buffer has ${vertices.vertexCount} vertices, the mesh has ${this.indexed.vertexCount} in the scene's positions`);
+            }
+            const groups = this.indexedBindGroups(pipelines, target.triangles, target.positions, vertices.positionBuffer);
+            pass.setPipeline(pipelines.copy);
+            pass.setBindGroup(0, groups.copy);
+            dispatchWorkgroups2d(pass, Math.ceil(vertices.vertexCount / WORKGROUP_SIZE), maxGroups);
+            pass.setPipeline(pipelines.boxes);
+            pass.setBindGroup(0, groups.boxes);
+            dispatchWorkgroups2d(pass, Math.ceil(this.triangleCount / WORKGROUP_SIZE), maxGroups);
+        } else {
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, this.bindGroup(pipeline, target.triangles, vertices.positionBuffer, vertices.indexBuffer ?? vertices.positionBuffer));
+            dispatchWorkgroups2d(pass, Math.ceil(this.triangleCount / WORKGROUP_SIZE), maxGroups);
+        }
         this.refit.encode(pass, target.nodes, this.boxes);
     }
 
@@ -293,7 +412,41 @@ export class GpuMeshRefit {
     dispose(): void {
         this.refit.dispose();
         this.params.destroy();
+        this.indexedParams.destroy();
         this.boxes.destroy();
+    }
+
+    private indexedBindGroups(
+        pipelines: { copy: GPUComputePipeline; boxes: GPUComputePipeline },
+        triangles: GPUBuffer,
+        scenePositions: GPUBuffer,
+        posed: GPUBuffer,
+    ): { copy: GPUBindGroup; boxes: GPUBindGroup } {
+        const key = [triangles, scenePositions, posed, this.boxes];
+        if (this.indexedGroups && this.indexedGroups.key.every((entry, index) => entry === key[index])) return this.indexedGroups;
+        const copy = this.device.createBindGroup({
+            label: `${this.label} copy vertices`,
+            layout: pipelines.copy.getBindGroupLayout(0),
+            entries: [
+                { binding: 1, resource: { buffer: posed } },
+                { binding: 4, resource: { buffer: this.params } },
+                { binding: 5, resource: { buffer: scenePositions } },
+                { binding: 6, resource: { buffer: this.indexedParams } },
+            ],
+        });
+        const boxes = this.device.createBindGroup({
+            label: `${this.label} indexed boxes`,
+            layout: pipelines.boxes.getBindGroupLayout(0),
+            entries: [
+                { binding: 3, resource: { buffer: this.boxes } },
+                { binding: 4, resource: { buffer: this.params } },
+                { binding: 5, resource: { buffer: scenePositions } },
+                { binding: 6, resource: { buffer: this.indexedParams } },
+                { binding: 7, resource: { buffer: triangles } },
+            ],
+        });
+        this.indexedGroups = { copy, boxes, key };
+        return this.indexedGroups;
     }
 
     private bindGroup(pipeline: GPUComputePipeline, triangles: GPUBuffer, positions: GPUBuffer, indices: GPUBuffer): GPUBindGroup {

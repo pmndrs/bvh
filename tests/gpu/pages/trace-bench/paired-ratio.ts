@@ -52,6 +52,32 @@ export function ratioOfRounds(name: string, numerator: readonly number[], denomi
     return { name, perRound, median: median(perRound), min: Math.min(...perRound), max: Math.max(...perRound) };
 }
 
+/** The triangle formats the indexed-leaves comparison times (docs/design/indexed-leaves.md). */
+export type LeafLayout = 'records' | 'indexed' | 'indexed-packed';
+
+export interface LeafLayoutCase {
+    tree: Tree;
+    set: string;
+    mode: 'closest' | 'any';
+}
+
+export interface LeafLayoutStep {
+    case: LeafLayoutCase;
+    layout: LeafLayout;
+}
+
+/**
+ * The timings of one round of the indexed-leaves comparison, in order: even
+ * rounds go through `cases` as given with `layouts` in order, odd rounds
+ * backwards with the layouts reversed. A case's layouts are timed back to back.
+ */
+export function leafLayoutRoundOrder(cases: readonly LeafLayoutCase[], layouts: readonly LeafLayout[], round: number): LeafLayoutStep[] {
+    const reversed = round % 2 === 1;
+    const ordered = reversed ? [...cases].reverse() : cases;
+    const order = reversed ? [...layouts].reverse() : layouts;
+    return ordered.flatMap((entry) => order.map((layout) => ({ case: entry, layout })));
+}
+
 /** The hit-record comparison: one tree and ray set traced closest-hit with the 40-byte record (`hitNormal: true`) and the 24-byte one (`false`). */
 export type HitRecord = 'record40' | 'record24';
 

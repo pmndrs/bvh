@@ -27,6 +27,10 @@
  * the instance's material + 1 (0 for none), and in a merged mesh bits 16-31
  * of each triangle's `flags` word hold its source instance's. Builders write
  * 0 there; the scene assembly writes them.
+ * Also in 2, before its release: indexed leaves, a second triangle format
+ * beside the records ({@link GpuLayoutTriangleLeaves}). It is a variant of
+ * version 2, not a new version: serialized trees name their format in header
+ * word 7 (0 records, 1 indexed), and records are unchanged.
  */
 export const GPU_LAYOUT_VERSION = 2;
 
@@ -88,6 +92,64 @@ export const GPU_LAYOUT_TRIANGLE_WORD = {
     padding: 11,
 } as const;
 
+/**
+ * How a tree stores its triangles (docs/design/indexed-leaves.md). Every tree
+ * and scene is one or the other, and the walk is compiled for one
+ * (`traceModuleWgsl({ triangleLeaves })`):
+ *
+ * - `'records'` (the default): 48-byte records with the three corners copied,
+ *   {@link GPU_LAYOUT_TRIANGLE_WORD}.
+ * - `'indexed'`: 16-byte records `vec4u(i0, i1, i2, id + flags)`,
+ *   {@link GPU_LAYOUT_INDEXED_TRIANGLE_WORD}, whose corners are read from a
+ *   positions buffer the scene owns. In a tree (`GpuLayoutMeshBvh`) the vertex
+ *   indices are the mesh's own. A scene keeps them mesh-relative too, and puts
+ *   the mesh's vertex base in a header before its triangles
+ *   ({@link GPU_LAYOUT_MESH_HEADER_WORD}), so trees are placed and moved
+ *   without rewriting their records.
+ */
+export type GpuLayoutTriangleLeaves = 'records' | 'indexed';
+
+/** One indexed triangle in tree order: three vertex indices, then the original index and flags, 16 bytes. */
+export const GPU_LAYOUT_INDEXED_TRIANGLE_BYTES = 16;
+
+/** Word positions inside an indexed triangle (a `vec4u`). */
+export const GPU_LAYOUT_INDEXED_TRIANGLE_WORD = {
+    vertex0: 0,
+    vertex1: 1,
+    vertex2: 2,
+    /** Bits 0-27 the original triangle index, bit 28 the filter flag, bit 29 the flip flag, bits 30-31 reserved (0). */
+    idFlags: 3,
+} as const;
+
+/** Bits 0-27 of an indexed triangle's word 3: the original index (it fits: {@link GPU_LAYOUT_MAX_TRIANGLES}). */
+export const GPU_LAYOUT_INDEXED_ID_MASK = 0x0fffffff;
+/**
+ * Where the records' flags bits 0-1 (filter, flip) sit in an indexed
+ * triangle's word 3: `flags << 28`. A record's material bits (16-31, merged
+ * meshes only) move to the merged side table instead.
+ */
+export const GPU_LAYOUT_INDEXED_FLAG_SHIFT = 28;
+
+/** Bytes per triangle of a format. */
+export function gpuLayoutTriangleBytes(leaves: GpuLayoutTriangleLeaves | undefined): number {
+    return leaves === 'indexed' ? GPU_LAYOUT_INDEXED_TRIANGLE_BYTES : GPU_LAYOUT_TRIANGLE_BYTES;
+}
+
+/**
+ * An indexed scene puts one 16-byte header (a `vec4u`) right before each
+ * mesh's triangles, at `triangleOffset - 1` in 16-byte units: the walk reads
+ * it once per instance it enters. A merged mesh keeps its side tables before
+ * the header.
+ */
+export const GPU_LAYOUT_MESH_HEADER_WORD = {
+    /** The mesh's first vertex in the scene's positions buffer. */
+    vertexBase: 0,
+    /** Merged meshes: `triangleOffset` minus the side table's first `vec4u` (0 otherwise). */
+    sideTableDistance: 1,
+    /** Merged meshes: `triangleOffset` minus the source table's first `vec4u` (0 otherwise). */
+    sourceTableDistance: 2,
+} as const;
+
 /** The tracer's largest leaf; larger leaves are cut in half until they fit. */
 export const GPU_LAYOUT_MAX_LEAF_PRIMITIVES = 8;
 
@@ -98,8 +160,10 @@ export const GPU_LAYOUT_MAX_TRIANGLES = 0x0fffffff;
 export interface GpuLayoutMeshBvh {
     /** `nodeCount` nodes, 64 bytes each. Node 0 is the root. */
     readonly nodes: ArrayBuffer;
-    /** `triangleCount` triangles, 48 bytes each, in tree order. */
+    /** `triangleCount` triangles in tree order: 48 bytes each, or 16 with `triangleLeaves: 'indexed'`. */
     readonly triangles: ArrayBuffer;
+    /** How `triangles` stores them; omitted means `'records'`. */
+    readonly triangleLeaves?: GpuLayoutTriangleLeaves;
     /** Parent of each node (0xffffffff for the root), for a bottom-up refit. */
     readonly parents: Uint32Array;
     readonly nodeCount: number;

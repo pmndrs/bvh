@@ -35,7 +35,13 @@
  */
 
 import {
+    INDEXED_FLAG_SHIFT,
+    INDEXED_ID_MASK,
+    INDEXED_TRIANGLE_WORDS,
     MATERIAL_SHIFT,
+    MAX_MERGED_SOURCES,
+    MERGED_SIDE_MATERIAL_SHIFT,
+    MESH_HEADER_WORD,
     MAX_REFERENCE_INDEX,
     NO_MATERIAL,
     TRIANGLE_FLAG_FILTER,
@@ -44,7 +50,9 @@ import {
     TRIANGLE_WORDS,
     checkInstanceMask,
     materialCode,
+    type TriangleLeaves,
 } from './layout.ts';
+import { checkTriangleLeaves } from '../indexed-leaves.ts';
 import type { MeshGeometry } from './mesh-bvh.ts';
 import { checkTriangleFlags } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
@@ -107,6 +115,13 @@ export interface StaticMergePlan {
 export interface StaticMergeOptions {
     /** Most triangles in one merged mesh; a group that would pass it is split. Default (and at most) the layout's limit, 2^28 - 1. */
     readonly maxTrianglesPerGroup?: number;
+    /**
+     * The format of the scene the plan is for. `'indexed'` also closes a group
+     * at {@link MAX_MERGED_SOURCES} sources (an indexed scene names a merged
+     * triangle's source by a 16-bit slot). Default `'records'`: no source cap,
+     * the grouping it always had.
+     */
+    readonly triangleLeaves?: TriangleLeaves;
 }
 
 /**
@@ -133,6 +148,7 @@ export function mergeStaticGeometry(
     options: StaticMergeOptions = {},
 ): StaticMergePlan {
     const maxTriangles = Math.min(options.maxTrianglesPerGroup ?? MAX_REFERENCE_INDEX, MAX_REFERENCE_INDEX);
+    const sourceCap = checkTriangleLeaves(options.triangleLeaves, 'mergeStaticGeometry') === 'indexed';
     const users = new Uint32Array(meshes.length);
     for (const instance of instances) {
         if (!meshes[instance.meshIndex]) throw new RangeError(`instance ${instance.instanceIndex} uses mesh ${instance.meshIndex}, which does not exist`);
@@ -177,7 +193,8 @@ export function mergeStaticGeometry(
         const vertices = geometry.positions.length / 3;
         const key = `${mask}`;
         let group = open.get(key);
-        if (group && group.triangles + triangles > maxTriangles) {
+        // An indexed scene names a merged triangle's source by a 16-bit slot (MAX_MERGED_SOURCES); records have no such cap.
+        if (group && (group.triangles + triangles > maxTriangles || (sourceCap && group.members.length >= MAX_MERGED_SOURCES))) {
             closed.push(group);
             group = undefined;
         }
@@ -308,5 +325,53 @@ export function writeMergedTriangleIdentity(records: ArrayBuffer, group: StaticM
         words[base + TRIANGLE_WORD.padding] = group.sourceInstances[merged];
         words[base + TRIANGLE_WORD.flags] =
             (flags | (group.flipFrontFace[merged] ? TRIANGLE_FLAG_FLIP_FRONT_FACE : 0) | (group.sourceMaterials[merged] << MATERIAL_SHIFT)) >>> 0;
+    }
+}
+
+/**
+ * The indexed twin of {@link writeMergedTriangleIdentity}, for a merged
+ * group's region in an indexed scene's triangle buffer (`words`, 4 words per
+ * 16-byte unit; the group's first triangle at unit `triangleOffset`). Each
+ * triangle's word 3 gets the source mesh's triangle index, its filter flag
+ * kept and the flip flag for a mirrored source. The region before the header
+ * (`indexedLeadingUnits(triangleCount, sources)` units before
+ * `triangleOffset`) gets the side table (per tree slot: source slot | material
+ * code << 16) and the source table (per slot: `instanceIndex`), and the
+ * header their distances. The header's vertex base is the caller's.
+ *
+ * Call it once on fresh indexed triangles (it reads the builder's original
+ * index); a word 3 with any bit but the filter flag above the index throws.
+ */
+export function writeMergedIndexedIdentity(words: Uint32Array, group: StaticMergeGroup, triangleOffset: number, triangleCount = group.sourceInstances.length): void {
+    if (triangleCount !== group.sourceInstances.length) {
+        throw new RangeError(`the merged tree has ${triangleCount} triangles, its group ${group.sourceInstances.length}`);
+    }
+    const sourceCount = group.sources.length;
+    if (sourceCount > MAX_MERGED_SOURCES) throw new RangeError(`a merged group holds ${sourceCount} sources; an indexed scene allows ${MAX_MERGED_SOURCES} (make the plan with triangleLeaves: 'indexed')`);
+    const sideUnits = Math.ceil(triangleCount / 4);
+    const sourceUnits = Math.ceil(sourceCount / 4);
+    const sideStart = (triangleOffset - 1 - sideUnits) * 4;
+    const sourceStart = (triangleOffset - 1 - sideUnits - sourceUnits) * 4;
+    if (sourceStart < 0) throw new RangeError(`the merged group at ${triangleOffset} has no room for its side tables`);
+    // Source slot of each merged triangle.
+    const slotOf = new Uint16Array(triangleCount);
+    group.sources.forEach((source, slot) => slotOf.fill(slot, source.firstTriangle, source.firstTriangle + source.triangleCount));
+    words.fill(0, sourceStart, (triangleOffset - 1) * 4);
+    group.sources.forEach((source, slot) => (words[sourceStart + slot] = source.instanceIndex));
+    const header = (triangleOffset - 1) * 4;
+    words[header + MESH_HEADER_WORD.sideTableDistance] = triangleOffset - (triangleOffset - 1 - sideUnits);
+    words[header + MESH_HEADER_WORD.sourceTableDistance] = triangleOffset - (triangleOffset - 1 - sideUnits - sourceUnits);
+    for (let slot = 0; slot < triangleCount; slot++) {
+        const word = (triangleOffset + slot) * INDEXED_TRIANGLE_WORDS + 3;
+        const idFlags = words[word];
+        const merged = idFlags & INDEXED_ID_MASK;
+        const flags = idFlags >>> INDEXED_FLAG_SHIFT;
+        if (merged >= triangleCount) throw new RangeError(`merged triangle ${slot} holds triangle ${merged}, out of range`);
+        if ((flags & ~TRIANGLE_FLAG_FILTER) !== 0) {
+            throw new RangeError(`merged indexed triangle ${slot} has flags 0x${flags.toString(16)} above its index: only the filter flag may be set in fresh triangles (were the ids already written?)`);
+        }
+        const flip = group.flipFrontFace[merged] ? TRIANGLE_FLAG_FLIP_FRONT_FACE : 0;
+        words[word] = (group.sourceTriangles[merged] | ((flags | flip) << INDEXED_FLAG_SHIFT)) >>> 0;
+        words[sideStart + slot] = (slotOf[merged] | (group.sourceMaterials[merged] << MERGED_SIDE_MATERIAL_SHIFT)) >>> 0;
     }
 }

@@ -12,14 +12,20 @@
 
 import type { TraceSceneData } from './scene-assembly.ts';
 import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl } from './wgsl.ts';
-import { RAY_MASK_ALL } from './layout.ts';
+import { RAY_MASK_ALL, type PositionLayout, type TriangleLeaves } from './layout.ts';
 import { RAY_BYTES } from './rays.ts';
 
-/** The three storage buffers the tracer reads. */
+/** The three storage buffers the tracer reads, and an indexed scene's fourth. */
 export interface TraceSceneBuffers {
     readonly nodes: GPUBuffer;
     readonly triangles: GPUBuffer;
     readonly topLevel: GPUBuffer;
+    /** An indexed scene's positions (`TraceSceneData.positions`), bound fourth. Absent or null for records. */
+    readonly positions?: GPUBuffer | null;
+    /** The scene's triangle format; absent means records. A kernel refuses a scene of the other format. */
+    readonly triangleLeaves?: TriangleLeaves;
+    /** An indexed scene's position layout; absent means `'vec4'`. */
+    readonly positionLayout?: PositionLayout;
     /** Bytes held on the GPU. */
     readonly byteLength: number;
     destroy(): void;
@@ -44,6 +50,8 @@ export function uploadTraceScene(device: GPUDevice, scene: TraceSceneData, label
         ['triangles', scene.triangles],
         ['top level', scene.topLevel.buffer],
     ];
+    const indexed = scene.triangleLeaves === 'indexed';
+    if (indexed) parts.push(['positions', scene.positions]);
     for (const [name, data] of parts) checkStorageBinding(device, name, data.byteLength);
 
     const buffers = parts.map(([name, data]) => {
@@ -55,11 +63,14 @@ export function uploadTraceScene(device: GPUDevice, scene: TraceSceneData, label
         device.queue.writeBuffer(buffer, 0, data);
         return buffer;
     });
-    const [nodes, triangles, topLevel] = buffers;
+    const [nodes, triangles, topLevel, positions] = buffers;
     return {
         nodes,
         triangles,
         topLevel,
+        positions: indexed ? positions : null,
+        triangleLeaves: scene.triangleLeaves ?? 'records',
+        positionLayout: scene.positionLayout ?? 'vec4',
         byteLength: scene.byteLength,
         destroy: () => buffers.forEach((buffer) => buffer.destroy()),
     };
@@ -91,6 +102,10 @@ export interface TraceBatchKernelOptions {
     readonly rayMasks?: boolean;
     /** Default true: 40-byte closest-hit records with material and normal. False: the 24-byte compact record. */
     readonly hitNormal?: boolean;
+    /** The scenes' triangle format, compiled in. Default `'records'`. */
+    readonly triangleLeaves?: TriangleLeaves;
+    /** Indexed only: `'vec4'` (the default) or `'packed'` positions, compiled in. */
+    readonly positionLayout?: PositionLayout;
 }
 
 /**
@@ -108,21 +123,23 @@ export class TraceBatchKernel {
         private readonly closestPipeline: GPUComputePipeline,
         private readonly anyPipeline: GPUComputePipeline,
         readonly rayMasks: boolean,
+        readonly triangleLeaves: TriangleLeaves,
+        readonly positionLayout: PositionLayout,
     ) {}
 
     static async create(device: GPUDevice, options: TraceBatchKernelOptions = {}): Promise<TraceBatchKernel> {
-        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true } = options;
+        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4' } = options;
         const pipelineFor = (mode: 'closest' | 'any') =>
             device.createComputePipelineAsync({
                 label: `${label} batch ${mode}`,
                 layout: 'auto',
                 compute: {
-                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks, hitNormal }) }),
+                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks, hitNormal, triangleLeaves, positionLayout }) }),
                     entryPoint: 'bvhBatch',
                 },
             });
         const [closestPipeline, anyPipeline] = await Promise.all([pipelineFor('closest'), pipelineFor('any')]);
-        return new TraceBatchKernel(device, closestPipeline, anyPipeline, rayMasks);
+        return new TraceBatchKernel(device, closestPipeline, anyPipeline, rayMasks, triangleLeaves, positionLayout);
     }
 
     private maskBuffer(mask: number): GPUBuffer {
@@ -146,6 +163,12 @@ export class TraceBatchKernel {
     private groupsFor(scene: TraceSceneBuffers): SceneBindGroups {
         let groups = this.sceneGroups.get(scene);
         if (!groups) {
+            const leaves = scene.triangleLeaves ?? 'records';
+            if (leaves !== this.triangleLeaves) throw new RangeError(`TraceBatchKernel: the kernel reads ${this.triangleLeaves} triangles, the scene holds ${leaves}`);
+            if (leaves === 'indexed' && (scene.positionLayout ?? 'vec4') !== this.positionLayout) {
+                throw new RangeError(`TraceBatchKernel: the kernel reads ${this.positionLayout} positions, the scene holds ${scene.positionLayout ?? 'vec4'}`);
+            }
+            if (leaves === 'indexed' && !scene.positions) throw new RangeError('TraceBatchKernel: an indexed scene needs its positions buffer');
             const make = (pipeline: GPUComputePipeline) =>
                 this.device.createBindGroup({
                     label: 'trace scene',
@@ -154,6 +177,7 @@ export class TraceBatchKernel {
                         { binding: 0, resource: { buffer: scene.nodes } },
                         { binding: 1, resource: { buffer: scene.triangles } },
                         { binding: 2, resource: { buffer: scene.topLevel } },
+                        ...(leaves === 'indexed' ? [{ binding: 3, resource: { buffer: scene.positions! } }] : []),
                     ],
                 });
             groups = { closest: make(this.closestPipeline), any: make(this.anyPipeline) };

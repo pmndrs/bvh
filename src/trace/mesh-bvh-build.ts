@@ -12,5 +12,5 @@ let tinyBvh: Promise<TinyBvhBuilder> | null = null;
 
 export async function buildMeshBvhAsync(geometry: MeshGeometry, options: MeshBvhBuildOptions = {}): Promise<MeshBvh> {
     tinyBvh ??= createTinyBvhBuilder();
-    return buildMeshBvhWithTinyBvh(geometry, await tinyBvh, { maxLeafPrimitives: options.maxLeafPrimitives });
+    return buildMeshBvhWithTinyBvh(geometry, await tinyBvh, { maxLeafPrimitives: options.maxLeafPrimitives, triangleLeaves: options.triangleLeaves });
 }

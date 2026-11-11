@@ -165,7 +165,7 @@ describe('counted walk', () => {
 
     it('keeps the production walk the merged-instance select and the masks, which the copy inherits', () => {
         const walk = productionWalkWgsl('closest');
-        expect(walk).toContain('BVH_INSTANCE_FLAG_MERGED');
+        expect(walk).toContain('bvhHitInstance(instance, triangle, slot)');
         expect(walk).toContain('bvhInstanceMask(instance) & rayMask');
     });
 

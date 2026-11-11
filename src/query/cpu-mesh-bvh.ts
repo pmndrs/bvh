@@ -45,12 +45,22 @@
  * place (nodes and triangles together, so the tree stays valid). Pass a copy
  * if the caller keeps using the same buffers elsewhere, for example a GPU
  * upload it will redo from them later.
+ *
+ * **Indexed trees** (`triangleLeaves: 'indexed'`, docs/design/indexed-leaves.md)
+ * are taken with their geometry (`options.source`) and expanded to records
+ * once, in the constructor (`recordsFromIndexed`): the queries, the
+ * depth-first reorder and {@link CpuMeshBvh.refit} all read corners from the
+ * records. So a CPU tree costs 48 bytes per triangle whichever format it was
+ * built in, `layout` is always records, and {@link CpuMeshBvh.serialize}
+ * writes records. Reading corners through the source's own positions instead
+ * (16 bytes per triangle) is a later step.
  */
 
 import { GPU_LAYOUT_EMPTY_CHILD, GPU_LAYOUT_MAX_LEAF_PRIMITIVES, GPU_LAYOUT_NO_PARENT, GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_NODE_WORD, GPU_LAYOUT_NODE_WORDS, GPU_LAYOUT_TRIANGLE_BYTES, GPU_LAYOUT_TRIANGLE_WORD, type GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import type { MeshInput } from '../mesh-input.ts';
 import { PRIMITIVE_BOX_FLOATS, refitOnCpu } from '../refit-cpu.ts';
 import { deserializeLayout, serializeLayout } from '../serialize.ts';
+import { recordsFromIndexed } from '../indexed-leaves.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
 import { createCpuTracer, CPU_TRACE_BACK_SIDE, CPU_TRACE_DOUBLE_SIDE, CPU_TRACE_FRONT_SIDE, type CpuTraceOptions, type CpuTracer } from '../trace/cpu-traversal.ts';
 import { buildMeshBvhWithTinyBvh } from '../trace/mesh-bvh-topology.ts';
@@ -381,7 +391,11 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
     private accept: BvhTriangleAccept | null = null;
     private collect: BvhRayIntersection[] | null = null;
 
-    constructor(layout: GpuLayoutMeshBvh, options: CpuMeshBvhOptions = {}) {
+    constructor(input: GpuLayoutMeshBvh, options: CpuMeshBvhOptions = {}) {
+        // Indexed trees are queried as records: the CPU queries, the depth-first reorder and the
+        // refit read corners from the records (docs/design/indexed-leaves.md, "CpuMeshBvh").
+        if (input.triangleLeaves === 'indexed' && !options.source) throw new RangeError('CpuMeshBvh: an indexed tree needs its geometry (options.source) for its corners');
+        const layout = input.triangleLeaves === 'indexed' ? recordsFromIndexed(input, options.source!.positions) : input;
         if (layout.nodes.byteLength !== layout.nodeCount * GPU_LAYOUT_NODE_BYTES) throw new RangeError(`CpuMeshBvh: ${layout.nodeCount} nodes need ${layout.nodeCount * GPU_LAYOUT_NODE_BYTES} bytes, got ${layout.nodes.byteLength}`);
         if (layout.triangles.byteLength !== layout.triangleCount * GPU_LAYOUT_TRIANGLE_BYTES) {
             throw new RangeError(`CpuMeshBvh: ${layout.triangleCount} triangles need ${layout.triangleCount * GPU_LAYOUT_TRIANGLE_BYTES} bytes, got ${layout.triangles.byteLength}`);

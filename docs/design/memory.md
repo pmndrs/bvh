@@ -225,6 +225,27 @@ Also, not on the P9 list but measured:
 
 **Reading the ranking.** The load's peak, not the settled scene, is the biggest number and the cheapest to cut (lever 1 changes scheduling, not the layout, so `GPU_LAYOUT_VERSION` stays). Of the resident levers, only indexed leaves and compressed nodes are large. Together, keeping a 4-byte id per triangle and 32-byte nodes, they would take Sponza from 448.1 to about 115 MiB beyond geometry (216 if the geometry has to be added to the GPU for them), against three-mesh-bvh's 51. What is left is the 3.03M nodes: their count follows from leaves of 1.9 triangles, which is lever 5, and the speed measurement has to decide that one.
 
+## Indexed leaves (lever 2, built; off by default)
+
+Lever 2 as option B of [indexed-leaves.md](indexed-leaves.md): 16-byte tree-ordered triangles `vec4u(i0, i1, i2, id + flags)`, a 16-byte header per mesh, and our own copy of the positions, welded by exact bits. `tools/memory-breakdown.ts` (Node, the same tinybvh trees, `buildTraceScene`), MiB:
+
+| | Sponza | Bistro exterior |
+| --- | ---: | ---: |
+| Records (today's default): nodes + 48 B triangles + top level | 185.1 + 263.0 + 0.0 = **448.1** | 80.4 + 129.5 + 0.2 = **210.1** |
+| Indexed, `vec4f` positions, welded (the indexed default) | 185.1 + 87.7 + 45.2 = **318.0** (−130.1) | 80.4 + 43.2 + 31.7 = **155.5** (−54.6) |
+| Indexed, `vec4f`, unwelded | 320.2 | 168.3 |
+| Indexed, packed `f32` positions, welded | **306.7** (−141.4) | **147.5** (−62.6) |
+| Merged static, indexed, `vec4f`, welded (records merged: 448.2 / 210.0) | 185.2 + 109.6 + 45.2 = 340.0 | 80.5 + 54.0 + 31.7 = 166.2 |
+| Vertices after the exact-bit weld (before) | 2,963,523 (3,108,999) | 2,077,661 (2,920,632) |
+
+- The triangles are exactly 16 bytes each plus 16 per mesh (87.7 against 263.0 on Sponza). The positions are the new cost: 45.2 MiB of `vec4f` on Sponza after the weld. The weld saves 5% of Sponza's vertices and 29% of Bistro exterior's.
+- A merged group adds its 4-byte side table per triangle (21.9 MiB on Sponza, 10.8 on Bistro), as section 5 of the design said.
+- Against three-mesh-bvh, which keeps no positions of its own: the positions copy is what the app already holds (35.6 / 33.4 MiB as `f32 x 3`), so an app that could share its positions buffer would save it again (option A, not built).
+- **The build peak**: an H-PLOC batch writes 16-byte triangles too, so a batch goes from 270.6 to 238.6 bytes per triangle on Sponza (276.6 to 244.6 on Bistro exterior); one uncapped Sponza batch from 1,482.4 to 1,307.1 MiB. With `gpuMaxBatchBytes`, about 13% more triangles fit under the cap.
+- **`SceneTrees` on Sponza** (`scene-trees-sponza`, M5, the default 256 MiB cap, settled after the swaps): records 458.6 MiB, peak 711; indexed `vec4` 327.1 (nodes 194.1 with growth room, triangles 87.7, positions 45.2), peak 580; indexed packed 315.8, peak 568.7. Merged, uncapped: records 470.4, peak 1,482.6; indexed 362.2, peak 1,350.9. First trees 130 ms indexed against 118 (records), tinybvh 300 ms against 285. 0 disagreements with the CPU reference in every state.
+- The CPU trees (`CpuMeshBvh`) stay on records: an indexed tree is expanded with its source on construction.
+- Speed (M5, indicative): `vec4` indexed traces at 0.83-0.99x records' rate (median of rounds), packed at 0.75-0.92x; details in indexed-leaves.md, "Measured". Records stay the default until the RTX 3060 is measured.
+
 ## The 40-byte hit record
 
 `batchKernelWgsl(mode, { hitNormal })` writes a 40-byte record by default (material and geometric normal) and a 24-byte one with `hitNormal: false`. The surface-ray bench now times both: closest-hit, on the instanced and the merged tree, on the `surface` and `air-grid` sets, 5 rounds, the two records back to back with the order reversed every other round (`hitRecordRoundOrder`), the ratio taken within each round. The compact kernel's hit, instance, triangle, front face and barycentrics were identical to the full kernel's on every ray of every set (the page fails otherwise). Apple M5, headless Chrome 157, once per scene, commit `f6eaaca`; **indicative only**, as the M5 drifts and a run is five rounds.

@@ -92,7 +92,7 @@ export function buildHookCases(sizes: CaseSizes): HookCase[] {
 /** Flags every mesh of an assembled scene as the case says, through each mesh's range. */
 export function writeHookFlags(scene: TraceSceneData, hook: HookCase): number {
     let flagged = 0;
-    for (const mesh of scene.meshes) flagged += writeTriangleFilterFlags(scene.triangles, hook.flagged, mesh);
+    for (const mesh of scene.meshes) flagged += writeTriangleFilterFlags(scene.triangles, hook.flagged, mesh, scene.triangleLeaves);
     return flagged;
 }
 

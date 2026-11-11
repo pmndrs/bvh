@@ -13,7 +13,21 @@
  * See docs/design/trace.md for the reasoning.
  */
 
-import { GPU_LAYOUT_EMPTY_CHILD, GPU_LAYOUT_MAX_LEAF_PRIMITIVES, GPU_LAYOUT_MAX_TRIANGLES, GPU_LAYOUT_NO_PARENT, GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_NODE_WORD, GPU_LAYOUT_TRIANGLE_BYTES } from '../gpu-layout.ts';
+import {
+    GPU_LAYOUT_EMPTY_CHILD,
+    GPU_LAYOUT_INDEXED_FLAG_SHIFT,
+    GPU_LAYOUT_INDEXED_ID_MASK,
+    GPU_LAYOUT_INDEXED_TRIANGLE_BYTES,
+    GPU_LAYOUT_INDEXED_TRIANGLE_WORD,
+    GPU_LAYOUT_MAX_LEAF_PRIMITIVES,
+    GPU_LAYOUT_MAX_TRIANGLES,
+    GPU_LAYOUT_MESH_HEADER_WORD,
+    GPU_LAYOUT_NO_PARENT,
+    GPU_LAYOUT_NODE_BYTES,
+    GPU_LAYOUT_NODE_WORD,
+    GPU_LAYOUT_TRIANGLE_BYTES,
+    type GpuLayoutTriangleLeaves,
+} from '../gpu-layout.ts';
 
 /**
  * The version of `@pmndrs/bvh`'s GPU layout (`GPU_LAYOUT_VERSION`) that this
@@ -102,6 +116,65 @@ export const TRIANGLE_FLAG_FLIP_FRONT_FACE = 2;
  * and `assembleTraceScene` writes the index after the build.
  */
 export const TRIANGLE_WORD_SOURCE_INSTANCE = TRIANGLE_WORD.padding;
+
+/**
+ * How a scene stores its triangles (docs/design/indexed-leaves.md):
+ * `'records'` (the default, the 48-byte records above) or `'indexed'`
+ * (16-byte `vec4u(i0, i1, i2, id + flags)` read through the scene's
+ * positions buffer). The walk is compiled for one
+ * (`traceModuleWgsl({ triangleLeaves })`, `createCpuTracer` reads it from the scene).
+ */
+export type TriangleLeaves = GpuLayoutTriangleLeaves;
+
+/** One indexed triangle: three vertex indices, then the original index and flags, 16 bytes. */
+export const INDEXED_TRIANGLE_BYTES = GPU_LAYOUT_INDEXED_TRIANGLE_BYTES;
+export const INDEXED_TRIANGLE_WORDS = INDEXED_TRIANGLE_BYTES / 4;
+/** Word positions inside an indexed triangle. */
+export const INDEXED_TRIANGLE_WORD = GPU_LAYOUT_INDEXED_TRIANGLE_WORD;
+/** Bits 0-27 of an indexed triangle's word 3: the original index. */
+export const INDEXED_ID_MASK = GPU_LAYOUT_INDEXED_ID_MASK;
+/** Bit 28 of an indexed triangle's word 3: {@link TRIANGLE_FLAG_FILTER}. */
+export const INDEXED_FLAG_FILTER = (TRIANGLE_FLAG_FILTER << GPU_LAYOUT_INDEXED_FLAG_SHIFT) >>> 0;
+/** Bit 29 of an indexed triangle's word 3: {@link TRIANGLE_FLAG_FLIP_FRONT_FACE}. */
+export const INDEXED_FLAG_FLIP_FRONT_FACE = (TRIANGLE_FLAG_FLIP_FRONT_FACE << GPU_LAYOUT_INDEXED_FLAG_SHIFT) >>> 0;
+export const INDEXED_FLAG_SHIFT = GPU_LAYOUT_INDEXED_FLAG_SHIFT;
+
+/**
+ * The 16-byte header an indexed scene puts before each mesh's triangles (at
+ * `triangleOffset - 1`, in 16-byte units): the mesh's vertex base, and for a
+ * merged mesh how far back its side table and source table start.
+ */
+export const MESH_HEADER_WORD = GPU_LAYOUT_MESH_HEADER_WORD;
+
+/**
+ * A merged mesh's side table entry (indexed scenes; one `u32` per triangle,
+ * by tree slot, four to a `vec4u`): bits 0-15 the source's slot in the
+ * group's source table, bits 16-31 its material code (material + 1, 0: none).
+ * The source table holds each source's `instanceIndex`, four to a `vec4u`.
+ * Records keep both in the triangle instead (word 11, flags bits 16-31).
+ */
+export const MERGED_SIDE_SOURCE_BITS = 0xffff;
+export const MERGED_SIDE_MATERIAL_SHIFT = 16;
+/** Most sources one merged group may hold: the side table's 16-bit slot. */
+export const MAX_MERGED_SOURCES = 0x10000;
+
+/**
+ * How an indexed scene stores its positions buffer: `'vec4'` (the default,
+ * `vec4f` per vertex, 16 bytes, one load per corner) or `'packed'` (`f32 x 3`,
+ * 12 bytes, three loads per corner). A compile-time choice of the walk, like
+ * the triangle format.
+ */
+export type PositionLayout = 'vec4' | 'packed';
+
+/** Floats per vertex in the positions buffer. */
+export function positionStrideFloats(layout: PositionLayout | undefined): number {
+    return layout === 'packed' ? 3 : 4;
+}
+
+/** Units (16 bytes each) of an indexed scene's region before a mesh's first triangle: the header, and a merged mesh's side and source tables. */
+export function indexedLeadingUnits(triangleCount: number, sourceCount = 0): number {
+    return sourceCount > 0 ? 1 + Math.ceil(triangleCount / 4) + Math.ceil(sourceCount / 4) : 1;
+}
 
 /** @deprecated The old name of {@link TRIANGLE_FLAG_FILTER}, from when the bit only meant an alpha test. */
 export const TRIANGLE_FLAG_ALPHA_TEST = TRIANGLE_FLAG_FILTER;

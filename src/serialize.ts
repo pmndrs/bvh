@@ -13,11 +13,11 @@
  *         4  triangleCount
  *         5  maxDepth
  *         6  leafCount
- *         7  unused (0)
+ *         7  triangle format: 0 records, 1 indexed (`triangleLeaves`)
  *         8-13  bounds: minX, minY, minZ, maxX, maxY, maxZ (f32)
  *         14-15 unused (0)
  *     nodes      nodeCount × 64 bytes
- *     triangles  triangleCount × 48 bytes
+ *     triangles  triangleCount × 48 bytes (records) or × 16 (indexed)
  *     parents    nodeCount × 4 bytes
  *
  * The arrays are copied byte for byte, so they keep the machine's byte order.
@@ -26,10 +26,17 @@
  *
  * Bytes from another layout version are refused, not converted: a tree is
  * cheap to rebuild, and a wrong word position would only show up as rays
- * missing.
+ * missing. The triangle format is a variant within GPU layout version 2:
+ * files written before it existed have 0 in word 7, which is records, so they
+ * still load. A reader refuses a format it does not know. An indexed file
+ * holds no positions: load it next to the same geometry it was built from
+ * (`CpuMeshBvh` takes it as `source`, a scene as its `geometries`).
  */
 
-import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, GPU_LAYOUT_VERSION, type GpuLayoutMeshBvh } from './gpu-layout.ts';
+import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_VERSION, gpuLayoutTriangleBytes, type GpuLayoutMeshBvh } from './gpu-layout.ts';
+
+/** Header word 7: the triangle format. */
+const TRIANGLE_FORMAT = { records: 0, indexed: 1 } as const;
 
 /** 'PBVH' read as a little-endian u32. */
 const MAGIC = 0x48564250;
@@ -48,18 +55,19 @@ const HEADER_WORD = {
     triangleCount: 4,
     maxDepth: 5,
     leafCount: 6,
+    triangleFormat: 7,
     bounds: 8,
 } as const;
 
 /** Bytes `serializeLayout` writes for this tree. */
-export function serializedLayoutBytes(layout: Pick<GpuLayoutMeshBvh, 'nodeCount' | 'triangleCount'>): number {
-    return HEADER_BYTES + layout.nodeCount * (GPU_LAYOUT_NODE_BYTES + 4) + layout.triangleCount * GPU_LAYOUT_TRIANGLE_BYTES;
+export function serializedLayoutBytes(layout: Pick<GpuLayoutMeshBvh, 'nodeCount' | 'triangleCount' | 'triangleLeaves'>): number {
+    return HEADER_BYTES + layout.nodeCount * (GPU_LAYOUT_NODE_BYTES + 4) + layout.triangleCount * gpuLayoutTriangleBytes(layout.triangleLeaves);
 }
 
 /** Writes a tree as one `ArrayBuffer` (see the file comment for the format). */
 export function serializeLayout(layout: GpuLayoutMeshBvh): ArrayBuffer {
     const nodeBytes = layout.nodeCount * GPU_LAYOUT_NODE_BYTES;
-    const triangleBytes = layout.triangleCount * GPU_LAYOUT_TRIANGLE_BYTES;
+    const triangleBytes = layout.triangleCount * gpuLayoutTriangleBytes(layout.triangleLeaves);
     if (layout.nodes.byteLength !== nodeBytes) throw new RangeError(`serializeLayout: ${layout.nodeCount} nodes need ${nodeBytes} bytes, got ${layout.nodes.byteLength}`);
     if (layout.triangles.byteLength !== triangleBytes) {
         throw new RangeError(`serializeLayout: ${layout.triangleCount} triangles need ${triangleBytes} bytes, got ${layout.triangles.byteLength}`);
@@ -76,6 +84,7 @@ export function serializeLayout(layout: GpuLayoutMeshBvh): ArrayBuffer {
     header.setUint32(HEADER_WORD.triangleCount * 4, layout.triangleCount, true);
     header.setUint32(HEADER_WORD.maxDepth * 4, layout.maxDepth, true);
     header.setUint32(HEADER_WORD.leafCount * 4, layout.leafCount, true);
+    header.setUint32(HEADER_WORD.triangleFormat * 4, layout.triangleLeaves === 'indexed' ? TRIANGLE_FORMAT.indexed : TRIANGLE_FORMAT.records, true);
     for (let i = 0; i < 6; i++) header.setFloat32((HEADER_WORD.bounds + i) * 4, layout.bounds[i], true);
 
     const bytes = new Uint8Array(out);
@@ -107,14 +116,19 @@ export function deserializeLayout(bytes: ArrayBuffer | ArrayBufferView): GpuLayo
 
     const nodeCount = word(HEADER_WORD.nodeCount);
     const triangleCount = word(HEADER_WORD.triangleCount);
-    const expected = serializedLayoutBytes({ nodeCount, triangleCount });
+    const format = word(HEADER_WORD.triangleFormat);
+    if (format !== TRIANGLE_FORMAT.records && format !== TRIANGLE_FORMAT.indexed) {
+        throw new Error(`deserializeLayout: triangle format ${format} is not one this package reads (0 records, 1 indexed); rebuild the tree`);
+    }
+    const triangleLeaves = format === TRIANGLE_FORMAT.indexed ? 'indexed' : 'records';
+    const expected = serializedLayoutBytes({ nodeCount, triangleCount, triangleLeaves });
     if (view.byteLength !== expected) throw new RangeError(`deserializeLayout: ${nodeCount} nodes and ${triangleCount} triangles need ${expected} bytes, got ${view.byteLength}`);
 
     const bounds = new Float32Array(6);
     for (let i = 0; i < 6; i++) bounds[i] = header.getFloat32((HEADER_WORD.bounds + i) * 4, true);
 
     const nodeBytes = nodeCount * GPU_LAYOUT_NODE_BYTES;
-    const triangleBytes = triangleCount * GPU_LAYOUT_TRIANGLE_BYTES;
+    const triangleBytes = triangleCount * gpuLayoutTriangleBytes(triangleLeaves);
     let offset = view.byteOffset + HEADER_BYTES;
     const nodes = view.buffer.slice(offset, offset + nodeBytes) as ArrayBuffer;
     offset += nodeBytes;
@@ -125,6 +139,7 @@ export function deserializeLayout(bytes: ArrayBuffer | ArrayBufferView): GpuLayo
     return {
         nodes,
         triangles,
+        ...(triangleLeaves === 'indexed' ? { triangleLeaves } : {}),
         parents,
         nodeCount,
         triangleCount,

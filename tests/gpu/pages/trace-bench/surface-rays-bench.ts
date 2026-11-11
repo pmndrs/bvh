@@ -37,7 +37,19 @@
  * Timing never fails the page: speeds depend on the GPU and on its heat.
  */
 
-import { buildTraceScene, createMeshBvhBuilder, HIT_RECORD_BYTES, HIT_RECORD_COMPACT_BYTES, HIT_RECORD_COMPACT_WORD, HIT_RECORD_WORD, RAY_FLOATS, type MeshGeometry, type TraceSceneData, type TraceSceneInstance } from '../../../../src/trace/index.ts';
+import {
+    buildTraceScene,
+    createMeshBvhBuilder,
+    HIT_RECORD_BYTES,
+    HIT_RECORD_COMPACT_BYTES,
+    HIT_RECORD_COMPACT_WORD,
+    HIT_RECORD_WORD,
+    RAY_FLOATS,
+    type MeshBvh,
+    type MeshGeometry,
+    type TraceSceneData,
+    type TraceSceneInstance,
+} from '../../../../src/trace/index.ts';
 import { createRandom } from '../../../../src/trace/oracle-fixtures.ts';
 import type { AdapterSummary } from '../../contract.ts';
 import { drainDevice, reportGpuTest, summarizeAdapterInfo, watchDevice } from '../../client.ts';
@@ -47,7 +59,19 @@ import { COUNTED_WORD, COUNTED_WORDS, countedKernelWgsl } from './counted-walk-w
 import { createDispatchTimer, measureDispatches } from './dispatch-timer.ts';
 import { timeLoaded } from './loaded-timing.ts';
 import { readBuffer, uploadRays, yieldToBrowser } from './ours-bench.ts';
-import { hitRecordRoundOrder, pairedRoundOrder, ratioOfRounds, type HitRecord, type HitRecordCase, type PairKey, type PairedRatio, type Tree } from './paired-ratio.ts';
+import {
+    hitRecordRoundOrder,
+    leafLayoutRoundOrder,
+    pairedRoundOrder,
+    ratioOfRounds,
+    type HitRecord,
+    type HitRecordCase,
+    type LeafLayout,
+    type LeafLayoutCase,
+    type PairKey,
+    type PairedRatio,
+    type Tree,
+} from './paired-ratio.ts';
 import { makePlacementRays, rayProblems, tileGrid } from './rc-rays.ts';
 import { makeProbeGrid, makeProbeRays as makeGridRays, makeSphereDirections } from './rays.ts';
 import { fullBrowserVersion, requestBenchDevice } from './run.ts';
@@ -136,6 +160,32 @@ export interface HitRecordResult {
     agreement: { tree: Tree; set: SetName; rays: number; same: number }[];
 }
 
+/** One tree, set and mode in one triangle format, per round. */
+export interface LeafLayoutEntry {
+    tree: Tree;
+    set: SetName;
+    mode: 'closest' | 'any';
+    layout: LeafLayout;
+    mraysPerRound: number[];
+    singleMraysPerRound: number[];
+}
+
+/**
+ * Indexed leaves against records (docs/design/indexed-leaves.md): the same
+ * tinybvh trees, the scene assembled in each format, timed in paired rounds;
+ * ratios `indexed_over_records/<tree>/<set>/<mode>` and
+ * `indexed_packed_over_records/...` (above 1: indexed is faster).
+ */
+export interface LeafLayoutResult {
+    rounds: number;
+    entries: LeafLayoutEntry[];
+    ratios: PairedRatio[];
+    /** Rays whose answer (the whole hit record, or the blocked word) is bit-identical to the records scene's: must be all. */
+    agreement: { tree: Tree; set: SetName; mode: 'closest' | 'any'; layout: LeafLayout; rays: number; same: number }[];
+    /** The scenes' bytes: nodes, triangles, positions, top level. */
+    bytes: Record<string, { nodes: number; triangles: number; positions: number; topLevel: number }>;
+}
+
 export interface TreeSummary {
     topLevelInstances: number;
     topLevelNodes: number;
@@ -163,6 +213,7 @@ export interface SurfaceRaysData {
     sets: SurfaceSetResult[];
     paired: PairedResult;
     hitRecord?: HitRecordResult;
+    triangleLeaves?: LeafLayoutResult;
 }
 
 function summarizeTree(data: TraceSceneData, buildMs: number): TreeSummary {
@@ -294,6 +345,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
         const sceneBuffers: TraceSceneBuffers[] = [];
         let kernel: TraceBatchKernel | null = null;
         let compactKernel: TraceBatchKernel | null = null;
+        const extraKernels: TraceBatchKernel[] = [];
         try {
             progress(`${sceneId}: profile ${profileName}; loading geometry`);
             const scene = await loadBenchScene(sceneId, 'manifest');
@@ -309,7 +361,13 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                 objectToWorld: instance.objectToWorld,
                 static: true,
             }));
-            const build = (geometry: MeshGeometry) => builder.build(geometry);
+            // Each geometry's tree is kept, so the indexed scenes below have exactly these trees.
+            const built = new Map<MeshGeometry, Promise<MeshBvh>>();
+            const build = (geometry: MeshGeometry) => {
+                let tree = built.get(geometry);
+                if (!tree) built.set(geometry, (tree = builder.build(geometry)));
+                return tree;
+            };
             let started = performance.now();
             const instancedData = await buildTraceScene(geometries, instances, { build });
             const instancedMs = performance.now() - started;
@@ -539,6 +597,94 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             }
             const hitRecord: HitRecordResult = { rounds: profile.rounds, entries: recordEntries, ratios: recordRatios, agreement };
 
+            // 5: indexed leaves against records (docs/design/indexed-leaves.md): the same trees, both position layouts.
+            const leafScenes: Record<LeafLayout, Record<Tree, TraceSceneBuffers>> = { records: scenes, indexed: {} as Record<Tree, TraceSceneBuffers>, 'indexed-packed': {} as Record<Tree, TraceSceneBuffers> };
+            const leafBytes: LeafLayoutResult['bytes'] = {};
+            for (const tree of ['instanced', 'merged'] as const) {
+                const recordsData = tree === 'instanced' ? instancedData : mergedData;
+                leafBytes[`records/${tree}`] = { nodes: recordsData.nodes.byteLength, triangles: recordsData.triangles.byteLength, positions: 0, topLevel: recordsData.topLevel.buffer.byteLength };
+                for (const [layout, positionLayout] of [['indexed', 'vec4'], ['indexed-packed', 'packed']] as const) {
+                    const indexed = await buildTraceScene(geometries, instances, { build, mergeStaticInstances: tree === 'merged', triangleLeaves: 'indexed', positionLayout });
+                    leafBytes[`${layout}/${tree}`] = { nodes: indexed.nodes.byteLength, triangles: indexed.triangles.byteLength, positions: indexed.positions.byteLength, topLevel: indexed.topLevel.buffer.byteLength };
+                    const buffers = uploadTraceScene(device, indexed, `surface ${layout} ${tree}`);
+                    sceneBuffers.push(buffers);
+                    leafScenes[layout][tree] = buffers;
+                    await yieldToBrowser();
+                }
+            }
+            const leafKernels: Record<LeafLayout, TraceBatchKernel> = {
+                records: fullKernel,
+                indexed: await TraceBatchKernel.create(device, { label: 'surface indexed', triangleLeaves: 'indexed' }),
+                'indexed-packed': await TraceBatchKernel.create(device, { label: 'surface indexed packed', triangleLeaves: 'indexed', positionLayout: 'packed' }),
+            };
+            extraKernels.push(leafKernels.indexed, leafKernels['indexed-packed']);
+            const leafLayouts: LeafLayout[] = ['records', 'indexed', 'indexed-packed'];
+            const leafCases: LeafLayoutCase[] = (['instanced', 'merged'] as const).flatMap((tree) => sets.flatMap((set) => MODES.map((mode) => ({ tree, set: set.name, mode }))));
+            const leafEntries: LeafLayoutEntry[] = leafCases.flatMap((entry) =>
+                leafLayouts.map((layout): LeafLayoutEntry => ({ tree: entry.tree, set: entry.set as SetName, mode: entry.mode, layout, mraysPerRound: [], singleMraysPerRound: [] })),
+            );
+            const leafEntryOf = (entry: LeafLayoutCase, layout: LeafLayout): LeafLayoutEntry => {
+                const found = leafEntries.find((candidate) => candidate.tree === entry.tree && candidate.set === entry.set && candidate.mode === entry.mode && candidate.layout === layout);
+                if (!found) throw new Error(`no leaf entry ${entry.tree} ${entry.set} ${entry.mode} ${layout}`);
+                return found;
+            };
+            // Hits must be identical in every format: the same trees, the same corner bits, the same arithmetic.
+            const leafAgreement: LeafLayoutResult['agreement'] = [];
+            for (const entry of leafCases) {
+                const set = sets.find((candidate) => candidate.name === entry.set) as RaySet;
+                const expected = new Uint32Array(await traceOnce(device, fullKernel, scenes[entry.tree], entry.mode, set.buffer, set.count));
+                for (const layout of ['indexed', 'indexed-packed'] as const) {
+                    const actual = new Uint32Array(await traceOnce(device, leafKernels[layout], leafScenes[layout][entry.tree], entry.mode, set.buffer, set.count));
+                    const words = expected.length / set.count;
+                    let same = 0;
+                    for (let ray = 0; ray < set.count; ray++) {
+                        let equal = true;
+                        for (let word = 0; word < words && equal; word++) equal = expected[ray * words + word] === actual[ray * words + word];
+                        if (equal) same++;
+                    }
+                    leafAgreement.push({ tree: entry.tree, set: entry.set as SetName, mode: entry.mode, layout, rays: set.count, same });
+                }
+            }
+            const leafResults = new Map<string, GPUBuffer>();
+            for (const set of sets) {
+                for (const mode of MODES) {
+                    const buffer = device.createBuffer({ label: `surface ${set.name} ${mode} leaf results`, size: set.count * (mode === 'closest' ? HIT_RECORD_BYTES : 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+                    gpuBuffers.push(buffer);
+                    leafResults.set(`${set.name}/${mode}`, buffer);
+                }
+            }
+            const timeLeaf = async (entry: LeafLayoutCase, layout: LeafLayout): Promise<{ loaded: number; single: number }> => {
+                const set = sets.find((candidate) => candidate.name === entry.set) as RaySet;
+                const results = leafResults.get(`${set.name}/${entry.mode}`) as GPUBuffer;
+                const encode = (encoder: GPUCommandEncoder, timestampWrites?: GPUComputePassTimestampWrites): void =>
+                    leafKernels[layout].encode(encoder, leafScenes[layout][entry.tree], { mode: entry.mode, rays: set.buffer, results, count: set.count, timestampWrites });
+                const single = await measureDispatches(() => timer.time((encoder, timestampWrites) => encode(encoder, timestampWrites)), profile.warmups, profile.timed);
+                const loaded = await timeLoaded(device, encode, set.count, single.medianMs, profile.loadedMs);
+                await yieldToBrowser();
+                return { loaded: loaded.mraysPerSecond, single: set.count / (single.medianMs * 1e3) };
+            };
+            progress(`${sceneId}: indexed leaves against records, ${profile.rounds} rounds of ${leafCases.length} cases in ${leafLayouts.length} formats, the order reversed every other round; identical answers on ${leafAgreement.filter((a) => a.same === a.rays).length} of ${leafAgreement.length}`);
+            for (let round = 0; round < profile.rounds; round++) {
+                for (const step of leafLayoutRoundOrder(leafCases, leafLayouts, round)) {
+                    const entry = leafEntryOf(step.case, step.layout);
+                    const timed = await timeLeaf(step.case, step.layout);
+                    entry.mraysPerRound.push(timed.loaded);
+                    entry.singleMraysPerRound.push(timed.single);
+                }
+                progress(
+                    `${sceneId}: leaf round ${round + 1} of ${profile.rounds}: ` +
+                        leafCases.map((entry) => `${entry.tree} ${entry.set} ${entry.mode} indexed/records ${(leafEntryOf(entry, 'indexed').mraysPerRound[round] / leafEntryOf(entry, 'records').mraysPerRound[round]).toFixed(3)}`).join(', '),
+                );
+            }
+            const leafRatios: PairedRatio[] = leafCases.flatMap((entry) => [
+                ratioOfRounds(`indexed_over_records/${entry.tree}/${entry.set}/${entry.mode}`, leafEntryOf(entry, 'indexed').mraysPerRound, leafEntryOf(entry, 'records').mraysPerRound),
+                ratioOfRounds(`indexed_packed_over_records/${entry.tree}/${entry.set}/${entry.mode}`, leafEntryOf(entry, 'indexed-packed').mraysPerRound, leafEntryOf(entry, 'records').mraysPerRound),
+            ]);
+            for (const ratio of leafRatios) {
+                progress(`${sceneId}: ${ratio.name}: median ${ratio.median.toFixed(3)} (${ratio.min.toFixed(3)}-${ratio.max.toFixed(3)} over ${profile.rounds} rounds)`);
+            }
+            const triangleLeaves: LeafLayoutResult = { rounds: profile.rounds, entries: leafEntries, ratios: leafRatios, agreement: leafAgreement, bytes: leafBytes };
+
             data = {
                 benchmark: 'surface-rays',
                 scene: sceneId,
@@ -557,6 +703,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                 sets: results,
                 paired: { rounds: profile.rounds, profile: profileName, entries, ratios, repeatRatios },
                 hitRecord,
+                triangleLeaves,
             };
 
             // The verdict is correctness only.
@@ -573,6 +720,9 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                     failures.push(`the merged tree blocks the same ${result.set} rays as the instanced one on only ${percent(result.blockedAgreement)}`);
                 }
             }
+            for (const entry of leafAgreement) {
+                if (entry.same !== entry.rays) failures.push(`${entry.layout} differs from records on ${entry.tree} ${entry.set} ${entry.mode}: ${entry.rays - entry.same} of ${entry.rays} rays`);
+            }
             for (const entry of agreement) {
                 if (entry.same / entry.rays < MIN_HIT_AGREEMENT) failures.push(`the compact-record kernel differs from the full one on ${entry.tree} ${entry.set}: ${percent(entry.same / entry.rays)} of rays the same`);
             }
@@ -583,6 +733,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
         } finally {
             kernel?.destroy();
             compactKernel?.destroy();
+            for (const extra of extraKernels) extra.destroy();
             for (const buffers of sceneBuffers) buffers.destroy();
             builder.dispose();
             timer.dispose();

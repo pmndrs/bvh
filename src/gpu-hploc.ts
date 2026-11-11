@@ -30,7 +30,8 @@
  * **Limits.** A batch's largest buffer holds 64 bytes per triangle (the output
  * nodes); {@link planGpuHplocBatches} splits a scene to fit the device. A mesh
  * may have at most {@link HPLOC_MAX_MESH_TRIANGLES} triangles. A whole batch holds
- * about 252 bytes per triangle plus its inputs ({@link hplocBatchBytes}); the
+ * about 252 bytes per triangle plus its inputs ({@link hplocBatchBytes}; 32 fewer
+ * with `triangleLeaves: 'indexed'`, whose triangles take 16 bytes, not 48); the
  * planner's `maxBatchBytes` caps that, and {@link GpuHplocScratchPool} shares
  * one scratch across batches built one after another (bvh-builders.md, "Build
  * peak memory").
@@ -45,7 +46,7 @@
  * (`device.adapterInfo.subgroupMinSize`), never on a fixed warp width.
  */
 
-import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, type GpuLayoutMeshBvh } from './gpu-layout.ts';
+import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, gpuLayoutTriangleBytes, type GpuLayoutMeshBvh, type GpuLayoutTriangleLeaves } from './gpu-layout.ts';
 import {
     allocatedBytes,
     batchTotals,
@@ -120,7 +121,7 @@ export interface HplocBatchPlanOptions extends BatchPlanOptions {
  */
 export function planGpuHplocBatches(device: GPUDevice, geometries: readonly GpuMeshGeometry[], options: HplocBatchPlanOptions = {}): { batches: number[][]; tooBig: number[] } {
     const mortonCodes = options.mortonCodes ?? 'cubic-30';
-    return planMeshBatches(device, geometries, LARGEST_BYTES_PER_TRIANGLE, HPLOC_MAX_MESH_TRIANGLES, budgetOf(options, (totals) => hplocBatchBytes(totals, mortonCodes).total));
+    return planMeshBatches(device, geometries, LARGEST_BYTES_PER_TRIANGLE, HPLOC_MAX_MESH_TRIANGLES, budgetOf(options, (totals) => hplocBatchBytes(totals, mortonCodes, options.triangleLeaves).total));
 }
 
 /** Where the climb's scratch and the links buffer put each part, in words (see the batch's constructor). */
@@ -154,7 +155,7 @@ function hplocParamRecords(mortonCodes: HplocMortonCodes) {
 }
 
 /** The H-PLOC batch's buffers, as {@link GpuHplocBatch} asks for them (before rounding up to 4 bytes, at least 16). */
-export function hplocBatchBuffers(totals: BatchTotals, mortonCodes: HplocMortonCodes = 'cubic-30') {
+export function hplocBatchBuffers(totals: BatchTotals, mortonCodes: HplocMortonCodes = 'cubic-30', triangleLeaves: GpuLayoutTriangleLeaves = 'records') {
     const { meshes, triangles, inner } = totals;
     const layout = hplocLayout(totals);
     const sortOffsetWords = totals.sortTiles * RADIX_BINS;
@@ -165,7 +166,7 @@ export function hplocBatchBuffers(totals: BatchTotals, mortonCodes: HplocMortonC
         // Every mesh's stats, then the word lbvhStart clears for the LBVH's climb queue (unused here).
         stats: meshes * LBVH_STATS_BYTES + 16,
         outNodes: inner * GPU_LAYOUT_NODE_BYTES,
-        outTriangles: triangles * GPU_LAYOUT_TRIANGLE_BYTES,
+        outTriangles: triangles * gpuLayoutTriangleBytes(triangleLeaves),
         outParents: inner * 4,
         tables: tableWords(totals) * 4,
         primitiveBoxes: triangles * 32,
@@ -188,8 +189,8 @@ export type HplocBatchBuffer = keyof ReturnType<typeof hplocBatchBuffers>;
 export type HplocPoolBuffer = Exclude<HplocBatchBuffer, 'outNodes' | 'outTriangles' | 'outParents'>;
 
 /** GPU bytes an H-PLOC batch of these totals holds while it builds, by buffer: its inputs, scratch and uniforms (`scratch`) and its trees (`outputs`). */
-export function hplocBatchBytes(totals: BatchTotals, mortonCodes: HplocMortonCodes = 'cubic-30'): BatchBytes<HplocBatchBuffer> {
-    return summarizeBatchBuffers(hplocBatchBuffers(totals, mortonCodes));
+export function hplocBatchBytes(totals: BatchTotals, mortonCodes: HplocMortonCodes = 'cubic-30', triangleLeaves: GpuLayoutTriangleLeaves = 'records'): BatchBytes<HplocBatchBuffer> {
+    return summarizeBatchBuffers(hplocBatchBuffers(totals, mortonCodes, triangleLeaves));
 }
 
 const POOL_USAGE: Record<HplocPoolBuffer, number> = {
@@ -469,6 +470,8 @@ type BatchBuffer = 'positions' | 'indices' | 'flags' | 'stats' | 'outNodes' | 'o
 /** One batch of mesh builds: inputs, scratch and outputs, recorded into one compute pass. */
 export class GpuHplocBatch {
     readonly meshCount: number;
+    /** The triangle format the batch writes. */
+    readonly triangleLeaves: GpuLayoutTriangleLeaves;
     private readonly device: GPUDevice;
     private readonly label: string;
     private readonly mortonCodes: HplocMortonCodes;
@@ -514,7 +517,8 @@ export class GpuHplocBatch {
 
         // Sizes from hplocBatchBuffers, which the planner's byte cap and the scratch pool also use.
         const totals = batchTotals(this.meshes);
-        const sizes = hplocBatchBuffers(totals, options.mortonCodes);
+        const sizes = hplocBatchBuffers(totals, options.mortonCodes, options.triangleLeaves);
+        this.triangleLeaves = options.triangleLeaves;
         if (tables.byteLength !== sizes.tables || sortTable.offsetWords * 4 !== sizes.sortOffsets) throw new Error('hplocBatchBuffers is out of step with buildTables');
         const output = USAGE.STORAGE | USAGE.COPY_SRC | USAGE.COPY_DST;
         const make = (name: string, bytes: number, usage: number, owned = true): GPUBuffer => {
@@ -568,6 +572,7 @@ export class GpuHplocBatch {
         floats[5] = options.traversalCost; // traversalCost
         floats[6] = options.intersectionCost; // intersectionCost
         words[7] = LBVH_FIRST_ROUND_TRIANGLES; // climbLimit (the LBVH's; unused here)
+        words[8] = options.triangleLeaves === 'indexed' ? 1 : 0; // indexedLeaves
         // HplocParams, field by field (gpu-hploc-wgsl.ts).
         const hplocParams = new Uint32Array([
             triangleTotal, // triangleTotal
@@ -760,6 +765,7 @@ export class GpuHplocBatch {
             return {
                 nodes: outNodes,
                 triangles: outTriangles,
+                triangleLeaves: this.triangleLeaves,
                 parents: outParents,
                 meshes: this.meshes.map((mesh, index) => {
                     const stats = words.subarray(index * LBVH_STATS_WORDS, (index + 1) * LBVH_STATS_WORDS);

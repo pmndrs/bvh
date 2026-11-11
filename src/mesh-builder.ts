@@ -25,6 +25,7 @@ import type { GpuLayoutMeshBvh } from './gpu-layout.ts';
 import { GpuLbvhBuilder, planGpuLbvhBatches } from './gpu-lbvh.ts';
 import type { GpuBuildOptions, GpuMeshGeometry, GpuTreeBuffers, MeshInput } from './mesh-input.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from './tinybvh.ts';
+import { indexedFromRecords } from './indexed-leaves.ts';
 
 export type MeshLayoutBuilderKind = 'gpu-hploc' | 'gpu-lbvh' | 'tinybvh';
 
@@ -64,7 +65,7 @@ export async function createMeshLayoutBuilder(
     let tinyBvh: Promise<TinyBvhBuilder> | null = null;
     const buildOnCpu = async (geometry: MeshInput, gpuOptions: GpuBuildOptions): Promise<GpuLayoutMeshBvh> => {
         tinyBvh ??= createTinyBvhBuilder();
-        return (await tinyBvh).buildLayout(geometry, { maxLeafPrimitives: gpuOptions.maxLeafPrimitives }).layout;
+        return (await tinyBvh).buildLayout(geometry, { maxLeafPrimitives: gpuOptions.maxLeafPrimitives, triangleLeaves: gpuOptions.triangleLeaves }).layout;
     };
 
     if (fallbackReason !== null || !device) {
@@ -82,6 +83,8 @@ export async function createMeshLayoutBuilder(
     const kind = options.prefer === 'gpu-lbvh' ? 'gpu-lbvh' : 'gpu-hploc';
     const gpu = kind === 'gpu-lbvh' ? new GpuLbvhBuilder(device, { label: options.label }) : new GpuHplocBuilder(device, { label: options.label });
     const planOptions = { maxBatchBytes: options.maxBatchBytes };
+    // The LBVH writes records only: an indexed build converts them after the readback (indexedFromRecords).
+    const gpuBuildOptions = (gpuOptions: GpuBuildOptions): GpuBuildOptions => (kind === 'gpu-lbvh' ? { ...gpuOptions, triangleLeaves: 'records' } : gpuOptions);
     const plan = (geometries: readonly GpuMeshGeometry[]) => (kind === 'gpu-lbvh' ? planGpuLbvhBatches : planGpuHplocBatches)(device, geometries, planOptions);
     await gpu.prepare();
     return {
@@ -100,8 +103,8 @@ export async function createMeshLayoutBuilder(
                     ? gpu.createScratchPool(batches.batches.map((batch) => batch.map((index) => geometries[index])))
                     : null;
             const buildBatch = async (batch: readonly GpuMeshGeometry[]): Promise<GpuTreeBuffers> => {
-                if (!pool || !(gpu instanceof GpuHplocBuilder)) return gpu.buildMany(batch, gpuOptions);
-                const built = gpu.createBatch(batch, gpuOptions, pool);
+                if (!pool || !(gpu instanceof GpuHplocBuilder)) return gpu.buildMany(batch, gpuBuildOptions(gpuOptions));
+                const built = gpu.createBatch(batch, gpuBuildOptions(gpuOptions), pool);
                 try {
                     const encoder = device.createCommandEncoder({ label: options.label });
                     built.encode(encoder);
@@ -126,7 +129,8 @@ export async function createMeshLayoutBuilder(
                     for (const [at, layout] of layouts.entries()) {
                         const index = batch[at];
                         const problem = trees.meshes[at].problem;
-                        if (layout && !problem) results[index] = { layout, builtBy: kind, fallbackReason: null };
+                        const converted = layout && gpuOptions.triangleLeaves === 'indexed' ? indexedFromRecords(layout, geometries[index]) : layout;
+                        if (converted && !problem) results[index] = { layout: converted, builtBy: kind, fallbackReason: null };
                         else results[index] = { layout: await buildOnCpu(geometries[index], gpuOptions), builtBy: 'tinybvh', fallbackReason: problem };
                     }
                 } finally {

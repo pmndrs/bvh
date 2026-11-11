@@ -30,8 +30,25 @@ export {
     GPU_LAYOUT_TRIANGLE_BYTES,
     GPU_LAYOUT_TRIANGLE_WORD,
     GPU_LAYOUT_VERSION,
+    GPU_LAYOUT_INDEXED_FLAG_SHIFT,
+    GPU_LAYOUT_INDEXED_ID_MASK,
+    GPU_LAYOUT_INDEXED_TRIANGLE_BYTES,
+    GPU_LAYOUT_INDEXED_TRIANGLE_WORD,
+    GPU_LAYOUT_MESH_HEADER_WORD,
+    gpuLayoutTriangleBytes,
     type GpuLayoutMeshBvh,
+    type GpuLayoutTriangleLeaves,
 } from './gpu-layout.ts';
+// Indexed leaves (docs/design/indexed-leaves.md): converting a tree between the formats, and the weld.
+export {
+    indexedFromRecords,
+    recordsFromIndexed,
+    weldExactBits,
+    weldPositions,
+    weldWithinTolerance,
+    type WeldOptions,
+    type WeldResult,
+} from './indexed-leaves.ts';
 export { deserializeLayout, SERIALIZED_FORMAT_VERSION, serializedLayoutBytes, serializeLayout } from './serialize.ts';
 
 // A tree's shape alone, before it is written in the GPU layout.
