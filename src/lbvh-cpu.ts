@@ -23,7 +23,7 @@ import {
     GPU_LAYOUT_TRIANGLE_WORD,
     type GpuLayoutMeshBvh,
 } from './gpu-layout.ts';
-import type { GpuBuildOptions, MeshInput } from './mesh-input.ts';
+import { checkTriangleFlags, type GpuBuildOptions, type MeshInput } from './mesh-input.ts';
 
 const f = Math.fround;
 const FLOAT_MAX = 3.4028234663852886e38;
@@ -318,6 +318,7 @@ export function packTrianglesInOrder(geometry: MeshInput, order: Uint32Array): A
     const floats = new Float32Array(buffer);
     const triangleWords = GPU_LAYOUT_TRIANGLE_BYTES / 4;
     const t = GPU_LAYOUT_TRIANGLE_WORD;
+    checkTriangleFlags(triangleFlags, order.length, 'mesh');
     const corners = [t.vertex0, t.vertex1, t.vertex2];
     order.forEach((triangle, position) => {
         const base = position * triangleWords;

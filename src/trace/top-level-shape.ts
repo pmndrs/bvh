@@ -35,7 +35,10 @@ export interface TopLevelBuildInput {
     /**
      * 1 for an instance that is a merged mesh of static instances
      * (static-merge.ts). Its transform must stay the identity: a build or
-     * check with anything else throws. Optional; omitted means none is merged.
+     * check with anything else throws. That only catches the group's own
+     * record moving: a merged *source* that moved is only caught when the
+     * scene is assembled again (`assembleTraceScene` checks the plan).
+     * Optional; omitted means none is merged.
      */
     readonly merged?: Uint8Array;
 }

@@ -18,7 +18,11 @@
  *    with a per-node counter, its subgroup pairing, and its repair pass.
  *
  * Any builder's tree works (the GPU LBVH's or tinybvh's): only the layout
- * matters. The refit takes the tree's shape from a CPU copy of the layout
+ * matters. Never refit a merged static group's range (`mergeStaticInstances`):
+ * its records are world space and name source-mesh triangles, so a refit from
+ * a source's vertices writes wrong triangles. This class takes raw offsets and
+ * can't tell; get a scene mesh's offsets from `meshRefitPlacement`, which
+ * refuses merged meshes. The refit takes the tree's shape from a CPU copy of the layout
  * (`setTree`), which a GPU-built tree gets once with `GpuLbvhBuilder.readLayouts`;
  * the shape never changes while the mesh deforms, so that is a one-off at
  * build time, not a per-frame readback.

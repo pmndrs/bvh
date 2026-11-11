@@ -56,6 +56,8 @@ export interface TraceInstance {
      * `INSTANCE_FLAG.merged`, and hits take their instance from the triangle.
      * Its transform must be the identity; anything else throws, because the
      * sources' transforms are baked into the mesh. `assembleTraceScene` sets it.
+     * This only catches the group's own record moving; a merged source that
+     * moved is only caught when the scene is assembled again.
      */
     readonly merged?: boolean;
 }

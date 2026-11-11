@@ -86,7 +86,8 @@ export const TRIANGLE_FLAG_FILTER = 1;
  * `assembleTraceScene` on a merged mesh's triangles (`mergeStaticInstances`,
  * static-merge.ts) that come from a mirrored source instance: they are stored
  * in world space, where a mirror reverses the authored winding. Builders never
- * write it. Bits 2-15 are reserved, 0. Bits 16-31 are reserved for a
+ * write it, and an input's `triangleFlags` may not set it (only bit 0;
+ * bits 1-31 throw). Bits 2-15 are reserved, 0. Bits 16-31 are reserved for a
  * per-instance material (planned: material + 1, 0 = none), which a merged
  * mesh will carry per triangle because its record has no single material;
  * not written yet.

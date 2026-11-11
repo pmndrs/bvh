@@ -168,7 +168,7 @@ describe('tinybvh GPU layout written in WASM (B0b)', () => {
         const indices = grid.indices as Uint32Array;
         expect(indices.every((index) => index < 0x10000)).toBe(true);
         compareBothWays({ positions: grid.positions, indices: Uint16Array.from(indices) });
-        const triangleFlags = Uint32Array.from({ length: indices.length / 3 }, (_, triangle) => (triangle * 2654435761) >>> 0);
+        const triangleFlags = Uint32Array.from({ length: indices.length / 3 }, (_, triangle) => ((triangle * 2654435761) >>> 31) & 1);
         compareBothWays({ ...grid, triangleFlags });
     });
 

@@ -9,10 +9,13 @@
  * identity transform, so the walk descends one tree.
  *
  * **What merges.** An instance marked `static: true` whose mesh no other
- * instance uses, with an invertible transform. Instances merge in groups of
- * equal `contributesToGi`, `visible` and mask, so each group still has one
- * instance record with the right flags and mask. Everything else stays a
- * normal instance.
+ * instance uses and has triangles, with an invertible transform, that is
+ * visible and contributes to GI (the top level skips the others anyway, so
+ * they stay normal instances and the scene is what it is with the option
+ * off). Instances merge in groups of equal mask, so each group still has one
+ * instance record with the right mask. Merged sources must have distinct
+ * `instanceIndex` values, since a hit names its source by that index.
+ * Everything else stays a normal instance.
  *
  * **Hit identity.** A merged mesh is a normal mesh, so any builder builds it
  * from {@link StaticMergeGroup.geometry}. The ids stay out of the builder:
@@ -29,8 +32,9 @@
  * world-space bits in both, and the watertight test still holds.
  */
 
-import { MAX_REFERENCE_INDEX, TRIANGLE_FLAG_FLIP_FRONT_FACE, TRIANGLE_WORD, TRIANGLE_WORDS, checkInstanceMask } from './layout.ts';
+import { MAX_REFERENCE_INDEX, TRIANGLE_FLAG_FILTER, TRIANGLE_FLAG_FLIP_FRONT_FACE, TRIANGLE_WORD, TRIANGLE_WORDS, checkInstanceMask } from './layout.ts';
 import type { MeshGeometry } from './mesh-bvh.ts';
+import { checkTriangleFlags } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
 import { invertAffine, type Mat4 } from './top-level.ts';
 import type { TraceSceneInstance } from './scene-assembly.ts';
@@ -64,8 +68,11 @@ export interface StaticMergeGroup {
     /** Per triangle of `geometry`: 1 when it comes from a mirrored source (`TRIANGLE_FLAG_FLIP_FRONT_FACE`). */
     readonly flipFrontFace: Uint8Array;
     readonly sources: readonly StaticMergeSource[];
+    /** Always true: instances that don't contribute to GI, or aren't visible, never merge. */
     readonly contributesToGi: boolean;
+    /** Always true (see {@link contributesToGi}). */
     readonly visible: boolean;
+    /** The sources' mask (0-255, 0xff when they give none). */
     readonly mask: number;
 }
 
@@ -90,6 +97,17 @@ export interface StaticMergeOptions {
  * Picks the instances that merge and produces each group's world-space
  * geometry, as a normal mesh input for any builder, with the per-triangle
  * source ids and flip bits kept beside it. Pure: nothing is built.
+ *
+ * Throws if a merged source's `triangleFlags` set a reserved bit (only bit 0
+ * may be set), or if two merged sources share an `instanceIndex`.
+ *
+ * **Static means static.** The source transforms are baked into the
+ * geometry. Only assembling the scene again (`assembleTraceScene` with this
+ * plan) notices a source that moved, or whose mask, `visible` or
+ * `contributesToGi` changed: nothing checks between assemblies. A merged
+ * group's records must never be refit (`GpuMeshRefit`): they hold world-space
+ * corners and source-mesh triangle indices, so a refit from a source's
+ * object-space vertices would write wrong triangles.
  */
 export function mergeStaticGeometry(
     meshes: readonly MeshGeometry[],
@@ -105,8 +123,6 @@ export function mergeStaticGeometry(
 
     interface Pending {
         readonly key: string;
-        readonly contributesToGi: boolean;
-        readonly visible: boolean;
         readonly mask: number;
         readonly members: { inputIndex: number; mirrored: boolean }[];
         triangles: number;
@@ -117,21 +133,30 @@ export function mergeStaticGeometry(
     const meshNeeded = new Uint8Array(meshes.length);
     const instanced: number[] = [];
 
+    const mergedInstanceIndices = new Map<number, number>();
     instances.forEach((instance, inputIndex) => {
         const mask = checkInstanceMask(instance.mask, instance.instanceIndex);
-        const inverse = instance.static === true && users[instance.meshIndex] === 1 ? invertAffine(instance.objectToWorld) : null;
+        const geometry = meshes[instance.meshIndex];
+        const triangles = countTriangles(geometry);
+        // The top level skips hidden and non-GI instances, so they stay instances: the scene is then what it is with the option off.
+        const candidate = instance.static === true && users[instance.meshIndex] === 1 && triangles > 0 && instance.visible !== false && instance.contributesToGi !== false;
+        const inverse = candidate ? invertAffine(instance.objectToWorld) : null;
         if (inverse === null) {
-            // Not static, a shared mesh, or a singular transform (which the top level skips as an instance).
+            // Not static, a shared or empty mesh, hidden, or a singular transform (which the top level skips as an instance).
             instanced.push(inputIndex);
             meshNeeded[instance.meshIndex] = 1;
             return;
         }
-        const geometry = meshes[instance.meshIndex];
-        const triangles = countTriangles(geometry);
+        const sameIndex = mergedInstanceIndices.get(instance.instanceIndex);
+        if (sameIndex !== undefined) {
+            throw new RangeError(
+                `instances at positions ${sameIndex} and ${inputIndex} both have instanceIndex ${instance.instanceIndex}; merged static instances need distinct indices, because a merged hit names its source by it`,
+            );
+        }
+        mergedInstanceIndices.set(instance.instanceIndex, inputIndex);
+        checkTriangleFlags(geometry.triangleFlags, triangles, `mesh ${instance.meshIndex} (instance ${instance.instanceIndex})`);
         const vertices = geometry.positions.length / 3;
-        const contributesToGi = instance.contributesToGi !== false;
-        const visible = instance.visible !== false;
-        const key = `${contributesToGi ? 1 : 0}:${visible ? 1 : 0}:${mask}`;
+        const key = `${mask}`;
         let group = open.get(key);
         if (group && group.triangles + triangles > maxTriangles) {
             closed.push(group);
@@ -139,7 +164,7 @@ export function mergeStaticGeometry(
         }
         if (!group) {
             if (triangles > maxTriangles) throw new RangeError(`instance ${instance.instanceIndex}: ${triangles} triangles do not fit one merged mesh (${maxTriangles})`);
-            group = { key, contributesToGi, visible, mask, members: [], triangles: 0, vertices: 0 };
+            group = { key, mask, members: [], triangles: 0, vertices: 0 };
             open.set(key, group);
         }
         group.members.push({ inputIndex, mirrored: inverse.determinant < 0 });
@@ -199,8 +224,8 @@ export function mergeStaticGeometry(
             sourceTriangles,
             flipFrontFace,
             sources,
-            contributesToGi: pending.contributesToGi,
-            visible: pending.visible,
+            contributesToGi: true,
+            visible: true,
             mask: pending.mask,
         };
     });
@@ -231,7 +256,8 @@ function transformPositions(source: Float32Array, e: Mat4, out: Float32Array, of
  * from `group.geometry` by any builder: each record's original index (the
  * builder's, an index into the group's geometry) becomes the source mesh's
  * triangle index, the padding word the source instance index, and flags bit 1
- * is set for a mirrored source. Every other flag bit is kept.
+ * is set for a mirrored source. Bit 0 (the filter flag) is kept; a record
+ * with any other flag bit set throws, since builders only write bit 0.
  *
  * Call it once on fresh records (it reads the builder's original index):
  * `assembleTraceScene` does, on its own copy, so a `MeshBvh` can be
@@ -246,6 +272,13 @@ export function writeMergedTriangleIdentity(records: ArrayBuffer, group: StaticM
         const base = slot * TRIANGLE_WORDS;
         const merged = words[base + TRIANGLE_WORD.originalIndex];
         if (merged >= triangleCount) throw new RangeError(`merged triangle record ${slot} holds triangle ${merged}, out of range`);
+        const flags = words[base + TRIANGLE_WORD.flags];
+        if ((flags & ~TRIANGLE_FLAG_FILTER) !== 0) {
+            throw new RangeError(
+                `merged triangle record ${slot} (source instance ${group.sourceInstances[merged]}, triangle ${group.sourceTriangles[merged]}) has flags 0x${flags.toString(16)}: ` +
+                    'only bit 0 may be set in fresh records (bits 1-31 are reserved; were the ids already written?)',
+            );
+        }
         words[base + TRIANGLE_WORD.originalIndex] = group.sourceTriangles[merged];
         words[base + TRIANGLE_WORD.padding] = group.sourceInstances[merged];
         if (group.flipFrontFace[merged]) words[base + TRIANGLE_WORD.flags] |= TRIANGLE_FLAG_FLIP_FRONT_FACE;

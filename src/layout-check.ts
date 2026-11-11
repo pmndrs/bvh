@@ -88,8 +88,15 @@ export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, op
     // Merged records name (source instance, source triangle); map that back to the merged geometry's triangle.
     const mergedIndexOf = new Map<number, number>();
     if (merged) {
-        for (let triangle = triangleCount - 1; triangle >= 0; triangle--) {
-            if (merged.sourceTriangles[triangle] === 0) mergedIndexOf.set(merged.sourceInstances[triangle], triangle);
+        for (let triangle = 0; triangle < triangleCount; triangle++) {
+            if (merged.sourceTriangles[triangle] !== 0) continue;
+            const source = merged.sourceInstances[triangle];
+            if (mergedIndexOf.has(source)) {
+                // Two sources with one instanceIndex: a merged hit can't say which (mergeStaticGeometry refuses this).
+                report(`source instance ${source} starts at merged triangles ${mergedIndexOf.get(source)} and ${triangle}; merged sources need distinct instance indices`);
+                return problems;
+            }
+            mergedIndexOf.set(source, triangle);
         }
     }
     for (let slot = 0; slot < triangleCount; slot++) {

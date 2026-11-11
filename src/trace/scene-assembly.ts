@@ -13,7 +13,9 @@
  */
 
 import type { Mat4 } from './top-level.ts';
-import { BVH_NODE_BYTES, TRACE_STACK_SIZE, TRIANGLE_BYTES } from './layout.ts';
+import { BVH_NODE_BYTES, TRACE_STACK_SIZE, TRIANGLE_BYTES, TRIANGLE_WORDS, checkInstanceMask } from './layout.ts';
+import { checkTriangleFlags } from '../mesh-input.ts';
+import { countTriangles } from './triangle-packing.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { buildTopLevel, IDENTITY_TRANSFORM, throwMergedTransformChange, type TopLevelBvh, type TraceInstance } from './top-level.ts';
 import type { SahBuildOptions } from './sah-builder.ts';
@@ -47,6 +49,12 @@ export interface TraceSceneMeshPlacement {
     /** First triangle record, counted in triangles. */
     readonly triangleOffset: number;
     readonly triangleCount: number;
+    /**
+     * Set on an input mesh that only merged sources use: its triangles live in
+     * `TraceSceneData.mergedGroups[mergedInto]`, and this entry is empty
+     * (`triangleCount` 0). `writeTriangleFilterFlags` refuses it.
+     */
+    readonly mergedInto?: number;
 }
 
 export interface TraceSceneData {
@@ -58,7 +66,9 @@ export interface TraceSceneData {
     /**
      * Where each input mesh landed. The scene holds copies of the meshes'
      * records: to change a mesh's triangle flags after assembly, write
-     * `triangles` with the mesh's entry as the range.
+     * `triangles` with the mesh's entry as the range. A mesh only merged
+     * sources use has an empty entry with `mergedInto`: flag its triangles on
+     * that merged group's range instead, by source instance.
      */
     readonly meshes: readonly TraceSceneMeshPlacement[];
     /** Deepest mesh tree among the meshes the instances use. */
@@ -76,10 +86,17 @@ export interface TraceSceneData {
     readonly mergedGroups: readonly TraceSceneMergedGroup[];
 }
 
-/** Where a merged group landed, and which instances it holds. */
+/**
+ * Where a merged group landed, and which instances it holds. A
+ * `TriangleRecordRange` for `writeTriangleFilterFlags`, whose callback then
+ * gets each record's source instance (`merged: true`). Never a refit target.
+ */
 export interface TraceSceneMergedGroup extends TraceSceneMeshPlacement {
+    readonly merged: true;
     /** The source instances' `instanceIndex`, in the group's order. */
     readonly sourceInstances: readonly number[];
+    /** Each source's mesh (its position in the `meshes` array), parallel to {@link sourceInstances}. */
+    readonly sourceMeshes: readonly number[];
 }
 
 /** The merged meshes for {@link assembleTraceScene}: the plan and one tree per group, from any builder. */
@@ -110,11 +127,21 @@ export function assembleTraceScene(
     const merged = options.merged;
     if (merged) checkMergedTrees(merged, instances);
     const placed: readonly (MeshBvh | null)[] = merged ? [...meshes, ...merged.meshes] : meshes;
+    const mergedInto = new Map<number, number>();
+    merged?.plan.groups.forEach((group, groupIndex) => {
+        for (const source of group.sources) if (!merged.plan.meshNeeded[source.meshIndex]) mergedInto.set(source.meshIndex, groupIndex);
+    });
 
     let totalNodes = 0;
     let totalTriangles = 0;
-    const allPlacements = placed.map((mesh): TraceSceneMeshPlacement => {
-        const placement = { nodeOffset: totalNodes, nodeCount: mesh?.nodeCount ?? 0, triangleOffset: totalTriangles, triangleCount: mesh?.triangleCount ?? 0 };
+    const allPlacements = placed.map((mesh, index): TraceSceneMeshPlacement => {
+        const placement: TraceSceneMeshPlacement = {
+            nodeOffset: totalNodes,
+            nodeCount: mesh?.nodeCount ?? 0,
+            triangleOffset: totalTriangles,
+            triangleCount: mesh?.triangleCount ?? 0,
+            ...(mergedInto.has(index) ? { mergedInto: mergedInto.get(index) } : {}),
+        };
         totalNodes += placement.nodeCount;
         totalTriangles += placement.triangleCount;
         return placement;
@@ -177,7 +204,12 @@ export function assembleTraceScene(
                 merged: true,
             });
             inputOf![plan.instanced.length + groupIndex] = instances.length + groupIndex;
-            mergedGroups.push({ ...placement, sourceInstances: group.sources.map((source) => source.instanceIndex) });
+            mergedGroups.push({
+                ...placement,
+                merged: true,
+                sourceInstances: group.sources.map((source) => source.instanceIndex),
+                sourceMeshes: group.sources.map((source) => source.meshIndex),
+            });
         });
     }
     const topLevel = buildTopLevel(traceInstances, topLevelOptions);
@@ -207,7 +239,7 @@ export function assembleTraceScene(
     };
 }
 
-/** The plan must be for these instances, unmoved, and each tree for its group. */
+/** The plan must be for these instances, unmoved, with the same mask and flags, and each tree for its group. */
 function checkMergedTrees(merged: MergedStaticTrees, instances: readonly TraceSceneInstance[]): void {
     const { plan } = merged;
     if (plan.instanceCount !== instances.length) {
@@ -228,6 +260,16 @@ function checkMergedTrees(merged: MergedStaticTrees, instances: readonly TraceSc
             }
             for (let k = 0; k < 16; k++) {
                 if (instance.objectToWorld[k] !== source.objectToWorld[k]) throwMergedTransformChange(source.instanceIndex, 'assembleTraceScene');
+            }
+            const mask = checkInstanceMask(instance.mask, instance.instanceIndex);
+            const contributesToGi = instance.contributesToGi !== false;
+            const visible = instance.visible !== false;
+            if (mask !== group.mask || contributesToGi !== group.contributesToGi || visible !== group.visible) {
+                throw new RangeError(
+                    `instance ${instance.instanceIndex} is a merged static instance, but its mask, visible or contributesToGi changed since the merge plan ` +
+                        `(mask ${mask}, visible ${visible}, contributesToGi ${contributesToGi}; the plan has ${group.mask}, ${group.visible}, ${group.contributesToGi}): ` +
+                        'make a new plan with mergeStaticGeometry, or leave it out of the merge (static: false)',
+                );
             }
         }
     });
@@ -251,12 +293,24 @@ export interface TraceSceneBuildOptions extends StaticMergeOptions {
  * Builds every mesh tree with `options.build` and assembles the scene. With
  * `mergeStaticInstances`, meshes only merged instances use get no tree of
  * their own, and each merged group's geometry is built instead.
+ *
+ * Every mesh's `triangleFlags` may set bit 0 only; a reserved bit throws,
+ * naming the mesh and triangle.
+ *
+ * **Static means static.** A merged instance's transform is baked into the
+ * merged mesh. Only assembling again notices that one moved (or that its
+ * mask, `visible` or `contributesToGi` changed); nothing checks between
+ * assemblies, so a caller that moves a merged instance and only updates the
+ * top level gets the old position. A merged group's range
+ * (`TraceSceneData.mergedGroups`) must never be refit: use
+ * {@link meshRefitPlacement}, which refuses merged meshes, to get refit offsets.
  */
 export async function buildTraceScene(
     geometries: readonly MeshGeometry[],
     instances: readonly TraceSceneInstance[],
     options: TraceSceneBuildOptions,
 ): Promise<TraceSceneData> {
+    geometries.forEach((geometry, index) => checkTriangleFlags(geometry.triangleFlags, countTriangles(geometry), `mesh ${index}`));
     if (!options.mergeStaticInstances) {
         const meshes = await Promise.all(geometries.map((geometry) => options.build(geometry)));
         return assembleTraceScene(meshes, instances, options.topLevel);
@@ -265,4 +319,24 @@ export async function buildTraceScene(
     const meshes = await Promise.all(geometries.map((geometry, index) => (plan.meshNeeded[index] ? options.build(geometry) : null)));
     const mergedMeshes = await Promise.all(plan.groups.map((group) => options.build(group.geometry)));
     return assembleTraceScene(meshes, instances, options.topLevel, { merged: { plan, meshes: mergedMeshes } });
+}
+
+/**
+ * The word offsets a `GpuMeshRefit.setTree` needs for input mesh `meshIndex`
+ * of an assembled scene (a deforming mesh refit in the scene's shared
+ * buffers). Throws for a mesh merged into a static group: merged records are
+ * world space and name source-mesh triangles, so a refit from the source's
+ * object-space vertices would corrupt them. Merged ranges are never refit.
+ */
+export function meshRefitPlacement(scene: TraceSceneData, meshIndex: number): { nodeWordOffset: number; triangleWordOffset: number } {
+    const placement = scene.meshes[meshIndex];
+    if (!placement) throw new RangeError(`meshRefitPlacement: the scene has no mesh ${meshIndex}`);
+    if (placement.mergedInto !== undefined) {
+        throw new RangeError(
+            `meshRefitPlacement: mesh ${meshIndex} was merged into static group ${placement.mergedInto} (TraceSceneData.mergedGroups); merged meshes never move and must not be refit. ` +
+                'To deform it, leave its instance out of the merge (static: false)',
+        );
+    }
+    if (placement.triangleCount === 0) throw new RangeError(`meshRefitPlacement: mesh ${meshIndex} has no tree in this scene`);
+    return { nodeWordOffset: placement.nodeOffset * (BVH_NODE_BYTES / 4), triangleWordOffset: placement.triangleOffset * TRIANGLE_WORDS };
 }

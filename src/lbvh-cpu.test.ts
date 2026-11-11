@@ -58,7 +58,7 @@ describe('LBVH on the CPU (the GPU builder written plainly)', () => {
             ['grid', grid(40)],
             // Every triangle the same: every Morton code is equal, so the tree comes from the position tie-break alone.
             ['duplicates', { positions: Float32Array.from({ length: 500 * 9 }, (_, index) => [0, 0, 0, 1, 0, 0, 0, 1, 0][index % 9]) }],
-            ['with flags', { positions: randomSoup(100, 5), triangleFlags: Uint32Array.from({ length: 100 }, (_, index) => index % 3) }],
+            ['with flags', { positions: randomSoup(100, 5), triangleFlags: Uint32Array.from({ length: 100 }, (_, index) => (index % 3 === 0 ? 1 : 0)) }],
         ];
         for (const [name, geometry] of cases) {
             for (const maxLeafPrimitives of [1, 4, 8]) {

@@ -77,7 +77,7 @@ export function treeCases(device: GPUDevice): { cases: TreeCase[]; owned: GPUBuf
             geometry: { positions: Float32Array.from({ length: 3000 * 9 }, (_, index) => [0, 0, 0, 1, 0, 0, 0, 1, 0][index % 9]) },
         },
         { name: 'flat (no height)', geometry: { positions: randomSoup(4000, 6).map((value, index) => (index % 3 === 1 ? 0 : value)) } },
-        { name: 'flags', geometry: { positions: randomSoup(500, 7), triangleFlags: Uint32Array.from({ length: 500 }, (_, index) => index % 3) } },
+        { name: 'flags', geometry: { positions: randomSoup(500, 7), triangleFlags: Uint32Array.from({ length: 500 }, (_, index) => (index % 3 === 0 ? 1 : 0)) } },
         { name: 'random soup 300k', geometry: { positions: randomSoup(300_000, 8, 200) } },
         // Nine 16-bit indices: an odd count, padded to whole words on upload.
         { name: 'odd 16-bit index list', geometry: { positions: randomSoup(3, 9), indices: Uint16Array.from({ length: 9 }, (_, index) => 8 - index) } },

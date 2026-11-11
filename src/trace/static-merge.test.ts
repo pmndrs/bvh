@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { checkGpuLayout, createTinyBvhBuilder } from '../index.ts';
+import { buildLbvhOnCpu, checkGpuLayout, createTinyBvhBuilder } from '../index.ts';
 import { createCpuTracer, type CpuHit } from './cpu-traversal.ts';
 import { INSTANCE_FLAG, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_LEVEL_HEADER_WORDS, TRIANGLE_FLAG_FILTER, TRIANGLE_FLAG_FLIP_FRONT_FACE, TRIANGLE_WORD, TRIANGLE_WORDS } from './layout.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
@@ -8,11 +8,11 @@ import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
 import { addToTally, compareAny, compareClosest, newTally } from './oracle-compare.ts';
 import { createRandom, randomAffine, randomRays, randomTriangleSoup, tessellatedQuad, toFloat32Ray } from './oracle-fixtures.ts';
 import { buildReferenceScene, traceAnyReference, traceClosestReference } from './reference-tracer.ts';
-import { assembleTraceScene, buildTraceScene, type TraceSceneData, type TraceSceneInstance } from './scene-assembly.ts';
-import { MERGED_INSTANCE_INDEX, mergeStaticGeometry } from './static-merge.ts';
+import { assembleTraceScene, buildTraceScene, meshRefitPlacement, type TraceSceneData, type TraceSceneInstance } from './scene-assembly.ts';
+import { MERGED_INSTANCE_INDEX, mergeStaticGeometry, writeMergedTriangleIdentity } from './static-merge.ts';
 import { buildTopLevel, IDENTITY_TRANSFORM } from './top-level.ts';
 import { buildTopLevelShape, TopLevelShapeKeeper } from './top-level-shape.ts';
-import type { TrianglePasses } from './triangle-filter.ts';
+import { writeTriangleFilterFlags, type TrianglePasses } from './triangle-filter.ts';
 
 const tinyBvh = await createTinyBvhBuilder();
 const build = (geometry: MeshGeometry): MeshBvh => buildMeshBvhWithTinyBvh(geometry, tinyBvh);
@@ -305,5 +305,178 @@ describe('a merged instance never moves', () => {
         const keeper = new TopLevelShapeKeeper();
         keeper.build({ ...input(), objectToWorld: Float64Array.from(IDENTITY_TRANSFORM) }, 1);
         expect(() => keeper.check(input(), 1.5, 1, 2)).toThrow(/instance 77/);
+    });
+});
+
+describe('triangle flags: only bit 0 comes from the input', () => {
+    const quad = tessellatedQuad(3, 1);
+    const count = quad.indices!.length / 3;
+    const flagsWith = (triangle: number, value: number) => Uint32Array.from({ length: count }, (_, t) => (t === triangle ? value : t % 2));
+
+    it('every builder throws, naming the triangle, for bit 1 or a material bit', () => {
+        for (const value of [TRIANGLE_FLAG_FLIP_FRONT_FACE, 1 << 16, 0x80000001]) {
+            const geometry = { ...quad, triangleFlags: flagsWith(5, value) };
+            expect(() => build(geometry)).toThrow(/triangleFlags\[5\] is 0x[0-9a-f]+; only bit 0/);
+            expect(() => tinyBvh.buildLayout(geometry)).toThrow(/triangleFlags\[5\]/);
+            expect(() => buildLbvhOnCpu(geometry)).toThrow(/triangleFlags\[5\]/);
+        }
+        // Bit 0 alone is fine.
+        expect(() => build({ ...quad, triangleFlags: flagsWith(5, TRIANGLE_FLAG_FILTER) })).not.toThrow();
+    });
+
+    it('buildTraceScene and mergeStaticGeometry name the mesh (and the instance)', async () => {
+        const meshes = [quad, { ...quad, triangleFlags: flagsWith(2, TRIANGLE_FLAG_FLIP_FRONT_FACE) }];
+        const instances: TraceSceneInstance[] = [0, 1].map((meshIndex) => ({ meshIndex, instanceIndex: 40 + meshIndex, objectToWorld: IDENTITY_TRANSFORM, static: true }));
+        await expect(buildTraceScene(meshes, instances, { build })).rejects.toThrow(/mesh 1: triangleFlags\[2\]/);
+        await expect(buildTraceScene(meshes, instances, { build, mergeStaticInstances: true })).rejects.toThrow(/mesh 1: triangleFlags\[2\]/);
+        expect(() => mergeStaticGeometry(meshes, instances)).toThrow(/mesh 1 \(instance 41\): triangleFlags\[2\]/);
+    });
+
+    it('writing the merged ids refuses records with reserved bits, so it cannot run twice', () => {
+        const instance: TraceSceneInstance = { meshIndex: 0, instanceIndex: 3, objectToWorld: randomAffine(createRandom(21), { extent: 5, mirror: true }), static: true };
+        const [group] = mergeStaticGeometry([quad], [instance]).groups;
+        const records = build(group.geometry).triangles.slice(0);
+        writeMergedTriangleIdentity(records, group);
+        expect(() => writeMergedTriangleIdentity(records, group)).toThrow(/has flags 0x2: only bit 0/);
+    });
+});
+
+describe('a stale merge plan', () => {
+    const { meshes, instances } = mixedScene(11);
+    const plan = mergeStaticGeometry(meshes, instances);
+    const trees = { plan, meshes: plan.groups.map((group) => build(group.geometry)) };
+    const sourceMeshes = meshes.map((mesh, index) => (plan.meshNeeded[index] ? build(mesh) : null));
+    const source = plan.groups.find((group) => group.mask === 0xff)!.sources[0];
+    const changed = (change: Partial<TraceSceneInstance>) => instances.map((instance, input) => (input === source.inputIndex ? { ...instance, ...change } : instance));
+
+    it('throws, naming the instance, when a source was hidden, left GI, or changed its mask', () => {
+        for (const change of [{ visible: false }, { contributesToGi: false }, { mask: 0x0f }, { mask: 0 }]) {
+            expect(() => assembleTraceScene(sourceMeshes, changed(change), {}, { merged: trees }), JSON.stringify(change)).toThrow(
+                new RegExp(`instance ${source.instanceIndex} is a merged static instance, but its mask, visible or contributesToGi changed`),
+            );
+        }
+        // Spelling out the defaults is not a change.
+        expect(() => assembleTraceScene(sourceMeshes, changed({ visible: true, contributesToGi: true, mask: 0xff }), {}, { merged: trees })).not.toThrow();
+    });
+});
+
+describe('planning leaves out what the option-off scene would not hit', () => {
+    it('keeps hidden, non-GI and empty static instances as instances, and refuses shared indices', () => {
+        const random = createRandom(31);
+        const meshes = [0, 1, 2, 3].map(() => randomTriangleSoup(random, 20, 2, 0.5));
+        meshes.push({ positions: new Float32Array(0) });
+        const instances: TraceSceneInstance[] = meshes.map((_, meshIndex) => ({ meshIndex, instanceIndex: meshIndex, objectToWorld: randomAffine(random, { extent: 4 }), static: true }));
+        instances[1] = { ...instances[1], visible: false };
+        instances[2] = { ...instances[2], contributesToGi: false };
+        const plan = mergeStaticGeometry(meshes, instances);
+        expect(Array.from(plan.instanced)).toEqual([1, 2, 4]);
+        expect(plan.groups.length).toBe(1);
+        expect(plan.groups[0].sources.map((s) => s.inputIndex)).toEqual([0, 3]);
+        expect(Array.from(plan.meshNeeded)).toEqual([0, 1, 1, 0, 1]);
+        // The scene the option gives traces like the instanced one: the hidden instances are skipped either way.
+        const merged = assembleTraceScene(meshes.slice(0, 4).map((mesh, index) => (plan.meshNeeded[index] ? build(mesh) : null)), instances.slice(0, 4), {}, {
+            merged: { plan: mergeStaticGeometry(meshes.slice(0, 4), instances.slice(0, 4)), meshes: [build(plan.groups[0].geometry)] },
+        });
+        expect(merged.topLevel.instanceCount).toBe(1);
+
+        const twice = instances.slice(0, 4).map((instance) => ({ ...instance, visible: true, contributesToGi: true, instanceIndex: instance.meshIndex === 3 ? 0 : instance.instanceIndex }));
+        expect(() => mergeStaticGeometry(meshes.slice(0, 4), twice)).toThrow(/positions 0 and 3 both have instanceIndex 0/);
+    });
+
+    it('the layout check names a merged identity whose sources share an index instead of reporting bad slots', () => {
+        const quad = tessellatedQuad(2, 1);
+        const instances: TraceSceneInstance[] = [0, 1].map((meshIndex) => ({ meshIndex, instanceIndex: 5 + meshIndex, objectToWorld: IDENTITY_TRANSFORM.map((v, k) => (k === 12 ? v + meshIndex * 3 : v)), static: true }));
+        const [group] = mergeStaticGeometry([quad, quad], instances).groups;
+        const records = build(group.geometry);
+        const stamped = records.triangles.slice(0);
+        writeMergedTriangleIdentity(stamped, group);
+        expect(checkGpuLayout({ ...records, triangles: stamped }, group.geometry, { merged: group })).toEqual([]);
+        const shared = { ...group, sourceInstances: group.sourceInstances.map(() => 5) };
+        expect(checkGpuLayout({ ...records, triangles: stamped }, group.geometry, { merged: shared })).toEqual([
+            `source instance 5 starts at merged triangles 0 and ${quad.indices!.length / 3}; merged sources need distinct instance indices`,
+        ]);
+    });
+});
+
+describe('filter flags written after assembly on a merged scene', () => {
+    // No flags in the input: they are all written into the scenes' buffers afterwards.
+    const { meshes: flaggedMeshes, instances } = mixedScene(17);
+    const meshes = flaggedMeshes.map(({ positions, indices }) => ({ positions, indices }));
+    const flagged = (meshIndex: number, original: number) => (meshIndex * 7 + original) % 3 === 0;
+    const meshOfInstance = new Map(instances.map((instance) => [instance.instanceIndex, instance.meshIndex]));
+    const plan = mergeStaticGeometry(meshes, instances);
+    const instanced = assembleTraceScene(meshes.map(build), instances);
+    const merged = assembleTraceScene(
+        meshes.map((mesh, index) => (plan.meshNeeded[index] ? build(mesh) : null)),
+        instances,
+        {},
+        { merged: { plan, meshes: plan.groups.map((group) => build(group.geometry)) } },
+    );
+    // Every flagged triangle passes: a triangle the flags miss blocks, and the scenes differ.
+    const passAll: TrianglePasses = () => true;
+
+    it('flags a merged range by source instance, so the filtered walk matches the instanced scene', () => {
+        let instancedFlagged = 0;
+        instanced.meshes.forEach((range, meshIndex) => {
+            instancedFlagged += writeTriangleFilterFlags(instanced.triangles, (original, sourceInstance) => {
+                expect(sourceInstance).toBeUndefined();
+                return flagged(meshIndex, original);
+            }, range);
+        });
+        let mergedFlagged = 0;
+        merged.meshes.forEach((range, meshIndex) => {
+            if (range.mergedInto === undefined) mergedFlagged += writeTriangleFilterFlags(merged.triangles, (original) => flagged(meshIndex, original), range);
+            else expect(() => writeTriangleFilterFlags(merged.triangles, () => true, range)).toThrow(new RegExp(`merged into static group ${range.mergedInto}.*mergedGroups\\[${range.mergedInto}\\]`));
+        });
+        // Without the merged ranges flagged, alpha-tested merged geometry goes opaque.
+        const unflaggedGroups = { ...merged, triangles: merged.triangles.slice(0) };
+        for (const group of merged.mergedGroups) {
+            mergedFlagged += writeTriangleFilterFlags(merged.triangles, (original, sourceInstance) => {
+                const meshIndex = group.sourceMeshes[group.sourceInstances.indexOf(sourceInstance!)];
+                expect(meshIndex).toBe(meshOfInstance.get(sourceInstance!));
+                return flagged(meshIndex, original);
+            }, group);
+        }
+        expect(mergedFlagged).toBe(instancedFlagged);
+        expect(merged.meshes.some((range) => range.mergedInto !== undefined)).toBe(true);
+
+        const a = createCpuTracer(instanced, { triangleFilter: passAll });
+        const b = createCpuTracer(merged, { triangleFilter: passAll });
+        const reference = buildReferenceScene(flaggedMeshes, instances, { triangleFilter: ({ instance, triangle }) => flagged(meshOfInstance.get(instance)!, triangle) });
+        const opaque = createCpuTracer(unflaggedGroups, { triangleFilter: passAll });
+        const unfiltered = createCpuTracer(instanced);
+        const problems: string[] = [];
+        let passed = 0;
+        let opaqueDiffers = 0;
+        randomRays(createRandom(18), 3000, [-10, -10, -10, 10, 10, 10], 3, { randomInterval: true }).forEach((ray, index) => {
+            const expected = traceClosestReference(reference, ray);
+            if (expected?.ambiguous) return;
+            const left = a.closest(ray);
+            const problem = sameHit(left, b.closest(ray));
+            if (problem) problems.push(`ray ${index}: ${problem}`);
+            if (a.any(ray) !== b.any(ray)) problems.push(`ray ${index}: any-hit differs`);
+            if (sameHit(left, unfiltered.closest(ray)) !== null) passed++;
+            if (sameHit(left, opaque.closest(ray)) !== null) opaqueDiffers++;
+        });
+        expect(problems.slice(0, 10).join('\n')).toBe('');
+        // The flags made rays pass somewhere, and leaving the merged ranges unflagged shows, so the comparison bites.
+        expect(passed).toBeGreaterThan(50);
+        expect(opaqueDiffers).toBeGreaterThan(40);
+    });
+});
+
+describe('merged meshes are never refit targets', () => {
+    it('meshRefitPlacement refuses a merged mesh and gives word offsets for the rest', () => {
+        const { meshes, instances } = mixedScene(19);
+        const plan = mergeStaticGeometry(meshes, instances);
+        const scene = assembleTraceScene(
+            meshes.map((mesh, index) => (plan.meshNeeded[index] ? build(mesh) : null)),
+            instances,
+            {},
+            { merged: { plan, meshes: plan.groups.map((group) => build(group.geometry)) } },
+        );
+        const mergedMesh = scene.meshes.findIndex((range) => range.mergedInto !== undefined);
+        expect(() => meshRefitPlacement(scene, mergedMesh)).toThrow(new RegExp(`mesh ${mergedMesh} was merged into static group \\d+.*must not be refit`));
+        expect(meshRefitPlacement(scene, 18)).toEqual({ nodeWordOffset: scene.meshes[18].nodeOffset * 16, triangleWordOffset: scene.meshes[18].triangleOffset * TRIANGLE_WORDS });
     });
 });
