@@ -57,6 +57,11 @@ export class FakeBuffer {
 
     unmap(): void {}
 
+    /** Readbacks never complete: there is no GPU to wait for. Code that polls must cope with that. */
+    mapAsync(): Promise<void> {
+        return new Promise(() => {});
+    }
+
     get words(): Uint32Array {
         return new Uint32Array(this.bytes.buffer);
     }

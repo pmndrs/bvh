@@ -288,6 +288,17 @@ describe('SceneTrees', () => {
         // A GPU tree's outputs are freed one update after its copy.
         frame();
         expect(scene.memory.gpuBuildOutputs).toBe(0);
+
+        // Runtime: a mesh added later gets a GPU tree placed after the others (its batch offsets are not the scene's).
+        const late = tessellatedQuad(4, 0.5);
+        const lateInstance: Instance = { mesh: scene.addMesh(late), meshIndex: 5, instanceIndex: 300, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, -3, 1] };
+        scene.addInstance(lateInstance);
+        frame();
+        await stand!.finishBatch();
+        frame();
+        expect(scene.meshStatus(lateInstance.mesh).builtBy).toBe('gpu');
+        expect(scene.meshStatus(lateInstance.mesh).placement!.nodeOffset).toBeGreaterThan(0);
+        expect(disagreements(readScene(scene), await reference([...geometries, late], [...all, lateInstance]), rays)).toEqual([]);
         scene.dispose();
     });
 
@@ -336,5 +347,56 @@ describe('SceneTrees', () => {
             if (mode === 'adopt') expect(standIn.destroyed).toBe(true);
         }
         expect(peaks.adopt).toBeLessThan(peaks.copy);
+    });
+
+    it('deforming meshes: refit from each pose (with subgroups), never merged, the deform box in the top level; poses skipped without subgroups', async () => {
+        const gpu = createFakeGpu({}, { features: ['subgroups'], kernels: { bvhMergedIdentity: mergedIdentityStandIn } });
+        const stand = new StandInGpuBuilder(gpu.device);
+        const scene = await SceneTrees.create(gpu.device, { firstTreeBuilder: stand, topLevel: 'cpu', mergeStaticInstances: true });
+        const passes: string[] = [];
+        const frame = () => {
+            const encoder = gpu.createEncoder();
+            scene.update(encoder);
+            passes.push(...(encoder as unknown as { commands: { dispatch?: { entryPoint: string } }[] }).commands.flatMap((command) => (command.dispatch ? [command.dispatch.entryPoint] : [])));
+            gpu.submit(encoder);
+        };
+        const box = [-5, -5, -5, 5, 5, 5];
+        const cloth = scene.addMesh(tessellatedQuad(4, 1), { deforming: { bounds: box } });
+        const rock = scene.addMesh(tessellatedQuad(2, 1));
+        const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+        scene.addInstance({ mesh: cloth, objectToWorld: identity, static: true });
+        scene.addInstance({ mesh: rock, objectToWorld: identity, static: true });
+        expect(() => scene.setPose(rock, { positionBuffer: gpu.device.createBuffer({ size: 64, usage: 0x80 }), vertexCount: 4 })).toThrow(/not added as deforming/);
+        frame();
+        // Only the rock merged; the cloth's GPU build is a batch of its own (it reads its layout back).
+        expect(scene.counts.mergedGroups).toBe(1);
+        expect(scene.meshStatus(cloth).mergedInto).toBeNull();
+        expect(stand.requests.map((batch) => batch.length).sort()).toEqual([1, 1]);
+        while (stand.waiting > 0) await stand.finishBatch();
+        await scene.whenRefined();
+        frame();
+        expect(scene.meshStatus(cloth).builtBy).toBe('tinybvh');
+        // The cloth's top-level box is its deform box.
+        const top = readScene(scene).topLevel;
+        expect(top.instanceCount).toBe(2);
+        const vertices = gpu.device.createBuffer({ size: 25 * 12, usage: 0x80 | 0x4 });
+        scene.setPose(cloth, { positionBuffer: vertices, vertexCount: 25, indexBuffer: gpu.device.createBuffer({ size: 32 * 12, usage: 0x80 }), indexFormat: 'uint32' });
+        passes.length = 0;
+        frame();
+        expect(passes).toContain('meshRefitTriangles');
+        expect(scene.deformingCounts).toMatchObject({ refitting: 1, refits: 1 });
+        passes.length = 0;
+        frame();
+        expect(passes).not.toContain('meshRefitTriangles');
+        expect(scene.memory.meshRefits).toBeGreaterThan(0);
+        scene.dispose();
+
+        // Without subgroups: no refit, the pose is counted as skipped.
+        const plain = await setUp({ stand: false });
+        const mesh = plain.scene.addMesh(tessellatedQuad(2, 1), { deforming: true });
+        plain.scene.addInstance({ mesh, objectToWorld: identity });
+        plain.scene.setPose(mesh, { positionBuffer: plain.gpu.device.createBuffer({ size: 64, usage: 0x80 }), vertexCount: 9 });
+        expect(plain.scene.deformingCounts.posesSkipped).toBe(1);
+        plain.scene.dispose();
     });
 });

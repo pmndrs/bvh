@@ -60,7 +60,10 @@ import {
     TRIANGLE_BYTES,
 } from '../trace/layout.ts';
 import type { MeshBvh, MeshGeometry } from '../trace/mesh-bvh.ts';
-import type { TraceSceneMeshPlacement } from '../trace/scene-assembly.ts';
+import { meshRefitPlacement, type TraceSceneMeshPlacement } from '../trace/scene-assembly.ts';
+import type { MeshRefitVertices } from '../gpu-mesh-refit.ts';
+import type { GpuLayoutMeshBvh } from '../gpu-layout.ts';
+import { DeformingTrees, type DeformingTreeCounts } from './deforming-trees.ts';
 import { MERGED_INSTANCE_INDEX, mergeStaticGeometry, writeMergedTriangleIdentity, type StaticMergeGroup, type StaticMergePlan } from '../trace/static-merge.ts';
 import { buildTopLevel, IDENTITY_TRANSFORM, throwMergedTransformChange, type Mat4, type TraceInstance } from '../trace/top-level.ts';
 import { GpuTopLevel, type GpuTopLevelInstance } from '../trace/top-level-gpu.ts';
@@ -211,6 +214,17 @@ export interface SceneTreesTimeline {
     readonly tinybvhTreesMs: number | null;
 }
 
+export interface SceneMeshOptions {
+    /**
+     * The mesh deforms ({@link SceneTrees.setPose}): its tree is refit from each
+     * pose on the GPU and rebuilt when the refit drifts. `bounds` is the box
+     * every pose stays in (`[min, max]`, object space), which the top level
+     * uses so a pose never changes it; `true` uses the rest pose's box. Its
+     * instances never merge.
+     */
+    readonly deforming?: boolean | { readonly bounds: ArrayLike<number> };
+}
+
 export interface SceneInstanceDescriptor {
     readonly mesh: number;
     readonly objectToWorld: Mat4;
@@ -247,6 +261,8 @@ interface PlacedTree {
 
 interface MeshSlot {
     readonly slot: number;
+    /** Deforms: refit from poses, never merged. */
+    readonly deforming: boolean;
     generation: number;
     /** The merged group this slot builds, or -1 for a mesh the caller added. */
     readonly group: number;
@@ -286,7 +302,14 @@ interface MergedGroup {
 
 type ArrivedTree =
     | { readonly source: 'tinybvh'; readonly slot: number; readonly generation: number; readonly bvh: MeshBvh }
-    | { readonly source: 'gpu'; readonly slot: number; readonly generation: number; readonly built: GpuBuiltTree };
+    | {
+          readonly source: 'gpu';
+          readonly slot: number;
+          readonly generation: number;
+          readonly built: GpuBuiltTree;
+          /** A deforming mesh's drift rebuild: it replaces whatever tree the mesh has, tinybvh's too. */
+          readonly rebuild: boolean;
+      };
 
 /** A pool of free slot numbers, lowest first. */
 class SlotPool {
@@ -354,6 +377,9 @@ export class SceneTrees {
     private cpuTopLevelInstanceCount = 0;
     private readonly retiredTopLevel: GPUBuffer[] = [];
     private readonly identity: GpuMergedIdentity;
+    /** Deforming meshes' refits and drift rebuilds; null without subgroups (they keep the pose their tree was built in). */
+    private readonly deforming: DeformingTrees | null;
+    private posesSkipped = 0;
 
     private readonly meshSlots = new SlotPool();
     private readonly instanceSlots = new SlotPool();
@@ -430,11 +456,12 @@ export class SceneTrees {
         this.cpuTopLevel = this.createTopLevelBuffer(TOP_LEVEL_HEADER_BYTES);
         device.queue.writeBuffer(this.cpuTopLevel, 0, new Uint32Array(TOP_LEVEL_HEADER_WORDS));
         this.identity = new GpuMergedIdentity(device, this.label);
+        this.deforming = DeformingTrees.isSupported(device) ? new DeformingTrees(device, { label: this.label }) : null;
     }
 
     /** Compiles the GPU builder, the top level and the merged-identity pass, all at once. */
     private async prepare(): Promise<void> {
-        await Promise.all([this.prepareFirstTrees(), this.gpuTopLevel?.prepare(), this.firstTrees ? this.identity.prepare() : undefined]);
+        await Promise.all([this.prepareFirstTrees(), this.gpuTopLevel?.prepare(), this.firstTrees ? this.identity.prepare() : undefined, this.deforming?.prepare()]);
         this.prepared = true;
     }
 
@@ -488,21 +515,56 @@ export class SceneTrees {
      * geometry is read then (and copied into the worker, unless
      * `transferGeometry`). Returns the mesh's handle.
      */
-    addMesh(geometry: MeshGeometry): number {
+    addMesh(geometry: MeshGeometry, options: SceneMeshOptions = {}): number {
         this.checkLive();
         const triangleCount = countTriangles(geometry);
         checkTriangleFlags(geometry.triangleFlags, triangleCount, 'SceneTrees.addMesh');
         if (triangleCount === 0) throw new RangeError('SceneTrees.addMesh: the mesh has no triangles');
         const slot = this.meshSlots.take();
-        this.meshes.set(slot, this.newMeshSlot(slot, -1, geometry, triangleCount));
+        const state = this.newMeshSlot(slot, -1, geometry, triangleCount, options.deforming !== undefined && options.deforming !== false);
+        this.meshes.set(slot, state);
+        if (state.deforming && this.deforming) {
+            const box = typeof options.deforming === 'object' ? options.deforming.bounds : state.bounds;
+            this.deforming.meshAdded(slot, triangleCount, box);
+        }
         this.newMeshes.push(slot);
         return slot;
     }
 
-    private newMeshSlot(slot: number, group: number, geometry: MeshGeometry, triangleCount: number): MeshSlot {
+    /**
+     * A deforming mesh's new pose: its moved vertices on the GPU (the mesh's
+     * own indices and triangle order, `STORAGE` usage; `COPY_SRC` too for drift
+     * rebuilds). The next update refits its tree from them, before anything
+     * traces. Without subgroups the pose is skipped (counted in
+     * `deformingCounts.posesSkipped`) and rays see the pose the tree was built in.
+     */
+    setPose(mesh: number, vertices: MeshRefitVertices): void {
+        this.checkLive();
+        const state = this.meshes.get(mesh);
+        if (!state || state.group >= 0) throw new RangeError(`SceneTrees.setPose: no mesh ${mesh}`);
+        if (!state.deforming) throw new RangeError(`SceneTrees.setPose: mesh ${mesh} was not added as deforming`);
+        if (!this.deforming) {
+            this.posesSkipped++;
+            return;
+        }
+        this.deforming.posed(mesh, vertices);
+    }
+
+    /** Deforming meshes' refits, drift rebuilds, and poses skipped without subgroups. */
+    get deformingCounts(): DeformingTreeCounts & { readonly posesSkipped: number } {
+        return { ...(this.deforming?.counts ?? { refitting: 0, refits: 0, driftRebuilds: 0 }), posesSkipped: this.posesSkipped };
+    }
+
+    /** A deforming mesh's latest refit cost over its built tree's (NaN before a sample, or without subgroups). */
+    driftRatio(mesh: number): number {
+        return this.deforming?.driftRatio(mesh) ?? NaN;
+    }
+
+    private newMeshSlot(slot: number, group: number, geometry: MeshGeometry, triangleCount: number, deforming = false): MeshSlot {
         const previous = this.retiredGenerations.get(slot) ?? 0;
         return {
             slot,
+            deforming,
             generation: previous + 1,
             group,
             geometry,
@@ -529,6 +591,7 @@ export class SceneTrees {
         if (state.users > 0) throw new RangeError(`SceneTrees.removeMesh: mesh ${mesh} is still used by ${state.users} instance(s)`);
         state.abort?.abort();
         this.releaseTree(mesh);
+        this.deforming?.meshRemoved(mesh);
         this.meshes.delete(mesh);
         this.newMeshes = this.newMeshes.filter((slot) => slot !== mesh);
         this.retiredGenerations.set(mesh, state.generation);
@@ -699,7 +762,7 @@ export class SceneTrees {
         const nodes = this.nodes.byteLength;
         const triangles = this.triangles.byteLength;
         const topLevel = this.gpuTopLevel ? this.gpuTopLevel.memoryBytes : this.cpuTopLevel.size;
-        const meshRefits = 0;
+        const meshRefits = this.deforming?.memoryBytes ?? 0;
         let gpuBuildOutputs = 0;
         for (const outputs of this.liveOutputs) gpuBuildOutputs += outputs.bytes;
         const retired = this.nodes.retiredByteLength + this.triangles.retiredByteLength + this.retiredTopLevel.reduce((sum, buffer) => sum + buffer.size, 0) + this.identity.pendingBytes;
@@ -779,6 +842,8 @@ export class SceneTrees {
         this.checkLive();
         if (!this.prepared) throw new Error('@pmndrs/bvh: SceneTrees is not prepared; make it with SceneTrees.create');
         this.updates++;
+        // Refit stats copied in earlier updates: the drift rule reads them.
+        this.deforming?.pollStats();
         this.nodes.releaseRetired();
         this.triangles.releaseRetired();
         for (const buffer of this.retiredTopLevel.splice(0)) buffer.destroy();
@@ -803,6 +868,9 @@ export class SceneTrees {
             }
             this.cpuTopLevelStale = true;
         }
+        // Poses and trees placed above, refit before anything traces; then a drift rebuild if one is due.
+        this.deforming?.encode(encoder, { nodes: this.nodes.buffer, triangles: this.triangles.buffer }, this.updates);
+        this.startDriftRebuild();
         this.syncInstances();
         try {
             this.updateTopLevel(encoder);
@@ -825,6 +893,7 @@ export class SceneTrees {
         if (this.ownsPool) this.pool.dispose();
         this.gpuTopLevel?.dispose();
         this.identity.dispose();
+        this.deforming?.dispose();
         this.nodes.destroy();
         this.triangles.destroy();
         this.cpuTopLevel.destroy();
@@ -855,7 +924,8 @@ export class SceneTrees {
                 contributesToGi: instance.contributesToGi,
                 mask: instance.mask,
                 material: instance.material ?? undefined,
-                static: instance.static,
+                // A deforming mesh's instances never merge: a merged range is never refit.
+                static: instance.static && !this.meshes.get(instance.mesh)!.deforming,
             })),
         );
         if (plan.groups.length === 0) return;
@@ -899,8 +969,12 @@ export class SceneTrees {
             if (!builder) state.fallbackReason = this.noGpuReason ?? 'the GPU builder is not ready';
         }
         if (builder && states.length > 0) {
-            const requests: GpuTreeRequest[] = states.map((state) => ({ slot: state.slot, generation: state.generation, geometry: state.geometry! }));
-            this.startGpuBuilds(builder, requests);
+            const request = (state: MeshSlot): GpuTreeRequest => ({ slot: state.slot, generation: state.generation, geometry: state.geometry! });
+            // Deforming meshes' trees are read back too (the refit needs their shape), so they get a batch of their own.
+            const others = states.filter((state) => !this.deforming?.has(state.slot)).map(request);
+            const deforming = states.filter((state) => this.deforming?.has(state.slot)).map(request);
+            if (others.length > 0) this.startGpuBuilds(builder, others, { readLayouts: false, rebuild: false });
+            if (deforming.length > 0) this.startGpuBuilds(builder, deforming, { readLayouts: true, rebuild: false });
         }
         // tinybvh after the GPU build has started: the GPU's writeBuffer has copied the arrays by now,
         // so moving them into a worker is safe (keep this order).
@@ -908,16 +982,21 @@ export class SceneTrees {
         for (const state of bySize) this.startTinybvhBuild(state);
     }
 
-    private startGpuBuilds(builder: FirstTreeBuilder, requests: readonly GpuTreeRequest[]): void {
+    /** Starts GPU builds. `rebuild` marks a deforming mesh's drift rebuild: refused, the mesh keeps refitting its tree. Returns whether anything started. */
+    private startGpuBuilds(builder: FirstTreeBuilder, requests: readonly GpuTreeRequest[], kind: { readonly readLayouts: boolean; readonly rebuild: boolean }): boolean {
+        const refuse = (slot: number, generation: number, reason: string): void => {
+            if (kind.rebuild) this.deforming?.rebuildRefused(slot);
+            else this.gpuRefused(slot, generation, reason);
+        };
         let builds;
         try {
-            builds = builder.build(requests);
+            builds = builder.build(requests, { readLayouts: kind.readLayouts });
         } catch (error) {
-            this.warn(`@pmndrs/bvh: the GPU mesh tree build failed, so the meshes wait for tinybvh: ${describe(error)}`);
-            for (const { slot, generation } of requests) this.gpuRefused(slot, generation, `the GPU build failed: ${describe(error)}`);
-            return;
+            this.warn(`@pmndrs/bvh: the GPU mesh tree build failed, so ${kind.rebuild ? 'the mesh keeps its refit tree' : 'the meshes wait for tinybvh'}: ${describe(error)}`);
+            for (const { slot, generation } of requests) refuse(slot, generation, `the GPU build failed: ${describe(error)}`);
+            return false;
         }
-        for (const { slot, generation, reason } of builds.notBuilt) this.gpuRefused(slot, generation, reason);
+        for (const { slot, generation, reason } of builds.notBuilt) refuse(slot, generation, reason);
         this.gpuBuilding += builds.buildingBytes;
         this.samplePeak();
         let left = builds.batches.length;
@@ -928,30 +1007,51 @@ export class SceneTrees {
                     this.samplePeak();
                     this.gpuBuilding -= builds.buildingBytes;
                 }
-                this.gpuBatchFinished(result);
+                this.gpuBatchFinished(result, kind.rebuild);
             });
         }
+        return builds.batches.length > 0;
     }
 
-    private gpuBatchFinished(result: GpuTreeBatchResult): void {
+    /** Starts the drift rebuild of the deforming mesh whose refit has drifted longest, from its latest pose. */
+    private startDriftRebuild(): void {
+        const deforming = this.deforming;
+        const builder = this.firstTreesReady ? this.firstTrees : null;
+        if (!deforming || !builder) return;
+        const slot = deforming.rebuildDue(this.updates);
+        if (slot === null) return;
+        const state = this.meshes.get(slot);
+        if (!state || state.gpu === 'building' || state.tinybvh === 'building') return;
+        const geometry = deforming.rebuildGeometry(slot);
+        if (!geometry) return;
+        const started = this.startGpuBuilds(builder, [{ slot, generation: state.generation, geometry }], { readLayouts: true, rebuild: true });
+        deforming.rebuildStarted(slot, started);
+    }
+
+    private gpuBatchFinished(result: GpuTreeBatchResult, rebuild: boolean): void {
         this.lastGpuBuildMs = result.buildMs;
         for (const outputs of new Set(result.built.map((built) => built.outputs))) {
             if (this.disposed) outputs.destroy();
             else this.liveOutputs.add(outputs);
         }
         if (this.disposed) return;
-        for (const { slot, generation, reason } of result.refused) this.gpuRefused(slot, generation, reason);
-        if (result.failure) this.warn(`@pmndrs/bvh: ${result.failure}, so the meshes wait for tinybvh`);
+        const refuse = (slot: number, generation: number, reason: string): void => {
+            if (rebuild) this.deforming?.rebuildRefused(slot);
+            else this.gpuRefused(slot, generation, reason);
+        };
+        for (const { slot, generation, reason } of result.refused) refuse(slot, generation, reason);
+        if (result.failure) this.warn(`@pmndrs/bvh: ${result.failure}, so ${rebuild ? 'the mesh keeps its refit tree' : 'the meshes wait for tinybvh'}`);
         for (const built of result.built) {
             const state = this.currentState(built.slot, built.generation);
             if (!state || built.tree.maxDepth > this.gpuMaxDepth) {
-                if (state) this.gpuRefused(built.slot, built.generation, `the GPU tree is ${built.tree.maxDepth} levels deep, more than gpuMaxDepth (${this.gpuMaxDepth})`);
+                if (state) refuse(built.slot, built.generation, `the GPU tree is ${built.tree.maxDepth} levels deep, more than gpuMaxDepth (${this.gpuMaxDepth})`);
                 this.outputsToRelease.push(built.outputs);
                 continue;
             }
-            state.gpu = 'built';
+            // A rebuild's mesh already had its first tree: its state stays as the first builds left it.
+            if (!rebuild) state.gpu = 'built';
             this.gpuTreesBuilt++;
-            this.arrived.push({ source: 'gpu', slot: built.slot, generation: built.generation, built });
+            this.arrived.push({ source: 'gpu', slot: built.slot, generation: built.generation, built, rebuild });
         }
         this.samplePeak();
         this.notifyWaiters();
@@ -1031,7 +1131,7 @@ export class SceneTrees {
         const taken: ArrivedTree[] = [];
         const waiting: ArrivedTree[] = [];
         const tinybvhNow = new Set<number>();
-        const gpuQueued = new Set(this.arrived.filter((tree) => tree.source === 'gpu' && this.currentState(tree.slot, tree.generation)).map((tree) => tree.slot));
+        const gpuQueued = new Set(this.arrived.filter((tree) => tree.source === 'gpu' && !tree.rebuild && this.currentState(tree.slot, tree.generation)).map((tree) => tree.slot));
         const waitForAdoption = this.gpuTreeOutputs === 'adopt' && this.placed.size === 0;
         for (const tree of this.arrived) {
             const state = this.currentState(tree.slot, tree.generation);
@@ -1050,10 +1150,12 @@ export class SceneTrees {
             const placed = this.placed.get(tree.slot);
             const hasTinybvhTree = tinybvhNow.has(tree.slot) || (placed?.source === 'tinybvh' && placed.generation === tree.generation);
             const state = this.currentState(tree.slot, tree.generation);
-            if (state && !hasTinybvhTree) {
+            // A drift rebuild is newer than any tree its mesh has (built from a later pose), tinybvh's too.
+            if (state && (tree.rebuild || !hasTinybvhTree)) {
                 taken.push(tree);
             } else {
                 if (state && hasTinybvhTree && state.fallbackReason === null) state.fallbackReason = "tinybvh's tree arrived before the GPU's";
+                if (tree.rebuild) this.deforming?.rebuildRefused(tree.slot);
                 this.outputsToRelease.push(tree.built.outputs);
             }
         }
@@ -1074,6 +1176,7 @@ export class SceneTrees {
         this.triangles.release(tree.triangleOffset, tree.triangleCount);
         this.placed.delete(slot);
         this.gpuTopLevel?.setMeshTree(slot, null);
+        this.deforming?.treeReleased(slot);
     }
 
     private releaseOutputs(outputs: GpuTreeOutputs): void {
@@ -1137,7 +1240,8 @@ export class SceneTrees {
                 this.outputsToRelease.push(outputs);
                 if (state.group >= 0) this.identity.encode(encoder, this.triangles.buffer, this.groups[state.group].group, triangleOffset, size.triangleCount);
             }
-            this.recordPlacement(tree, { nodeOffset, triangleOffset, ...size }, replaced.get(tree.slot) ?? null);
+            // The tree's own sizes, at the scene's offsets (a GPU tree's range also carries its offsets in the batch's buffers).
+            this.recordPlacement(tree, { ...size, nodeOffset, triangleOffset }, replaced.get(tree.slot) ?? null);
         });
     }
 
@@ -1172,16 +1276,24 @@ export class SceneTrees {
             const built = tree.built.tree;
             const state = this.meshes.get(tree.slot)!;
             if (state.group >= 0) this.identity.encode(encoder, this.triangles.buffer, this.groups[state.group].group, built.triangleOffset, built.triangleCount);
-            this.recordPlacement(tree, { nodeOffset: built.nodeOffset, triangleOffset: built.triangleOffset, ...treeSize(tree) }, null);
+            this.recordPlacement(tree, { ...treeSize(tree), nodeOffset: built.nodeOffset, triangleOffset: built.triangleOffset }, null);
         }
         return trees;
     }
 
     private recordPlacement(tree: ArrivedTree, at: { nodeOffset: number; triangleOffset: number; nodeCount: number; triangleCount: number; maxDepth: number; bounds: Float32Array }, replaced: TreeBuilder | null): void {
         const state = this.meshes.get(tree.slot)!;
-        const placed: PlacedTree = { ...at, bounds: Float32Array.from(at.bounds), source: tree.source, generation: tree.generation };
+        // A deforming mesh's box in the top level is the box every pose stays in, so a pose never changes the top level.
+        const bounds = Float32Array.from(this.deforming?.deformBox(tree.slot) ?? at.bounds);
+        const placed: PlacedTree = { ...at, bounds, source: tree.source, generation: tree.generation };
         this.placed.set(tree.slot, placed);
         this.gpuTopLevel?.setMeshTree(tree.slot, placed);
+        if (this.deforming?.has(tree.slot)) {
+            const layout: GpuLayoutMeshBvh | null = tree.source === 'tinybvh' ? tree.bvh : tree.built.layout;
+            // meshRefitPlacement refuses merged meshes: merged ranges are never refit.
+            const placement = meshRefitPlacement({ meshes: [{ nodeOffset: at.nodeOffset, nodeCount: at.nodeCount, triangleOffset: at.triangleOffset, triangleCount: at.triangleCount, ...(state.mergedInto !== null ? { mergedInto: state.mergedInto } : {}) }] }, 0);
+            this.deforming.treePlaced(tree.slot, placement, layout);
+        }
         if (replaced === 'gpu' && tree.source === 'tinybvh') this.swaps++;
         this.onTree?.({
             mesh: state.group >= 0 ? null : state.slot,

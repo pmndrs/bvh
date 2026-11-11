@@ -98,6 +98,7 @@ export {
     type GpuTreeOutputsMode,
     type SceneInstanceChange,
     type SceneInstanceDescriptor,
+    type SceneMeshOptions,
     type SceneMeshStatus,
     type SceneTreeCounts,
     type SceneTreeEvent,
@@ -106,4 +107,5 @@ export {
     type SceneTreesTimeline,
     type TreeBuilder,
 } from './scene/scene-trees.ts';
+export { DRIFT_HOLD_FRAMES, DRIFT_THRESHOLD, STATS_EVERY_FRAMES, type DeformingTreeCounts } from './scene/deforming-trees.ts';
 export { GpuFirstTrees, GpuTreeOutputs, type FirstTreeBuilder, type GpuBuiltTree, type GpuTreeBatchResult, type GpuTreeBuilds, type GpuTreeRequest } from './scene/gpu-first-trees.ts';
