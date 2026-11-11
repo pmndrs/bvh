@@ -37,6 +37,7 @@ import type { GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import { GpuMeshRefit, GpuMeshRefitKernels, type MeshRefitVertices } from '../gpu-mesh-refit.ts';
 import type { GpuMeshBuffers } from '../mesh-input.ts';
 import { relativeSahCost } from '../refit-cpu.ts';
+import { dequantizeNodes } from '../quantized-nodes.ts';
 import { BVH_NODE_WORDS } from '../trace/layout.ts';
 
 /** Refit cost over the built tree's above which a pose counts as drifted (within 10% of a fresh build is the BVH's done-when). */
@@ -180,8 +181,10 @@ export class DeformingTrees {
         }
         mesh.shapeGeneration = this.nextShapeGeneration++;
         mesh.refit.setTree(layout, { ...placement, generation: mesh.shapeGeneration });
-        const words = new Uint32Array(layout.nodes, 0, layout.nodeCount * BVH_NODE_WORDS);
-        const floats = new Float32Array(layout.nodes, 0, layout.nodeCount * BVH_NODE_WORDS);
+        // The built tree's cost on f32 boxes (a quantized layout is decoded; SceneTrees hands deforming meshes f32 trees).
+        const f32Nodes = dequantizeNodes(layout).nodes;
+        const words = new Uint32Array(f32Nodes, 0, layout.nodeCount * BVH_NODE_WORDS);
+        const floats = new Float32Array(f32Nodes, 0, layout.nodeCount * BVH_NODE_WORDS);
         mesh.builtCost = relativeSahCost(floats, words, 0, layout.nodeCount);
         mesh.placement = placement;
         mesh.refitDue = mesh.vertices !== null;

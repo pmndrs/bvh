@@ -115,6 +115,19 @@ describe('BvhTraceNodes', () => {
         expect(records.storage.positions).toBeNull();
     });
 
+    it('compiles a quantized source in: the nodes read as vec4u, the frame read on instance entry', () => {
+        const { renderer, backend } = fakeRenderer();
+        for (const triangleLeaves of ['records', 'indexed'] as const) {
+            const source = { nodeFormat: 'quantized' as const, triangleLeaves, buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l'), positions: buffer('p') as GPUBuffer | null } };
+            const bvh = new BvhTraceNodes(renderer, source);
+            expect(bvh.nodeFormat).toBe('quantized');
+            expect((bvh.storage.nodes as unknown as { bufferType?: string; nodeType?: string }).nodeType ?? (bvh.storage.nodes as unknown as { bufferType?: string }).bufferType).toMatch(/uvec4/);
+            expect(backend.get(bvh.storage.nodes.value as object).buffer).toBe(source.buffers.nodes);
+            bvh.dispose();
+        }
+        expect(new BvhTraceNodes(renderer, { buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } }).nodeFormat).toBe('f32');
+    });
+
     it("survives three's disposal: renderer.dispose() (Attributes.dispose) and a stand-in's dispose()", () => {
         const { renderer, backend, created, attributes, use } = fakeRenderer();
         const source = { version: 1, buffers: { nodes: buffer('n1'), triangles: buffer('t1'), topLevel: buffer('l1') } };

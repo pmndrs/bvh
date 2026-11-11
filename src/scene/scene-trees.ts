@@ -107,10 +107,14 @@ import {
     MESH_HEADER_WORD,
     indexedLeadingUnits,
     positionStrideFloats,
+    QUANTIZED_NODE_BYTES,
+    type NodeFormat,
     type PositionLayout,
     type TriangleLeaves,
 } from '../trace/layout.ts';
-import type { MeshBvh, MeshGeometry } from '../trace/mesh-bvh.ts';
+import type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from '../trace/mesh-bvh.ts';
+import { nodeQuantizerFor, type QuantizeJob } from '../gpu-quantize.ts';
+import { quantizeNodes } from '../quantized-nodes.ts';
 import { weldPositions } from '../indexed-leaves.ts';
 import { meshRefitPlacement, type TraceSceneMeshPlacement } from '../trace/scene-assembly.ts';
 import type { MeshRefitVertices } from '../gpu-mesh-refit.ts';
@@ -224,6 +228,18 @@ export interface SceneTreesOptions {
     readonly triangleLeaves?: TriangleLeaves;
     /** Indexed: `'vec4'` (the default, 16 bytes per vertex) or `'packed'` (12) positions. */
     readonly positionLayout?: PositionLayout;
+    /**
+     * The node format (docs/design/compressed-nodes.md): `'f32'` (the
+     * default, 64 bytes per node) or `'quantized'` (32 bytes per node, plus a
+     * 32-byte frame slot per mesh before its root). The walk that reads the
+     * scene must be built with the same `nodeFormat`. tinybvh trees come
+     * quantized from the workers (deforming meshes' come `f32`: their refit
+     * keeps an `f32` copy, and they are packed when placed); GPU trees are
+     * built `f32` and packed by a compute pass on their way into the storage.
+     * Quantized needs `gpuTreeOutputs: 'copy'` (an adopted batch's nodes are
+     * `f32`). Independent of `triangleLeaves`.
+     */
+    readonly nodeFormat?: NodeFormat;
     /**
      * Indexed: weld each mesh's vertices by exact bits when it is added (not
      * deforming meshes'). It changes no coordinate, so rays see the same
@@ -554,6 +570,12 @@ export class SceneTrees {
     readonly triangleLeaves: TriangleLeaves;
     readonly positionLayout: PositionLayout;
     private readonly triangleBytes: number;
+    /** The scene's node format, its nodes' unit, and the slots before each root (the frame slot when quantized). */
+    readonly nodeFormat: NodeFormat;
+    private readonly nodeBytes: number;
+    private readonly nodeLeading: number;
+    /** Quantize passes recorded into the caller's encoder (GPU trees placed), freed at the next update. */
+    private quantizeJobsToRelease: QuantizeJob[] = [];
     private readonly weld: boolean;
     private readonly positions: GrowableStorage | null;
     /** Removed meshes' position ranges, freed at the next update. */
@@ -662,7 +684,12 @@ export class SceneTrees {
         const indexed = this.triangleLeaves === 'indexed';
         if (indexed && this.gpuTreeOutputs === 'adopt') throw new RangeError("SceneTrees: triangleLeaves: 'indexed' needs gpuTreeOutputs: 'copy' (an adopted batch's buffers have no mesh headers)");
         this.triangleBytes = indexed ? INDEXED_TRIANGLE_BYTES : TRIANGLE_BYTES;
-        this.nodes = new GrowableStorage(device, `${this.label} trace nodes`, BVH_NODE_BYTES, INITIAL_NODES);
+        this.nodeFormat = options.nodeFormat ?? 'f32';
+        if (this.nodeFormat !== 'f32' && this.nodeFormat !== 'quantized') throw new RangeError(`nodeFormat must be 'f32' or 'quantized', got ${String(this.nodeFormat)}`);
+        if (this.nodeFormat === 'quantized' && this.gpuTreeOutputs === 'adopt') throw new RangeError("SceneTrees: nodeFormat: 'quantized' needs gpuTreeOutputs: 'copy' (an adopted batch's nodes are f32)");
+        this.nodeBytes = this.nodeFormat === 'quantized' ? QUANTIZED_NODE_BYTES : BVH_NODE_BYTES;
+        this.nodeLeading = this.nodeFormat === 'quantized' ? 1 : 0;
+        this.nodes = new GrowableStorage(device, `${this.label} trace nodes`, this.nodeBytes, INITIAL_NODES);
         this.triangles = new GrowableStorage(device, `${this.label} trace triangles`, this.triangleBytes, indexed ? INITIAL_TRIANGLES * 3 : INITIAL_TRIANGLES);
         this.positions = indexed ? new GrowableStorage(device, `${this.label} trace positions`, positionStrideFloats(this.positionLayout) * 4, INITIAL_TRIANGLES) : null;
         this.topLevelPath = options.topLevel !== 'cpu' && GpuTopLevel.isSupported(device) ? 'gpu' : 'cpu';
@@ -733,6 +760,7 @@ export class SceneTrees {
                     positions,
                     triangleLeaves: this.triangleLeaves,
                     positionLayout: this.positionLayout,
+                    nodeFormat: this.nodeFormat,
                     byteLength: nodes.size + triangles.size + topLevel.size + (positions?.size ?? 0),
                     destroy: () => {},
                 },
@@ -1041,7 +1069,7 @@ export class SceneTrees {
         const transient = gpuBuildOutputs + gpuBuilding + retired;
         const total = resident + transient;
         if (total > this.peakBytes) this.peakBytes = total;
-        const reservedNodes = this.reserve.nodes.units * BVH_NODE_BYTES;
+        const reservedNodes = this.reserve.nodes.units * this.nodeBytes;
         const reservedTriangles = this.reserve.triangles.units * this.triangleBytes;
         return {
             nodes,
@@ -1141,8 +1169,9 @@ export class SceneTrees {
         this.updates++;
         // The frame the last update recorded into was submitted: its writes into the storages are on the queue.
         this.encoderWritesStorage = false;
+        for (const job of this.quantizeJobsToRelease.splice(0)) job.destroy();
         for (const tree of this.releaseAtUpdate.splice(0)) {
-            this.nodes.release(tree.nodeOffset, tree.nodeCount);
+            this.nodes.release(tree.nodeOffset - this.nodeLeading, tree.nodeCount + this.nodeLeading);
             this.triangles.release(tree.triangleOffset - tree.triangleLeading, tree.triangleCount + tree.triangleLeading);
         }
         for (const range of this.releasePositionsAtUpdate.splice(0)) this.positions?.release(range.offset, range.count);
@@ -1197,6 +1226,7 @@ export class SceneTrees {
         this.gpuTopLevel?.dispose();
         this.identity.dispose();
         this.deforming?.dispose();
+        for (const job of this.quantizeJobsToRelease.splice(0)) job.destroy();
         this.nodes.destroy();
         this.triangles.destroy();
         this.positions?.destroy();
@@ -1417,7 +1447,7 @@ export class SceneTrees {
             }
             this.notifyWaiters();
         };
-        this.pool.build(geometry, this.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' } : {}, { signal: state.abort.signal, transferInput }).then(finished, (error: unknown) => {
+        this.pool.build(geometry, this.tinybvhOptions(state.slot), { signal: state.abort.signal, transferInput }).then(finished, (error: unknown) => {
             const cancelled = error instanceof Error && error.name === 'AbortError';
             if (!this.disposed && !cancelled) this.buildFailure = new Error(`@pmndrs/bvh: building a mesh tree with tinybvh failed: ${describe(error)}`);
             finished(null);
@@ -1528,7 +1558,7 @@ export class SceneTrees {
                 if (tree.rebuild) this.deforming?.rebuildRefused(tree.slot);
                 if (tree.stored) {
                     // Stored between updates, never placed: its ranges hold nothing anyone traces.
-                    this.nodes.release(tree.stored.nodeOffset, tree.built.tree.nodeCount);
+                    this.nodes.release(tree.stored.nodeOffset - this.nodeLeading, tree.built.tree.nodeCount + this.nodeLeading);
                     this.triangles.release(tree.stored.triangleOffset - tree.stored.triangleLeading, tree.built.tree.triangleCount + tree.stored.triangleLeading);
                 } else {
                     this.outputsToRelease.push(tree.built.outputs);
@@ -1548,7 +1578,7 @@ export class SceneTrees {
     private releaseTree(slot: number): void {
         const tree = this.placed.get(slot);
         if (!tree) return;
-        this.nodes.release(tree.nodeOffset, tree.nodeCount);
+        this.nodes.release(tree.nodeOffset - this.nodeLeading, tree.nodeCount + this.nodeLeading);
         this.triangles.release(tree.triangleOffset - tree.triangleLeading, tree.triangleCount + tree.triangleLeading);
         this.forgetTree(slot);
     }
@@ -1599,7 +1629,8 @@ export class SceneTrees {
         const sizes = arrived.map(treeSize);
         // Trees stored between updates are in the buffers already; the others need ranges.
         const fresh = arrived.flatMap((tree, index) => (tree.source === 'gpu' && tree.stored ? [] : [index]));
-        const nodeCounts = fresh.map((index) => sizes[index].nodeCount);
+        // Quantized: a tree's node range starts with its frame slot.
+        const nodeCounts = fresh.map((index) => sizes[index].nodeCount + this.nodeLeading);
         // Indexed: a tree's range starts with its leading units (header, side tables).
         const leadings = fresh.map((index) => this.leadingOf(arrived[index].slot, sizes[index].triangleCount));
         const triangleCounts = fresh.map((index, at) => sizes[index].triangleCount + leadings[at]);
@@ -1608,7 +1639,7 @@ export class SceneTrees {
         const oldSlots = [...replaced.keys()];
         const oldTrees = oldSlots.map((slot) => this.placed.get(slot)!);
         for (const old of oldTrees) {
-            this.nodes.release(old.nodeOffset, old.nodeCount);
+            this.nodes.release(old.nodeOffset - this.nodeLeading, old.nodeCount + this.nodeLeading);
             this.triangles.release(old.triangleOffset - old.triangleLeading, old.triangleCount + old.triangleLeading);
         }
         let nodeRanges: TakenRanges | null;
@@ -1627,7 +1658,7 @@ export class SceneTrees {
             }
         } catch (error) {
             for (const old of oldTrees) {
-                this.nodes.reserve(old.nodeOffset, old.nodeCount);
+                this.nodes.reserve(old.nodeOffset - this.nodeLeading, old.nodeCount + this.nodeLeading);
                 this.triangles.reserve(old.triangleOffset - old.triangleLeading, old.triangleCount + old.triangleLeading);
             }
             this.arrived.push(...arrived);
@@ -1654,11 +1685,11 @@ export class SceneTrees {
                 return;
             }
             const at = freshAt.get(index)!;
-            const nodeOffset = nodeOffsets[at];
+            const nodeOffset = nodeOffsets[at] + this.nodeLeading;
             const triangleOffset = triangleOffsets[at] + leadings[at];
             const state = this.meshes.get(tree.slot)!;
             if (tree.source === 'tinybvh') {
-                this.nodes.write(nodeOffset, tree.bvh.nodes, size.nodeCount * BVH_NODE_BYTES);
+                this.writeTinybvhNodes(tree.bvh, nodeOffset);
                 if (this.positions) {
                     this.writeIndexedTree(state, tree.bvh, triangleOffset, leadings[at]);
                 } else {
@@ -1687,7 +1718,14 @@ export class SceneTrees {
     /** Records a GPU tree's copy out of its batch's buffers into the scene's, and a merged group's identity pass after it. */
     private copyGpuTree(encoder: GPUCommandEncoder, tree: GpuArrivedTree, size: TreeSize, nodeOffset: number, triangleOffset: number): void {
         const { outputs, tree: built } = tree.built;
-        encoder.copyBufferToBuffer(outputs.nodes, built.nodeOffset * BVH_NODE_BYTES, this.nodes.buffer, nodeOffset * BVH_NODE_BYTES, size.nodeCount * BVH_NODE_BYTES);
+        if (this.nodeFormat === 'quantized') {
+            // The batch's nodes are f32: packed into the frame slot and the nodes on the way in.
+            const job = nodeQuantizerFor(this.device).prepare(outputs.nodes, this.nodes.buffer, [{ sourceNodeOffset: built.nodeOffset, targetRootSlot: nodeOffset, nodeCount: size.nodeCount }], `${this.label} quantize`);
+            job.encode(encoder);
+            this.quantizeJobsToRelease.push(job);
+        } else {
+            encoder.copyBufferToBuffer(outputs.nodes, built.nodeOffset * BVH_NODE_BYTES, this.nodes.buffer, nodeOffset * BVH_NODE_BYTES, size.nodeCount * BVH_NODE_BYTES);
+        }
         const bytes = this.triangleBytes;
         encoder.copyBufferToBuffer(outputs.triangles, built.triangleOffset * bytes, this.triangles.buffer, triangleOffset * bytes, size.triangleCount * bytes);
         const state = this.meshes.get(tree.slot)!;
@@ -1711,16 +1749,16 @@ export class SceneTrees {
         arriving: readonly ArrivedTree[],
     ): { nodeOffsets: number[] | null; triangleOffsets: number[] | null; grew: boolean } {
         if (!nodeCounts && !triangleCounts) return { nodeOffsets: null, triangleOffsets: null, grew: false };
-        const gpuNodes = sum(gpuSizes.map((size) => size.nodeCount));
+        const gpuNodes = sum(gpuSizes.map((size) => size.nodeCount + this.nodeLeading));
         const gpuTriangles = sum(gpuSizes.map((size) => size.triangleCount));
         if (gpuTriangles > 0) this.reserveNodesPerTriangle = gpuNodes / gpuTriangles;
         // A capped load's later batches are still coming: grow once for them too, not by doubling batch after batch.
         const target = this.reserveTarget(new Set(arriving.map((tree) => tree.slot)));
-        const residentNodes = [...this.placed.values()].map((tree) => ({ offset: tree.nodeOffset, count: tree.nodeCount }));
+        const residentNodes = [...this.placed.values()].map((tree) => ({ offset: tree.nodeOffset - this.nodeLeading, count: tree.nodeCount + this.nodeLeading }));
         const residentTriangles = [...this.placed.values()].map((tree) => ({ offset: tree.triangleOffset - tree.triangleLeading, count: tree.triangleCount + tree.triangleLeading }));
         for (const tree of [...arriving, ...this.arrived]) {
             if (tree.source !== 'gpu' || !tree.stored) continue;
-            residentNodes.push({ offset: tree.stored.nodeOffset, count: tree.built.tree.nodeCount });
+            residentNodes.push({ offset: tree.stored.nodeOffset - this.nodeLeading, count: tree.built.tree.nodeCount + this.nodeLeading });
             residentTriangles.push({ offset: tree.stored.triangleOffset - tree.stored.triangleLeading, count: tree.built.tree.triangleCount + tree.stored.triangleLeading });
         }
         let nodeOffsets: number[] | null = null;
@@ -1753,10 +1791,15 @@ export class SceneTrees {
     private reserveTarget(arriving: ReadonlySet<number> = new Set()): { nodes: number; triangles: number } {
         if (this.maxBatchBytes === undefined) return { nodes: 0, triangles: 0 };
         let triangles = 0;
+        let meshes = 0;
         for (const state of this.meshes.values()) {
-            if (state.gpu === 'building' && !this.placed.has(state.slot) && !arriving.has(state.slot)) triangles += state.triangleCount + this.leadingOf(state.slot, state.triangleCount);
+            if (state.gpu === 'building' && !this.placed.has(state.slot) && !arriving.has(state.slot)) {
+                triangles += state.triangleCount + this.leadingOf(state.slot, state.triangleCount);
+                meshes++;
+            }
         }
-        return { nodes: Math.ceil(triangles * this.reserveNodesPerTriangle), triangles };
+        // Quantized: each tree to come takes a frame slot too (nodes per triangle is measured on whole ranges, so this is a little over).
+        return { nodes: Math.ceil(triangles * this.reserveNodesPerTriangle) + this.nodeLeading * meshes, triangles };
     }
 
     /** Gives the reserve's room that no mesh still needs back to the storages (it holds nothing, so at any time). */
@@ -1849,7 +1892,7 @@ export class SceneTrees {
      */
     private copyBetweenUpdates(trees: readonly GpuArrivedTree[]): Map<GpuArrivedTree, StoredAt> | null {
         const sizes = trees.map(treeSize);
-        const nodeCounts = sizes.map((size) => size.nodeCount);
+        const nodeCounts = sizes.map((size) => size.nodeCount + this.nodeLeading);
         const leadings = trees.map((tree, index) => this.leadingOf(tree.slot, sizes[index].triangleCount));
         const triangleCounts = sizes.map((size, index) => size.triangleCount + leadings[index]);
         const fromReserve = trees.map(() => true);
@@ -1875,11 +1918,11 @@ export class SceneTrees {
         const growth = this.grow(encoder, nodeRanges === null ? nodeCounts : null, triangleRanges === null ? triangleCounts : null, sizes, trees);
         const nodeOffsets = nodeRanges?.offsets ?? growth.nodeOffsets!;
         const triangleOffsets = triangleRanges?.offsets ?? growth.triangleOffsets!;
-        trees.forEach((tree, index) => this.copyGpuTree(encoder, tree, sizes[index], nodeOffsets[index], triangleOffsets[index] + leadings[index]));
+        trees.forEach((tree, index) => this.copyGpuTree(encoder, tree, sizes[index], nodeOffsets[index] + this.nodeLeading, triangleOffsets[index] + leadings[index]));
         this.device.queue.submit([encoder.finish()]);
         // The copies are submitted: the outputs can go (a buffer destroyed after a submit stays alive for it).
         for (const tree of trees) this.releaseOutputs(tree.built.outputs);
-        return new Map(trees.map((tree, index) => [tree, { nodeOffset: nodeOffsets[index], triangleOffset: triangleOffsets[index] + leadings[index], triangleLeading: leadings[index] }]));
+        return new Map(trees.map((tree, index) => [tree, { nodeOffset: nodeOffsets[index] + this.nodeLeading, triangleOffset: triangleOffsets[index] + leadings[index], triangleLeading: leadings[index] }]));
     }
 
     /** Both storages hold nothing: no tree placed or stored, no reserve, no range waiting to be freed. */
@@ -1904,7 +1947,7 @@ export class SceneTrees {
             placedUnits.nodes += tree.nodeCount;
             placedUnits.triangles += tree.triangleCount;
         }
-        if (this.nodes.usedBytes !== placedUnits.nodes * BVH_NODE_BYTES || this.triangles.usedBytes !== placedUnits.triangles * this.triangleBytes) return null;
+        if (this.nodes.usedBytes !== placedUnits.nodes * this.nodeBytes || this.triangles.usedBytes !== placedUnits.triangles * this.triangleBytes) return null;
         const byOutputs = new Map<GpuTreeOutputs, GpuArrivedTree[]>();
         for (const tree of arrived) {
             if (tree.source !== 'gpu') continue;
@@ -1946,7 +1989,27 @@ export class SceneTrees {
         this.reconcileReserve();
     }
 
-/**
+    /**
+     * What a mesh's tinybvh build asks the workers for: the triangle format,
+     * and quantized nodes unless the mesh deforms (its refit keeps an `f32`
+     * copy, which an `f32` tree gives exactly; it is packed when placed).
+     */
+    private tinybvhOptions(slot: number): MeshBvhBuildOptions {
+        const indexed = this.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const } : {};
+        return this.nodeFormat === 'quantized' && !this.deforming?.has(slot) ? { ...indexed, nodeFormat: 'quantized' } : indexed;
+    }
+
+    /** A tinybvh tree's nodes into the storage at its root `nodeOffset` (quantized: its frame slot first; packed here if the worker sent f32). */
+    private writeTinybvhNodes(bvh: MeshBvh, nodeOffset: number): void {
+        if (this.nodeFormat !== 'quantized') {
+            this.nodes.write(nodeOffset, bvh.nodes, bvh.nodeCount * BVH_NODE_BYTES);
+            return;
+        }
+        const quantized = quantizeNodes(bvh);
+        this.nodes.write(nodeOffset - 1, quantized.nodes, (bvh.nodeCount + 1) * QUANTIZED_NODE_BYTES);
+    }
+
+    /**
      * Indexed: units before a mesh's first triangle (its header, and a merged
      * group's side and source tables); 0 for records.
      */
@@ -2041,6 +2104,7 @@ export class SceneTrees {
                     ],
                     triangleLeaves: this.triangleLeaves,
                     positionLayout: this.positionLayout,
+                    nodeFormat: this.nodeFormat,
                 },
                 0,
             );

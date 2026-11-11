@@ -66,6 +66,8 @@ export interface BvhTraceBufferSource {
     readonly triangleLeaves?: 'records' | 'indexed';
     /** An indexed source's position layout; absent means `'vec4'`. */
     readonly positionLayout?: 'vec4' | 'packed';
+    /** The source's node format (`SceneTrees.nodeFormat`, `TraceSceneBuffers.nodeFormat`); absent means `'f32'`. */
+    readonly nodeFormat?: 'f32' | 'quantized';
 }
 
 export interface BvhTraceNodesOptions {
@@ -183,11 +185,16 @@ interface BufferSpec {
     readonly array: () => Float32Array | Uint32Array;
 }
 
-/** The storage nodes of a format: three, or with indexed leaves four (the triangles read as `vec4u`, then the positions). */
-function buffersOf(triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4' | 'packed'): readonly BufferSpec[] {
+/**
+ * The storage nodes of a format: three, or with indexed leaves four (the
+ * triangles read as `vec4u`, then the positions). Quantized nodes are read as `vec4u`.
+ */
+function buffersOf(triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4' | 'packed', nodeFormat: 'f32' | 'quantized'): readonly BufferSpec[] {
     const indexed = triangleLeaves === 'indexed';
     return [
-        { name: 'bvhTraceNodes', key: 'nodes', type: 'vec4', itemSize: 4, array: () => new Float32Array(4) },
+        nodeFormat === 'quantized'
+            ? { name: 'bvhTraceNodes', key: 'nodes', type: 'uvec4', itemSize: 4, array: () => new Uint32Array(4) }
+            : { name: 'bvhTraceNodes', key: 'nodes', type: 'vec4', itemSize: 4, array: () => new Float32Array(4) },
         indexed
             ? { name: 'bvhTraceTriangles', key: 'triangles', type: 'uvec4', itemSize: 4, array: () => new Uint32Array(4) }
             : { name: 'bvhTraceTriangles', key: 'triangles', type: 'vec4', itemSize: 4, array: () => new Float32Array(4) },
@@ -203,8 +210,8 @@ function buffersOf(triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4'
 }
 
 /** The walk's text without its binding declarations: three declares the storage nodes instead. */
-function moduleWithoutBindings(options: BvhTraceNodesOptions, triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4' | 'packed'): string {
-    const text = traceModuleWgsl({ triangleFilter: options.triangleFilter, rayMasks: options.rayMasks, triangleLeaves, positionLayout });
+function moduleWithoutBindings(options: BvhTraceNodesOptions, triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4' | 'packed', nodeFormat: 'f32' | 'quantized'): string {
+    const text = traceModuleWgsl({ triangleFilter: options.triangleFilter, rayMasks: options.rayMasks, triangleLeaves, positionLayout, nodeFormat });
     let removed = 0;
     const stripped = text.replace(/^@group\(\d+\) @binding\(\d+\) var<storage, read> bvhTrace(?:Nodes|Triangles|TopLevel|Positions): array<(?:vec4[fu]|f32)>;$/gm, () => {
         removed++;
@@ -279,6 +286,8 @@ export class BvhTraceNodes {
     /** The source's triangle format, compiled into the walk. */
     readonly triangleLeaves: 'records' | 'indexed';
     readonly positionLayout: 'vec4' | 'packed';
+    /** The source's node format, compiled into the walk. */
+    readonly nodeFormat: 'f32' | 'quantized';
     private readonly specs: readonly BufferSpec[];
     /** The walk (`bvhTraceClosest`, `bvhTraceAny`, `BvhRay`, `BvhHit`, ...): include it in a `wgslFn` to call it from WGSL. */
     readonly module: Node;
@@ -311,7 +320,8 @@ export class BvhTraceNodes {
         this.rayMasks = options.rayMasks ?? true;
         this.triangleLeaves = source.triangleLeaves ?? 'records';
         this.positionLayout = source.positionLayout ?? 'vec4';
-        this.specs = buffersOf(this.triangleLeaves, this.positionLayout);
+        this.nodeFormat = source.nodeFormat ?? 'f32';
+        this.specs = buffersOf(this.triangleLeaves, this.positionLayout, this.nodeFormat);
         this.bound = source.buffers;
         this.boundVersion = source.version;
         const storages: Partial<Record<BufferName, StorageNode>> = {};
@@ -321,7 +331,7 @@ export class BvhTraceNodes {
             storages[name] = node;
         }
         this.storage = { nodes: storages.bvhTraceNodes!, triangles: storages.bvhTraceTriangles!, topLevel: storages.bvhTraceTopLevel!, positions: storages.bvhTracePositions ?? null };
-        this.module = new BvhTraceModuleNode(moduleWithoutBindings(options, this.triangleLeaves, this.positionLayout), storages);
+        this.module = new BvhTraceModuleNode(moduleWithoutBindings(options, this.triangleLeaves, this.positionLayout, this.nodeFormat), storages);
         const includes = [bvhTraceHitStruct, this.module];
         this.traceClosest = helper(closestWgsl('bvhThreeTraceClosest', false), includes);
         this.traceAny = helper(anyWgsl('bvhThreeTraceAny', false), includes);

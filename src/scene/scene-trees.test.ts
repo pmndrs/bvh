@@ -29,6 +29,7 @@ import { MERGED_SOURCE_WORDS } from './merged-identity-gpu.ts';
 import { DEFAULT_GPU_MAX_BATCH_BYTES, SceneTrees, type SceneInstanceDescriptor, type SceneTreeEvent, type SceneTreesOptions } from './scene-trees.ts';
 import type { GpuMeshTreeRange } from '../mesh-input.ts';
 import { gatherStandIn } from '../../tests/support/top-level-gather.ts';
+import { quantizeNodeWords } from '../quantized-nodes.ts';
 import { FakeHploc, settle } from '../../tests/support/fake-hploc.ts';
 
 /** The merged-identity WGSL, line by line on the CPU. */
@@ -50,6 +51,19 @@ function mergedIdentityStandIn(bindings: ReadonlyMap<number, FakeBinding>): void
         triangles[base + TRIANGLE_WORD.originalIndex] = merged - sources[at];
         triangles[base + TRIANGLE_WORD.padding] = sources[at + 1];
         triangles[base + TRIANGLE_WORD.flags] = (triangles[base + TRIANGLE_WORD.flags] | sources[at + 2]) >>> 0;
+    }
+}
+
+/** The quantize pass (gpu-quantize.ts, `bvhqQuantize`) on the CPU: the CPU encoder it matches bit for bit (bvh-blas-refit checks that on GPUs). */
+function quantizeStandIn(bindings: ReadonlyMap<number, FakeBinding>): void {
+    const source = bindings.get(0)!.buffer.bytes;
+    const target = new Uint32Array(bindings.get(1)!.buffer.bytes.buffer);
+    const table = new Uint32Array(bindings.get(2)!.buffer.bytes.buffer);
+    const [meshCount] = new Uint32Array(bindings.get(3)!.buffer.bytes.buffer);
+    for (let mesh = 0; mesh < meshCount; mesh++) {
+        const [sourceNodeOffset, rootSlot, nodeCount] = table.subarray(mesh * 4, mesh * 4 + 3);
+        const words = new Uint32Array(source.buffer.slice(source.byteOffset + sourceNodeOffset * 64, source.byteOffset + (sourceNodeOffset + nodeCount) * 64));
+        quantizeNodeWords(new Float32Array(words.buffer), words, 0, nodeCount, target, (rootSlot - 1) * 8);
     }
 }
 
@@ -145,7 +159,7 @@ interface Instance extends SceneInstanceDescriptor {
 }
 
 async function setUp(options: Partial<SceneTreesOptions> & { stand?: boolean } = {}) {
-    const gpu: FakeGpu = createFakeGpu({}, { kernels: { bvhMergedIdentity: mergedIdentityStandIn, bvhMergedIdentityIndexed: mergedIdentityIndexedStandIn } });
+    const gpu: FakeGpu = createFakeGpu({}, { kernels: { bvhMergedIdentity: mergedIdentityStandIn, bvhMergedIdentityIndexed: mergedIdentityIndexedStandIn, bvhqQuantize: quantizeStandIn } });
     const stand = options.stand === false ? null : new StandInGpuBuilder(gpu.device, options.triangleLeaves);
     const events: SceneTreeEvent[] = [];
     const scene = await SceneTrees.create(gpu.device, { ...options, firstTreeBuilder: stand ?? undefined, onTree: (event) => events.push(event) });
@@ -165,7 +179,7 @@ function readScene(scene: SceneTrees): TraceSceneData {
     const header = new Uint32Array(top, 0, 4);
     return {
         nodes: bytes(nodes),
-        nodeFormat: 'f32',
+        nodeFormat: scene.nodeFormat,
         triangles: bytes(triangles),
         triangleLeaves: scene.triangleLeaves,
         positions: positions ? bytes(positions) : new ArrayBuffer(0),
@@ -703,7 +717,7 @@ const SMALL_CAP = 4 * 1024;
 
 /** A capped scene on the real GpuFirstTrees queue, with a stand-in H-PLOC builder. */
 async function setUpCapped(options: Partial<SceneTreesOptions> = {}) {
-    const gpu: FakeGpu = createFakeGpu({}, { kernels: { bvhMergedIdentity: mergedIdentityStandIn } });
+    const gpu: FakeGpu = createFakeGpu({}, { kernels: { bvhMergedIdentity: mergedIdentityStandIn, bvhqQuantize: quantizeStandIn } });
     const hploc = new FakeHploc(gpu.device);
     const scene = await SceneTrees.create(gpu.device, { gpuMaxBatchBytes: SMALL_CAP, ...options, firstTreeBuilder: new GpuFirstTrees(gpu.device, { hploc }) });
     const frame = () => {
@@ -784,6 +798,63 @@ describe('SceneTrees with indexed leaves', () => {
     });
 });
 
+describe('SceneTrees with quantized nodes', () => {
+    for (const triangleLeaves of ['records', 'indexed'] as const) {
+        it(`GPU trees packed on the way in, tinybvh's quantized in the workers, merged groups, runtime adds and removals: the same hits as f32 (${triangleLeaves})`, async () => {
+            const { scene, stand, frame } = await setUp({ holdRefinements: true, mergeStaticInstances: true, triangleLeaves, nodeFormat: 'quantized' });
+            expect(scene.nodeFormat).toBe('quantized');
+            expect(scene.traceBuffers.nodeFormat).toBe('quantized');
+            const { geometries, instances, rays } = sceneOf(5);
+            const twin: Instance = { mesh: -1, meshIndex: 4, instanceIndex: 200, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1] };
+            const all = [...instances, twin];
+            addAll(scene, geometries, all);
+            frame();
+            const expected = await reference(geometries, all);
+            await stand!.finishBatch();
+            frame();
+            expect(scene.counts).toMatchObject({ onGpuTrees: 2, onTinybvhTrees: 0 });
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+            scene.releaseRefinements();
+            await scene.whenRefined();
+            frame();
+            expect(scene.counts).toMatchObject({ onGpuTrees: 0, onTinybvhTrees: 2, swaps: 2 });
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+
+            const late = tessellatedQuad(4, 0.5);
+            const lateInstance: Instance = { mesh: scene.addMesh(late), meshIndex: 5, instanceIndex: 300, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, -3, 1] };
+            const lateHandle = scene.addInstance(lateInstance);
+            frame();
+            await stand!.finishBatch();
+            frame();
+            expect(disagreements(readScene(scene), await reference([...geometries, late], [...all, lateInstance]), rays)).toEqual([]);
+            scene.removeInstance(lateHandle);
+            scene.removeMesh(lateInstance.mesh);
+            frame();
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+            scene.dispose();
+        });
+    }
+
+    it('takes half the node bytes plus a frame slot per tree, and refuses the adopt lever', async () => {
+        const sizes = [];
+        let trees = 0;
+        for (const nodeFormat of ['f32', 'quantized'] as const) {
+            const { scene, frame } = await setUp({ stand: false, nodeFormat });
+            const { geometries, instances, rays } = sceneOf(4);
+            addAll(scene, geometries, instances);
+            frame();
+            await scene.whenRefined();
+            frame();
+            expect(disagreements(readScene(scene), await reference(geometries, instances), rays)).toEqual([]);
+            sizes.push(scene.memory.nodesInUse);
+            trees = scene.counts.onTinybvhTrees;
+            scene.dispose();
+        }
+        expect(sizes[1]).toBe(sizes[0] / 2 + trees * 32);
+        await expect(setUp({ stand: false, nodeFormat: 'quantized', gpuTreeOutputs: 'adopt' })).rejects.toThrow(/gpuTreeOutputs: 'copy'/);
+    });
+});
+
 describe('SceneTrees with gpuMaxBatchBytes (the real queue, a stand-in H-PLOC)', () => {
     for (const variant of [
         { name: 'copy, holdRefinements', options: { holdRefinements: true }, allGpu: true },
@@ -791,6 +862,8 @@ describe('SceneTrees with gpuMaxBatchBytes (the real queue, a stand-in H-PLOC)',
         { name: 'adopt, merged, holdRefinements', options: { holdRefinements: true, gpuTreeOutputs: 'adopt' as const, mergeStaticInstances: true }, allGpu: true },
         { name: 'adopt', options: { gpuTreeOutputs: 'adopt' as const }, allGpu: false },
         { name: 'copy', options: {}, allGpu: false },
+        { name: 'copy, quantized, holdRefinements', options: { holdRefinements: true, nodeFormat: 'quantized' as const }, allGpu: true },
+        { name: 'copy, quantized', options: { nodeFormat: 'quantized' as const }, allGpu: false },
     ]) {
         it(`${variant.name}: frame(); await whenBuilt(); frame() places every first tree, batch after batch without updates in between`, async () => {
             const { scene, frame, hploc } = await setUpCapped(variant.options);
