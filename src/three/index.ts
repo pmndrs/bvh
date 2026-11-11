@@ -43,6 +43,10 @@ export {
     type BvhHitPointInfoTarget,
     type BvhSplitStrategy,
 } from './raycast.ts';
+// Shapecast and bvhcast (Q2): three-mesh-bvh's shape classes with three's types, over the core's math.
+export { ExtendedTriangle, OrientedBox, SeparatingAxisBounds } from './shapes.ts';
+// three-mesh-bvh's names for what intersectsBounds returns.
+export { BVH_CONTAINED as CONTAINED, BVH_INTERSECTED as INTERSECTED, BVH_NOT_INTERSECTED as NOT_INTERSECTED } from '../query/cpu-mesh-bvh.ts';
 export { GenerateMeshBvhWorker, type GenerateMeshBvhWorkerOptions } from './generate.ts';
 
 // The walk in three's node system (three-mesh-bvh's BVHComputeData pattern), for TSL and wgslFn.

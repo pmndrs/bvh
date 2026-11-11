@@ -1,6 +1,6 @@
 # Parity with three-mesh-bvh 0.9.18 (BX.16)
 
-The audit P8 asks for (`docs/design/bvh-package-split.md`, P8). It compares our package, as of `main` on 2026-11-11 (rows 1.1, 1.2, 4.1-4.4, 4.7, 6.1, 6.2, 6.5, 7.1, 7.2 and 9.1 updated after build-out items 1, 3 and 5), with three-mesh-bvh 0.9.18 as installed in `node_modules/three-mesh-bvh`. The sources are its `src/index.js`, `src/index.d.ts`, `src/webgpu/index.js` and `index.d.ts`, `src/workers/index.js` and `index.d.ts`, and its README example list (the package ships no `example/` folder).
+The audit P8 asks for (`docs/design/bvh-package-split.md`, P8). It compares our package, as of `main` on 2026-11-11 (rows 1.1-1.3, 1.6, 1.7, 2.1, 2.2, 4.1-4.4, 4.7, 6.1, 6.2, 6.5, 7.1, 7.2 and 9.1 updated after build-out items 1 to 5), with three-mesh-bvh 0.9.18 as installed in `node_modules/three-mesh-bvh`. The sources are its `src/index.js`, `src/index.d.ts`, `src/webgpu/index.js` and `index.d.ts`, `src/workers/index.js` and `index.d.ts`, and its README example list (the package ships no `example/` folder).
 
 **Status**
 - **have**: we have an equivalent. Our code is cited.
@@ -33,11 +33,11 @@ Notes on the survey:
 | --- | --- | --- | --- | --- |
 | 1.1 | `MeshBVH.raycast` (all hits) | have | `CpuMeshBvh.raycast(ray, { side, near, far })` (`src/query/cpu-mesh-bvh.ts`); `geometry.boundsTree.raycast(ray, materialOrSide, near, far)` with three's types, and `acceleratedRaycast`, the same fields as three's `Mesh.raycast` (`src/three/raycast.ts`); `createCpuTracer().closest/any` for bare rays (`src/trace/cpu-traversal.ts`). All run the one CPU walk | homefig (`viewer/src/components/viewer/scene-bvh.tsx:84`, `editor/.../first-person-controls.tsx:332`), drei (`external/Performance/Bvh/Bvh.tsx:55,115`) |
 | 1.2 | `MeshBVH.raycastFirst(ray, materialOrSide, near, far)` | have | `CpuMeshBvh.raycastFirst` takes a ray (`[x, y, z]` arrays or a three `Ray`) and a side, `{ side, near, far }` or a material; `BvhBoundsTree.raycastFirst(ray, DoubleSide)` returns a three intersection with `face.normal`, as csg reads it (`src/three/bounds-tree.test.ts`) | csg (`core/operations/operationsUtils.js:50`, `raycastFirst(_ray, DoubleSide)`) |
-| 1.3 | `shapecast` (`intersectsBounds`, `intersectsTriangle`, `boundsTraverseOrder`, ...) | missing | Q2. The box walk it will use is in: `CpuMeshBvh.traverse({ intersectsBounds, intersectsRange, boundsTraverseOrder })`, with three-mesh-bvh's `NOT_INTERSECTED` / `INTERSECTED` / `CONTAINED` values (`BVH_*`) | homefig (`editor/.../first-person/bvh-ecctrl.tsx:440,547`) |
+| 1.3 | `shapecast` (`intersectsBounds`, `intersectsTriangle`, `boundsTraverseOrder`, ...) | have | `CpuMeshBvh.shapecast({ intersectsBounds, intersectsTriangle, intersectsRange, boundsTraverseOrder })` (`src/query/cpu-mesh-bvh.ts`), on the one box walk (`traverse`): the triangle as a scratch `ExtendedTriangle`, its original index, `contained`, `depth`; `BvhBoundsTree.shapecast` hands over `Box3` and the three-flavoured `ExtendedTriangle`. Against three-mesh-bvh on oriented boxes, spheres and homefig's capsule pattern: the same triangles and closest points (`src/three/shapecast.test.ts`) | homefig (`editor/.../first-person/bvh-ecctrl.tsx:440,547`) |
 | 1.4 | `closestPointToPoint` | missing | Q2. Our reference tracer (`src/trace/reference-tracer.ts`) only casts rays | None (see note 2) |
 | 1.5 | `closestPointToGeometry` | missing | Q2 | None |
-| 1.6 | `intersectsGeometry`, `intersectsBox`, `intersectsSphere` | missing | Q2 | None directly. homefig gets the box test through `shapecast` (`intersectsBounds: box.intersectsBox`) |
-| 1.7 | `bvhcast` (tree against tree) | missing | | csg (`core/operations/operationsUtils.js:70`, the boolean-op core) |
+| 1.6 | `intersectsGeometry`, `intersectsBox`, `intersectsSphere` | have | `CpuMeshBvh.intersectsBox(box, boxToMesh)`, `intersectsSphere(sphere)`, `intersectsGeometry(treeOrMesh, geometryToBvh)`; `BvhBoundsTree.intersectsGeometry(geometry, matrix)` uses `geometry.boundsTree` when it is ours, else the bare triangles. Same booleans as three-mesh-bvh (`src/three/shapecast.test.ts`) | None directly. homefig gets the box test through `shapecast` (`intersectsBounds: box.intersectsBox`) |
+| 1.7 | `bvhcast` (tree against tree) | have | `CpuMeshBvh.bvhcast(other, matrixToLocal, { intersectsRanges, intersectsTriangles })`: three-mesh-bvh's walk step for step on our nodes, tree positions as in indirect mode; `BvhBoundsTree.bvhcast` hands over three-flavoured `ExtendedTriangle`s. three-bvh-csg's pattern finds the same pairs and segments on random mesh pairs (`src/three/bvhcast.test.ts`) and on a 270k-triangle room (`bench/query-parity.ts`: 100 / 100, 0.94x three-mesh-bvh's time). `intersectsGeometry` uses it against a tree | csg (`core/operations/operationsUtils.js:70`, the boolean-op core) |
 
 Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes a three `Box3` too) and `shiftPrimitiveOffsets` (none).
 
@@ -45,8 +45,8 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 
 | # | three-mesh-bvh | Status | Ours / what is missing | Who needs it |
 | --- | --- | --- | --- | --- |
-| 2.1 | `ExtendedTriangle` (`intersectsTriangle`, `closestPointToSegment`, `distanceToPoint`, `distanceToTriangle`, `intersectsSphere`) | missing | A math-only version would keep the core engine-free; the three-typed one would live in `/three` | csg (`core/CDTTriangleSplitter.js:2,140,153`, `core/LegacyTriangleSplitter.js:2,16`), homefig (`closestPointToSegment` on the triangle that `shapecast` hands over, `bvh-ecctrl.tsx:443,550`) |
-| 2.2 | `OrientedBox` | missing | | None |
+| 2.1 | `ExtendedTriangle` (`intersectsTriangle`, `closestPointToSegment`, `distanceToPoint`, `distanceToTriangle`, `intersectsSphere`) | have | Engine-free `ExtendedTriangle` and the math as functions over plain points (`src/query/shapes.ts`, from `@pmndrs/bvh`); `/three`'s `ExtendedTriangle` extends three's `Triangle` and calls the same functions (`src/three/shapes.ts`). Bit-for-bit equal to three-mesh-bvh's on 4,000 random pairs with coplanar and degenerate cases (`src/three/shapes.test.ts`) | csg (`core/CDTTriangleSplitter.js:2,140,153`, `core/LegacyTriangleSplitter.js:2,16`), homefig (`closestPointToSegment` on the triangle that `shapecast` hands over, `bvh-ecctrl.tsx:443,550`) |
+| 2.2 | `OrientedBox` | have | Engine-free `OrientedBox` (`src/query/shapes.ts`) and `/three`'s (`Vector3` / `Matrix4` fields): `intersectsBox`, `intersectsTriangle`, `closestPointToPoint`, `distanceToPoint`, `distanceToBox`. Bit-for-bit equal to three-mesh-bvh's on 3,000 random cases. three-mesh-bvh 0.9.18's `distanceToBox` with targets throws on overlapping boxes under three 0.187 (`Box3.closestPointToPoint` is gone); ours doesn't | None |
 
 ## 3. Primitives
 
@@ -127,7 +127,7 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 
 ## Counts
 
-51 rows: **20 have, 6 partial, 22 missing, 3 won't** (4.8, 8.12, 9.2). At the audit, before items 1, 3 and 5: 12 have, 13 partial, 23 missing. Every "won't" has its reason in its row; P8's done-when also wants them in the "Coming from three-mesh-bvh" docs page.
+51 rows: **25 have, 6 partial, 17 missing, 3 won't** (4.8, 8.12, 9.2). At the audit, before items 1 to 5: 12 have, 13 partial, 23 missing. Every "won't" has its reason in its row; P8's done-when also wants them in the "Coming from three-mesh-bvh" docs page.
 
 ## Proposed build-out order
 
@@ -143,9 +143,9 @@ P8's order was: Q2 closest point and shapecast plus shapes; the drop-in three in
 | Order | Item | Rows | Size | Unblocks |
 | --- | --- | --- | --- | --- |
 | 1 (done) | Pass `strategy`, `maxLeafSize` / `targetLeafSize` and `maxDepth` through `computeBoundsTree` and the builders, mapping SAH to the SAH-quality builder and tolerating the other names. Add `onProgress`. | 4.1, 4.2, 4.3, 4.7 | S | homefig, drei, pathtracer, upscaler (all already pass these options) |
-| 2 | Q2 shapecast on the CPU tree, with `ExtendedTriangle` (math-only core, three-typed wrapper in `/three`) and `OrientedBox`, plus `intersectsBox` / `intersectsSphere` / `intersectsGeometry` on top of shapecast | 1.3, 1.6, 2.1, 2.2 | M | homefig (character controller), csg (the triangle class) |
+| 2 (done) | Q2 shapecast on the CPU tree, with `ExtendedTriangle` (math-only core, three-typed wrapper in `/three`) and `OrientedBox`, plus `intersectsBox` / `intersectsSphere` / `intersectsGeometry` on top of shapecast | 1.3, 1.6, 2.1, 2.2 | M | homefig (character controller), csg (the triangle class) |
 | 3 (done) | Public CPU tree object: `raycastFirst(ray, side)`, `refit()` on `BvhBoundsTree` (wiring in `refitOnCpu`), the indirect API (`resolveTriangleIndex`), `getTriangleHitPointInfo` | 1.2, 4.4, 6.1, 6.5 | M | csg (`raycastFirst`, indirect), pathtracer (`refit`, indirect) |
-| 4 | `bvhcast` (tree against tree) | 1.7 | M | csg (booleans) |
+| 4 (done) | `bvhcast` (tree against tree) | 1.7 | M | csg (booleans) |
 | 5 (done) | `generate(geometry, options)` drop-in over the worker pool | 9.1 | S | pathtracer (`setBVHWorker`) |
 | 6 | Q2 `closestPointToPoint` and `closestPointToGeometry` on the CPU | 1.4, 1.5 | M | no surveyed call site; the P8 `distancecast` compare and SDF need it. Lower than its P8 slot |
 | 7 | `MeshBVHHelper` in `/three` | 6.4 | S | drei (story only) |
@@ -156,8 +156,8 @@ P8's order was: Q2 closest point and shapecast plus shapes; the drop-in three in
 | 12 | Per-tree utilities: `estimateMemoryInBytes`, `getBVHExtremes`, three-mesh-bvh-format `serialize`, `getJSONStructure` | 7.1-7.3, 7.5 | S | none found |
 
 A project's full switch waits on every item in its column:
-- csg needs 2 and 4 (3 is done).
-- homefig needs 2 (1 is done).
+- csg needs nothing more (2, 3 and 4 are done). Its `Brush` builds `new MeshBVH(geometry, { maxLeafSize: 3, indirect: true, useSharedArrayBuffer })`, which `/three`'s `MeshBVH` accepts.
+- homefig needs nothing more (1 and 2 are done).
 - drei needs nothing more (1 is done). Its refraction material is GLSL (won't, 8.12).
 - pathtracer's CPU side has what it needs (1, 3 and 5 are done). Its shaders are GLSL (won't).
 - Denoiser, upscaler, ddgi-research and reflections need nothing beyond what is on `main` (rows 8.1 to 8.3 and 5.1), apart from the switch itself (`docs/three.md`, "Switching the known consumers").
