@@ -75,6 +75,10 @@ try {
         records: await TraceBatchKernel.create(device),
         vec4: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4' }),
         packed: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed' }),
+        // `quantized-` variants (docs/design/compressed-nodes.md): nodeFormat 'quantized', the rest of the name as above.
+        'quantized-records': await TraceBatchKernel.create(device, { nodeFormat: 'quantized' }),
+        'quantized-vec4': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4', nodeFormat: 'quantized' }),
+        'quantized-packed': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'quantized' }),
     };
     const box = scene.geometryBounds;
     const rays = randomRays(createRandom(9), RAYS, [box.min[0], box.min[1], box.min[2], box.max[0], box.max[1], box.max[2]], 0);
@@ -118,18 +122,21 @@ try {
         // `-cap<MB>` sets a cap, `-default` leaves it out (256 MiB), and the rest turn it off (Infinity: one batch).
         const isDefault = variant.endsWith('-default');
         const capMB = isDefault ? String(DEFAULT_GPU_MAX_BATCH_BYTES / MB) : /-cap(\d+)/.exec(variant)?.[1];
-        const indexed = variant.startsWith('indexed');
-        const positionLayout = variant.includes('packed') ? 'packed' : 'vec4';
-        const kernel = indexed ? kernels[positionLayout] : kernels.records;
+        const quantized = variant.startsWith('quantized-');
+        const name = quantized ? variant.slice('quantized-'.length) : variant;
+        const indexed = name.startsWith('indexed');
+        const positionLayout = name.includes('packed') ? 'packed' : 'vec4';
+        const kernel = kernels[`${quantized ? 'quantized-' : ''}${indexed ? positionLayout : 'records'}`];
         const leaves = indexed ? ('indexed' as const) : ('records' as const);
         const trees = await SceneTrees.create(device, {
             gpuMaxBatchBytes: isDefault ? undefined : capMB ? Number(capMB) * MB : Infinity,
             label: `sponza ${variant}`,
             holdRefinements: true,
-            gpuTreeOutputs: variant.startsWith('adopt') ? 'adopt' : 'copy',
+            gpuTreeOutputs: name.startsWith('adopt') ? 'adopt' : 'copy',
             mergeStaticInstances: variant.includes('merged'),
             workers: pool,
             ...(indexed ? { triangleLeaves: 'indexed' as const, positionLayout } : {}),
+            ...(quantized ? { nodeFormat: 'quantized' as const } : {}),
         });
         const meshes = scene.meshes.map((mesh) => trees.addMesh(mesh));
         scene.instances.forEach((instance, index) => trees.addInstance({ mesh: meshes[instance.meshIndex], instanceIndex: index, objectToWorld: instance.objectToWorld, static: true }));

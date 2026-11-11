@@ -242,10 +242,14 @@ export interface QuantizeJob {
 
 /** The pipeline of the quantize pass, made once per device. */
 export class GpuNodeQuantizer {
-    private constructor(
-        private readonly device: GPUDevice,
-        private readonly pipeline: GPUComputePipeline,
-    ) {}
+    private readonly device: GPUDevice;
+    private readonly pipeline: GPUComputePipeline;
+
+    // Plain fields, not parameter properties: Node's type stripping (the tools) can't run those.
+    private constructor(device: GPUDevice, pipeline: GPUComputePipeline) {
+        this.device = device;
+        this.pipeline = pipeline;
+    }
 
     static async create(device: GPUDevice): Promise<GpuNodeQuantizer> {
         const pipeline = await device.createComputePipelineAsync({

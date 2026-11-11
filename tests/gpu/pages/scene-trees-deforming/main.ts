@@ -66,11 +66,13 @@ await runGpuTest(
         const failures: string[] = [];
         const results: Record<string, unknown> = {};
         // Records, then indexed leaves (the refit copies each pose into the scene's positions).
-        for (const triangleLeaves of ['records', 'indexed'] as const) {
-            const kernel = await TraceBatchKernel.create(device, { triangleLeaves });
+        // Then quantized nodes (docs/design/compressed-nodes.md): the refit keeps an f32 copy and packs it into the scene.
+        for (const [triangleLeaves, nodeFormat] of [['records', 'f32'], ['indexed', 'f32'], ['records', 'quantized'], ['indexed', 'quantized']] as const) {
+            const label = nodeFormat === 'quantized' ? `quantized ${triangleLeaves}` : triangleLeaves;
+            const kernel = await TraceBatchKernel.create(device, { triangleLeaves, nodeFormat });
             const rest = cloth();
             const rock: MeshGeometry = { positions: new Float32Array([-1, -1, -1, 1, -1, -1, 0, 1, -1, 0, 0, 1]), indices: new Uint32Array([0, 1, 2, 0, 1, 3, 1, 2, 3, 0, 2, 3]) };
-            const scene = await SceneTrees.create(device, { label: `deforming ${triangleLeaves}`, holdRefinements: true, mergeStaticInstances: true, workers: { size: 2 }, triangleLeaves });
+            const scene = await SceneTrees.create(device, { label: `deforming ${label}`, holdRefinements: true, mergeStaticInstances: true, workers: { size: 2 }, triangleLeaves, nodeFormat });
             const clothMesh = scene.addMesh(rest, { deforming: { bounds: [-3, -3, -3, 3, 3, 3] } });
             const rockMesh = scene.addMesh(rock);
             const instances: (TraceSceneInstance & { readonly mesh: number })[] = [
@@ -101,14 +103,14 @@ await runGpuTest(
             const random = createRandom(4);
             const rays = randomRays(random, 30000, [-3, -3, -3, 8, 5, 3], 1);
             const check = async (state: string, positions: Float32Array) => {
-                const name = `${triangleLeaves} ${state}`;
+                const name = `${label} ${state}`;
                 await device.queue.onSubmittedWorkDone();
                 const reference = assembleTraceScene(
                     [buildMeshBvhWithTinyBvh({ positions, indices: rest.indices }, tinyBvh), buildMeshBvhWithTinyBvh(rock, tinyBvh)],
                     instances.map(({ mesh: _mesh, ...instance }) => instance),
                 );
                 const gpu = await traceOnGpu(device, kernel, scene.traceBuffers, rays);
-                const comparison = compareWithReference(rays, gpu, await readScene(device, scene.buffers, { triangleLeaves: scene.triangleLeaves, positionLayout: scene.positionLayout }), reference);
+                const comparison = compareWithReference(rays, gpu, await readScene(device, scene.buffers, { triangleLeaves: scene.triangleLeaves, positionLayout: scene.positionLayout, nodeFormat: scene.nodeFormat }), reference);
                 results[name] = { disagreements: comparison.count, hits: comparison.hits, builtBy: scene.meshStatus(clothMesh).builtBy };
                 log(`${name}: ${comparison.hits} hits, ${comparison.count} disagreements, cloth on ${scene.meshStatus(clothMesh).builtBy}`);
                 if (comparison.count > 0) failures.push(`${name}: ${comparison.count} disagreements, first ${JSON.stringify(comparison.disagreements.slice(0, 2))}`);
@@ -164,10 +166,10 @@ await runGpuTest(
             await check('after the drift rebuild', positions);
 
             const counts = scene.deformingCounts;
-            results[`${triangleLeaves} refits`] = counts.refits;
-            results[`${triangleLeaves} driftRebuilds`] = counts.driftRebuilds;
-            results[`${triangleLeaves} updatesToRebuild`] = updates;
-            results[`${triangleLeaves} driftRatioAtRebuild`] = drift;
+            results[`${label} refits`] = counts.refits;
+            results[`${label} driftRebuilds`] = counts.driftRebuilds;
+            results[`${label} updatesToRebuild`] = updates;
+            results[`${label} driftRatioAtRebuild`] = drift;
             scene.dispose();
             kernel.destroy();
             vertexBuffer.destroy();

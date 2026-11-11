@@ -39,6 +39,12 @@
  * written indexed by H-PLOC, tinybvh's converted in the worker, merged groups'
  * side tables from the GPU and the CPU identity pass.
  *
+ * The `quantized-*` variants run with `nodeFormat: 'quantized'`
+ * (docs/design/compressed-nodes.md), copy only: GPU trees packed by the
+ * quantize pass on their way into the storage, tinybvh's quantized in the
+ * workers, merged groups one frame each, capped batches stored between
+ * updates; one also with indexed leaves (packed positions).
+ *
  * URL option: `?sharedRays=100000` shrinks the seam cases.
  */
 
@@ -63,6 +69,8 @@ interface Variant {
     readonly maxBatchBytes?: number;
     /** Indexed leaves (docs/design/indexed-leaves.md), with this position layout; absent: records. */
     readonly indexed?: 'vec4' | 'packed';
+    /** Quantized nodes (docs/design/compressed-nodes.md); absent: f32. */
+    readonly quantized?: boolean;
 }
 
 /** Smaller than any one-mesh batch (its uniforms alone are 2.8 kB), so every mesh is a batch of its own. */
@@ -85,6 +93,11 @@ const VARIANTS: readonly Variant[] = [
     { name: 'indexed-copy-merged', gpuTreeOutputs: 'copy', merged: true, indexed: 'vec4' },
     { name: 'indexed-copy-capped', gpuTreeOutputs: 'copy', merged: false, maxBatchBytes: SMALL_CAP, indexed: 'packed' },
     { name: 'indexed-copy-merged-capped', gpuTreeOutputs: 'copy', merged: true, maxBatchBytes: SMALL_CAP, indexed: 'packed' },
+    // Quantized nodes: copy only (an adopted batch's nodes are f32).
+    { name: 'quantized-copy', gpuTreeOutputs: 'copy', merged: false, quantized: true },
+    { name: 'quantized-copy-merged', gpuTreeOutputs: 'copy', merged: true, quantized: true },
+    { name: 'quantized-copy-capped', gpuTreeOutputs: 'copy', merged: false, maxBatchBytes: SMALL_CAP, quantized: true },
+    { name: 'quantized-indexed-copy-merged-capped', gpuTreeOutputs: 'copy', merged: true, maxBatchBytes: SMALL_CAP, indexed: 'packed', quantized: true },
 ];
 
 /** Each instance its own mesh copy, two of every three static (the trace-oracle's merged variants). */
@@ -105,6 +118,9 @@ await runGpuTest(
             records: await TraceBatchKernel.create(device),
             vec4: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4' }),
             packed: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed' }),
+            'quantized-records': await TraceBatchKernel.create(device, { nodeFormat: 'quantized' }),
+            'quantized-vec4': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4', nodeFormat: 'quantized' }),
+            'quantized-packed': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'quantized' }),
         };
         const firstTrees = new GpuFirstTrees(device, { label: 'mid-swap' });
         const indexedFirstTrees = new GpuFirstTrees(device, { label: 'mid-swap indexed', triangleLeaves: 'indexed' });
@@ -134,8 +150,9 @@ await runGpuTest(
                     workers: pool,
                     firstTreeBuilder: variant.indexed ? indexedFirstTrees : firstTrees,
                     ...(variant.indexed ? { triangleLeaves: 'indexed' as const, positionLayout: variant.indexed } : {}),
+                    ...(variant.quantized ? { nodeFormat: 'quantized' as const } : {}),
                 });
-                const kernel = kernels[variant.indexed ?? 'records'];
+                const kernel = kernels[`${variant.quantized ? 'quantized-' : ''}${variant.indexed ?? 'records'}` as keyof typeof kernels];
                 const handles = meshes.map((mesh) => scene.addMesh(mesh));
                 for (const instance of instances) scene.addInstance({ ...instance, mesh: handles[instance.meshIndex] });
                 const frame = () => {
@@ -146,7 +163,7 @@ await runGpuTest(
                 const check = async (state: string) => {
                     await device.queue.onSubmittedWorkDone();
                     const gpu = await traceOnGpu(device, kernel, scene.traceBuffers, rays);
-                    const gpuScene = await readScene(device, scene.buffers, { triangleLeaves: scene.triangleLeaves, positionLayout: scene.positionLayout });
+                    const gpuScene = await readScene(device, scene.buffers, { triangleLeaves: scene.triangleLeaves, positionLayout: scene.positionLayout, nodeFormat: scene.nodeFormat });
                     const comparison = compareWithReference(rays, gpu, gpuScene, reference);
                     let misses = 0;
                     if (oracleCase.everyRayMustHit) for (let index = 0; index < rays.length; index++) if (gpu.closest(index) === null || !gpu.any(index)) misses++;

@@ -102,15 +102,17 @@ try {
     const failures: string[] = [];
     const results: Record<string, unknown> = {};
     // Records and indexed leaves (docs/design/indexed-leaves.md): BvhTraceNodes takes the format from SceneTrees.
-    for (const triangleLeaves of ['records', 'indexed'] as const) {
+    // Then quantized nodes (docs/design/compressed-nodes.md): BvhTraceNodes takes the node format from SceneTrees too.
+    for (const [triangleLeaves, nodeFormat] of [['records', 'f32'], ['indexed', 'f32'], ['records', 'quantized'], ['indexed', 'quantized']] as const) {
+        const label = nodeFormat === 'quantized' ? `quantized ${triangleLeaves}` : triangleLeaves;
         const random = createRandom(57);
         const { root, movers } = buildScene(random);
         const materialOf = (mesh: Mesh, info: { instanceId: number; group: number }) => ((mesh.id * 7 + Math.max(0, info.instanceId) * 3 + info.group + 1) % 300);
         const syncOptions = { material: materialOf };
-        const trees = await SceneTrees.create(device, { label: `three-trace ${triangleLeaves}`, holdRefinements: true, workers: { size: 2 }, triangleLeaves });
+        const trees = await SceneTrees.create(device, { label: `three-trace ${label}`, holdRefinements: true, workers: { size: 2 }, triangleLeaves, nodeFormat });
         const sync = new SceneTreesObject3DSync(trees, root, syncOptions);
         const bvh = new BvhTraceNodes(renderer, trees);
-        const kernel = await TraceBatchKernel.create(device, { triangleLeaves });
+        const kernel = await TraceBatchKernel.create(device, { triangleLeaves, nodeFormat });
         const tinyBvh = await createTinyBvhBuilder();
         let rebinds = 0;
 
@@ -171,7 +173,7 @@ try {
         const wgslKernel = makeKernel(true);
 
         const check = async (state: string) => {
-            const phase = `${triangleLeaves} ${state}`;
+            const phase = `${label} ${state}`;
             await device.queue.onSubmittedWorkDone();
             const t0 = performance.now();
             await renderer.computeAsync(tslKernel.node);
@@ -265,7 +267,7 @@ try {
         if (trees.version === versionBefore) failures.push('the buffers did not grow; the rebind was not exercised');
         if (rebinds === rebindsBefore) failures.push('BvhTraceNodes never rebound after the buffers grew');
         await check('moved-and-grown');
-        results[`${triangleLeaves} rebinds`] = rebinds;
+        results[`${label} rebinds`] = rebinds;
 
         // three's disposal of the stand-ins (as renderer.dispose() does for every attribute) must not destroy SceneTrees' buffers.
         const beforeDispose = await traceOnGpu(device, kernel, trees.traceBuffers, rays);
@@ -274,7 +276,7 @@ try {
         let changedByDispose = 0;
         for (let ray = 0; ray < count; ray++) if (beforeDispose.closest(ray)?.t !== afterDispose.closest(ray)?.t) changedByDispose++;
         if (changedByDispose > 0) failures.push(`${changedByDispose} hits changed after three disposed the stand-in attributes`);
-        results[`${triangleLeaves} afterStandInDispose`] = { changed: changedByDispose };
+        results[`${label} afterStandInDispose`] = { changed: changedByDispose };
 
         bvh.dispose();
         sync.dispose();

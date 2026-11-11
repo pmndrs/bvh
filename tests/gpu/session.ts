@@ -172,6 +172,8 @@ export class BrowserSession {
 
         const query = new URLSearchParams({ [QUERY_TOKEN]: token });
         if (this.options.gpu) query.set(QUERY_GPU, this.options.gpu);
+        // BVH_PAGE_QUERY (e.g. `profile=quick&skip=leaves`) is added to every page's URL, for page options.
+        for (const [key, value] of new URLSearchParams(process.env.BVH_PAGE_QUERY ?? '')) query.set(key, value);
         let runnerProblem: string | null = null;
         let report: GpuTestReport | null = null;
         try {
