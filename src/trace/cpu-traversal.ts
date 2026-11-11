@@ -27,7 +27,10 @@ import {
     TOP_LEVEL_HEADER_WORDS,
     TRACE_STACK_SIZE,
     TRIANGLE_FLAG_FILTER,
+    TRIANGLE_FLAG_FLIP_FRONT_FACE,
     TRIANGLE_WORD,
+    TRIANGLE_WORD_SOURCE_INSTANCE,
+    INSTANCE_FLAG,
     BVH_QUERY_ANY,
     BVH_QUERY_CLOSEST,
     RAY_MASK_ALL,
@@ -174,6 +177,7 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
         let rootNodeOffset = 0;
         let triangleOffset = 0;
         let instanceIndex = 0;
+        let instanceMerged = false;
 
         let closestT = ray.tMax;
         let result: CpuHit | null = null;
@@ -230,6 +234,7 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
                 rootNodeOffset = topWords[record + INSTANCE_WORD.rootNodeOffset];
                 triangleOffset = topWords[record + INSTANCE_WORD.triangleOffset];
                 instanceIndex = topWords[record + INSTANCE_WORD.instanceIndex];
+                instanceMerged = (topWords[record + INSTANCE_WORD.flags] & INSTANCE_FLAG.merged) !== 0;
                 const row = (rowStart: number): number[] => [
                     topFloats[record + rowStart],
                     topFloats[record + rowStart + 1],
@@ -252,6 +257,10 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
                     const hit = intersectWatertight(triangleFloats, base, setup, ray.tMin, closestT);
                     if (hit === null) continue;
                     const triangleIndex = triangleWords[base + TRIANGLE_WORD.originalIndex];
+                    // As the WGSL: a merged mesh's triangle names its source instance, and the
+                    // flip bit marks one from a mirrored source (world-space winding reversed).
+                    const hitInstance = instanceMerged ? triangleWords[base + TRIANGLE_WORD_SOURCE_INSTANCE] : instanceIndex;
+                    const frontFace = hit.frontFace !== ((triangleWords[base + TRIANGLE_WORD.flags] & TRIANGLE_FLAG_FLIP_FRONT_FACE) !== 0);
                     // As the WGSL leaf test: a flagged triangle's filter may let the ray through,
                     // and then nothing is recorded and closestT stays.
                     const consult = (triangleWords[base + TRIANGLE_WORD.flags] & TRIANGLE_FLAG_FILTER) !== 0;
@@ -259,11 +268,11 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
                         consult &&
                         triangleFilter &&
                         triangleFilter({
-                            instance: instanceIndex,
+                            instance: hitInstance,
                             triangle: triangleIndex,
                             t: hit.t,
                             barycentrics: [hit.u, hit.v],
-                            frontFace: hit.frontFace,
+                            frontFace,
                             query: stopAtFirstHit ? BVH_QUERY_ANY : BVH_QUERY_CLOSEST,
                             rayMask,
                         })
@@ -272,12 +281,13 @@ export function createCpuTracer(scene: TraceSceneData, options: CpuTracerOptions
                     }
                     result = {
                         t: hit.t,
-                        instanceIndex,
+                        instanceIndex: hitInstance,
                         triangleIndex,
                         u: hit.u,
                         v: hit.v,
-                        // Object-space winding is the authored one, so this is the authored side even when mirrored.
-                        frontFace: hit.frontFace,
+                        // Object-space winding is the authored one, so this is the authored side even when
+                        // mirrored; a merged mesh's mirrored-source triangle carries the flip bit instead.
+                        frontFace,
                     };
                     closestT = hit.t;
                     if (stopAtFirstHit) return result;

@@ -6,6 +6,7 @@
 
 import { MAX_REFERENCE_INDEX, TRIANGLE_BYTES, TRIANGLE_WORD, TRIANGLE_WORDS } from './layout.ts';
 import type { MeshGeometry } from './mesh-bvh.ts';
+import { checkTriangleFlags } from '../mesh-input.ts';
 
 export function countTriangles(geometry: MeshGeometry): number {
     const entries = geometry.indices ? geometry.indices.length : geometry.positions.length / 3;
@@ -33,6 +34,7 @@ export function checkGeometry(geometry: MeshGeometry): CheckedGeometry {
     if (triangleFlags && triangleFlags.length < triangleCount) {
         throw new RangeError('triangleFlags must have one entry per triangle');
     }
+    checkTriangleFlags(triangleFlags, triangleCount, 'mesh');
     return {
         triangleCount,
         vertexOf(triangle, corner) {

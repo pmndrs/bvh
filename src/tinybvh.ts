@@ -28,7 +28,7 @@ import {
 } from './gpu-layout.ts';
 import { singleLeafTopology, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from './topology.ts';
 import { TINYBVH_WASM_BASE64 } from './tinybvh-wasm.ts';
-import type { MeshInput } from './mesh-input.ts';
+import { checkTriangleFlags, type MeshInput } from './mesh-input.ts';
 
 /** tinybvh's node: aabbMin (3 floats), leftFirst, aabbMax (3 floats), triCount. 32 bytes. */
 const TINYBVH_NODE_WORDS = 8;
@@ -288,6 +288,7 @@ function buildGpuLayout(wasm: TinyBvhExports, geometry: MeshInput, options: Tiny
     const { triangleFlags } = geometry;
     const { vertexCount, triangleCount } = countInput(geometry);
     if (triangleFlags && triangleFlags.length < triangleCount) throw new RangeError('triangleFlags must have one entry per triangle');
+    checkTriangleFlags(triangleFlags, triangleCount, 'mesh');
 
     return withTinyBvhTree(wasm, geometry, options, (wasmBuildMs) => {
         const flagsPointer = triangleFlags ? allocateInput(wasm, triangleCount * 4, 'triangle flags') : 0;

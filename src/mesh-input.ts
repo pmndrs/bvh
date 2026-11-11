@@ -13,10 +13,36 @@ export interface MeshInput {
     /** Three vertex indices per triangle; omit for a plain triangle list. */
     readonly indices?: Uint16Array | Uint32Array | null;
     /**
-     * Per-triangle bit flags, indexed by the original triangle number. Only the
-     * GPU layout stores them; they default to 0.
+     * Per-triangle flags, indexed by the original triangle number; they default
+     * to 0. Only bit 0 (`TRIANGLE_FLAG_FILTER`: ask the triangle filter) may be
+     * set. Bits 1-31 are reserved: bit 1 flips `frontFace` on merged static
+     * meshes' triangles, bits 2-15 are 0, and bits 16-31 are kept for a
+     * per-instance material. Every builder throws, naming the triangle, if a
+     * reserved bit is set.
      */
     readonly triangleFlags?: Uint32Array | null;
+}
+
+/** The triangle flag bits a mesh's input may set: bit 0, `TRIANGLE_FLAG_FILTER` (trace/layout.ts). */
+export const TRIANGLE_FLAGS_INPUT_MASK = 1;
+
+/**
+ * Throws a `RangeError` naming `where` and the triangle if any of the first
+ * `triangleCount` entries sets a reserved bit (anything but
+ * {@link TRIANGLE_FLAGS_INPUT_MASK}). Masking them silently would hide a
+ * caller's bug and break merged meshes' flip bit or a later material.
+ */
+export function checkTriangleFlags(triangleFlags: Uint32Array | null | undefined, triangleCount: number, where: string): void {
+    if (!triangleFlags) return;
+    const count = Math.min(triangleCount, triangleFlags.length);
+    for (let triangle = 0; triangle < count; triangle++) {
+        const flags = triangleFlags[triangle];
+        if ((flags & ~TRIANGLE_FLAGS_INPUT_MASK) !== 0) {
+            throw new RangeError(
+                `${where}: triangleFlags[${triangle}] is 0x${flags.toString(16)}; only bit 0 (TRIANGLE_FLAG_FILTER) may be set, bits 1-31 are reserved`,
+            );
+        }
+    }
 }
 
 /**
@@ -38,7 +64,7 @@ export interface GpuMeshBuffers {
     /** Index of the mesh's first index in `indexBuffer` (not bytes). Default 0. */
     readonly indexOffset?: number;
     readonly triangleCount: number;
-    /** One `u32` per triangle, by original triangle number, from offset 0. Default 0. */
+    /** One `u32` per triangle, by original triangle number, from offset 0. Default 0. Only bit 0 may be set, as in `MeshInput.triangleFlags`; a GPU buffer is not checked. */
     readonly triangleFlagsBuffer?: GPUBuffer | null;
 }
 

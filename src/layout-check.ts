@@ -34,10 +34,31 @@ const CHILD_COUNT = [GPU_LAYOUT_NODE_WORD.leftCount, GPU_LAYOUT_NODE_WORD.rightC
 const CHILD_MIN = [GPU_LAYOUT_NODE_WORD.leftMin, GPU_LAYOUT_NODE_WORD.rightMin] as const;
 const MAX_OFFSET = GPU_LAYOUT_NODE_WORD.leftMax - GPU_LAYOUT_NODE_WORD.leftMin;
 
+/**
+ * A merged static mesh's hit identity (`StaticMergeGroup` in trace/static-merge.ts),
+ * for checking a tree whose records the scene assembly has written it into.
+ */
+export interface LayoutCheckMergedIdentity {
+    /** Per triangle of the merged geometry: source instance index, index in the source mesh, and 1 to flip `frontFace`. */
+    readonly sourceInstances: Uint32Array;
+    readonly sourceTriangles: Uint32Array;
+    readonly flipFrontFace: Uint8Array;
+}
+
 export interface LayoutCheckOptions {
     readonly maxLeafPrimitives?: number;
     readonly maxProblems?: number;
+    /**
+     * The records carry a merged mesh's identity: the original index is the
+     * source mesh's triangle, the padding word the source instance, and flags
+     * bit 1 is set for a mirrored source. Without it, every record's padding
+     * must be 0 (as every builder writes it).
+     */
+    readonly merged?: LayoutCheckMergedIdentity;
 }
+
+/** Flags bit 1 (trace/layout.ts `TRIANGLE_FLAG_FLIP_FRONT_FACE`). */
+const FLIP_FRONT_FACE = 2;
 
 export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, options: LayoutCheckOptions = {}): string[] {
     const maxLeaf = options.maxLeafPrimitives ?? GPU_LAYOUT_MAX_LEAF_PRIMITIVES;
@@ -63,9 +84,36 @@ export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, op
     const positionBits = new Uint32Array(positions.buffer, positions.byteOffset, positions.length);
     const seen = new Uint8Array(triangleCount);
     const corners = [GPU_LAYOUT_TRIANGLE_WORD.vertex0, GPU_LAYOUT_TRIANGLE_WORD.vertex1, GPU_LAYOUT_TRIANGLE_WORD.vertex2];
+    const merged = options.merged;
+    // Merged records name (source instance, source triangle); map that back to the merged geometry's triangle.
+    const mergedIndexOf = new Map<number, number>();
+    if (merged) {
+        for (let triangle = 0; triangle < triangleCount; triangle++) {
+            if (merged.sourceTriangles[triangle] !== 0) continue;
+            const source = merged.sourceInstances[triangle];
+            if (mergedIndexOf.has(source)) {
+                // Two sources with one instanceIndex: a merged hit can't say which (mergeStaticGeometry refuses this).
+                report(`source instance ${source} starts at merged triangles ${mergedIndexOf.get(source)} and ${triangle}; merged sources need distinct instance indices`);
+                return problems;
+            }
+            mergedIndexOf.set(source, triangle);
+        }
+    }
     for (let slot = 0; slot < triangleCount; slot++) {
         const base = slot * TRIANGLE_WORDS;
-        const original = triangleWords[base + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
+        const padding = triangleWords[base + GPU_LAYOUT_TRIANGLE_WORD.padding];
+        let original = triangleWords[base + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
+        if (merged) {
+            const first = mergedIndexOf.get(padding);
+            const at = first === undefined ? -1 : first + original;
+            if (at < 0 || at >= triangleCount || merged.sourceInstances[at] !== padding || merged.sourceTriangles[at] !== original) {
+                if (report(`triangle slot ${slot} names source instance ${padding} triangle ${original}, which the merged mesh does not hold`)) return problems;
+                continue;
+            }
+            original = at;
+        } else if (padding !== 0) {
+            report(`triangle slot ${slot} has padding ${padding}; it is 0 outside a merged mesh`);
+        }
         if (original >= triangleCount || seen[original]) {
             if (report(`triangle slot ${slot} holds triangle ${original}, which is out of range or already placed`)) return problems;
             continue;
@@ -79,7 +127,7 @@ export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, op
                 }
             }
         }
-        const flags = triangleFlags ? triangleFlags[original] : 0;
+        const flags = ((triangleFlags ? triangleFlags[original] : 0) | (merged?.flipFrontFace[original] ? FLIP_FRONT_FACE : 0)) >>> 0;
         if (triangleWords[base + GPU_LAYOUT_TRIANGLE_WORD.flags] !== flags) report(`triangle slot ${slot} has flags ${triangleWords[base + GPU_LAYOUT_TRIANGLE_WORD.flags]}, not ${flags}`);
     }
     if (problems.length > 0) return problems;

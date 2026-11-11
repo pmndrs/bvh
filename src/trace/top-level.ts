@@ -51,6 +51,15 @@ export interface TraceInstance {
      * Defaults to 0xff, visible to every ray.
      */
     readonly mask?: number;
+    /**
+     * A merged mesh of static instances (static-merge.ts): the record gets
+     * `INSTANCE_FLAG.merged`, and hits take their instance from the triangle.
+     * Its transform must be the identity; anything else throws, because the
+     * sources' transforms are baked into the mesh. `assembleTraceScene` sets it.
+     * This only catches the group's own record moving; a merged source that
+     * moved is only caught when the scene is assembled again.
+     */
+    readonly merged?: boolean;
 }
 
 export interface TopLevelBvh {
@@ -65,6 +74,23 @@ export interface TopLevelBvh {
     readonly skippedSingular: number;
     /** `traceableIndex` order: `recordOrder[recordIndex]` is the position in the input array. */
     readonly recordOrder: Uint32Array;
+}
+
+/** True for an exact identity matrix (16 numbers, column-major): the only transform a merged instance may have. */
+export function isIdentityTransform(objectToWorld: Mat4): boolean {
+    for (let k = 0; k < 16; k++) if (objectToWorld[k] !== (k % 5 === 0 ? 1 : 0)) return false;
+    return true;
+}
+
+/** The identity transform of a merged group's record. */
+export const IDENTITY_TRANSFORM: readonly number[] = Object.freeze([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+/** The error every path that would move a merged static instance throws (static-merge.ts). */
+export function throwMergedTransformChange(instanceIndex: number, where: string): never {
+    throw new Error(
+        `instance ${instanceIndex} is a merged static instance (mergeStaticInstances): its transform is baked into a world-space mesh and cannot change (${where}). ` +
+            'Leave it out of the merge (static: false) to move it.',
+    );
 }
 
 /**
@@ -180,6 +206,7 @@ export function buildTopLevel(instances: readonly TraceInstance[], options: Part
     instances.forEach((instance, input) => {
         if (instance.visible === false || instance.contributesToGi === false) return;
         checkInstanceMask(instance.mask, instance.instanceIndex);
+        if (instance.merged === true && !isIdentityTransform(instance.objectToWorld)) throwMergedTransformChange(instance.instanceIndex, 'buildTopLevel');
         const inverse = invertAffine(instance.objectToWorld);
         if (inverse === null) {
             skippedSingular++;
@@ -224,6 +251,7 @@ export function buildTopLevel(instances: readonly TraceInstance[], options: Part
             (INSTANCE_FLAG.contributesToGi |
                 INSTANCE_FLAG.visible |
                 (entry.mirrored ? INSTANCE_FLAG.mirrored : 0) |
+                (instance.merged === true ? INSTANCE_FLAG.merged : 0) |
                 (checkInstanceMask(instance.mask, instance.instanceIndex) << INSTANCE_MASK_SHIFT)) >>>
             0;
     }

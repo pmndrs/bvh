@@ -76,7 +76,7 @@ import {
 import { createRadixSort, createRadixSortPipelines, radixPassCount, sortTileTable, type RadixSort, type RadixSortPipelines } from './gpu-radix-sort.ts';
 import { createScanBindGroups, createScanPipelines, encodeScan, SCAN_PARAMS_BYTES, scanParams, scanTileSumWords, type ScanBindGroups } from './gpu-scan.ts';
 import { dispatchWorkgroups2d } from './gpu-workgroup-scan.ts';
-import { isGpuMeshBuffers, meshTriangleCount, type GpuBuildOptions, type GpuMeshGeometry, type GpuMeshTreeRange, type GpuTreeBuffers } from './mesh-input.ts';
+import { checkTriangleFlags, isGpuMeshBuffers, meshTriangleCount, type GpuBuildOptions, type GpuMeshGeometry, type GpuMeshTreeRange, type GpuTreeBuffers } from './mesh-input.ts';
 
 /** Bits of the Morton codes: 10 per axis. */
 export const LBVH_MORTON_BITS = 30;
@@ -179,6 +179,7 @@ export function checkGeometry(geometry: GpuMeshGeometry, index: number): void {
             throw new RangeError(`${where}: needs at least one triangle, with three floats per vertex and three indices per triangle`);
         }
         if (triangleFlags && triangleFlags.length < triangles) throw new RangeError(`${where}: triangleFlags must have one entry per triangle`);
+        checkTriangleFlags(triangleFlags, triangles, where);
     }
     if (triangles > GPU_LAYOUT_MAX_TRIANGLES) throw new RangeError(`${where}: too many triangles for one tree: ${triangles}`);
 }

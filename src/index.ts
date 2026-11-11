@@ -83,7 +83,7 @@ export {
 } from './refit-cpu.ts';
 
 // Checks on any tree.
-export { checkGpuLayout, treeSahCost, type LayoutCheckOptions } from './layout-check.ts';
+export { checkGpuLayout, treeSahCost, type LayoutCheckMergedIdentity, type LayoutCheckOptions } from './layout-check.ts';
 
 // The tracer's layout, the WGSL walk (closest/any) and its CPU port, the oracle,
 // tinybvh trees in the tracer's layout, the top-level builder and the worker wrappers (BX.2).

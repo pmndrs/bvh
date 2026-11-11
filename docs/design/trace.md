@@ -23,7 +23,7 @@ Everything is plain arrays in a few storage buffers, so it survives a worker han
   }
   ```
   A child with count 0 is an inner node at `index`. A leaf child stores the first triangle and the number of triangles.
-- **Triangles: 48 bytes each, stored in tree order** (leaves point at contiguous runs, so no index indirection): `v0` + original triangle index, `v1` + flags, `v2` + pad. The three corners are stored as they are, so a vertex shared by two triangles has identical bits in both; the watertight test needs that. The original index maps a hit back to the mesh's UVs and material group. Flags bit 0 (`TRIANGLE_FLAG_FILTER`) sends the triangle to the triangle filter (below).
+- **Triangles: 48 bytes each, stored in tree order** (leaves point at contiguous runs, so no index indirection): `v0` + original triangle index, `v1` + flags, `v2` + pad. The three corners are stored as they are, so a vertex shared by two triangles has identical bits in both; the watertight test needs that. The original index maps a hit back to the mesh's UVs and material group. Flags bit 0 (`TRIANGLE_FLAG_FILTER`) sends the triangle to the triangle filter (below). Flags bit 1 (`TRIANGLE_FLAG_FLIP_FRONT_FACE`) flips the hit's `frontFace`, and the padding word holds the source instance index; both are only used by merged static meshes (below) and are 0 as every builder writes them. Flags bits 2-15 are reserved, 0; bits 16-31 are reserved for a per-instance material, which a merged mesh will carry per triangle (not written yet). Input flags (`MeshInput.triangleFlags`) may set bit 0 only: every builder, `buildTraceScene` and `mergeStaticGeometry` throw, naming the mesh and triangle, for any of bits 1-31. A GPU flags buffer (`triangleFlagsBuffer`) is not checked.
 - **Leaves:** at most 4 triangles in the tracer's own builder, fewer where the SAH cost says so. The builders take a largest-leaf option.
 - **Deforming meshes** keep the tree's shape. Refitting bottom-up needs each node's parent, so the builder also writes a parent index per node (4 bytes per node, kept in a separate array that only the refit pass uses).
 
@@ -31,7 +31,7 @@ All meshes' nodes go in one node buffer, and all triangles in one triangle buffe
 
 ### Instances and the top level
 
-- **Instance record: 64 bytes.** It holds the world-to-object transform as a 3x4 matrix (48 bytes), the mesh's root node offset, its triangle offset, the instance index, and flags. Flags bits 0-2 are `contributesToGi`, `visible` and `mirrored`; bits 8-15 hold the 8-bit instance mask (as in DXR; `0xff`, visible to every ray, unless the instance gives one). Layout version 2 added the mask; nothing else moved. Rays are moved into object space, so moving an object never touches its tree. Mirrored and non-uniform scales work because the hit distance is measured on the object-space ray, whose direction we deliberately *don't* renormalize, so `t` stays in world units.
+- **Instance record: 64 bytes.** It holds the world-to-object transform as a 3x4 matrix (48 bytes), the mesh's root node offset, its triangle offset, the instance index, and flags. Flags bits 0-3 are `contributesToGi`, `visible`, `mirrored` and `merged` (below); bits 8-15 hold the 8-bit instance mask (as in DXR; `0xff`, visible to every ray, unless the instance gives one); bits 16-31 are reserved for a per-instance material index (material + 1, 0 for none; not written yet). Layout version 2 added the mask, and before its release the `merged` bit and the meaning of the triangle's padding word and flags bit 1; nothing moved. Rays are moved into object space, so moving an object never touches its tree. Mirrored and non-uniform scales work because the hit distance is measured on the object-space ray, whose direction we deliberately *don't* renormalize, so `t` stays in world units.
 - **Top-level tree:** the same 64-byte node layout, over instance world boxes. Leaves point at instance records. It can be built on the CPU with binned SAH (`src/trace/top-level.ts`), or, on a device with subgroups, refitted on the GPU each frame something moves with a new shape built in a worker now and then (`GpuBvhRefit`; the declared fallback without subgroups is the CPU rebuild). The walk's WGSL is the same either way.
 - **Buffers:** instance records and top-level nodes share one buffer (records first, after a 64-byte header). That gives three storage buffers for tracing: nodes, triangles, and top level. This matters because a default device allows only 8 per shader stage.
 
@@ -46,7 +46,7 @@ A default device caps one storage binding at 128 MB. At 48 bytes per triangle th
   - **Closest hit** goes to the nearer child first.
   - **Any hit** goes to the *farther* child first. A shadow ray starts on a surface, so the nearer child is mostly the geometry it starts on, and what blocks it lies ahead. Any blocker will do. This made any-hit 1.1-2.8x faster on the bench scenes, with the same answers.
 - **Closest hit** keeps the nearest `t`, instance, triangle and barycentrics, and whether the hit was on the front face. Back-face hits count as hits.
-- **Front face means the side the mesh was authored as front,** also through a mirrored transform. The triangle test runs in object space, where the winding is the authored one, so no flip is needed.
+- **Front face means the side the mesh was authored as front,** also through a mirrored transform. The triangle test runs in object space, where the winding is the authored one, so no flip is needed. The exception is a merged static mesh, which is tested in world space: its triangles from mirrored sources carry flags bit 1, which flips the result.
 - **Any hit** returns at the first triangle hit within `[tMin, tMax]`.
 - **Triangle test: watertight** (Woop, Benthin and Wald 2013), with per-ray shear rows computed once per ray. It replaced Moller-Trumbore, which let rays slip through shared edges (below).
 - **Stack overflow:** the builders report the maximum depth. The top-level and mesh depths together must fit in the stack (47 levels are left for a mesh tree under a top level; a deeper GPU-built tree is refused).
@@ -74,6 +74,56 @@ fn bvhTrianglePasses(candidate: BvhCandidate) -> bool         // supplied by the
 - **`rayMasks: false`** compiles the mask code out of the same walk (no second walk): no `*Masked` functions, no mask parameter or test, instance masks ignored, `rayMask` all ones in the candidate. Nothing changes size in either mode: `BvhRay` stays 32 bytes and instance records 64.
 - **Batch kernel.** `batchKernelWgsl(mode, { traceSlot, triangleFilter, rayMasks })`: rays and results in group 1, and with ray masks one mask for the whole batch, a uniform at group 1 binding 2 (`BATCH_PARAMS_BYTES`). There is no per-ray mask buffer.
 - **CPU walk and reference.** `createCpuTracer(scene, { triangleFilter, rayMasks })` with `closest(ray, { mask, stats })` and `any(ray, { mask, stats })`; `buildReferenceScene(meshes, instances, { triangleFilter, rayMasks })` with `traceClosestReference(scene, ray, { mask })` and `traceAnyReference(scene, ray, { mask })`. The filter is a `TrianglePasses`, taking a `TriangleCandidate` with the WGSL struct's fields. The reference asks it about every triangle it really hits (it has no flags), so test filters should give one answer per triangle: f32 and f64 disagree right at a decision boundary inside a triangle.
+
+## Merged static instances (`mergeStaticInstances`, off by default)
+
+Every instance box a ray enters costs a transform, a marker push and a descent into that mesh's tree. In scenes made of one instance per mesh (Sponza, Bistro), the boxes overlap heavily, and rays that start on surfaces pay for it: on Sponza a surface origin sits inside 5.8 instance boxes, and a ray enters 9.8 instances, 8.1 of them without a hit. Merging puts instances that never move into one world-space tree under an identity transform, so such rays walk one tree.
+
+**What merges.** An instance with `static: true` whose mesh no other instance uses and has triangles, whose transform can be inverted, and that is visible and contributes to GI. Hidden and non-GI instances stay normal instances: the top level skips them either way, so the scene traces as with the option off. Merged instances are grouped by mask, and each group becomes one mesh with one identity-transform instance record. Merged sources must have distinct `instanceIndex` values (a hit names its source by it); `mergeStaticGeometry` throws otherwise. Everything else stays a normal instance, in the same top level. A material index is not a grouping key: it will travel per triangle (flags bits 16-31) once the per-instance material lands.
+
+**API.**
+- `buildTraceScene(geometries, instances, { build, mergeStaticInstances })` builds and assembles. `build` is any builder (`buildMeshBvhWithTinyBvh`, a worker builder's `build`, a GPU layout).
+- Lower level: `mergeStaticGeometry(meshes, instances)` returns a plan. Each group has `geometry`, a normal mesh input with world-space positions and `Uint32Array` indices, plus per-triangle `sourceInstances`, `sourceTriangles` and `flipFrontFace` beside it. Build each group's geometry with any builder, then call `assembleTraceScene(meshes, instances, topLevelOptions, { merged: { plan, meshes: groupTrees } })`. Meshes that only merged instances use need no tree of their own (`plan.meshNeeded`, pass `null`).
+- With the option off, or without `merged`, the scene is byte for byte what it was before the option existed (a unit test pins `main`'s hash).
+
+**Exact hits with no memory growth.** The builders never see the ids. Assembly writes them into its copy of the built records: `originalIndex` becomes the triangle's index in its source mesh, the padding word (word 11) the source instance index, and flags bit 1 is set for a mirrored source, because world space reverses that source's winding. The source's filter flag (bit 0) is kept. The record of a group has `INSTANCE_FLAG.merged` (bit 3) and `instanceIndex` `0xffffffff`. The walk then does, per hit:
+
+```wgsl
+let hitInstance = select(instance.instanceIndex, triangle.padding, (instance.flags & BVH_INSTANCE_FLAG_MERGED) != 0u);
+let frontFace = triangleHit.frontFacing != ((triangle.flags & BVH_TRIANGLE_FLAG_FLIP_FRONT_FACE) != 0u);
+```
+
+`BvhHit.instance`, `BvhCandidate.instance` (the filter sees the source instance) and `frontFace` come out as for the instanced scene; the CPU walk does the same. The reference needs no change: it traces the source instances in world space. Barycentrics are unchanged, because corner order is kept; `t` agrees with the instanced scene to rounding. A hit normal computed from a merged triangle's world-space edges must apply the flip bit too.
+
+**Filter flags on a merged mesh.** Either set them before the build (`triangleFlags` on the source mesh, which `mergeStaticGeometry` copies per source triangle), or write them after assembly on the group's range: `writeTriangleFilterFlags(scene.triangles, (original, sourceInstance) => ..., scene.mergedGroups[g])`. On a merged range the callback's second argument is the record's source instance (`mergedGroups[g].sourceMeshes` maps it to the mesh), because `original` alone is ambiguous across sources; elsewhere it is `undefined`. A merged mesh's own `scene.meshes[i]` entry is empty and has `mergedInto: g`, and `writeTriangleFilterFlags` throws for it rather than silently flag nothing.
+
+**Watertight.** Each source mesh's vertices are transformed once each, in doubles and rounded once to f32, and the indices are kept. A vertex two triangles share has the same world-space bits in both, so the watertight test still holds. The oracle's merged variants let none of 2M shared-edge rays through.
+
+**Swapping trees.** A merged group is a normal mesh, so its tree from the GPU H-PLOC or LBVH (`createMeshLayoutBuilder`) or from tinybvh goes into `assembleTraceScene` the same way, and assembly writes the ids into its own copy each time. To serve the GPU tree first and tinybvh's later, assemble again with the new tree and the same plan; assembly checks that the plan still fits the instances (below). Which tree is in use is the app's choice. (`writeMergedTriangleIdentity` writes the ids into a tree's records directly, once, for an app that places records itself.)
+
+**Static means static.** The source transforms are baked into the merged geometry, and **only re-assembly detects a moved source**: `assembleTraceScene` throws, naming the instance, if a merged instance's transform differs from the one in the plan, or if its mask, `visible` or `contributesToGi` changed. Nothing checks between assemblies. A caller that moves or hides a merged source and only rebuilds or refits the top level keeps tracing it where and as it was. The checks in `buildTopLevel` and in the top-level shape build and check (`TopLevelBuildInput.merged`) only catch a `merged` record whose own transform isn't the identity, which nothing in this package produces; they guard hand-written records, not moved sources. To move, hide or re-mask an instance, leave it out of the merge (`static: false`) or make a new plan.
+
+**Never refit a merged range.** Its records hold world-space corners and source-mesh triangle indices, so `GpuMeshRefit` over it, fed a source's object-space vertices, would write wrong triangles. `TraceSceneData.meshes[i]` of a merged mesh is empty and carries `mergedInto`; `meshRefitPlacement(scene, i)` gives the word offsets for `GpuMeshRefit.setTree` and refuses merged meshes. `GpuMeshRefit` itself takes raw offsets and can't tell.
+
+**When it helps, and when it doesn't.**
+- It helps scenes with many meshes used once whose boxes overlap, which is most authored scenes (architecture, Sponza, Bistro), most of all for rays that start on surfaces.
+- It does little for heavily instanced scenes. Meshes used more than once never merge, because copying them would cost memory per copy.
+- Rays from points in the air already enter few instances, so they gain less.
+
+**Precision.** Merged triangles are stored in world space as f32. Geometry far from the origin loses precision that object space kept: at 10 km the f32 step is about 1 mm, and the triangle test and boxes work at that resolution. Merge only what sits near the origin, or re-centre the world first.
+
+**Build time.** One big build replaces many small ones, and a single build can't spread over the worker pool. On Sponza (132 meshes, 5.74 M triangles, all static, Node on an M5 Pro, `tools/merge-static.ts`), tinybvh took 1.53 s for the merged tree. The per-mesh builds took 1.25 s summed, and the largest took 54 ms, so a pool of workers finishes the instanced build much sooner. Bistro interior took 264 ms merged, against 200 ms summed. Nothing comes near minutes, but on the main thread it is a 1.5 s stall: build in a worker. The GPU H-PLOC builds a merged mesh like any other.
+
+**Memory.** On Sponza the merged scene has 185.2 MB of nodes (185.1 MB instanced) and 263.0 MB of triangle records (the same). The ids use words that were already there. The top level shrinks from 16.5 KB to 0.2 KB. The merged build input (world positions, indices and per-triangle ids, about 150 MB on Sponza) lives only until the tree is built and assembled.
+
+**Measured (study RC5.4, webgpu-ddgi-radiance-cache, Apple M5 Pro).** One world-space tree over all triangles, built by tinybvh at the default leaf size, traced surface rays faster than per-mesh instances:
+
+| Scene | Closest hit | Any hit |
+| --- | --- | --- |
+| Sponza | 1.86x | 1.39x |
+| Bistro interior | 1.24x | 1.13x |
+
+Source: `docs/design/radiance-cache-speed.md` (lever 20) and `tools/gpu/pages/trace-bench/surface-rays-bench.ts` (`TreeLayout = 'merged'`) in webgpu-ddgi-radiance-cache. That bench matched hits only approximately (0.999 agreement). Here hit identity is exact (instance, triangle, side), while `t` agrees to rounding, so on a near-tie the merged walk may pick the other triangle. The radiance-cache team re-runs its surface-ray benches against this branch.
 
 ## Why the triangle test is watertight
 

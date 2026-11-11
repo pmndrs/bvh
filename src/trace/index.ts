@@ -15,6 +15,7 @@ export * from './top-level.ts';
 export * from './top-level-shape.ts';
 export * from './top-level-async.ts';
 export * from './scene-assembly.ts';
+export * from './static-merge.ts';
 export * from './cpu-traversal.ts';
 export * from './reference-tracer.ts';
 export * from './oracle-compare.ts';

@@ -20,7 +20,7 @@
 import { halfArea, leafSlotsOf, parentSlotsOf, PRIMITIVE_BOX_FLOATS, refitOnCpu, relativeSahCost } from '../refit-cpu.ts';
 import { BVH_NODE_BYTES } from './layout.ts';
 import { buildSahTree, DEFAULT_SAH_OPTIONS } from './sah-builder.ts';
-import { transformBounds } from './top-level.ts';
+import { isIdentityTransform, throwMergedTransformChange, transformBounds } from './top-level.ts';
 
 /** What a top-level build needs per instance, as flat arrays that can move to a worker. */
 export interface TopLevelBuildInput {
@@ -32,6 +32,15 @@ export interface TopLevelBuildInput {
     readonly objectToWorld: Float64Array;
     /** The instance's mesh box in object space, six floats per instance (`[min, max]`). */
     readonly meshBounds: Float32Array;
+    /**
+     * 1 for an instance that is a merged mesh of static instances
+     * (static-merge.ts). Its transform must stay the identity: a build or
+     * check with anything else throws. That only catches the group's own
+     * record moving: a merged *source* that moved is only caught when the
+     * scene is assembled again (`assembleTraceScene` checks the plan).
+     * Optional; omitted means none is merged.
+     */
+    readonly merged?: Uint8Array;
 }
 
 export interface TopLevelShape {
@@ -62,12 +71,24 @@ export interface TopLevelCheck {
 
 /** The world box of each input instance, six floats each. */
 function worldBoxes(input: TopLevelBuildInput): Float32Array {
+    checkMergedTransforms(input);
     const count = input.slots.length;
     const boxes = new Float32Array(count * 6);
     for (let instance = 0; instance < count; instance++) {
         transformBounds(input.meshBounds.subarray(instance * 6, instance * 6 + 6), input.objectToWorld.subarray(instance * 16, instance * 16 + 16), boxes, instance * 6);
     }
     return boxes;
+}
+
+/** Merged instances' transforms are baked into their meshes: refuse any that moved. */
+function checkMergedTransforms(input: TopLevelBuildInput): void {
+    const merged = input.merged;
+    if (!merged) return;
+    for (let instance = 0; instance < merged.length; instance++) {
+        if (merged[instance] && !isIdentityTransform(input.objectToWorld.subarray(instance * 16, instance * 16 + 16))) {
+            throwMergedTransformChange(input.slots[instance], 'top-level shape');
+        }
+    }
 }
 
 /** Builds the shape over the instances' world boxes. One instance per leaf. */
@@ -138,6 +159,7 @@ export class TopLevelShapeKeeper {
      * `ratio` times its as-built cost, or if that shape isn't known.
      */
     check(input: TopLevelBuildInput, ratio: number, currentGeneration: number, generation: number): TopLevelCheck {
+        checkMergedTransforms(input);
         const kept = this.kept.get(currentGeneration);
         if (!kept || kept.nodeCount === 0) return { shape: this.build(input, generation), relativeCost: 0, builtCost: 0 };
 
@@ -173,7 +195,9 @@ export class TopLevelShapeKeeper {
 
 /** The input buffers, which move to the worker with the request. */
 export function topLevelInputTransferables(input: TopLevelBuildInput): Transferable[] {
-    return [input.slots.buffer, input.visible.buffer, input.objectToWorld.buffer, input.meshBounds.buffer];
+    const buffers: Transferable[] = [input.slots.buffer, input.visible.buffer, input.objectToWorld.buffer, input.meshBounds.buffer];
+    if (input.merged) buffers.push(input.merged.buffer);
+    return buffers;
 }
 
 /** The buffers to move (not copy) when a shape crosses a worker boundary. */

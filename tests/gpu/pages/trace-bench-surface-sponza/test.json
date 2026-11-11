@@ -1,0 +1,5 @@
+{
+    "description": "Paired surface-ray bench on sponza: surface and air-grid rays, closest and any hit, through the per-mesh instanced tree and the merged static tree (buildTraceScene mergeStaticInstances), 5 paired rounds with the order reversed every other round. Fails only if the trees disagree on hits. Slow; run under the bench lock, on its own.",
+    "timeoutMs": 900000,
+    "manual": true
+}
