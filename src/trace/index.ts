@@ -15,6 +15,7 @@ export * from './sah-builder.ts';
 export * from './top-level.ts';
 export * from './top-level-shape.ts';
 export * from './top-level-async.ts';
+export * from './top-level-gpu.ts';
 export * from './scene-assembly.ts';
 export * from './static-merge.ts';
 export * from './cpu-traversal.ts';

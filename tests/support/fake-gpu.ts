@@ -101,6 +101,11 @@ type RecordedCommand = { copy: RecordedCopy } | { dispatch: RecordedDispatch } |
 
 interface FakePipeline {
     readonly entryPoint: string;
+    getBindGroupLayout(index: number): object;
+}
+
+function fakePipeline(descriptor: GPUComputePipelineDescriptor): FakePipeline {
+    return { entryPoint: descriptor.compute.entryPoint ?? '', getBindGroupLayout: (index: number) => ({ index }) };
 }
 
 interface FakeBindGroup {
@@ -110,6 +115,11 @@ interface FakeBindGroup {
 export class FakeEncoder {
     /** Copies and dispatches in recording order: submit runs them in this order. */
     readonly commands: RecordedCommand[] = [];
+
+    /** The encoder is its own command buffer: `queue.submit` runs it. */
+    finish(): GPUCommandBuffer {
+        return this as unknown as GPUCommandBuffer;
+    }
 
     get copies(): RecordedCopy[] {
         return this.commands.flatMap((command) => ('copy' in command ? [command.copy] : []));
@@ -193,9 +203,32 @@ export function createFakeGpu(limits: Partial<GPUSupportedLimits> = {}, options:
         maxTextureArrayLayers: 256,
         ...limits,
     };
+    const run = (encoder: GPUCommandEncoder): void => {
+        for (const command of (encoder as unknown as FakeEncoder).commands) {
+            if ('dispatch' in command) {
+                const { entryPoint, bindings, workgroupsX, workgroupsY } = command.dispatch;
+                for (const binding of bindings.values()) if (binding.buffer.destroyed) throw new Error('submit uses a destroyed buffer');
+                options.kernels?.[entryPoint]?.(bindings, workgroupsX, workgroupsY);
+                continue;
+            }
+            if ('clear' in command) {
+                const { buffer, offset, size } = command.clear;
+                if (buffer.destroyed) throw new Error('submit uses a destroyed buffer');
+                buffer.bytes.fill(0, offset, offset + size);
+                continue;
+            }
+            const copy = command.copy;
+            if (copy.source.destroyed || copy.destination.destroyed) throw new Error('submit uses a destroyed buffer');
+            if (copy.sourceOffset + copy.size > copy.source.size || copy.destinationOffset + copy.size > copy.destination.size) {
+                throw new Error('copy out of range');
+            }
+            copy.destination.bytes.set(copy.source.bytes.subarray(copy.sourceOffset, copy.sourceOffset + copy.size), copy.destinationOffset);
+        }
+    };
     const device = {
         limits: fullLimits,
         features: new Set<string>(options.features ?? []),
+        createCommandEncoder: () => new FakeEncoder(),
         createBuffer(descriptor: GPUBufferDescriptor) {
             if (descriptor.size > fullLimits.maxBufferSize) throw new Error(`buffer of ${descriptor.size} bytes is over maxBufferSize`);
             const buffer = new FakeBuffer(descriptor);
@@ -215,11 +248,11 @@ export function createFakeGpu(limits: Partial<GPUSupportedLimits> = {}, options:
         },
         createComputePipeline(descriptor: GPUComputePipelineDescriptor) {
             counters.pipelines++;
-            return { entryPoint: descriptor.compute.entryPoint ?? '' } satisfies FakePipeline;
+            return fakePipeline(descriptor);
         },
         createComputePipelineAsync(descriptor: GPUComputePipelineDescriptor) {
             counters.pipelines++;
-            return Promise.resolve({ entryPoint: descriptor.compute.entryPoint ?? '' } satisfies FakePipeline);
+            return Promise.resolve(fakePipeline(descriptor));
         },
         createBindGroupLayout(descriptor: GPUBindGroupLayoutDescriptor) {
             return { descriptor };
@@ -232,6 +265,11 @@ export function createFakeGpu(limits: Partial<GPUSupportedLimits> = {}, options:
             return { entries: [...descriptor.entries] } satisfies FakeBindGroup;
         },
         queue: {
+            /** Runs command buffers (encoders, as `finish()` returns them) in order. */
+            submit(commandBuffers: readonly GPUCommandBuffer[]) {
+                for (const commands of commandBuffers) run(commands as unknown as GPUCommandEncoder);
+            },
+            onSubmittedWorkDone: () => Promise.resolve(),
             writeBuffer(buffer: GPUBuffer, bufferOffset: number, data: ArrayBufferView | ArrayBuffer, dataOffset = 0, size?: number) {
                 const target = buffer as unknown as FakeBuffer;
                 if (target.destroyed) throw new Error(`writeBuffer into destroyed buffer "${target.label}"`);
@@ -254,27 +292,6 @@ export function createFakeGpu(limits: Partial<GPUSupportedLimits> = {}, options:
         buffers,
         counters,
         createEncoder: () => new FakeEncoder() as unknown as GPUCommandEncoder,
-        submit(encoder) {
-            for (const command of (encoder as unknown as FakeEncoder).commands) {
-                if ('dispatch' in command) {
-                    const { entryPoint, bindings, workgroupsX, workgroupsY } = command.dispatch;
-                    for (const binding of bindings.values()) if (binding.buffer.destroyed) throw new Error('submit uses a destroyed buffer');
-                    options.kernels?.[entryPoint]?.(bindings, workgroupsX, workgroupsY);
-                    continue;
-                }
-                if ('clear' in command) {
-                    const { buffer, offset, size } = command.clear;
-                    if (buffer.destroyed) throw new Error('submit uses a destroyed buffer');
-                    buffer.bytes.fill(0, offset, offset + size);
-                    continue;
-                }
-                const copy = command.copy;
-                if (copy.source.destroyed || copy.destination.destroyed) throw new Error('submit uses a destroyed buffer');
-                if (copy.sourceOffset + copy.size > copy.source.size || copy.destinationOffset + copy.size > copy.destination.size) {
-                    throw new Error('copy out of range');
-                }
-                copy.destination.bytes.set(copy.source.bytes.subarray(copy.sourceOffset, copy.sourceOffset + copy.size), copy.destinationOffset);
-            }
-        },
+        submit: (encoder) => run(encoder),
     };
 }
