@@ -80,6 +80,10 @@ import {
 } from './shapes.ts';
 
 const TRIANGLE_WORDS = GPU_LAYOUT_TRIANGLE_BYTES / 4;
+/** Scratch for closestPointToPoint, which runs no user code (so it can't be re-entered mid-call). */
+const CLOSEST_QUERY = new BvhVector3();
+const CLOSEST_TEMP = new BvhVector3();
+const CLOSEST_BEST = new BvhVector3();
 const CORNER_WORDS = [GPU_LAYOUT_TRIANGLE_WORD.vertex0, GPU_LAYOUT_TRIANGLE_WORD.vertex1, GPU_LAYOUT_TRIANGLE_WORD.vertex2] as const;
 
 /** Which faces a raycast hits. The values are three's `FrontSide`, `BackSide` and `DoubleSide`. */
@@ -991,9 +995,10 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
      */
     closestPointToPoint(point: BvhVec3Like, target: BvhClosestPointTarget = {}, minThreshold = 0, maxThreshold = Infinity): BvhClosestPoint | null {
         const [px, py, pz] = readVec3(point);
-        const query = new BvhVector3(px, py, pz);
-        const temp = new BvhVector3();
-        const best = new BvhVector3();
+        // Module scratch: nothing below calls user code, and writeClosestPoint copies `best` out.
+        const query = CLOSEST_QUERY.set(px, py, pz);
+        const temp = CLOSEST_TEMP;
+        const best = CLOSEST_BEST;
         const minThresholdSq = minThreshold * minThreshold;
         const maxThresholdSq = maxThreshold * maxThreshold;
         let closestDistanceSq = Infinity;
