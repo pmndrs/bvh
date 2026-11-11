@@ -51,6 +51,8 @@ export { ExtendedTriangle, OrientedBox, SeparatingAxisBounds } from './shapes.ts
 // three-mesh-bvh's names for what intersectsBounds returns.
 export { BVH_CONTAINED as CONTAINED, BVH_INTERSECTED as INTERSECTED, BVH_NOT_INTERSECTED as NOT_INTERSECTED } from '../query/cpu-mesh-bvh.ts';
 export { GenerateMeshBvhWorker, type GenerateMeshBvhWorkerOptions } from './generate.ts';
+// three-mesh-bvh's helper: a tree's boxes as line segments.
+export { BVHHelper, MeshBVHHelper } from './helper.ts';
 // three-mesh-bvh's debug functions (the core's, which take any CpuMeshBvh, so a BvhBoundsTree too).
 export { estimateMemoryInBytes, getBVHExtremes, validateBounds, type BvhExtremes, type BvhExtremes as ExtremeInfo } from '../query/debug.ts';
 

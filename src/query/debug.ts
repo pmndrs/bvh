@@ -109,6 +109,58 @@ export function validateBounds(tree: CpuMeshBvh<unknown>): boolean {
 }
 
 /**
+ * The boxes three-mesh-bvh's `BVHHelper` draws, as corner positions: 8
+ * corners per box (x outermost, then y, then z; min before max), 24 numbers.
+ * A box is drawn when it is a leaf or at depth `depth - 1` (the walk stops
+ * there), and, with `displayParents`, every box above those too. Empty boxes
+ * are skipped. The root is at depth 0, so `depth` 1 draws the root's box.
+ */
+export function bvhHelperPositions(tree: CpuMeshBvh<unknown>, depth: number, displayParents: boolean): Float32Array {
+    const targetDepth = depth - 1;
+    const boxes: Float32Array[] = [];
+    tree.traverseNodes((nodeDepth, isLeaf, box) => {
+        if (box[3] < box[0] || box[4] < box[1] || box[5] < box[2]) return true;
+        const terminate = nodeDepth >= targetDepth || isLeaf;
+        if (terminate || displayParents) boxes.push(box);
+        return terminate;
+    });
+    const positions = new Float32Array(boxes.length * 24);
+    let at = 0;
+    for (const box of boxes) {
+        for (let x = 0; x < 2; x++) {
+            for (let y = 0; y < 2; y++) {
+                for (let z = 0; z < 2; z++) {
+                    positions[at++] = box[x * 3];
+                    positions[at++] = box[1 + y * 3];
+                    positions[at++] = box[2 + z * 3];
+                }
+            }
+        }
+    }
+    return positions;
+}
+
+/** Corner pairs of a box's 12 edges ({@link bvhHelperPositions}' corner order), three-mesh-bvh's. */
+const BOX_EDGES = [0, 4, 1, 5, 2, 6, 3, 7, 0, 2, 1, 3, 4, 6, 5, 7, 0, 1, 2, 3, 4, 5, 6, 7];
+/** Corner triples of a box's 12 faces' triangles, three-mesh-bvh's. */
+const BOX_FACES = [0, 1, 2, 2, 1, 3, 4, 6, 5, 6, 7, 5, 1, 4, 5, 0, 4, 1, 2, 3, 6, 3, 7, 6, 0, 2, 4, 2, 6, 4, 1, 5, 3, 3, 5, 7];
+
+/**
+ * The index buffer three-mesh-bvh's `BVHHelper` draws {@link bvhHelperPositions}
+ * with: 12 edges per box as line segments (`edges`), or 12 triangles. 16-bit
+ * when `positions` has at most 65,535 numbers, as three-mesh-bvh decides.
+ */
+export function bvhHelperIndices(positions: Float32Array, edges: boolean): Uint16Array | Uint32Array {
+    const boxCount = positions.length / 24;
+    const pattern = edges ? BOX_EDGES : BOX_FACES;
+    const indices = positions.length > 65535 ? new Uint32Array(pattern.length * boxCount) : new Uint16Array(pattern.length * boxCount);
+    for (let box = 0; box < boxCount; box++) {
+        for (let i = 0; i < pattern.length; i++) indices[box * pattern.length + i] = box * 8 + pattern[i];
+    }
+    return indices;
+}
+
+/**
  * three-mesh-bvh's `estimateMemoryInBytes(bvh)`: the bytes the tree holds,
  * {@link CpuMeshBvh.estimateMemoryInBytes} (the layout, its one-instance top
  * level and lookups made so far; not the source geometry). three-mesh-bvh
