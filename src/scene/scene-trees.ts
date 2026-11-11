@@ -812,6 +812,11 @@ export class SceneTrees {
      * next update: all of them, or only the meshes `which` accepts (by mesh
      * handle; merged groups by `-1 - group`).
      */
+    /** Turns `holdRefinements` on or off from now on (off releases every held tree at the next update). */
+    setHoldRefinements(hold: boolean): void {
+        this.refinementHold = hold ? () => true : null;
+    }
+
     releaseRefinements(which?: (mesh: number) => boolean): void {
         const held = this.refinementHold;
         if (!held) return;

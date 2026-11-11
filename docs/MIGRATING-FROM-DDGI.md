@@ -156,3 +156,19 @@ Off by default, and nothing changes when it stays off. It targets the surface-ra
 5. Rebuild any serialized trees.
 6. Run ddgi's oracle and material pages; both must report 0 mismatches.
 7. Optionally, turn on `mergeStaticInstances` (section 6) and re-run the surface-ray benches.
+
+## 8. Scene trees: `SceneTrees` replaces ddgi's tree half of `ray-queries.ts`
+
+`gpu-mesh-trees.ts`, `growable-storage.ts`, `top-level-gpu.ts`, `deforming-trees.ts` and the tree half of `ray-queries.ts` are in the package (`src/scene/`, `src/trace/top-level-gpu.ts`). ddgi can keep its own until P3, or drive `SceneTrees` from its scene copy:
+
+| ddgi | `@pmndrs/bvh` |
+| --- | --- |
+| `meshesUploaded` / `meshesRemoved` | `addMesh(geometry, { deforming })` / `removeMesh(mesh)` |
+| scene-copy instances, `setTransform`, visibility | `addInstance`, `setTransform`, `setInstance({ visible, contributesToGi, mask, material })`, `removeInstance` |
+| `meshesPosed` with `deformBounds` | `setPose(mesh, vertices)`, `deforming: { bounds }` |
+| `update(encoder, upload)` | `update(encoder)` |
+| `module.resources()`, `module.version` | `buffers`, `version` (or `traceBuffers` for `TraceBatchKernel`) |
+| `meshTreeCounts`, `memory`, `holdRefinements`, `releaseRefinements` | `counts`, `memory`, `holdRefinements`, `releaseRefinements`, plus `onTree` events and `meshStatus` (`builtBy`, `fallbackReason`) |
+
+The GPU top level's gather reads its own instance table, not the scene copy: hits name `instanceIndex` (ddgi passes its scene slot). ddgi's install hook for triangle flags (`requestTriangleFlags`) has no twin yet: write flags before the build (`MeshInput.triangleFlags`) or after placement on `meshStatus(mesh).placement`.
+
