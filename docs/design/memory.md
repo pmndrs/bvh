@@ -211,7 +211,7 @@ Computed from the tables above, Sponza first and Bistro exterior second (MiB). "
 | ---: | --- | --- | ---: | --- |
 | 1 | **Scratch pooling, or batches built one after another with their scratch freed** | peak | **537.6 to 808.0 / 111.8 to 391.8** | peak 1,482.4 down to 944.8 (128 MiB batches, the default device) or 674.4 (16 MiB). The scratch and inputs are 57% of the peak. Smaller batches alone save nothing (all batches are created before the submit). Resident bytes unchanged. |
 | 2 | **Indexed leaves** | resident | **241.1 to 263.0 / 118.7 to 129.5** | drop the 48-byte records; keep a 4-byte original-triangle id each (21.9 / 10.8 MiB) or, like three-mesh-bvh, reorder the app's index in place (nothing kept). Net of the geometry the walk would then read (101.3 / 65.8 MiB), if the app does not already hold it on the GPU: 139.8 to 161.7 / 52.9 to 63.7. |
-| 3 | **Compressed nodes** | resident | **92.6 to 138.8 / 40.2 to 60.3** | 64 to 32 bytes halves the 185.1 / 80.4; 64 to 16 (CWBVH-like) saves three quarters. |
+| 3 | **Compressed nodes** (built as quantized nodes, below) | resident | **92.6 to 138.8 / 40.2 to 60.3** | 64 to 32 bytes halves the 185.1 / 80.4; 64 to 16 (CWBVH-like) saves three quarters. |
 | 4 | Freeing CPU copies | CPU | 256 / 256 (WASM heaps); 263.0 / 129.5 (deforming meshes) | terminating idle pool workers frees 4 x 64 MiB of WASM heap; a deforming mesh's retained layout needs only nodes and parents, so its 48-byte records can go (the whole 263.0 MiB if every mesh deforms). Static scenes have no CPU copy to free. |
 | 5 | Larger leaves | resident | 0.5 to 141.3 / 3.2 to 58.8 | measured: allowing 8 instead of 4 saved 0.5 / 3.2 MiB, because tinybvh's SAH picks 1.9 / 2.1 triangles per leaf. The upper bound is leaves forced to 8 full triangles (nodes = triangles / 8 x 64 B = 43.8 / 21.6 MiB), which is a builder change, a speed question, and past the layout's cap of 8. |
 | 6 | Smaller triangle records | resident | 43.8 to 109.6 / 21.6 to 54.0 | 48 to 40 bytes (corners 36 + a hit-time table for id and flags, which still needs the walk to read flags for the filter) saves 8 per triangle; 28 bytes (one corner and two 16-bit edges relative to the leaf, plus id) saves 20, and costs bit-exact shared vertices that the watertight test relies on. Overlaps lever 2. |
@@ -245,6 +245,24 @@ Lever 2 as option B of [indexed-leaves.md](indexed-leaves.md): 16-byte tree-orde
 - **`SceneTrees` on Sponza** (`scene-trees-sponza`, M5, the default 256 MiB cap, settled after the swaps): records 458.6 MiB, peak 711; indexed `vec4` 327.1 (nodes 194.1 with growth room, triangles 87.7, positions 45.2), peak 580; indexed packed 315.8, peak 568.7. Merged, uncapped: records 470.4, peak 1,482.6; indexed 362.2, peak 1,350.9. First trees 130 ms indexed against 118 (records), tinybvh 300 ms against 285. 0 disagreements with the CPU reference in every state.
 - The CPU trees (`CpuMeshBvh`) stay on records: an indexed tree is expanded with its source on construction.
 - Speed (M5, indicative): `vec4` indexed traces at 0.83-0.99x records' rate (median of rounds), packed at 0.75-0.92x; details in indexed-leaves.md, "Measured". Records stay the default until the RTX 3060 is measured.
+
+## Quantized nodes (lever 3, built; off by default)
+
+Lever 3 as option A of [compressed-nodes.md](compressed-nodes.md): 32-byte two-child nodes with 16-bit planes on a per-mesh grid, and one 32-byte frame slot per placed tree. `tools/memory-breakdown.ts` (Node, the same tinybvh trees, `buildTraceScene`), MiB beyond the app's geometry:
+
+| | Sponza | Bistro exterior |
+| --- | ---: | ---: |
+| `f32` nodes, records (today's default) | 185.1 + 263.0 + 0.0 = **448.1** | 80.4 + 129.5 + 0.2 = **210.1** |
+| Quantized nodes, records | 92.6 + 263.0 + 0.0 = **355.5** (−92.6) | 40.3 + 129.5 + 0.2 = **169.9** (−40.2) |
+| Indexed leaves (`vec4`, welded), `f32` nodes | 318.0 | 155.5 |
+| **Quantized nodes and indexed leaves** | 92.6 + 87.7 + 45.2 = **225.5** (−222.6) | 40.3 + 43.2 + 31.7 = **115.3** (−94.8) |
+| Merged static, quantized, records / indexed | 355.5 / 247.4 | 169.8 / 125.9 |
+
+- The nodes halve exactly, plus 32 bytes per tree (132 on Sponza, 1,296 on Bistro exterior: 4 KiB and 41 KiB). The design's 225.4 / 115.3 estimate holds.
+- **The build peak**: GPU batches still write 64-byte nodes (the climbs need `f32` words), so the batch sizes and `gpuMaxBatchBytes` planning don't change; `SceneTrees` packs them on the way into storage, so the settled storage, and the capped peak's floor (storage plus one batch), drop by the node saving. A GPU builder asked for quantized output (`nodeFormat: 'quantized'`) holds both node buffers for the moment of its `finish`.
+- **Deforming meshes** keep a 64-byte copy of their nodes on the GPU in `GpuMeshRefit` (the refit's climb runs on it): 64 bytes per node, deforming meshes only.
+- `SceneTrees` on Sponza: see compressed-nodes.md, "Measured".
+- The CPU trees (`CpuMeshBvh`) stay 64 bytes per node: a quantized tree is decoded on construction.
 
 ## The 40-byte hit record
 
