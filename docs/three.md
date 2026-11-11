@@ -70,7 +70,37 @@ renderer.compute(kernel); // or render
 
 ## CPU raycast
 
-Not yet: `computeBoundsTree` / `acceleratedRaycast` / `disposeBoundsTree` drop-ins over the CPU walk are the next step.
+These are drop-ins for three-mesh-bvh's functions of the same names. They run the CPU walk (`createCpuTracer`) over one tinybvh tree per geometry:
+
+```ts
+await prepareBoundsTrees();                         // loads tinybvh (WebAssembly) once
+BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+Mesh.prototype.raycast = acceleratedRaycast;
+geometry.computeBoundsTree();
+raycaster.firstHitOnly = true;                      // optional
+```
+
+- **What three would return:** the same intersections as three's `Mesh.raycast`:
+  - the draw range, and with an array of materials, the groups;
+  - `side` (front, back or double);
+  - `near` and `far`.
+- **The same fields:** `distance`, `point`, `face` (`a`, `b`, `c`, `normal`, `materialIndex`), `faceIndex`, `barycoord`, `uv`, `uv1` and `normal`. `InstancedMesh` and `BatchedMesh` get these through `Mesh.raycast`.
+- **All hits:** without `firstHitOnly`, every hit is returned, as three does. The triangle filter collects them.
+- **Falls back to three's raycast** when the geometry has no tree, for a `SkinnedMesh`, or when there are morph targets.
+- **Not matched:** a range that starts off a multiple of 3. Moved positions need `computeBoundsTree` again.
+- **Tested:** `src/three/raycast.test.ts` checks it against three on 8,000 random rays.
+
+Raycasts per second, Node 22 on the Apple M5 while other jobs were running (`node --experimental-transform-types bench/three-raycast.ts --seconds 2`, three runs, median). The mesh is a torus knot, the rays come from outside, and 81% of them hit:
+
+| 100k triangles | Build ms | `firstHitOnly` | All hits |
+| --- | --- | --- | --- |
+| three's `Mesh.raycast` | none | 294 | 288 |
+| three-mesh-bvh 0.9.18 (CENTER, its default) | 31 | 664,652 | 238,685 |
+| three-mesh-bvh 0.9.18 (SAH) | 95 | 647,330 | 286,503 |
+| `@pmndrs/bvh/three` (tinybvh) | 28 | 692,630 | 315,420 |
+
+At 10k triangles: three 3,390; three-mesh-bvh 607k (CENTER) and 656k (SAH); ours 629k (`firstHitOnly`). All hits: 285k, 281k and 363k.
 
 ## Switching the known consumers
 
