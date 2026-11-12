@@ -18,7 +18,7 @@ export const RAY_BYTES = 32;
 export const RAY_FLOATS = RAY_BYTES / 4;
 
 /** Packs rays into the `BvhRay` layout, ready for `writeBuffer`. */
-export function packRays(rays: readonly TraceRay[]): Float32Array {
+export function packRays(rays: readonly TraceRay[]): Float32Array<ArrayBuffer> {
     const packed = new Float32Array(rays.length * RAY_FLOATS);
     rays.forEach((ray, index) => {
         const base = index * RAY_FLOATS;

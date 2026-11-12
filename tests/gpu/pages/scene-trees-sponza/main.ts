@@ -70,12 +70,12 @@ try {
     const variants = (new URLSearchParams(location.search).get('variants') ?? 'copy,adopt,copy-merged,copy-default,copy-cap512,copy-cap256,copy-cap128,indexed-copy-default,indexed-packed-copy-default,indexed-copy-merged').split(',');
     const scene = await loadBenchScene('sponza', 'scene');
     log(`sponza: ${scene.meshes.length} meshes, ${scene.instances.length} instances, ${scene.uniqueTriangles} triangles (load ${Math.round(scene.loadMs)} ms)`);
-    // `indexed` variants (docs/design/indexed-leaves.md): triangleLeaves 'indexed', with `packed` positions when the name says so.
+    // `indexed` variants (docs/internals/design/indexed-leaves.md): triangleLeaves 'indexed', with `packed` positions when the name says so.
     const kernels = {
         records: await TraceBatchKernel.create(device),
         vec4: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4' }),
         packed: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed' }),
-        // `quantized-` variants (docs/design/compressed-nodes.md): nodeFormat 'quantized', the rest of the name as above.
+        // `quantized-` variants (docs/internals/design/compressed-nodes.md): nodeFormat 'quantized', the rest of the name as above.
         'quantized-records': await TraceBatchKernel.create(device, { nodeFormat: 'quantized' }),
         'quantized-vec4': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4', nodeFormat: 'quantized' }),
         'quantized-packed': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'quantized' }),

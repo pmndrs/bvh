@@ -19,7 +19,7 @@
  * `meshRefitPlacement`, and the CPU walk over the read-back buffers must hit
  * what a scene built in that pose hits, on every mesh.
  *
- * Quantized nodes (docs/design/compressed-nodes.md): the same frames with
+ * Quantized nodes (docs/internals/design/compressed-nodes.md): the same frames with
  * the tree's nodes quantized in the shared buffer (frame slot first). The
  * refit runs on its own f32 copy and the quantize pass packs it into the
  * buffer: the read-back nodes must be, bit for bit, the CPU refit's f32 nodes
@@ -308,7 +308,7 @@ async function refitQuantizedAcrossFrames(device: GPUDevice, name: string, geome
 const VERTICES_BEFORE = 9;
 
 /**
- * An indexed tree (docs/design/indexed-leaves.md): the refit copies the posed
+ * An indexed tree (docs/internals/design/indexed-leaves.md): the refit copies the posed
  * vertices into the mesh's range of a positions buffer, leaves the triangles
  * alone, and refits the boxes from the copied corners. Checked: the copied
  * positions are the posed ones bit for bit, the triangles and the marker words

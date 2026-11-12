@@ -1,0 +1,84 @@
+---
+title: Workers
+description: tinybvh builds off the main thread with @pmndrs/bvh/worker, GPU builds and workers, and what to transfer.
+nav: 40
+sourcecode: src/worker/pool.ts
+---
+
+tinybvh is synchronous: one big mesh blocks the thread for a second or more. `@pmndrs/bvh/worker` runs it in a pool of
+module workers.
+
+{/* snippet: pool */}
+```ts
+import { buildTraceScene, SceneTrees, type MeshGeometry, type TraceSceneInstance } from '@pmndrs/bvh';
+import { createBvhWorkerPool, generateCpuMeshBvh } from '@pmndrs/bvh/worker';
+
+const pool = createBvhWorkerPool(); // up to 4 workers; inline where there is no Worker (Node)
+console.log(pool.usesWorkers, pool.size);
+
+// One mesh per worker, several meshes at once. The result is a tree in the GPU layout.
+const tree = await pool.build(meshes[0], { maxLeafPrimitives: 8 });
+
+// Any API that takes a `build` function can use the pool.
+const scene = await buildTraceScene(meshes, instances, { build: (geometry) => pool.build(geometry) });
+
+// SceneTrees makes its own pool unless you hand it one to share.
+const trees = await SceneTrees.create(device, { workers: pool });
+
+// A CPU query tree built off the main thread.
+const cpuTree = await generateCpuMeshBvh(pool, meshes[0]);
+```
+
+## The pool
+
+- **Each worker is single-threaded.** tinybvh's WebAssembly build has no threads, so the pool needs no
+  `SharedArrayBuffer` and no cross-origin isolation, unlike three-mesh-bvh's `ParallelMeshBVHWorker`.
+- **Parallel across meshes.** A scene of many meshes spreads over the pool. One big mesh (a merged static group, say)
+  occupies one worker and leaves the rest to the others.
+- **Size:** one less than the logical cores, at least 1 and at most 4 (`defaultWorkerPoolSize()`). Workers start when
+  builds need them, so an idle pool costs nothing.
+- **Order:** first in, first out. Ask for your biggest meshes first to finish sooner (`SceneTrees` does).
+- **Without `Worker`** (Node, a host that blocks workers), or when the first worker fails before answering, the pool
+  builds on the calling thread, one mesh per turn, so callers see the same asynchronous behaviour. `worker: 'never'`
+  always builds inline; `'always'` throws instead of falling back.
+
+{/* snippet: cancel */}
+```ts
+const pool = createBvhWorkerPool({ size: 2, transferInput: false });
+const controller = new AbortController();
+const pending = pool.build(meshes[0], {}, { signal: controller.signal });
+controller.abort(); // rejects at once with an AbortError; a running build finishes in its worker and is dropped
+await pending.catch((error: Error) => console.log(error.name));
+console.log(pool.stats); // { queued, running, workers, finished }
+pool.dispose(); // stops the workers; unfinished builds reject
+```
+
+## What moves and what is copied
+
+- **Inputs are copied** into the worker (structured clone), unless `transferInput` is set. Then the caller's arrays are
+  empty afterwards; an array that views only part of its buffer (glTF accessors into one BIN buffer) is copied anyway,
+  so the buffer's other arrays stay usable. `SceneTrees` has the same switch as `transferGeometry`.
+- **Results are transferred**, never copied: nodes, triangles, parents and bounds arrive as `ArrayBuffer`s.
+- **Each worker keeps a WebAssembly heap**, 64 MiB measured (it held the largest Sponza mesh without growing). A pool
+  of 4 holds 256 MiB of CPU memory for as long as it lives. `pool.dispose()` frees it.
+
+## Other worker builders
+
+- `generateCpuMeshBvh(pool, input, options)` builds a [CPU query tree](/cpu-queries/raycast) on the pool.
+  In three, `GenerateMeshBvhWorker` does the same for a `BufferGeometry` ([CPU raycast in three](/three/cpu-raycast#off-the-main-thread)).
+- `createMeshBvhBuilder({ worker, transferInput })` is the one-worker builder the pool grew from.
+- `createTopLevelBuilder()` builds and checks top-level shapes in a worker. `SceneTrees`' GPU top level uses it.
+
+## GPU builds and workers
+
+A GPU build runs on a device, and a device's buffers can't be shared with another device. So:
+
+1. **On the render device** (the usual case): the trees stay on the GPU with no copy. GPU H-PLOC trees take
+   milliseconds, and the CPU waits only for a few stats words.
+2. **In a worker with its own `GPUDevice`:** build there, read the trees back (`readLayouts`), transfer the
+   `ArrayBuffer`s to the main thread, and upload them to the render device. That costs a readback, a transfer and an
+   upload, and the GPU itself is still shared, so it saves no GPU time.
+3. **Everything in a worker**, rendering to an `OffscreenCanvas`: one device, no copies, and the main thread is free.
+
+`SceneTrees` uses option 1, and tinybvh on the pool for the swaps. The vanilla `workers-gpu` example that shows the
+three side by side is planned.

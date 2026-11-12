@@ -1,0 +1,68 @@
+---
+title: Builds and tracing
+description: Measured build times, tree quality and ray rates, with how each number was taken.
+nav: 90
+---
+
+Every number here says where it was measured. The package has two speed targets, the RTX 3060 Laptop and the Apple M5
+Pro. The Intel UHD runs every check for correctness only. Numbers from the Apple M5 are **indicative**: its clocks drift
+by up to about 30% within a run, so those benches report ratios taken within one round, not absolute rates.
+
+## Method
+
+- **Rays:** a grid of probes fills the scene's bounds, and each probe fires 256 rays in random directions from a fixed
+  seed. Any-hit rays go from each closest hit toward a fixed direction. The rays are generated once and stored in a
+  buffer, so every tracer gets the same input.
+- **Timing:** GPU timestamps around the trace dispatch, the median of several runs after warm-ups. Without
+  timestamps, a fence-based wall time over 20 dispatches, labelled as such.
+- **The GPU is loaded and clocks are checked.** A run counts only if it started cool, fewer than 5% of its samples were
+  thermally throttled, and it had enough samples ("the clock rule").
+- **three-mesh-bvh** runs as a three `WebGPURenderer` compute node reading the same ray buffer, its per-mesh trees built
+  with `{ strategy: SAH }` explicitly (its default is CENTER).
+- The pages are `tests/gpu/pages/trace-bench*`; results go in `bench/results/trace.csv`.
+
+## Sponza on the RTX 3060 Laptop
+
+5,744,384 triangles in 132 meshes. Headless Chrome 156 on Windows.
+
+| What | Number | Conditions |
+| --- | --- | --- |
+| GPU H-PLOC build, whole scene | **46.6 ms** | Median of the 2 runs valid under the clock rule, loaded SM clock about 1,000 MHz, power-limited |
+| CPU tinybvh build, whole scene | **1.6-1.9 s** | In a browser worker, single-threaded; medians of 3 runs per session |
+| GPU LBVH build, whole scene | 31.2 ms | Median of 3, before the clock rule existed |
+| H-PLOC tree quality | SAH cost **1.032x** tinybvh's | Lower is better; the LBVH's is 1.217x |
+| Trace speed on H-PLOC trees | closest-hit **0.95x**, any-hit **1.02x** of tinybvh's trees | Same rays, both tracers in each run, median of 3. The runs were flagged low-clock, so the ratio is more reliable than the rates |
+| Trace speed on LBVH trees | closest-hit 0.82x, any-hit 0.80x | As above |
+| Closest-hit rate, tinybvh trees | 104.3 Mrays/s, **1.20x three-mesh-bvh** | Median of 3 |
+| Closest-hit rate, Intel UHD | 12.8 Mrays/s, 1.97x three-mesh-bvh | Median of 3; correctness device, for scale only |
+| GPU top-level refit, 10,000 moving instances | about **0.09 ms** (0.086-0.091) | The refit's own page, two measurements |
+
+three-mesh-bvh's trees converted to our layout traced at 96.7 Mrays/s and took 7.4 s to build, against 101.6 Mrays/s and
+5.3 s for tinybvh's, in the same session.
+
+## On the Apple M5 (indicative)
+
+| What | Number | Conditions |
+| --- | --- | --- |
+| `SceneTrees` first trees, Sponza | 100-190 ms after the first update | `scene-trees-sponza` page, Chrome, several runs and caps |
+| `SceneTrees` every tinybvh tree in, Sponza | 285-370 ms after the first update | the same |
+| Merged static instances, Sponza surface rays | closest 1.85x, any 1.36x of instanced | [Merged static instances](/scenes/merged-static#measured) |
+| GPU batch of 65k rays | about 1.9 ms (35 Mrays/s) | `three/raycast` example, a 100k-triangle knot from outside, timestamps |
+| Path tracer | about 120 Mrays/s | `three/pathtracer` example, wall time of one dispatch |
+| CPU raycast, 100k triangles | 692,630 per second `firstHitOnly` | [Raycast](/cpu-queries/raycast#speed), Node 22 |
+
+The variants' trace speed against the default layout (surface-ray pages, paired rounds with the order reversed):
+indexed leaves 0.83-0.99x with `vec4` positions and 0.75-0.92x packed; quantized nodes 0.93-0.97x.
+
+## Not measured yet
+
+The RTX 3060 and the Intel UHD have not run the 2026-11 work: `SceneTrees`, the build-peak cap, merged static
+instances, the layout variants and the 40-byte hit record. Their defaults wait on those runs. A side-by-side
+comparison suite against three-mesh-bvh (`compare/`) is in progress.
+
+## Reproducing
+
+- `pnpm test:gpu:page trace-bench-sponza` (and the other `trace-bench-*` pages, run by exact name) runs a trace bench on
+  the machine's GPU. Sponza and Bistro need their assets; see `tests/gpu/README.md`.
+- `pnpm test:gpu:page scene-trees-sponza` reports `SceneTrees` load times and memory.
+- `node bench/three-raycast.ts`, `bench/query-parity.ts` and `bench/closest-point.ts` run the CPU benches in Node.

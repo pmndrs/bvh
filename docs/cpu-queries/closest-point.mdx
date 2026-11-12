@@ -1,0 +1,52 @@
+---
+title: Closest point
+description: The nearest point on a mesh to a point, or to another mesh, and what lies at a hit.
+nav: 72
+sourcecode: src/query/cpu-mesh-bvh.ts
+---
+
+{/* snippet: closest */}
+```ts
+const closest = tree.closestPointToPoint({ x: 0, y: 2, z: 0 }); // { point, distance, faceIndex } or null
+// minThreshold: stop below this distance; maxThreshold: look no farther.
+const near = tree.closestPointToPoint({ x: 0, y: 2, z: 0 }, {}, 0, 1);
+
+const onTree = {};
+const onOther = {};
+const between = tree.closestPointToGeometry(other, otherToTree, onTree, onOther); // onTree is between too
+```
+
+- `closestPointToPoint(point, target, minThreshold, maxThreshold)` is three-mesh-bvh's shapecast step for step: the
+  nearer box first, boxes culled by the best distance so far and by `maxThreshold`, an early stop below
+  `minThreshold`. It fills `target` with `point`, `distance` and `faceIndex` (the original triangle), and returns it,
+  or null with `target` untouched. As in three-mesh-bvh, `maxThreshold` culls boxes, not triangles.
+- `closestPointToGeometry(other, geometryToBvh, target1, target2, minThreshold, maxThreshold)` runs the same casts
+  between two meshes. `target1` is on this tree, `target2` (null skips it) on the other, in its own space. Both
+  `faceIndex`es are original triangles. A scaling `geometryToBvh` skews the culling, as in three-mesh-bvh.
+
+Against three-mesh-bvh 0.9.18 (`bench/closest-point.ts --rounds 10`, Node 22 on the Apple M5, the 269,764-triangle
+room, 2,000 points per row, 200 placements; indicative):
+
+| Query | Agreement | Ours | three-mesh-bvh |
+| --- | --- | ---: | ---: |
+| Random points in the room's box | 2,000 of 2,000 the same distance (241 on another, equally near triangle) | 5.1 µs | 5.5 µs |
+| Points just off random surfaces | 2,000 of 2,000 (245 tied) | 8.1-8.6 µs | 7.5 µs |
+| `closestPointToGeometry`, a 180-triangle sphere with its own tree | 200 of 200 the same distance | 30.8 ms | 28.7 ms |
+
+## What lies at a hit
+
+`getTriangleHitPointInfo(point, triangle, { indices, attributes })` gives the barycentric weights of the three
+corners at a point, the corners, the face normal, and any per-vertex attributes interpolated there:
+
+{/* snippet: hit-info */}
+```ts
+const hit = tree.raycastFirst({ origin: [0, 0, 5], direction: [0, 0, -1] });
+if (hit) {
+    const info = tree.getTriangleHitPointInfo(hit.point, hit.triangle, {
+        attributes: { normal: { array: normals, itemSize: 3 }, uv: { array: uvs, itemSize: 2 } },
+    });
+    console.log(info.barycoord, info.faceNormal, info.attributes.uv);
+}
+```
+
+The tree's triangles hold positions only. Normals, UVs and colours come from your own arrays.

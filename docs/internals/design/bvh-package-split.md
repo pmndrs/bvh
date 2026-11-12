@@ -34,7 +34,7 @@ The examples should make three cases obvious:
   - the layout checker and the batch planner;
   - the `createMeshLayoutBuilder` fallback chooser.
 - Unit tests, GPU pages (`tools/gpu/pages/bvh-*`), licence texts, and a reproducible `.wasm` build (`pnpm bvh:wasm --check`).
-- A user README (`packages/bvh/README.md`) and two design docs (`docs/design/bvh-builders.md`, `bvh-framework.md`).
+- A user README (`packages/bvh/README.md`) and two design docs (`docs/internals/design/bvh-builders.md`, `bvh-framework.md`).
 
 **Still in ddgi-core, though not DDGI-specific** (`packages/ddgi-core/src/platform/trace/`)
 - The layout's WGSL structs (`layout.ts`).

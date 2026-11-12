@@ -66,7 +66,7 @@ await runGpuTest(
         const failures: string[] = [];
         const results: Record<string, unknown> = {};
         // Records, then indexed leaves (the refit copies each pose into the scene's positions).
-        // Then quantized nodes (docs/design/compressed-nodes.md): the refit keeps an f32 copy and packs it into the scene.
+        // Then quantized nodes (docs/internals/design/compressed-nodes.md): the refit keeps an f32 copy and packs it into the scene.
         for (const [triangleLeaves, nodeFormat] of [['records', 'f32'], ['indexed', 'f32'], ['records', 'quantized'], ['indexed', 'quantized']] as const) {
             const label = nodeFormat === 'quantized' ? `quantized ${triangleLeaves}` : triangleLeaves;
             const kernel = await TraceBatchKernel.create(device, { triangleLeaves, nodeFormat });

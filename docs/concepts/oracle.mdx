@@ -1,0 +1,52 @@
+---
+title: The oracle rule
+description: Every builder and walk must give the same answers as a tree-less reference on fixed hard cases, on every GPU tested.
+nav: 12
+sourcecode: src/trace/oracle-fixtures.ts
+---
+
+No builder or walk change is used until it passes the ray oracle. Correctness is a gate; speed is measured, not gated.
+
+## The three tracers
+
+- **The GPU walk** (`traceModuleWgsl`), the one your shaders call.
+- **The CPU walk** (`createCpuTracer`), a step-for-step TypeScript port of the WGSL walk over the same buffers. It runs
+  in Node, so the unit tests cover the walk and the layout without a GPU.
+- **The reference tracer** (`buildReferenceScene`, `traceClosestReference`, `traceAnyReference`): every triangle,
+  no tree, in doubles.
+
+## The cases
+
+`src/trace/oracle-fixtures.ts` and the `trace-oracle` GPU page hold fixed cases the three must agree on:
+
+- thin walls, mirrored and non-uniform transforms, instancing;
+- rays aimed exactly at shared triangle edges, which must not slip through;
+- the triangle filter and instance masks, with ray masks on and off;
+- seams: a split seam (every corner its own vertex, same bits) must let nothing through in either triangle format;
+- every builder (tinybvh, LBVH, H-PLOC), merged static meshes, indexed leaves and quantized nodes as variants.
+
+`compareClosest` and `compareAny` decide agreement: the same instance and triangle, `t` within `T_TOLERANCE`
+(1e-4), the same material, and normals within a cosine of 0.9999.
+
+## Where it runs
+
+`pnpm test:gpu --filter trace-oracle` runs the page in headless Chrome on a real GPU. It must report no mismatches on
+every GPU tested: the RTX 3060 and the Intel UHD (Windows), and the Apple M5. CI runs a reduced profile on SwiftShader.
+
+## The watertight test
+
+The walk uses the watertight ray-triangle test of Woop, Benthin and Wald (2013). Two million rays aimed at shared
+edges: Moller-Trumbore let 11.6% through on an RTX 3060 and 3.0% on an Intel GPU; the watertight test let none
+through on either. On Metal, Dawn's relaxed math may fuse a product into the edge function's subtraction, and on an
+Apple M5 Pro 2,696 of 1 million shared-edge rays slipped through. `bvhEdgeFunction` now puts each edge's corners in a
+fixed order, so both triangles on an edge run the same arithmetic; none slip through since.
+
+The test needs bit-identical shared vertices, which is why triangles store their three corners as they are
+(or, with indexed leaves, read them from positions welded by exact bits).
+
+## For your own builder or walk
+
+Run your trees through the CPU walk against the reference on random rays first (Node, no GPU), then the oracle page
+on each GPU. The contributor notes are in
+[`docs/internals/design/trace.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/trace.md), "The
+oracle and the CPU walk".

@@ -1,0 +1,45 @@
+---
+title: Introduction
+description: BVH builders, refits and a ray walk for WebGPU, with no engine inside.
+nav: 0
+---
+
+<Intro>
+  `@pmndrs/bvh` builds bounding volume hierarchies (BVHs) for WebGPU. You give it triangles. It gives you trees in one
+  fixed GPU layout, built on the CPU (tinybvh in WebAssembly) or on the GPU (H-PLOC or LBVH), refit on the GPU when
+  things move, and read by a WGSL ray walk that you put in your own shaders.
+</Intro>
+
+The core imports no engine. three.js support lives behind `@pmndrs/bvh/three`, and worker builds behind
+`@pmndrs/bvh/worker`. The same trees serve a raw compute pass, three's node system, a worker, or another library on the
+same `GPUDevice`.
+
+> [!IMPORTANT]
+> The package is at version 0.0.0 and not on npm yet. The API can still change before 0.1.
+
+## What is in it
+
+| Part | What it does | Page |
+| --- | --- | --- |
+| Builders | tinybvh (CPU, WebAssembly), H-PLOC and LBVH (GPU, WGSL), and a chooser that picks one | [Choosing a builder](/builders/choosing-a-builder) |
+| One GPU layout | 64-byte two-child nodes, 48-byte triangles, a parent per node, `GPU_LAYOUT_VERSION` | [The GPU layout](/concepts/gpu-layout) |
+| `SceneTrees` | A scene's trees on one device: GPU trees first, tinybvh's swapped in, the GPU top level, runtime changes | [SceneTrees](/scenes/scene-trees) |
+| Refits | Top-level refit over moving instances, per-mesh refit for deforming meshes, both on the GPU | [Refits](/scenes/refits) |
+| The WGSL walk | `bvhTraceClosest` and `bvhTraceAny`, masks, a triangle filter, a watertight triangle test | [Tracing in WGSL](/tracing/wgsl-walk) |
+| CPU queries | Raycast, shapecast, bvhcast and closest point over the same layout | [Raycast](/cpu-queries/raycast) |
+| three.js | Scenes from `Object3D`, GPU skinning, TSL nodes, and three-mesh-bvh's CPU API | [three.js](/three/overview) |
+| Workers | A pool of tinybvh workers that needs no cross-origin isolation | [Workers](/workers/workers) |
+
+## What it is not
+
+- It has no WebGL2 path. The CPU queries work anywhere JavaScript runs, but no GPU work targets WebGL2.
+- Babylon.js is not supported yet. A `/babylon` subpath is planned.
+- Points and lines are not primitives. Leaves hold triangles only.
+
+## Where to start
+
+1. [Installation](/getting-started/installation): the package and a device with `subgroups`.
+2. [First build](/getting-started/first-build): a vanilla quick start and two three.js quick starts.
+3. [The GPU layout](/concepts/gpu-layout), if you will write your own walk or read the trees yourself.
+
+Users of three-mesh-bvh can start at [Coming from three-mesh-bvh](/three/coming-from-three-mesh-bvh).

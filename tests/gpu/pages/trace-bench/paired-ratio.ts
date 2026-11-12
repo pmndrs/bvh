@@ -52,10 +52,10 @@ export function ratioOfRounds(name: string, numerator: readonly number[], denomi
     return { name, perRound, median: median(perRound), min: Math.min(...perRound), max: Math.max(...perRound) };
 }
 
-/** The node formats the quantized-nodes comparison times (docs/design/compressed-nodes.md). */
+/** The node formats the quantized-nodes comparison times (docs/internals/design/compressed-nodes.md). */
 export type NodeLayout = 'f32' | 'quantized';
 
-/** The triangle formats the indexed-leaves comparison times (docs/design/indexed-leaves.md). */
+/** The triangle formats the indexed-leaves comparison times (docs/internals/design/indexed-leaves.md). */
 export type LeafLayout = 'records' | 'indexed' | 'indexed-packed';
 
 export interface LeafLayoutCase {

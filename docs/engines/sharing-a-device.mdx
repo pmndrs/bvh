@@ -1,0 +1,58 @@
+---
+title: Sharing a device with an engine
+description: Building and tracing on the device your renderer already uses, in three.js and in plain WebGPU. Babylon is not supported yet.
+nav: 50
+sourcecode: src/three/scene.ts
+---
+
+Buffers belong to one `GPUDevice`. To trace from the engine's shaders, or from compute passes beside them, build the
+trees on the engine's own device. The core takes any `GPUDevice` and holds no engine reference.
+
+## three.js
+
+three's `WebGPURenderer` makes its device in `init()`. `deviceFromRenderer(renderer)` returns
+`renderer.backend.device`, and throws for the WebGL backend or before `init()`. `deviceFromRendererAsync(renderer)`
+awaits `init()` first.
+
+{/* snippet: renderer-device */}
+```ts
+import { WebGPURenderer } from 'three/webgpu';
+import { deviceFromRenderer } from '@pmndrs/bvh/three';
+
+const adapter = await navigator.gpu.requestAdapter();
+// three asks for every adapter feature (subgroups included), but WebGPU's default limits:
+// a scene past 128 MiB of triangles needs the adapter's limits.
+const renderer = new WebGPURenderer({
+    requiredLimits: adapter ? { maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, maxBufferSize: adapter.limits.maxBufferSize } : undefined,
+});
+await renderer.init();
+const device = deviceFromRenderer(renderer); // renderer.backend.device; throws on the WebGL backend
+```
+
+- three requests every adapter feature, `subgroups` included, so the GPU builders work on three's device where the
+  adapter has subgroups.
+- three asks for WebGPU's default limits. A scene past 128 MiB of triangles needs `requiredLimits`, as above.
+- Record `SceneTrees.update(encoder)` in your own encoder and submit it before three's frame uses the trees.
+- To read the trees from TSL or a three `wgslFn`, wrap them in `BvhTraceNodes`. It binds `SceneTrees`' own
+  `GPUBuffer`s to three's storage nodes, with no copy ([BvhTraceNodes](/three/trace-nodes)). That relies on three's
+  backend internals, which is why three is pinned to 0.187.
+
+## Vanilla WebGPU
+
+Make the device yourself ([Installation](/getting-started/installation#a-device-with-subgroups)), and bind
+`SceneTrees.buffers` (or `uploadTraceScene`'s buffers) to your passes. The walk's bind group layout entries come from
+`traceModuleEntries()`. [Tracing in WGSL](/tracing/wgsl-walk) has a full kernel.
+
+Another library on the same device (a GI technique, a denoiser) can bind the same buffers. `SceneTrees.version` tells
+every user when to rebind.
+
+## Babylon.js
+
+Not supported yet. A `@pmndrs/bvh/babylon` subpath is planned: CPU picking first, and the WGSL walk on Babylon's
+device, which today means reaching into the engine's internals (`engine._device`). Until then, the CPU queries
+([Raycast](/cpu-queries/raycast)) work with any engine's vertex arrays.
+
+## Other engines
+
+Anything that gives you a `GPUDevice` and the vertex positions works: `SceneTrees.addMesh({ positions, indices })`
+and `addInstance({ mesh, objectToWorld })` with a column-major 4x4 matrix, as most engines store one.

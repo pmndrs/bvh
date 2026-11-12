@@ -10,7 +10,7 @@
  *
  * Everything is plain 32-bit words in a few buffers so it survives a worker
  * hand-off (transferable `ArrayBuffer`s) and a GPU upload without conversion.
- * See docs/design/trace.md for the reasoning.
+ * See docs/internals/design/trace.md for the reasoning.
  */
 
 import {
@@ -40,7 +40,7 @@ import {
 export const TRACER_GPU_LAYOUT_VERSION = 2;
 
 /**
- * How a scene stores its mesh nodes (docs/design/compressed-nodes.md):
+ * How a scene stores its mesh nodes (docs/internals/design/compressed-nodes.md):
  * `'f32'` (the default, the 64-byte nodes below) or `'quantized'` (32-byte
  * nodes on a per-mesh frame, `GpuLayoutNodeFormat`). The walk is compiled
  * for one (`traceModuleWgsl({ nodeFormat })`); the top level is always `f32`.
@@ -131,7 +131,7 @@ export const TRIANGLE_FLAG_FLIP_FRONT_FACE = 2;
 export const TRIANGLE_WORD_SOURCE_INSTANCE = TRIANGLE_WORD.padding;
 
 /**
- * How a scene stores its triangles (docs/design/indexed-leaves.md):
+ * How a scene stores its triangles (docs/internals/design/indexed-leaves.md):
  * `'records'` (the default, the 48-byte records above) or `'indexed'`
  * (16-byte `vec4u(i0, i1, i2, id + flags)` read through the scene's
  * positions buffer). The walk is compiled for one

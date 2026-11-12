@@ -1,0 +1,130 @@
+---
+title: Choosing a builder
+description: tinybvh on the CPU, H-PLOC and LBVH on the GPU, and the chooser that picks for you.
+nav: 20
+sourcecode: src/mesh-builder.ts
+---
+
+| Builder | What it is | Use it when | Needs |
+| --- | --- | --- | --- |
+| **tinybvh** (`createTinyBvhBuilder`) | tinybvh 1.9.1 compiled to WebAssembly. Its default builder (binned SAH, "SIMD Bonsai") makes the best trees here. | You want the best trees and can wait (Sponza: 1.6-1.9 s). It is synchronous: run it in a [worker](/workers/workers). It is also the fallback for everything else. | WebAssembly SIMD |
+| **GPU H-PLOC** (`GpuHplocBuilder`) | H-PLOC (Benthin et al., HPG 2024) in WGSL, ported from tinybvh's `BuildHPLOC`. The default GPU builder. | You need trees fast: at load, or to rebuild a mesh that changed a lot. Its trees trace about as fast as tinybvh's. | `subgroups` |
+| **GPU LBVH** (`GpuLbvhBuilder`) | A linear BVH in WGSL, ported from HIPRT. | The fastest build, when tree quality matters less. Its trees trace about 20% slower. | `subgroups` |
+| **The chooser** (`createMeshLayoutBuilder`) | H-PLOC when the device has subgroups, otherwise tinybvh. Meshes too big for the device, or refused by the GPU, go to tinybvh too. | A list of meshes, trees back on the CPU, each result saying who built it and why. | nothing |
+| **`SceneTrees`** | H-PLOC trees first, tinybvh's swapped in from workers, per mesh. | A whole scene, kept on the GPU. See [SceneTrees](/scenes/scene-trees). | nothing |
+
+Measured on Sponza (5,744,384 triangles, 132 meshes), RTX 3060 Laptop, headless Chrome 156 on Windows:
+
+| | Build, whole scene | SAH cost against tinybvh (lower is better) | Trace speed on its trees, against tinybvh's |
+| --- | --- | --- | --- |
+| tinybvh | 1.6-1.9 s (one worker, medians of 3 runs per session) | 1 | 1 |
+| H-PLOC | 46.6 ms (median of the 2 runs valid under the clock rule) | 1.032 | closest-hit 0.95x, any-hit 1.02x |
+| LBVH | 31.2 ms (median of 3, before the clock rule) | 1.217 | closest-hit 0.82x, any-hit 0.80x |
+
+How these were taken is on [Builds and tracing](/performance/builds-and-tracing).
+
+## The chooser
+
+{/* snippet: chooser */}
+```ts
+import { createMeshLayoutBuilder, type MeshInput } from '@pmndrs/bvh';
+
+const builder = await createMeshLayoutBuilder(device); // compiles the GPU kernels once
+console.log(builder.kind, builder.fallbackReason); // 'gpu-hploc' and null, or 'tinybvh' and why
+
+const results = await builder.buildLayouts(meshes, { maxLeafPrimitives: 8 });
+for (const { layout, builtBy, fallbackReason } of results) {
+    // layout.nodes, layout.triangles and layout.parents are ArrayBuffers in the GPU layout.
+    console.log(builtBy, fallbackReason, layout.nodeCount, layout.maxDepth);
+}
+```
+
+This path reads each GPU-built tree back to the CPU (one small readback per batch) and frees the GPU copy. To keep
+GPU trees on the GPU, use `SceneTrees`, or a GPU builder directly.
+
+{/* snippet: prefer */}
+```ts
+const lbvhFirst = await createMeshLayoutBuilder(device, { prefer: 'gpu-lbvh' });
+const cpuOnly = await createMeshLayoutBuilder(device, { prefer: 'tinybvh' }); // for comparisons
+const capped = await createMeshLayoutBuilder(device, { maxBatchBytes: 256 * 1024 * 1024 }); // lower build peak
+```
+
+## tinybvh
+
+{/* snippet: tinybvh */}
+```ts
+import { createTinyBvhBuilder } from '@pmndrs/bvh';
+
+const tiny = await createTinyBvhBuilder(); // loads the WebAssembly once
+const { layout, buildMs } = tiny.buildLayout({ positions, indices }, { maxLeafPrimitives: 8 });
+```
+
+`buildLayout` runs on the calling thread. A big mesh blocks it for a second or more, so in a browser use
+`@pmndrs/bvh/worker` ([Workers](/workers/workers)). In Node it needs no GPU: see
+[Serialization and baking](/serialization/serialization-and-baking).
+
+## GPU H-PLOC
+
+{/* snippet: hploc */}
+```ts
+import { GpuHplocBuilder, planGpuHplocBatches, type GpuMeshGeometry } from '@pmndrs/bvh';
+
+const builder = new GpuHplocBuilder(device);
+await builder.prepare(); // compiles the kernels, asynchronously
+
+// One batch builds many meshes with the same dispatches. planGpuHplocBatches splits
+// a scene that doesn't fit the device's buffers (or maxBatchBytes) into several.
+const { batches, tooBig } = planGpuHplocBatches(device, meshes, { maxBatchBytes: 256 * 1024 * 1024 });
+for (const batch of batches) {
+    const trees = await builder.buildMany(batch.map((index) => meshes[index]));
+    // trees.nodes, trees.triangles and trees.parents are GPU buffers the batch's meshes share.
+    for (const mesh of trees.meshes) {
+        if (mesh.problem) continue; // refused (too deep, for example): build this one with tinybvh
+        // mesh.nodeOffset and mesh.triangleOffset say where its tree sits in those buffers.
+    }
+    trees.destroy(); // when nothing reads them any more
+}
+console.log('for tinybvh:', tooBig);
+```
+
+- One batch builds many meshes with the same dispatches. All of a batch's trees share three buffers.
+- Every GPU build reads a few stats words back (nothing per vertex), then the trees are ready.
+- A mesh's tree is refused (`mesh.problem` set) on an index past the end of the positions, a word one GPU thread
+  hands to another still unwritten after a bounded wait, a merge that found no pair (NaN boxes), or a tree too deep.
+  Build that mesh with tinybvh. The chooser and `SceneTrees` do this for you.
+- `readLayouts(trees)` copies trees to the CPU, which a refit's `setTree` and `serializeLayout` need.
+
+Options (`HplocOptions`), besides the [contract's](/concepts/builder-contract#options):
+
+- `mortonCodes`: `'cubic-30'` (default) or `'tinybvh-63'` (tinybvh's 63-bit codes).
+- `tieBreak`: `'pairs'` (default) or `'tinybvh'`. On equal merged areas tinybvh's rule chains the tree: 3,000 identical
+  triangles give depth 128, twice the walk's stack. `'pairs'` keeps it balanced.
+
+With tinybvh's codes and tie rule, the CPU twin (`buildHplocOnCpu`) builds exactly the tree of tinybvh's
+`BuildHPLOC`. The GPU builds the same trees on every subgroup size (RTX 32 lanes, Intel 8-16).
+
+## GPU LBVH
+
+{/* snippet: lbvh */}
+```ts
+import { GpuLbvhBuilder } from '@pmndrs/bvh';
+
+if (GpuLbvhBuilder.isSupported(device)) {
+    const builder = new GpuLbvhBuilder(device);
+    await builder.prepare();
+    const trees = await builder.buildMany(meshes);
+    const layouts = await builder.readLayouts(trees); // CPU copies, for a refit's setTree or a file
+    trees.destroy();
+    console.log(layouts.map((layout) => layout?.nodeCount));
+}
+```
+
+Same API as H-PLOC. Its CPU twin is `buildLbvhOnCpu`.
+
+## Trees from the GPU, used on the CPU
+
+A tree from H-PLOC or the LBVH lives on the GPU. Refits order nodes by level on the CPU, so a GPU-built tree that will
+be refit is read back once with `readLayouts` after its build. Its shape doesn't change while the mesh deforms, so
+this is once per build, never per frame. `SceneTrees` does it for its deforming meshes.
+
+Next: [Fallbacks and limits](/builders/fallbacks-and-limits).

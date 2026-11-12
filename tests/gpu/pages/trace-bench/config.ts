@@ -61,7 +61,7 @@ export const GPU_BUILD_LOADED_RUNS = { min: 10, max: 400 } as const;
  * How big a run is.
  *
  * - `full`: what the decision uses. 256 rays per probe, about 2M rays per dispatch,
- *   median of 20 timed dispatches after 5 warm-ups (docs/design/trace.md, "Benchmark").
+ *   median of 20 timed dispatches after 5 warm-ups (docs/internals/design/trace.md, "Benchmark").
  * - `quick`: a few seconds, for checking that the page and the tracers work.
  */
 export interface BenchProfile {
@@ -95,7 +95,7 @@ export const FALLBACK_TOWARD_SUN: readonly [number, number, number] = [0.4, 0.8,
 
 /**
  * The agreement check: two closest hits are the same when both miss, or both
- * hit with t within this relative tolerance (docs/design/trace.md).
+ * hit with t within this relative tolerance (docs/internals/design/trace.md).
  */
 export const AGREEMENT_RELATIVE_T = 1e-3;
 /** Absolute slack (metres) so two very short hits are not failed by float noise. */

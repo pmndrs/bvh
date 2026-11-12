@@ -1,5 +1,5 @@
 /**
- * `GpuFirstTrees`' capped queue (`maxBatchBytes`, docs/design/bvh-builders.md
+ * `GpuFirstTrees`' capped queue (`maxBatchBytes`, docs/internals/design/bvh-builders.md
  * "Build peak memory"), in Node with a stand-in H-PLOC builder
  * (tests/support/fake-hploc.ts): every capped build of one builder shares one
  * queue and one scratch pool, so at most one batch's scratch and outputs are

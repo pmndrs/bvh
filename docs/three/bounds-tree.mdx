@@ -1,0 +1,110 @@
+---
+title: The tree object
+description: geometry.boundsTree as a BvhBoundsTree, three-mesh-bvh's MeshBVH API with three's types, its build options and the helper.
+nav: 85
+sourcecode: src/three/raycast.ts
+---
+
+`computeBoundsTree` makes a `BvhBoundsTree`: the core's [`CpuMeshBvh`](/cpu-queries/raycast) with three's types on top.
+`acceleratedRaycast` runs through it, so the core and `/three` share one walk and one triangle test. It is also
+exported as `MeshBVH`, so switching from three-mesh-bvh can be one import change:
+
+{/* snippet: meshbvh */}
+```ts
+import { MeshBVH } from '@pmndrs/bvh/three'; // was: import { MeshBVH } from 'three-mesh-bvh';
+
+const bvh = new MeshBVH(geometry, { maxLeafSize: 3, indirect: true }); // after await prepareBoundsTrees()
+```
+
+{/* snippet: bounds-tree */}
+```ts
+import { deserializeBoundsTree, getBVHExtremes, MeshBVHHelper, type BvhBoundsTree } from '@pmndrs/bvh/three';
+import { Box3, Sphere } from 'three';
+
+const tree: BvhBoundsTree = mesh.geometry.boundsTree ?? mesh.geometry.computeBoundsTree();
+
+const hits = tree.raycast(new Raycaster().ray, DoubleSide); // three intersections in the geometry's space
+const nearby = tree.intersectsSphere(new Sphere(new Vector3(), 0.5));
+const closest = tree.closestPointToPoint(new Vector3(0, 3, 0)); // { point: Vector3, distance, faceIndex }
+const box = tree.getBoundingBox(new Box3());
+
+// After editing the position attribute (same index):
+mesh.geometry.attributes.position.needsUpdate = true;
+tree.refit();
+
+// Save and load: our layout's bytes, not three-mesh-bvh's format.
+const bytes = tree.serialize();
+const loaded = deserializeBoundsTree(bytes, mesh.geometry);
+
+const helper = new MeshBVHHelper(mesh, 10); // a Group of the boxes down to depth 10
+```
+
+## Queries
+
+The same methods as three-mesh-bvh's `MeshBVH`, with three's types (`Box3`, `Sphere`, `Vector3`, `Matrix4`, `Ray`):
+
+- `raycast(ray, materialOrSide, near, far)`, `raycastFirst(...)`: three intersections in the geometry's space, without
+  `object`.
+- `shapecast({ intersectsBounds, intersectsTriangle, intersectsRange, boundsTraverseOrder })`: boxes as `Box3`,
+  triangles as `ExtendedTriangle` (a three `Triangle`), original triangle indices.
+- `intersectsBox(box, boxToMesh)`, `intersectsSphere(sphere)`, `intersectsGeometry(geometry, geometryToBvh)`.
+- `bvhcast(otherBvh, matrixToLocal, { intersectsRanges, intersectsTriangles })`, with tree positions.
+- `closestPointToPoint(point, target, minThreshold, maxThreshold)`, `closestPointToGeometry(geometry, geometryToBvh,
+  target1, target2, minThreshold, maxThreshold)`.
+- `refit()`, `getBoundingBox(box)`, `resolveTriangleIndex(i)`, `traverseNodes(callback)` (three-mesh-bvh's
+  `traverse`), `serialize()`.
+- `getTriangleHitPointInfo(point, geometry, triangleIndex, target)`, `estimateMemoryInBytes(tree)`,
+  `getBVHExtremes(tree)` and `validateBounds(tree)` as functions.
+
+`ExtendedTriangle`, `OrientedBox`, `SeparatingAxisBounds`, `CONTAINED`, `INTERSECTED` and `NOT_INTERSECTED` come from
+`/three` too, and give three-mesh-bvh's results bit for bit.
+
+{/* snippet: shapecast-three */}
+```ts
+import { INTERSECTED, NOT_INTERSECTED, type ExtendedTriangle } from '@pmndrs/bvh/three';
+
+const sphere = new Sphere(new Vector3(0, 0, 1), 0.5);
+let count = 0;
+tree.shapecast({
+    intersectsBounds: (box: Box3) => (sphere.intersectsBox(box) ? INTERSECTED : NOT_INTERSECTED),
+    intersectsTriangle: (triangle: ExtendedTriangle) => {
+        if (triangle.intersectsSphere(sphere)) count++;
+        return false;
+    },
+});
+```
+
+**Queries read the tree's triangles**, not the geometry's current positions. After editing positions, call `refit()`
+first (three-mesh-bvh reads the geometry, so it sees edits straight away).
+
+## Build options
+
+`computeBoundsTree`, `new BvhBoundsTree`, `new MeshBVH` and `GenerateMeshBvhWorker.generate` take three-mesh-bvh's
+options:
+
+| Option | What happens |
+| --- | --- |
+| `strategy` (`CENTER` 0, `AVERAGE` 1, `SAH` 2) | Accepted. Every value builds the same tree: tinybvh's binned SAH, whose trees have a lower SAH cost than a centre or average split. Other values throw. |
+| `maxLeafSize`, `targetLeafSize`, `maxLeafTris` | The largest leaf (`targetLeafSize` wins, then `maxLeafSize`), clamped to 1-8: three-mesh-bvh's default 10 gives 8. |
+| `maxDepth` | Accepted, not honoured: tinybvh decides the depth (`boundsTree.depth`). A value below it logs one warning. |
+| `setBoundingBox` | Default `true`: sets `geometry.boundingBox` from the tree when it has none, and `refit()` keeps it current. |
+| `indirect` | Accepted and ignored: the geometry's index is never reordered. |
+| `onProgress` | Called with 0 before the build and 1 after it: tinybvh builds in one call. |
+| `verbose`, `useSharedArrayBuffer` | Accepted and ignored. |
+| `range` | Throws: the tree holds every triangle, and raycasts follow the draw range. |
+| `builder`, `layout`, `snapshot` (ours) | A tinybvh builder to use; a tree already built for this geometry; the geometry's versions when that build started (`snapshotGeometry`). |
+
+`buildOptionsFromThreeMeshBvh(options)` gives the core options these map to.
+
+## Save and load
+
+`boundsTree.serialize()` and `deserializeBoundsTree(bytes, geometry)` use our layout's bytes (`serializeLayout`), not
+three-mesh-bvh's format. See [Serialization and baking](/serialization/serialization-and-baking).
+
+## The helper
+
+`new MeshBVHHelper(mesh, depth)` (or `BVHHelper`) is a `Group` that draws the tree's boxes down to `depth` (default 10) as
+line segments: `displayEdges = false` gives see-through faces, `displayParents` draws inner boxes too, with `color`,
+`opacity`, `edgeMaterial`, `meshMaterial` and `instanceId`. It follows the mesh's world matrix. Call `update()` after
+changing the tree or those fields. The boxes come from the core (`bvhHelperPositions`), so another engine can draw the
+same thing.

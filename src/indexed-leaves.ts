@@ -1,5 +1,5 @@
 /**
- * Indexed leaves (docs/design/indexed-leaves.md): the 16-byte triangle format
+ * Indexed leaves (docs/internals/design/indexed-leaves.md): the 16-byte triangle format
  * `vec4u(i0, i1, i2, id + flags)` beside the 48-byte records, and the
  * helpers every builder and the scene share to write it.
  *

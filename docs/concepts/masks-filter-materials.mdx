@@ -1,0 +1,95 @@
+---
+title: Masks, the triangle filter and materials
+description: Hide instances from some rays, let some rays through some triangles, and get a material index back with each hit.
+nav: 13
+sourcecode: src/trace/triangle-filter.ts
+---
+
+## Instance masks
+
+Each instance has an 8-bit mask, `0xff` by default, as in DXR. A masked trace skips an instance when
+`(instanceMask & rayMask) == 0`, at the top level, before it enters the instance's tree.
+
+{/* snippet: masks-materials */}
+```ts
+// 8-bit instance masks (default 0xff) and a material index per instance (0-65534).
+trees.addInstance({ mesh, objectToWorld: matrix, mask: 0b0000_0011, material: 12 });
+// A masked trace skips an instance when (instanceMask & rayMask) == 0.
+// hit.material is 12 for this instance's hits, BVH_NO_MATERIAL where none was given.
+```
+
+- In WGSL, `bvhTraceClosestMasked(ray, mask)` and `bvhTraceAnyMasked(ray, mask)`. The plain `bvhTraceClosest` and
+  `bvhTraceAny` use an all-ones ray mask, so **an instance with mask 0 is never hit**, by the plain functions too.
+- The test reads the flags word the walk already loads, so it costs one shift, AND and compare per instance leaf, not
+  per triangle.
+- `rayMasks: false` compiles the mask code out of the same walk: no `*Masked` functions, no test, every instance
+  visible. Nothing changes size either way.
+
+{/* snippet: no-masks */}
+```ts
+// No *Masked functions, no mask test in the walk, every instance visible.
+const code = traceModuleWgsl({ rayMasks: false });
+```
+
+In three, layers 0-7 become mask bits 0-7 (`instanceMaskFromLayers`), and `rayMaskFromLayers(camera.layers)` gives a
+ray mask. Layers 8-31 are dropped.
+
+## The triangle filter
+
+A triangle whose flags bit 0 (`TRIANGLE_FLAG_FILTER`) is set asks a WGSL function before its hit is taken:
+
+```wgsl
+fn bvhTrianglePasses(candidate: BvhCandidate) -> bool
+```
+
+`true` means the ray passes through: nothing is recorded and the closest distance stays, so what lies behind is still
+found. Unflagged triangles never ask, so a scene pays only for the triangles that need it. Use it for alpha-tested
+foliage, glass that casts no shadow, or one-sided surfaces.
+
+The candidate holds `instance`, `triangle` (the original index), `t`, `barycentrics`, `frontFace`, `query`
+(`BVH_QUERY_CLOSEST` or `BVH_QUERY_ANY`) and `rayMask`. It is a struct, so fields can be added without breaking filters.
+
+{/* snippet: filter */}
+```ts
+    // Asked only for triangles with TRIANGLE_FLAG_FILTER set. true: the ray passes through.
+    const triangleFilter = /* wgsl */ `
+fn bvhTrianglePasses(candidate: BvhCandidate) -> bool {
+    // Shadow rays pass through flagged triangles (foliage cards, glass); closest-hit rays still see them.
+    return candidate.query == BVH_QUERY_ANY;
+}`;
+    const code = traceModuleWgsl({ triangleFilter });
+```
+
+The default filter, `DEFAULT_TRIANGLE_FILTER_WGSL`, lets nothing through. `triangleFilter: null` leaves the function
+out, for a kernel that declares `bvhTrianglePasses` itself (to read a texture, for example).
+
+Flag the triangles when you add the mesh:
+
+{/* snippet: filter-flags */}
+```ts
+import { TRIANGLE_FLAG_FILTER, type MeshGeometry } from '@pmndrs/bvh';
+
+const triangleCount = indices.length / 3;
+const triangleFlags = new Uint32Array(triangleCount);
+for (let triangle = 0; triangle < triangleCount; triangle++) if (isGlass(triangle)) triangleFlags[triangle] = TRIANGLE_FLAG_FILTER;
+
+const window: MeshGeometry = { positions, indices, triangleFlags }; // only bit 0 may be set
+const mesh = trees.addMesh(window);
+```
+
+For a scene assembled with `buildTraceScene`, `writeTriangleFilterFlags(scene, (originalIndex, sourceInstance) => ...,
+scene.meshes[i])` writes the flags into the scene's own buffer after assembly. The CPU walk and the reference tracer
+take the same filter as a TypeScript function (`TrianglePasses`).
+
+## Materials
+
+Each instance can carry a material index, 0 to 65534. It comes back as `hit.material` (and as word 6 of the batch
+kernel's 40-byte hit record). `BVH_NO_MATERIAL` (`0xffffffff`, `NO_MATERIAL` in TypeScript) means none was given, and
+is what a miss reports.
+
+- It costs no binding and two loads per ray, after the walk.
+- A merged static triangle keeps its source instance's material.
+- In three, the sync's `material(mesh, info)` callback sets it per object and group.
+
+The hit also has `normal`: the world-space geometric normal of the authored front side, unit length. Interpolated
+normals need your own attributes, through `hit.triangle` and `hit.barycentrics`.

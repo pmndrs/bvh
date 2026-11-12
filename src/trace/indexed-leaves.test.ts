@@ -1,4 +1,4 @@
-// Indexed leaves (docs/design/indexed-leaves.md) against records: the same tree in either format,
+// Indexed leaves (docs/internals/design/indexed-leaves.md) against records: the same tree in either format,
 // and the same hits, bit for bit, from the same scene in either format.
 import { describe, expect, it } from 'vitest';
 import {

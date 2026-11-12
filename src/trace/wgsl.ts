@@ -434,7 +434,7 @@ fn bvhEnterMeshNodes(rootNodeOffset: u32) {}
 `;
 
 /**
- * Mesh nodes as 32-byte quantized nodes (docs/design/compressed-nodes.md):
+ * Mesh nodes as 32-byte quantized nodes (docs/internals/design/compressed-nodes.md):
  * two `vec4u`, child `side` at `vec4u` `side`: three axis words (min plane
  * bits 0-15, max plane bits 16-31) and the child's stack reference. Planes
  * decode as `origin + f32(q) * step` on the frame of the instance's mesh, read
@@ -510,7 +510,7 @@ fn bvhMergedMaterialFlags(instance: BvhInstance, triangle: BvhTriangle, slot: u3
 `;
 
 /**
- * Triangle loading for indexed leaves (docs/design/indexed-leaves.md): one
+ * Triangle loading for indexed leaves (docs/internals/design/indexed-leaves.md): one
  * `vec4u(i0, i1, i2, id | flags << 28)`, then three dependent position reads
  * at the mesh's vertex base (one `vec4f` each, or three `f32` each when
  * packed). The result is the same `BvhTriangle`, so the triangle test, the
@@ -602,7 +602,7 @@ export interface TraceModuleOptions {
      */
     readonly rayMasks?: boolean;
     /**
-     * The scene's triangle format (docs/design/indexed-leaves.md), compiled
+     * The scene's triangle format (docs/internals/design/indexed-leaves.md), compiled
      * in like `rayMasks`: `'records'` (the default, 48-byte records, three
      * bindings) or `'indexed'` (16-byte indexed triangles read through the
      * scene's positions buffer, a fourth binding after the top level,
@@ -613,7 +613,7 @@ export interface TraceModuleOptions {
     /** Indexed only: the positions buffer's layout, `'vec4'` (the default) or `'packed'`. */
     readonly positionLayout?: PositionLayout;
     /**
-     * The scene's node format (docs/design/compressed-nodes.md), compiled in
+     * The scene's node format (docs/internals/design/compressed-nodes.md), compiled in
      * like `rayMasks`: `'f32'` (the default, 64-byte nodes) or `'quantized'`
      * (32-byte nodes decoded on the frame read once per instance entered).
      * Only `bvhLoadMeshNode` and the instance entry's frame read differ; it is

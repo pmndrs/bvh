@@ -1,0 +1,97 @@
+---
+title: Coming from three-mesh-bvh
+description: The API mapping from three-mesh-bvh 0.9, what is missing here, what won't be, and when to stay with three-mesh-bvh.
+nav: 86
+---
+
+This compares `@pmndrs/bvh` with three-mesh-bvh 0.9.18. Of the 51 features audited, 31 have an equivalent here, 7 have
+part of one, 10 are missing and 3 won't be done. The full audit, with the code behind each row, is
+[`docs/internals/PARITY.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/PARITY.md).
+
+## CPU: MeshBVH and friends
+
+Most code switches by changing the import:
+
+| three-mesh-bvh | `@pmndrs/bvh/three` |
+| --- | --- |
+| `import { MeshBVH, acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from 'three-mesh-bvh'` | The same names from `@pmndrs/bvh/three`, after `await prepareBoundsTrees()` once (it loads tinybvh) |
+| `new MeshBVH(geometry, options)` | `new MeshBVH(geometry, options)` (a `BvhBoundsTree`), or `geometry.computeBoundsTree(options)` |
+| `strategy`, `maxLeafSize`, `maxDepth`, `indirect`, ... | Accepted; see [Build options](/three/bounds-tree#build-options) for what each does here |
+| `raycast`, `raycastFirst`, `shapecast`, `intersectsBox`, `intersectsSphere`, `intersectsGeometry`, `bvhcast` | The same arguments and answers |
+| `closestPointToPoint`, `closestPointToGeometry` | The same; both `faceIndex`es are original triangles |
+| `refit()` | `refit()`: rereads the position attribute; the index must not have changed |
+| `traverse(callback)` (the node walk) | `traverseNodes(callback)`. Our `traverse` is the shapecast box walk |
+| `resolveTriangleIndex(i)` | The same. The geometry is never reordered, as with `indirect: true` |
+| `MeshBVH.serialize(bvh)`, `MeshBVH.deserialize(data, geometry)` | `boundsTree.serialize()`, `deserializeBoundsTree(bytes, geometry)`: our format |
+| `ExtendedTriangle`, `OrientedBox`, `SeparatingAxisBounds`, `CONTAINED`, `INTERSECTED`, `NOT_INTERSECTED` | The same, from `/three`. `OrientedBox` is its own class, not a `Box3` subclass |
+| `getTriangleHitPointInfo`, `estimateMemoryInBytes`, `getBVHExtremes`, `validateBounds` | The same functions |
+| `MeshBVHHelper`, `BVHHelper` | The same classes (no deprecation warning on `MeshBVHHelper`) |
+| `GenerateMeshBVHWorker().generate(geometry, options)` | `new GenerateMeshBvhWorker().generate(geometry, options)`: no cross-origin isolation needed |
+| `ObjectBVH.raycast(raycaster)`, frustum culling | `BvhSceneRaycaster`, `raycastScene(picker, raycaster)`, `picker.intersectsFrustum(frustum, layers)` |
+
+Without three, the same queries are on the core's `CpuMeshBvh` with plain points ([CPU queries](/cpu-queries/raycast)).
+
+## GPU: three-mesh-bvh/webgpu
+
+| three-mesh-bvh 0.9 (`three-mesh-bvh/webgpu`) | `@pmndrs/bvh/three` |
+| --- | --- |
+| `new BVHComputeData(root, { attributes })` | `SceneTrees.create(deviceFromRenderer(renderer))`, `new SceneTreesObject3DSync(trees, root, options)`, `new BvhTraceNodes(renderer, trees)` |
+| `bvh.update()` (repack everything) | `sync.sync()`: only the meshes and instances that changed |
+| `bvh.updateTransforms()` | `sync.update()` each frame, then `trees.update(encoder)`, then `bvh.update()` |
+| `bvh.updateAsync` | `trees.whenBuilt()`, `trees.whenRefined()` |
+| `bvh.fns.raycastFirstHit(ray, &hit) -> bool` | WGSL `bvhTraceClosest(ray) -> BvhHit` (`hit.t < 0` on a miss); TSL `bvh.traceClosest(origin, direction, tMin, tMax)` |
+| `bvh.fns.raycastAnyHit(ray) -> bool` | WGSL `bvhTraceAny(ray) -> bool`; TSL `bvh.traceAny(...)` |
+| (none) | Ray masks: `bvhTraceClosestMasked`, `bvhTraceAnyMasked`; `rayMaskFromLayers(camera.layers)` |
+| `wgslTagFn` with `${bvh.fns.raycastFirstHit}` | three's `wgslFn(code, [bvh.module])`, calling the walk by name |
+| `rayStruct` (`origin, direction, maxDist`; 0 is unbounded) | `BvhRay(origin, tMin, direction, tMax)`, an explicit interval |
+| `hit.dist`, `hit.didHit` | `hit.t`, and `hit.t >= 0.0` |
+| `hit.normal` and `hit.side` | `hit.normal` (world, geometric, authored front side) and `hit.frontFace` |
+| `hit.barycoord` (weights of a, b, c) | `hit.barycentrics`: weights of corners 1 and 2; corner 0 is `1 - u - v` |
+| `hit.indices` | `hit.triangle`, the triangle's index in its mesh |
+| `hit.objectIndex` | `hit.instance`; `sync.sourceOf(hit.instance)` gives `{ object, instanceId, group }` |
+| Per-vertex attribute buffers | None: use `hit.triangle` and `hit.barycentrics` against your own attributes, or `hit.material` |
+| `writeTransformData` override (material in the pad words) | `material(object, info)` in the sync's options, which becomes `hit.material` |
+
+## Partly there
+
+- **Skinned meshes:** posed on the GPU for GPU rays ([Skinned and morphed meshes](/three/skinned-and-morphed)); CPU
+  picking on them uses three's own raycast. No `SkinnedMeshBVH` on the CPU.
+- **`StaticGeometryGenerator`:** the GPU pose pass replaces it for GPU rays; there is no CPU static geometry.
+- **`BatchedMesh`:** the scene read and the raycast work; there is no per-geometry `computeBatchedBoundsTree(index)`.
+- **`maxDepth`:** accepted, not honoured.
+- **`setBoundingBox`, `verbose`, `onProgress`:** `onProgress` reports 0 and 1 only; `verbose` is ignored.
+- **`serialize`:** our layout's format, not three-mesh-bvh's, and no `setIndex`.
+- **`updateAsync`:** `whenBuilt()` and `whenRefined()` cover it.
+
+## Missing
+
+- `PointsBVH` and the line BVHs (`LineSegmentsBVH`, `LineLoopBVH`, `LineBVH`): leaves hold triangles only.
+- `ObjectBVH.shapecast`.
+- `getJSONStructure`.
+- On the GPU: `closestPointToPoint`, shapecasts (`getShapecastFn`), `sampleTrianglePoint`, the WGSL helpers
+  (`intersectRayTriangle`, `closestPointToTriangle`, `ndcToCameraRay`; our triangle test sits inside the walk),
+  `ClusteredBVH`, and SDF generation.
+
+## Won't be done
+
+- **GLSL and WebGL2** (`MeshBVHUniformStruct`, `BVHShaderGLSL`, the `VertexAttributeTexture` classes): WebGL2 isn't a
+  target.
+- **`ParallelMeshBVHWorker`:** it needs `SharedArrayBuffer` and cross-origin isolation. A large mesh goes to the GPU
+  H-PLOC builder instead.
+- **`useSharedArrayBuffer`:** our trees are copied to the GPU, and the worker pool needs no shared memory.
+
+## What you get that three-mesh-bvh doesn't have
+
+- GPU builds (H-PLOC and LBVH) and GPU refits (top level and per mesh), with nothing read back per frame.
+- The same trees for three, for raw WebGPU passes, for workers and for other libraries on the device.
+- The ray oracle on every builder and walk, and a watertight triangle test.
+- Instance masks, a triangle filter and per-instance materials in the walk.
+
+## When to stay with three-mesh-bvh
+
+- You need WebGL2 GPU traversal, or GLSL.
+- You need points or lines as primitives, or GPU shapecasts and closest points (SDF generation).
+- Memory matters more than ray speed. Our trees use 8-9 times three-mesh-bvh's bytes beyond the geometry on Sponza and
+  Bistro (448 MiB against 51 MiB on Sponza with defaults on both sides). The off-by-default layout variants bring that to
+  226 MiB. See [Memory](/performance/memory).
+- You rely on years of other people's use: this package is new.

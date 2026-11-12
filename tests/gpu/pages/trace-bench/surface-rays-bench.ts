@@ -172,7 +172,7 @@ export interface LeafLayoutEntry {
 }
 
 /**
- * Indexed leaves against records (docs/design/indexed-leaves.md): the same
+ * Indexed leaves against records (docs/internals/design/indexed-leaves.md): the same
  * tinybvh trees, the scene assembled in each format, timed in paired rounds;
  * ratios `indexed_over_records/<tree>/<set>/<mode>` and
  * `indexed_packed_over_records/...` (above 1: indexed is faster).
@@ -188,7 +188,7 @@ export interface LeafLayoutResult {
 }
 
 /**
- * Quantized nodes against f32 nodes (docs/design/compressed-nodes.md): the
+ * Quantized nodes against f32 nodes (docs/internals/design/compressed-nodes.md): the
  * same tinybvh trees, records, the scene assembled with each node format,
  * timed in paired rounds; ratios `quantized_over_f32/<tree>/<set>/<mode>`
  * (above 1: quantized is faster). Hits: the same `t`, bit for bit, and the
@@ -622,7 +622,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             }
             const hitRecord: HitRecordResult = { rounds: profile.rounds, entries: recordEntries, ratios: recordRatios, agreement };
 
-            // 5: indexed leaves against records (docs/design/indexed-leaves.md): the same trees, both position layouts.
+            // 5: indexed leaves against records (docs/internals/design/indexed-leaves.md): the same trees, both position layouts.
             const leafScenes: Record<LeafLayout, Record<Tree, TraceSceneBuffers>> = { records: scenes, indexed: {} as Record<Tree, TraceSceneBuffers>, 'indexed-packed': {} as Record<Tree, TraceSceneBuffers> };
             const leafBytes: LeafLayoutResult['bytes'] = {};
             const runLeaves = !skip.has('leaves');
@@ -711,7 +711,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             }
             const triangleLeaves: LeafLayoutResult = { rounds: profile.rounds, entries: leafEntries, ratios: leafRatios, agreement: leafAgreement, bytes: leafBytes };
 
-            // 6: quantized nodes against f32 nodes (docs/design/compressed-nodes.md): the same trees, records.
+            // 6: quantized nodes against f32 nodes (docs/internals/design/compressed-nodes.md): the same trees, records.
             const nodeLayouts: NodeLayout[] = ['f32', 'quantized'];
             const nodeScenes: Record<NodeLayout, Record<Tree, TraceSceneBuffers>> = { f32: scenes, quantized: {} as Record<Tree, TraceSceneBuffers> };
             const nodeBytes: Record<string, number> = {};

@@ -128,7 +128,7 @@ export type BvhSplitStrategy = typeof CENTER | typeof AVERAGE | typeof SAH;
 /**
  * Options of {@link computeBoundsTree} and `new BvhBoundsTree(geometry, options)`:
  * three-mesh-bvh's `MeshBVH` options, mapped to ours where they map
- * (docs/three.md, "Build options").
+ * (docs/internals/three.md, "Build options").
  */
 export interface BvhBoundsTreeOptions {
     /** The tinybvh builder; default the one {@link prepareBoundsTrees} loaded. */
@@ -175,7 +175,7 @@ export interface BvhBoundsTreeOptions {
     readonly onProgress?: (progress: number) => void;
     /** Accepted and ignored. */
     readonly verbose?: boolean;
-    /** Accepted and ignored: no SharedArrayBuffer is needed (docs/PARITY.md, 4.8). */
+    /** Accepted and ignored: no SharedArrayBuffer is needed (docs/internals/PARITY.md, 4.8). */
     readonly useSharedArrayBuffer?: boolean;
     /** Not supported: the tree holds every triangle, and raycasts follow the draw range instead. Throws when set. */
     readonly range?: unknown;

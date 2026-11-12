@@ -36,7 +36,7 @@ const engineRules = (allowThree) => ({
 });
 
 export default tseslint.config(
-    { ignores: ['**/dist/', 'examples/dist/','node_modules/', '.claude/', 'native/build/', 'tools/emsdk/', 'bench/results/'] },
+    { ignores: ['**/dist/', 'examples/dist/', 'api-docs/', 'docs-site/', 'node_modules/', '.claude/', 'native/build/', 'tools/emsdk/', 'bench/results/'] },
     js.configs.recommended,
     ...tseslint.configs.recommended,
     {
@@ -67,7 +67,7 @@ export default tseslint.config(
     {
         // The examples and the compare suite are apps: three (and the libraries compared) are allowed, and the library only through its public entry points
         // (@pmndrs/bvh, /three, /worker, aliased to src/ by examples/vite.config.ts), never by a path into src/.
-        files: ['examples/**/*.ts', 'compare/**/*.ts'],
+        files: ['examples/**/*.ts', 'compare/**/*.ts', 'docs/snippets/**/*.ts'],
         rules: {
             'no-restricted-imports': ['error', { patterns: [{ group: ['**/src/**', '../../src/*', '../../../src/*'], message: 'Examples use the package by its public names: @pmndrs/bvh, @pmndrs/bvh/three, @pmndrs/bvh/worker.' }] }],
             'no-restricted-syntax': 'off',

@@ -13,3 +13,5 @@ Thumbs.db
 /bench/results/incoming/
 .claude/
 /examples/dist/
+/api-docs/
+/docs-site/

@@ -1,5 +1,5 @@
 /**
- * GPU LBVH builder (stage B1 of docs/design/bvh-framework.md): a tree per
+ * GPU LBVH builder (stage B1 of docs/internals/design/bvh-framework.md): a tree per
  * mesh, built on the GPU in the tracer's layout (gpu-layout.ts), so the
  * tracer and everything that traces (`bvhTraceClosest`, `bvhTraceAny`, DDGI)
  * read its trees exactly as they read tinybvh's (B0). It is the stepping

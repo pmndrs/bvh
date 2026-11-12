@@ -1,5 +1,5 @@
 /**
- * The build-peak lever (`maxBatchBytes`, docs/design/bvh-builders.md "Build
+ * The build-peak lever (`maxBatchBytes`, docs/internals/design/bvh-builders.md "Build
  * peak memory"): the planners keep each batch's GPU bytes under the cap, a
  * mesh bigger than the cap gets a batch of its own, and the scratch pool is
  * sized from the largest batch. Only the device's limits are read, so this

@@ -1,4 +1,4 @@
-// Quantized nodes (docs/design/compressed-nodes.md) against f32 nodes: the frame rule, outward
+// Quantized nodes (docs/internals/design/compressed-nodes.md) against f32 nodes: the frame rule, outward
 // rounding with the margin, every decoded box around its exact box, and the same hits from the
 // same scene with either node format (the triangle test is unchanged, so instance, triangle and
 // t are bit for bit the same).
