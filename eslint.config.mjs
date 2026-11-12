@@ -65,9 +65,9 @@ export default tseslint.config(
         rules: { 'no-restricted-imports': 'off', 'no-restricted-syntax': 'off' },
     },
     {
-        // The examples are apps: three is allowed, and the library only through its public entry points
+        // The examples and the compare suite are apps: three (and the libraries compared) are allowed, and the library only through its public entry points
         // (@pmndrs/bvh, /three, /worker, aliased to src/ by examples/vite.config.ts), never by a path into src/.
-        files: ['examples/**/*.ts', 'docs/snippets/**/*.ts'],
+        files: ['examples/**/*.ts', 'compare/**/*.ts', 'docs/snippets/**/*.ts'],
         rules: {
             'no-restricted-imports': ['error', { patterns: [{ group: ['**/src/**', '../../src/*', '../../../src/*'], message: 'Examples use the package by its public names: @pmndrs/bvh, @pmndrs/bvh/three, @pmndrs/bvh/worker.' }] }],
             'no-restricted-syntax': 'off',

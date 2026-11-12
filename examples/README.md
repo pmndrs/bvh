@@ -49,6 +49,19 @@ BVH_ASSETS_DIR=../webgpu-ddgi/assets pnpm examples:dev
 
 Measured on the Apple M5 (Chrome, headless, `pnpm examples:smoke`), default scenes: the GPU batch traces 65k rays in about 1.9 ms (35 Mrays/s, a 100k-triangle knot from outside, timestamps); `acceleratedRaycast` 0.40 M rays/s against three's 306 (100k triangles); the path tracer about 120 Mrays/s (wall time of one dispatch); Sponza (405 meshes, 3.7 M triangles) through `load-gltf` has every first tree in about 150-230 ms and every tinybvh tree in about 600 ms after the first update.
 
+## Comparison pages (`compare/`, BX.10)
+
+Each runs the suites of `compare/core/` (the same as `pnpm compare:node`) on the page's mesh (`?scene=furnished-room`, `?scene=sponza`, `?model=`, a torus knot by default; meshes merged into one world-space mesh), shows a table with every answer's agreement with ours, works live with the library chosen in the overlay, and has a "what else you can do" box. Smoke runs use a 20k-triangle knot and short timings; `BVH_PAGE_QUERY='scene=sponza&full'` gives the runner a full run, whose CSV rows come back in the report (`data.csv`). Results and method: `compare/RESULTS.md`.
+
+| Page | Compares | What else (live) | Smoke check |
+| --- | --- | --- | --- |
+| `compare/raycast` | CPU first and all hits per second, every library; a GPU batch against three-mesh-bvh/webgpu | the batch is a raw WebGPU pass three never sees | three-mesh-bvh (CPU and GPU) and three agree with ours on every ray |
+| `compare/build` | build, refit, memory; main-thread stalls on the main thread and in workers (ours and three-mesh-bvh's) | a GPU H-PLOC build of the same mesh | refits agree |
+| `compare/tree-quality` | SAH, depth, boxes, leaves, bytes; `MeshBVHHelper` of either | three builders, one layout | both trees have an SAH cost |
+| `compare/queries` | box, sphere, closest point (three-mesh-bvh, Rapier) | the GPU builder's tree answers the same CPU queries | every answer agrees |
+| `compare/scene` | scene trees over thousands of moving objects: ours, bvh.js, `ObjectBVH`; live frustum culling | the GPU top-level refit every frame | `ObjectBVH` agrees before and after the motion |
+| `compare/gpu` | GPU closest and any hit against three-mesh-bvh/webgpu, paired rounds | a GPU-built tree traced by the same kernel | every ray agrees |
+
 ## Public-API gaps the examples ran into
 
 - `SceneTrees` keeps no CPU copy of its trees, so there is no SAH cost per tree for the overlay; and its GPU build time (`counts.gpuBuildMs`) is submit-to-stats wall time, not timestamps. `SceneTrees.update(encoder)` takes no timestamp writes, so the top-level refit's GPU time can't be shown (the instances page shows CPU ms of sync + update).
