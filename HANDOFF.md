@@ -23,7 +23,7 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
 
 ## Current state (end of 2026-11-12). Read this first.
 
-Everything below is on `main` and local only (nothing has been pushed). The earlier "Update" paragraphs are folded in here; the file had no history sections below this one when it was rewritten.
+Everything below is on `main` and local only (nothing has been pushed).
 
 **Dennis's decisions**
 - **Source of truth:** this repo, for BVH and walk code. webgpu-ddgi's copy is frozen until P3 (split point `d288adf`).
@@ -56,21 +56,39 @@ Everything below is on `main` and local only (nothing has been pushed). The earl
 - **Packaging and CI:** `tsc` builds `dist/`; `scripts/verify-artifacts.mjs` checks the licence text, worker URLs and `/three`; ESLint keeps the core engine-free (only `src/three` imports three). `.github/workflows/ci.yml` has a `wasm` job (rebuilds on Linux and macOS, `--check`, uploads the `.wasm`) and a SwiftShader GPU job (`--allow-software`; gates `bvh-lbvh-fallback`, `trace-inline`, `trace-oracle`; 15 minute limit). Neither has ever run on GitHub, because nothing has been pushed.
 - **Docs:** `docs/internals/DIVERGENCES.md` (32 rows plus 8 "needs Dennis" items), `docs/internals/MIGRATING-FROM-DDGI.md` (P3), `docs/internals/MIGRATING-FROM-REFLECTIONS-BRANCH.md`, `docs/internals/three.md`, `docs/internals/design/trace.md`, `docs/internals/WINDOWS-RUNBOOK.md` (the next pass on the RTX 3060 and Intel).
 
+**Landed since 2026-11-12 midday** (all on `main`)
+- **Comparison suite** (`compare/`, `compare/RESULTS.md`, `docs/performance/comparison.mdx`; `pnpm compare:node`): one adapter interface over @pmndrs/bvh, three-mesh-bvh, three, bvh-tree, Babylon, bvh.js and Rapier; compare pages `raycast`, `build`, `tree-quality`, `queries`, `scene`, `gpu` in the examples site. Apple M5, indicative.
+  - **Wins:** Sponza CPU closest-hit 580k rays/s (three-mesh-bvh 0.57-0.75x, bvh-tree 0.12x); tree SAH cost 90 against 122/141/205; GPU 0.96-1.12x three-mesh-bvh/webgpu closest and 1.25-1.28x any-hit on Sponza and the knot; scene trees ahead of `ObjectBVH` at 10k objects.
+  - **Losses:** see Open.
+- **Docs site:** 34 MDX pages in `docs/`, type-checked snippets (`pnpm docs:snippets`, `docs:check`), TypeDoc at `/api`, new README; internals moved to `docs/internals/`. The docs workflow builds on push and PR and deploys only on manual dispatch.
+- **three.js examples** (`examples/`, Vite site; `pnpm examples:dev`, `examples:build`, `examples:smoke`): raycast, pathtracer, skinned, instances, load-gltf, inspector.
+- **Per-triangle materials and `setPoseCpu`:** `MeshInput.triangleMaterials` (records flags bits 16-31, indexed per-mesh table, merged side table); `SceneTrees.setPoseCpu` is a CPU refit for deforming meshes, with or without subgroups.
+- **`/three` fold is the default:** multi-material meshes fold into one tree in the scene builder, the sync and the scene raycaster; `multiMaterial: 'groups'` splits them. `/three` also augments three's types in three-mesh-bvh's shape (`boundsTree`, `computeBoundsTree`, `firstHitOnly`).
+- **Perf follow-ups:** `anyHitOrder: 'far'` (default) `| 'larger' | 'near'`, compiled into the one walk (`'larger'` is 1.73x three-mesh-bvh on outside any-hit rays, was 0.32x; costs 0.78x on merged surface rays); CPU refit 2.8-3.6x faster; tinybvh WASM heap released after big builds (`releaseAboveBytes`, pool `recycleAboveBytes`; 1,707 to 391 MiB retained).
+- **CI:** `profile=ci` for `trace-oracle` and `trace-inline` on the SwiftShader job (all variants and cases, about a tenth of the rays; pass rules unchanged; per-phase timings in the report).
+- **reflections** now runs on bvh `main` and reads `dist/`: run `pnpm build` after any source change it needs.
+
 **Consumers** (survey of ~/Developer, 2026-11-11)
 - **ddgi and its rc-\* copies:** on the frozen copy; they switch at P3.
-- **reflections:** linked to the old-API branch `reflections-integration`; can move to `main` (see its migration doc).
+- **reflections:** now on bvh `main`, reading `dist/` (see the build note above).
 - **Denoiser, upscaler, ddgi-research:** use three-mesh-bvh `/webgpu`; can switch through `/three`.
 - **three-bvh-csg, homefig, drei, three-gpu-pathtracer:** the CPU features they use exist (shapecast, `bvhcast`, `ExtendedTriangle`, closest point); none has switched.
 
 **Open**
-- **RTX 3060 and Intel have run none of the 2026-11-12 work.** Steps and decision rules: `docs/internals/WINDOWS-RUNBOOK.md`. It decides three defaults (`mergeStaticInstances`, indexed leaves, quantized nodes), the 40-byte hit record's cost (M5 only: ratios 0.96-1.15, medians 1.02-1.11) and the cap's effect (`docs/internals/design/memory.md`).
-- **`scene-trees-mid-swap`:** one unexplained failure after 405 s under a parallel `pnpm build` (message not captured; the page limit is 900 s). It has passed 3 times since (about 170 s, 0 disagreements over 87.7M rays). If it fails again, keep the full log.
-- **Indexed leaves, not built:** WASM writer for tinybvh (it converts after), indexed output from the GPU LBVH, `CpuMeshBvh` reading corners through positions (it expands to records), the adopt lever with indexed scenes, binding the app's positions (option A).
-- **Quantized nodes, not built:** H-PLOC emitting quantized nodes directly, packing inside the tinybvh WASM (workers pack in JS: Sponza's tinybvh trees arrive in 439 ms against 351), the folded decode. Performance: `SceneTrees` runs one quantize job per copied GPU tree (`copyGpuTree`); batching an update's jobs into one dispatch would cut per-tree buffers and passes.
-- **`bvh:wasm --check`** needs the pinned emsdk, which isn't downloaded on every machine.
-- **Still to do in `/three`:** Windows compile cost of the pose pass (one shader per variant, not measured on Windows), `ObjectBVH.shapecast` (PARITY 5.3), a browser look at `MeshBVHHelper`.
-- **API tidy:** `export *` in `src/trace/index.ts`, the batch helpers in `gpu-lbvh.ts`, folding the two layout files into one.
-- **Next phases:** Babylon (P6), P4 examples and docs site, the comparison suite (P5), the rest of CPU queries (P8): a CPU `StaticGeometryGenerator` (PARITY 8), `ObjectBVH.shapecast` (9), three-mesh-bvh-format `serialize` and `getJSONStructure` (12).
+- **RTX 3060 and Intel runs** (`docs/internals/WINDOWS-RUNBOOK.md`): none of the recent work has run there. They decide the defaults for `mergeStaticInstances`, `triangleLeaves`, `nodeFormat`, the 40-byte hit record (M5 only so far: ratios 0.96-1.15) and `anyHitOrder`, and the cap's effect (`docs/internals/design/memory.md`).
+- **Publishing the docs** (Dennis): Pages settings and DNS.
+- **Old worktree** `~/Developer/bvh-worktrees/reflections-integration`: reflections no longer uses it; Dennis removes it (a session couldn't delete it).
+- **Compare pages left:** `skinned`, `pathtracer`, `sdf`.
+- **Where others still win:** Rapier's box queries (2.3-2.7x) and closest point (1.7-2.4x); three-mesh-bvh's refit (1.6-2x) and memory (we hold 9-10x more in the default layout); also its CPU box queries (1.2-1.4x), furnished-room GPU closest-hit (1.1-1.2x) and bvh.js's scene build (3x).
+- **Not started:** `three/sdf`, Babylon (P6), the vanilla examples, ddgi P3 (Dennis tells that session when the core is done).
+- **Quantize jobs:** `SceneTrees` runs one per copied GPU tree (`copyGpuTree`); batching an update's jobs into one dispatch would cut per-tree buffers and passes.
+- **`scene-trees-mid-swap`:** one unexplained failure after 405 s under a parallel `pnpm build` (message not captured; page limit 900 s); passed 3 times since. If it fails again, keep the full log.
+- **Indexed leaves, not built:** WASM writer for tinybvh, indexed output from the GPU LBVH, `CpuMeshBvh` reading through positions, adopt lever with indexed scenes, binding the app's positions.
+- **Quantized nodes, not built:** H-PLOC emitting them directly, packing inside the tinybvh WASM, the folded decode.
+- **`bvh:wasm --check`** needs the pinned emsdk, not on every machine.
+- **`/three` to do:** Windows compile cost of the pose pass, `ObjectBVH.shapecast` (PARITY 5.3), a browser look at `MeshBVHHelper`.
+- **API tidy:** `export *` in `src/trace/index.ts`, batch helpers in `gpu-lbvh.ts`, merging the two layout files.
+- **Later CPU queries (P8):** CPU `StaticGeometryGenerator` (PARITY 8), three-mesh-bvh-format `serialize` and `getJSONStructure` (12).
 
 **Needs Dennis**
 - **Indexed leaves:** the vertex base lives in a per-mesh header, not added into the records as the design said (records stay relocatable); merged groups capped at 65,536 sources.
