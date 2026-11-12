@@ -100,6 +100,7 @@ export function traceNodesMasked(renderer: WebGPURenderer, trees: SceneTrees): v
     // #region trace-nodes-options
     const bvh = new BvhTraceNodes(renderer, trees, {
         rayMasks: true, // default: traceClosestMasked and traceAnyMasked exist
+        anyHitOrder: 'far', // default; 'larger' for occlusion rays from outside the model or across open space
         triangleFilter: /* wgsl */ `fn bvhTrianglePasses(candidate: BvhCandidate) -> bool { return candidate.query == BVH_QUERY_ANY; }`,
     });
     // #endregion

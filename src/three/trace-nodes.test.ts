@@ -170,6 +170,16 @@ describe('BvhTraceNodes', () => {
         expect(() => new BvhTraceNodes({ backend: { ...backend, destroyAttribute: undefined }, _attributes: renderer._attributes }, source)).toThrow(/unsupported/);
     });
 
+    it('passes anyHitOrder to the compiled walk', () => {
+        const { renderer } = fakeRenderer();
+        const source = { buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } };
+        const codeOf = (options?: { anyHitOrder?: 'far' | 'near' | 'larger' }) => (new BvhTraceNodes(renderer, source, options).module as unknown as { text: string }).text;
+        expect(codeOf()).not.toContain('fn bvhBoxHalfArea(');
+        expect(codeOf({ anyHitOrder: 'far' })).toBe(codeOf());
+        expect(codeOf({ anyHitOrder: 'larger' })).toContain('fn bvhBoxHalfArea(');
+        expect(codeOf({ anyHitOrder: 'near' })).not.toBe(codeOf());
+    });
+
     it('needs a WebGPU backend, and refuses masked helpers without ray masks', () => {
         expect(() => new BvhTraceNodes({ backend: { isWebGPUBackend: false } }, { buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } })).toThrow(/WebGPURenderer/);
         const { renderer } = fakeRenderer();

@@ -122,6 +122,24 @@ describe('createBvhWorkerPool', () => {
         keeping.dispose();
     });
 
+    it('does not give up on workers when a fresh worker fails after a recycled one answered', async () => {
+        vi.stubGlobal('Worker', FakeWorker);
+        const pool = createBvhWorkerPool({ size: 1 });
+        FakeWorker.heapBytes = 1300 * 2 ** 20;
+        await pool.build(quad(3));
+        expect(pool.stats).toMatchObject({ workers: 0, recycled: 1 });
+        // The fresh worker dies on its first build: that build fails, and the pool keeps using workers.
+        FakeWorker.failToLoad = true;
+        await expect(pool.build(quad(4))).rejects.toThrow(/a BVH worker failed/);
+        expect(pool.usesWorkers).toBe(true);
+        FakeWorker.failToLoad = false;
+        FakeWorker.heapBytes = 64 * 2 ** 20;
+        expect((await pool.build(quad(5))).triangleCount).toBe(50);
+        expect(pool.usesWorkers).toBe(true);
+        expect(FakeWorker.started).toHaveLength(3);
+        pool.dispose();
+    });
+
     it('copies the input by default and moves it with transferInput', async () => {
         vi.stubGlobal('Worker', FakeWorker);
         const pool = createBvhWorkerPool({ size: 1 });

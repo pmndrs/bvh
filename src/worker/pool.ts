@@ -128,8 +128,6 @@ interface Job {
 interface PoolWorker {
     readonly worker: Worker;
     job: Job | null;
-    /** Builds this worker answered: a worker that fails before its first answer may mean workers don't load here. */
-    answered: number;
     nextId: number;
 }
 
@@ -199,6 +197,8 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
     /** Builds running inline now (a tinybvh build can't be stopped, so dispose settles them and drops their result). */
     const inlineJobs = new Set<Job>();
     let finished = 0;
+    /** Whether any worker of this pool ever answered, even one since recycled: until then a failure may mean workers can't load. */
+    let everAnswered = false;
     let disposed = false;
 
     const settle = (job: Job, outcome: { bvh: MeshBvh } | { error: Error }): void => {
@@ -263,7 +263,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
             const job = entry.job;
             if (!job || event.data.id !== entry.nextId - 1) return;
             entry.job = null;
-            entry.answered++;
+            everAnswered = true;
             finished++;
             const response = event.data;
             settle(job, 'error' in response ? { error: new Error(response.error) } : { bvh: response.bvh });
@@ -279,8 +279,8 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
         entry.worker.onerror = (event) => {
             event.preventDefault?.();
             const message = `@pmndrs/bvh/worker: a BVH worker failed: ${event.message || 'it could not be loaded'}`;
-            if (entry.answered === 0 && workers.every((other) => other.answered === 0)) {
-                // No worker has ever answered: workers probably can't load here (a bundler that didn't copy
+            if (!everAnswered) {
+                // No worker of this pool has ever answered (a recycled one counts): workers probably can't load here (a bundler that didn't copy
                 // the worker file, a blocked origin). Build inline from now on.
                 fallBackToInline(message);
                 pump();
@@ -334,7 +334,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
             let entry = workers.find((candidate) => candidate.job === null);
             if (!entry && workers.length < size) {
                 try {
-                    entry = { worker: startWorker(), job: null, answered: 0, nextId: 1 };
+                    entry = { worker: startWorker(), job: null, nextId: 1 };
                 } catch (error) {
                     fallBackToInline(`@pmndrs/bvh/worker: a worker could not be started: ${toError(error).message}`);
                     continue;

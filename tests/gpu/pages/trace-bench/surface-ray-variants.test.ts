@@ -163,6 +163,16 @@ describe('counted walk', () => {
         });
     }
 
+    for (const anyHitOrder of ['far', 'larger', 'near'] as const) {
+        it(`follows the production any-hit walk with anyHitOrder '${anyHitOrder}'`, () => {
+            const name = 'bvhWalkAny';
+            expect(countedWalkWgsl({ kind: 'any', name, counters: false, anyHitOrder })).toBe(productionWalkWgsl('any', anyHitOrder));
+            const counted = countedWalkWgsl({ kind: 'any', name, counters: true, anyHitOrder });
+            expect(codeOnly(withoutCounters(counted, `fn ${name}(ray: BvhRay, rayMask: u32) -> bool {`))).toBe(codeOnly(productionWalkWgsl('any', anyHitOrder)));
+            expect(countedKernelWgsl('any', { anyHitOrder })).toContain('fn benchCountedWalk(');
+        });
+    }
+
     it('keeps the production walk the merged-instance select and the masks, which the copy inherits', () => {
         const walk = productionWalkWgsl('closest');
         expect(walk).toContain('bvhHitInstance(instance, triangle, slot)');

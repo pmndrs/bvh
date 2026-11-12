@@ -111,7 +111,7 @@ export interface TraceBatchKernelOptions {
     readonly positionLayout?: PositionLayout;
     /** The scenes' node format, compiled in. Default `'f32'`. */
     readonly nodeFormat?: NodeFormat;
-    /** The any-hit walk's child order, compiled in (`AnyHitOrder`). Default `'far'`; `'near'` for rays that start away from the geometry. */
+    /** The any-hit walk's child order, compiled in (`AnyHitOrder`). Default `'far'` (best for rays from surfaces); `'larger'` for rays from outside the geometry or across open space. */
     readonly anyHitOrder?: AnyHitOrder;
 }
 

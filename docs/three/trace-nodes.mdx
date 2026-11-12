@@ -48,9 +48,13 @@ masked forms by name ([Tracing in WGSL](/tracing/wgsl-walk)).
 ```ts
 const bvh = new BvhTraceNodes(renderer, trees, {
     rayMasks: true, // default: traceClosestMasked and traceAnyMasked exist
+    anyHitOrder: 'far', // default; 'larger' for occlusion rays from outside the model or across open space
     triangleFilter: /* wgsl */ `fn bvhTrianglePasses(candidate: BvhCandidate) -> bool { return candidate.query == BVH_QUERY_ANY; }`,
 });
 ```
+
+`anyHitOrder` is the any-hit walk's child order, compiled in: `'far'` (the default) is best for rays that start on
+surfaces, `'larger'` for rays from outside or across open space. Answers are the same either way.
 
 The walk is compiled for the source's formats (`triangleLeaves`, `positionLayout`, `nodeFormat`); with indexed leaves
 a fourth storage node, `bvh.storage.positions`, is bound. Nothing changes for the caller.
