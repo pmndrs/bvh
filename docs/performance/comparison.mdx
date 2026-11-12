@@ -1,0 +1,44 @@
+---
+title: Comparison with other libraries
+description: The same geometry and the same seeded queries through @pmndrs/bvh, three-mesh-bvh, three, bvh-tree, Babylon.js, bvh.js and Rapier.
+nav: 92
+sourcecode: compare/RESULTS.md
+---
+
+The comparison suite in `compare/` runs the same geometry and the same seeded rays, boxes, spheres and points through
+every library it covers. Each answer is checked against ours. **A library that disagrees with ours on a measurement
+gets no ratio on it: a faster wrong answer is not faster.** The full tables, the method and every caveat are in
+[`compare/RESULTS.md`](https://github.com/pmndrs/bvh/blob/main/compare/RESULTS.md), and the raw rows are in
+`bench/results/compare.csv`.
+
+> [!NOTE]
+> Every number here is from one Apple M5 Pro (Node 22 and headless Chrome), and is **indicative**. The RTX 3060 runs are
+> still to come.
+
+## The libraries
+
+- [three-mesh-bvh](https://github.com/gkjohnson/three-mesh-bvh) 0.9.18: `MeshBVH` (CENTER and SAH), `ObjectBVH`, and `three-mesh-bvh/webgpu`.
+- [three](https://github.com/mrdoob/three.js) 0.187: `Mesh.raycast`, the no-BVH baseline.
+- [bvh-tree](https://github.com/benraziel/bvh-tree) 1.0.1: a plain-JS triangle BVH.
+- [Babylon.js](https://github.com/BabylonJS/Babylon.js) 9.35: an engine's own picking, with and without the submesh octree.
+- [bvh.js](https://github.com/agargaro/bvh.js) 0.0.13: a scene-level box BVH (objects, not triangles).
+- [Rapier](https://github.com/dimforge/rapier.js) 0.21: a physics engine's ray, point and shape queries on a trimesh collider.
+
+## Headline results
+
+| What | Result (ours = 1; above 1 means faster than ours) |
+| --- | --- |
+| CPU closest-hit rays, Sponza (5.74M triangles) | ours 580k rays/s; three-mesh-bvh 0.75 (SAH) and 0.57 (CENTER), Rapier 0.95, bvh-tree 0.12 |
+| Tree quality, Sponza (SAH cost, lower is better) | ours 90; three-mesh-bvh 122 (SAH) and 141 (CENTER); bvh-tree 205 |
+| GPU rays, against three-mesh-bvh/webgpu (paired rounds) | ours 0.97–1.11× theirs closest-hit and 1.23–1.28× any-hit on Sponza and the knot; 0.88–0.91× closest on the furnished room |
+| Scene-level trees, 10k objects | ours is ahead of three-mesh-bvh's `ObjectBVH` on every query |
+
+## Where other libraries win
+
+Measured on the same harness. These are open items, not footnotes:
+
+- **Rapier** answers box queries 2.3–2.7× faster and closest point 1.7–2.4× faster.
+- **three-mesh-bvh, CPU:** refits 6–7× faster, and answers box queries 1.2–1.4× faster.
+- **three-mesh-bvh, GPU:** any-hit rays from outside the model run 3× faster on its tree than on ours. That is being investigated.
+- **bvh.js** builds its scene tree about 3× faster.
+- **Memory:** in the default layout we hold about 9–10× more bytes beyond the app's geometry than three-mesh-bvh, because our triangle records copy the corners. The [memory page](/performance/memory) shows the levers: indexed leaves and compressed nodes roughly halve it.

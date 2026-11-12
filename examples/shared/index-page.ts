@@ -1,8 +1,8 @@
 // The index page's cards, from the one list of examples.
 import { EXAMPLES, SOURCE_TREE } from './examples.ts';
 
-const grid = document.getElementById('three')!;
 for (const example of EXAMPLES) {
+    const grid = document.getElementById(example.path.startsWith('compare/') ? 'compare' : 'three')!;
     const card = document.createElement('div');
     card.className = 'card';
     const title = document.createElement('a');

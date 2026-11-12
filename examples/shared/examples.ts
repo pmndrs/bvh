@@ -58,6 +58,48 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         description: 'MeshBVHHelper boxes by depth, stats per builder (tinybvh, H-PLOC, LBVH), leaf size and layout options, and a heat map of nodes visited per ray.',
         timeoutMs: 90_000,
     },
+    {
+        name: 'compare-raycast',
+        path: 'compare/raycast',
+        title: 'compare/raycast',
+        description: 'CPU first-hit and all-hit raycasts per second in every library on the same seeded rays, answers checked against ours, and a GPU batch against three-mesh-bvh/webgpu. Pick with any library.',
+        timeoutMs: 240_000,
+    },
+    {
+        name: 'compare-build',
+        path: 'compare/build',
+        title: 'compare/build',
+        description: 'Build and refit times, memory beyond the geometry, and main-thread stalls of worker builds (ours and three-mesh-bvh\'s), plus a GPU H-PLOC build only ours has.',
+        timeoutMs: 240_000,
+    },
+    {
+        name: 'compare-tree-quality',
+        path: 'compare/tree-quality',
+        title: 'compare/tree-quality',
+        description: 'SAH cost, depth, nodes and bytes of every tree: tinybvh, H-PLOC and LBVH against three-mesh-bvh\'s CENTER and SAH and bvh-tree.',
+        timeoutMs: 180_000,
+    },
+    {
+        name: 'compare-queries',
+        path: 'compare/queries',
+        title: 'compare/queries',
+        description: 'Box, sphere and closest-point queries against three-mesh-bvh and Rapier, with a live probe; the CPU tree uploaded as is for the GPU walk.',
+        timeoutMs: 180_000,
+    },
+    {
+        name: 'compare-scene',
+        path: 'compare/scene',
+        title: 'compare/scene',
+        description: 'A scene-level tree over thousands of objects: ours against bvh.js and three-mesh-bvh\'s ObjectBVH for build, updates as everything moves, frustum and box culling, rays; the GPU top-level refit.',
+        timeoutMs: 180_000,
+    },
+    {
+        name: 'compare-gpu',
+        path: 'compare/gpu',
+        title: 'compare/gpu',
+        description: 'GPU traversal, ours against three-mesh-bvh/webgpu, closest and any hit, in paired rounds; a GPU-built tree traced by the same kernel.',
+        timeoutMs: 240_000,
+    },
 ];
 
 /** Where an example's source is browsed. */
