@@ -1,6 +1,6 @@
 # BVH builders: how they work
 
-How each builder in this package works inside. To learn what the package is and how to use it, read [README.md](../../README.md) first. The plan and the stages are in [bvh-framework.md](bvh-framework.md), and the measured numbers are in PROGRESS (B0, B0b, B1a, B1, B2, B3).
+How each builder in this package works inside. To learn what the package is and how to use it, read [README.md](../../../README.md) first. The plan and the stages are in [bvh-framework.md](bvh-framework.md), and the measured numbers are in PROGRESS (B0, B0b, B1a, B1, B2, B3).
 
 Paths below are relative to the repository root.
 
@@ -145,7 +145,7 @@ GPU pages: `bvh-hploc`, `bvh-hploc-profile` (manual), the `watertight-hploc` var
 
 ## Build peak memory (P9)
 
-A GPU build batch holds its inputs, its scratch and its outputs at once, so on a scene load the batch is the biggest memory number: Sponza (132 meshes, 5,744,384 triangles) peaks at **1,482.7 MiB** in `SceneTrees`, against 470 MiB settled. `hplocBatchBytes` and `lbvhBatchBytes` (`src/gpu-hploc.ts`, `src/gpu-lbvh.ts`) give every buffer's bytes for any batch. Each batch's constructor allocates from the same functions, and checks itself against `buildTables`, so the prediction can't drift from the code. `docs/design/memory.md` has the same itemization, from its own tool.
+A GPU build batch holds its inputs, its scratch and its outputs at once, so on a scene load the batch is the biggest memory number: Sponza (132 meshes, 5,744,384 triangles) peaks at **1,482.7 MiB** in `SceneTrees`, against 470 MiB settled. `hplocBatchBytes` and `lbvhBatchBytes` (`src/gpu-hploc.ts`, `src/gpu-lbvh.ts`) give every buffer's bytes for any batch. Each batch's constructor allocates from the same functions, and checks itself against `buildTables`, so the prediction can't drift from the code. `docs/internals/design/memory.md` has the same itemization, from its own tool.
 
 ### Bytes per triangle
 
@@ -195,7 +195,7 @@ T is triangles and I is radix-tree inner nodes, `max(1, T - 1)` per mesh (so I i
   - Each batch has its own submit and readback.
 - **Undo:** `gpuMaxBatchBytes: Infinity` (or `maxBatchBytes` left unset on the standalone builders). The uncapped path is the code as it was.
 
-This is batching, which is ours. The H-PLOC and LBVH kernels are unchanged, and so is every tree they build: the oracle pages compare the trees with tinybvh's and the CPU walk. So `docs/DIVERGENCES.md` has no row for it.
+This is batching, which is ours. The H-PLOC and LBVH kernels are unchanged, and so is every tree they build: the oracle pages compare the trees with tinybvh's and the CPU walk. So `docs/internals/DIVERGENCES.md` has no row for it.
 
 ### Measured trade-off (Sponza, Apple M5, `scene-trees-sponza`)
 

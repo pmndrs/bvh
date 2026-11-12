@@ -1,6 +1,6 @@
 /// <reference types="node" />
 /**
- * Quantized nodes (docs/design/compressed-nodes.md, section 3 step 1) on real
+ * Quantized nodes (docs/internals/design/compressed-nodes.md, section 3 step 1) on real
  * scenes, in Node with no GPU: how much the outward-rounded boxes cost.
  *
  *   BVH_ASSETS_DIR=... BVH_MANIFESTS_DIR=... node --experimental-transform-types tools/quantized-nodes.ts sponza bistro-exterior

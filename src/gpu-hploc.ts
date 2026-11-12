@@ -1,5 +1,5 @@
 /**
- * GPU H-PLOC builder (stage B2 of docs/design/bvh-framework.md, the target
+ * GPU H-PLOC builder (stage B2 of docs/internals/design/bvh-framework.md, the target
  * builder): mesh trees built on the GPU in the tracer's layout, behind the
  * same contract as the LBVH (B1, gpu-lbvh.ts). It reuses B1's pieces: the
  * batches (mesh and tile tables, one dispatch for every mesh), triangle boxes,
@@ -116,7 +116,7 @@ export interface HplocBatchPlanOptions extends BatchPlanOptions {
  * `maxBatchBytes` (optional; default none, today's path) also caps each
  * batch's GPU bytes while it builds, its inputs, scratch and outputs
  * ({@link hplocBatchBytes}), so a scene builds in several smaller batches, one
- * after another, with a lower peak (docs/design/bvh-builders.md, "Build peak
+ * after another, with a lower peak (docs/internals/design/bvh-builders.md, "Build peak
  * memory"). A mesh bigger than the cap on its own still builds, alone in its
  * batch.
  */

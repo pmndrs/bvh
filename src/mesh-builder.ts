@@ -1,6 +1,6 @@
 /**
  * One entry point for mesh trees in the tracer's layout, whichever builder
- * makes them (the Builder contract, docs/design/bvh-framework.md): a GPU
+ * makes them (the Builder contract, docs/internals/design/bvh-framework.md): a GPU
  * builder when the device has subgroups (the H-PLOC, B2, by default; or the
  * LBVH, B1), tinybvh in WebAssembly (B0) otherwise. That is the BVH's one
  * declared fallback (DECISIONS 2026-11-04: subgroups first, one fallback per
@@ -13,7 +13,7 @@
  * `maxBatchBytes` (optional, default none) caps each GPU batch's bytes (its
  * inputs, scratch and outputs) for a lower build peak; the batches are built
  * one after another, and H-PLOC's share one scratch pool sized from the
- * largest (docs/design/bvh-builders.md, "Build peak memory"). A mesh bigger
+ * largest (docs/internals/design/bvh-builders.md, "Build peak memory"). A mesh bigger
  * than the cap builds alone.
  *
  * tinybvh runs on the calling thread here. ddgi-core runs it in a worker

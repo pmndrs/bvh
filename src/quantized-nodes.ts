@@ -1,5 +1,5 @@
 /**
- * Quantized nodes (docs/design/compressed-nodes.md, option A): 32-byte
+ * Quantized nodes (docs/internals/design/compressed-nodes.md, option A): 32-byte
  * two-child nodes whose child boxes are 16-bit planes on a per-mesh grid,
  * beside the 64-byte `f32` nodes. Every builder writes `f32` nodes; these
  * helpers pack them (and unpack them for the CPU).

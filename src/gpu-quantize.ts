@@ -1,5 +1,5 @@
 /**
- * The GPU half of quantized nodes (docs/design/compressed-nodes.md): one
+ * The GPU half of quantized nodes (docs/internals/design/compressed-nodes.md): one
  * compute pass that packs 64-byte `f32` nodes into a frame slot and 32-byte
  * quantized nodes, mesh by mesh. It is the GPU twin of `quantizeNodeWords`
  * (quantized-nodes.ts), bit for bit: the frame comes from each mesh's root by

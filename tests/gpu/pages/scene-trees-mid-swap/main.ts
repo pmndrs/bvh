@@ -40,7 +40,7 @@
  * side tables from the GPU and the CPU identity pass.
  *
  * The `quantized-*` variants run with `nodeFormat: 'quantized'`
- * (docs/design/compressed-nodes.md), copy only: GPU trees packed by the
+ * (docs/internals/design/compressed-nodes.md), copy only: GPU trees packed by the
  * quantize pass on their way into the storage, tinybvh's quantized in the
  * workers, merged groups one frame each, capped batches stored between
  * updates; one also with indexed leaves (packed positions).
@@ -67,9 +67,9 @@ interface Variant {
     readonly gpuTreeOutputs: 'copy' | 'adopt';
     readonly merged: boolean;
     readonly maxBatchBytes?: number;
-    /** Indexed leaves (docs/design/indexed-leaves.md), with this position layout; absent: records. */
+    /** Indexed leaves (docs/internals/design/indexed-leaves.md), with this position layout; absent: records. */
     readonly indexed?: 'vec4' | 'packed';
-    /** Quantized nodes (docs/design/compressed-nodes.md); absent: f32. */
+    /** Quantized nodes (docs/internals/design/compressed-nodes.md); absent: f32. */
     readonly quantized?: boolean;
 }
 

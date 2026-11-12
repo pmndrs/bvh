@@ -4,18 +4,18 @@ BVH builders for WebGPU that don't depend on any engine. You give it triangles, 
 
 DDGI (`@pmndrs/ddgi`, in [webgpu-ddgi](https://github.com/DennisSmolek/webgpu-ddgi)) is its first user. The package imports nothing from DDGI, from GI code or from any engine, so picking, a path tracer or another GI technique can use it too.
 
-**Status.** This repo, [pmndrs/bvh](https://github.com/pmndrs/bvh), was split out of webgpu-ddgi, where it lived in `packages/bvh` (the plan: [docs/design/bvh-package-split.md](docs/design/bvh-package-split.md)); until ddgi switches to the published package it still bundles its own copy. Import it from its root, `@pmndrs/bvh` (`src/index.ts`), or `@pmndrs/bvh/worker` for the tinybvh worker pool. ddgi-core uses the CPU builder, the GPU refit, and, since M2's "fast first GI" (T2.12), the GPU H-PLOC for the first trees of a scene as it loads: one batch for all meshes, its trees copied into the tracer's buffers after a small stats readback, then replaced mesh by mesh by tinybvh's from a worker (ddgi-core's `gpu-mesh-trees.ts` and `ray-queries.ts`, in webgpu-ddgi). That load pattern is now in the package as `SceneTrees` (`src/scene/`): GPU first trees, tinybvh's from the worker pool swapped in mesh by mesh, the GPU top level, runtime adds and removals, merged static groups and deforming meshes, for any engine. The LBVH isn't used by ddgi-core.
+**Status.** This repo, [pmndrs/bvh](https://github.com/pmndrs/bvh), was split out of webgpu-ddgi, where it lived in `packages/bvh` (the plan: [docs/internals/design/bvh-package-split.md](docs/internals/design/bvh-package-split.md)); until ddgi switches to the published package it still bundles its own copy. Import it from its root, `@pmndrs/bvh` (`src/index.ts`), or `@pmndrs/bvh/worker` for the tinybvh worker pool. ddgi-core uses the CPU builder, the GPU refit, and, since M2's "fast first GI" (T2.12), the GPU H-PLOC for the first trees of a scene as it loads: one batch for all meshes, its trees copied into the tracer's buffers after a small stats readback, then replaced mesh by mesh by tinybvh's from a worker (ddgi-core's `gpu-mesh-trees.ts` and `ray-queries.ts`, in webgpu-ddgi). That load pattern is now in the package as `SceneTrees` (`src/scene/`): GPU first trees, tinybvh's from the worker pool swapped in mesh by mesh, the GPU top level, runtime adds and removals, merged static groups and deforming meshes, for any engine. The LBVH isn't used by ddgi-core.
 
-How the builders work inside: [docs/design/bvh-builders.md](docs/design/bvh-builders.md). The plan and its stages: [docs/design/bvh-framework.md](docs/design/bvh-framework.md).
+How the builders work inside: [docs/internals/design/bvh-builders.md](docs/internals/design/bvh-builders.md). The plan and its stages: [docs/internals/design/bvh-framework.md](docs/internals/design/bvh-framework.md).
 
-Every way our code differs from its sources (tinybvh, HIPRT, the watertight test), and why: [docs/DIVERGENCES.md](docs/DIVERGENCES.md).
+Every way our code differs from its sources (tinybvh, HIPRT, the watertight test), and why: [docs/internals/DIVERGENCES.md](docs/internals/DIVERGENCES.md).
 
 ## The builder contract
 
 Every builder follows the same contract, so one can replace another without changing the code that traces rays.
 
 - **In:** one mesh, or many: vertex positions (`x, y, z` floats) and, optionally, three indices per triangle and a flags word per triangle. CPU arrays (`MeshInput`) work for every builder. The GPU builders also take buffers already on the GPU (`GpuMeshBuffers`), for example the output of a skinning pass.
-- **Options:** the largest leaf (1 to 8 triangles, default 8) and, for the GPU builders, the SAH costs. H-PLOC has two more (see [bvh-builders.md](docs/design/bvh-builders.md#gpu-h-ploc-stage-b2)).
+- **Options:** the largest leaf (1 to 8 triangles, default 8) and, for the GPU builders, the SAH costs. H-PLOC has two more (see [bvh-builders.md](docs/internals/design/bvh-builders.md#gpu-h-ploc-stage-b2)).
 - **Out:** the tree in the shared GPU layout (`GpuLayoutMeshBvh` on the CPU, `GpuTreeBuffers` on the GPU):
   - 64-byte nodes with two child boxes each (the Aila–Laine layout), node 0 the root;
   - 48-byte triangles in tree order, each with its original index and flags;
@@ -159,7 +159,7 @@ const bytes = serializeLayout(layout); // one ArrayBuffer: a 64-byte header, the
 const loaded = deserializeLayout(bytes); // refuses bytes from another GPU_LAYOUT_VERSION: rebuild those
 ```
 
-**Trace rays in your own kernel** (the WGSL walk; the design is in [docs/design/trace.md](docs/design/trace.md)):
+**Trace rays in your own kernel** (the WGSL walk; the design is in [docs/internals/design/trace.md](docs/internals/design/trace.md)):
 
 ```ts
 import { traceModuleWgsl } from '@pmndrs/bvh';
@@ -213,5 +213,5 @@ The `.wasm` carries its licence texts in a `/*! */` comment that bundlers keep, 
 
 - Unit tests: `pnpm test` (the CPU twins, the layout checker, the batch planner, the WGSL names).
 - GPU pages: `pnpm test:gpu --filter bvh-` and `--filter trace-oracle`, on both GPUs.
-- Rebuild the `.wasm` with `pnpm bvh:wasm`, or check it with `pnpm bvh:wasm --check`; [bvh-builders.md](docs/design/bvh-builders.md#rebuilding-the-wasm) has the toolchain.
+- Rebuild the `.wasm` with `pnpm bvh:wasm`, or check it with `pnpm bvh:wasm --check`; [bvh-builders.md](docs/internals/design/bvh-builders.md#rebuilding-the-wasm) has the toolchain.
 - Port only MIT or Apache-2.0 code, and add its licence to `licenses/` and THIRD_PARTY.md.

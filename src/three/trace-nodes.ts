@@ -5,7 +5,7 @@
  * `fns.raycastFirstHit` / `raycastAnyHit` are WGSL functions compiled into
  * three's shaders), over this package's layout and buffers.
  *
- * Two ways to use it (docs/three.md):
+ * Two ways to use it (docs/internals/three.md):
  *
  * - **WGSL**, as three-mesh-bvh's users write it: include {@link BvhTraceNodes.module}
  *   in a three `wgslFn`, then call the walk by name:
@@ -58,7 +58,7 @@ import { traceModuleWgsl } from '../trace/wgsl.ts';
 
 /** Where the trace buffers come from: a `SceneTrees` (buffers and version), or fixed buffers (`uploadTraceScene`). */
 export interface BvhTraceBufferSource {
-    /** `positions`: an indexed scene's fourth buffer (docs/design/indexed-leaves.md); null or absent for records. */
+    /** `positions`: an indexed scene's fourth buffer (docs/internals/design/indexed-leaves.md); null or absent for records. */
     readonly buffers: { readonly nodes: GPUBuffer; readonly triangles: GPUBuffer; readonly topLevel: GPUBuffer; readonly positions?: GPUBuffer | null };
     /** Changes whenever a buffer is replaced. Fixed buffers may omit it. */
     readonly version?: number;

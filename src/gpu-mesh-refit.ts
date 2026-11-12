@@ -27,7 +27,7 @@
  * the shape never changes while the mesh deforms, so that is a one-off at
  * build time, not a per-frame readback.
  *
- * **Quantized nodes** (docs/design/compressed-nodes.md): the climb hands
+ * **Quantized nodes** (docs/internals/design/compressed-nodes.md): the climb hands
  * boxes over through the node's own `f32` words, which 16-bit planes can't
  * take part in. So a mesh whose target holds quantized nodes keeps a 64-byte
  * `f32` copy of its nodes here (the refit runs on it unchanged), and a third
@@ -127,7 +127,7 @@ ${INDEXED_REFIT_WGSL}`;
 }
 
 /**
- * The indexed refit (docs/design/indexed-leaves.md, "Deforming meshes"): the
+ * The indexed refit (docs/internals/design/indexed-leaves.md, "Deforming meshes"): the
  * triangles keep their vertex indices, so nothing is written to them. Step 1
  * copies the posed vertices into the mesh's range of the scene's positions
  * buffer (a copy, not the app's buffer: rays must keep the pose the boxes were

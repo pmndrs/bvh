@@ -1,5 +1,5 @@
 // @pmndrs/bvh: engine-free BVH builders and refits for WebGPU, writing one
-// shared GPU layout (docs/design/bvh-framework.md). This file is the public
+// shared GPU layout (docs/internals/design/bvh-framework.md). This file is the public
 // API: everything a user needs, and nothing that is only there for a builder's
 // own plumbing. Each name is listed on purpose; the package has no other entry
 // point, so a new export here is an API decision.
@@ -47,10 +47,10 @@ export {
     type GpuLayoutNodeFormat,
     type GpuLayoutTriangleLeaves,
 } from './gpu-layout.ts';
-// Quantized nodes (docs/design/compressed-nodes.md): packing a tree's nodes, unpacking them, the frame rule.
+// Quantized nodes (docs/internals/design/compressed-nodes.md): packing a tree's nodes, unpacking them, the frame rule.
 export { dequantizeNodes, nodeFrameOf, quantizeNodes, quantizeNodeWords, readNodeFrame, type NodeFrame } from './quantized-nodes.ts';
 export { GpuNodeQuantizer, quantizeTreeBuffers, type QuantizeJob, type QuantizeMesh } from './gpu-quantize.ts';
-// Indexed leaves (docs/design/indexed-leaves.md): converting a tree between the formats, and the weld.
+// Indexed leaves (docs/internals/design/indexed-leaves.md): converting a tree between the formats, and the weld.
 export {
     indexedFromRecords,
     recordsFromIndexed,

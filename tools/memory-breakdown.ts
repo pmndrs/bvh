@@ -1,7 +1,7 @@
 /// <reference types="node" />
 /**
  * Memory breakdown of our trees against three-mesh-bvh's on real scenes, in Node
- * with no GPU (BX.19; the write-up is docs/design/memory.md).
+ * with no GPU (BX.19; the write-up is docs/internals/design/memory.md).
  *
  *   BVH_ASSETS_DIR=... BVH_MANIFESTS_DIR=... node tools/memory-breakdown.ts sponza
  *   node tools/memory-breakdown.ts bistro-exterior --json out.json
@@ -318,7 +318,7 @@ async function main(): Promise<void> {
     console.log(`  ours (tinybvh, leaves of up to 8): nodes ${mib(ours.nodes)} MiB (${ours.nodeCount} nodes, ${ours.averageLeafTriangles.toFixed(2)} triangles per leaf), triangle records ${mib(ours.triangles)}, parents (CPU only) ${mib(ours.parentsCpu)}, top level ${mib(ours.topLevel)}`);
     scene = undefined as never;
 
-    // Indexed leaves (docs/design/indexed-leaves.md): the same tinybvh trees with 16-byte triangles and the scene's own
+    // Indexed leaves (docs/internals/design/indexed-leaves.md): the same tinybvh trees with 16-byte triangles and the scene's own
     // positions, welded by exact bits (the default) or not, as vec4f (the default) or packed f32; instanced and merged.
     const indexedOut: Record<string, { nodes: number; triangles: number; positions: number; topLevel: number; vertices: number; total: number }> = {};
     for (const [name, options] of [
@@ -349,7 +349,7 @@ async function main(): Promise<void> {
     }
     out.indexed = indexedOut;
 
-    // Quantized nodes (docs/design/compressed-nodes.md): the same tinybvh trees with 32-byte nodes and a 32-byte frame
+    // Quantized nodes (docs/internals/design/compressed-nodes.md): the same tinybvh trees with 32-byte nodes and a 32-byte frame
     // slot per placed tree, with records and with indexed leaves (vec4, welded); instanced and merged.
     const quantizedOut: Record<string, { nodes: number; triangles: number; positions: number; topLevel: number; total: number }> = {};
     for (const [name, options] of [

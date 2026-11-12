@@ -49,7 +49,7 @@
  *   batch are placed into its buffers at the next update.
  *
  * **A cap on the GPU batches' bytes** (`gpuMaxBatchBytes`, 256 MiB by default,
- * `Infinity` for none: the P9 build-peak lever; docs/design/bvh-builders.md,
+ * `Infinity` for none: the P9 build-peak lever; docs/internals/design/bvh-builders.md,
  * "Build peak memory"). The
  * load's H-PLOC build is the biggest memory number (Sponza: 1,483 MB at peak,
  * scratch and outputs of one batch of 5.74M triangles, against 470 MB
@@ -152,7 +152,7 @@ const GPU_TREE_NODE_HEADROOM = 1 / 8;
  * takes the load's peak from 1,483 to 711 MiB (−771 MiB) and settles 11 MiB
  * lower; the first trees cost about +165 ms at 60 Hz as first measured, when
  * each batch waited for two updates, and nothing now (166 ms against 171)
- * that batches go on between updates. docs/design/bvh-builders.md,
+ * that batches go on between updates. docs/internals/design/bvh-builders.md,
  * "Build peak memory".
  */
 export const DEFAULT_GPU_MAX_BATCH_BYTES = 256 * 1024 * 1024;
@@ -218,7 +218,7 @@ export interface SceneTreesOptions {
     /** Builds the first trees instead of the GPU H-PLOC, whatever the device's features: for unit tests in Node. */
     readonly firstTreeBuilder?: FirstTreeBuilder;
     /**
-     * The triangle format (docs/design/indexed-leaves.md): `'records'` (the
+     * The triangle format (docs/internals/design/indexed-leaves.md): `'records'` (the
      * default, 48 bytes per triangle) or `'indexed'` (16 bytes per triangle,
      * plus the scene's own positions, `buffers.positions`). The walk that
      * reads the scene must be built with the same `triangleLeaves` and
@@ -229,7 +229,7 @@ export interface SceneTreesOptions {
     /** Indexed: `'vec4'` (the default, 16 bytes per vertex) or `'packed'` (12) positions. */
     readonly positionLayout?: PositionLayout;
     /**
-     * The node format (docs/design/compressed-nodes.md): `'f32'` (the
+     * The node format (docs/internals/design/compressed-nodes.md): `'f32'` (the
      * default, 64 bytes per node) or `'quantized'` (32 bytes per node, plus a
      * 32-byte frame slot per mesh before its root). The walk that reads the
      * scene must be built with the same `nodeFormat`. tinybvh trees come

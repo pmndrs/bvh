@@ -3,7 +3,7 @@
  * are shared by all builders (tinybvh, the GPU LBVH, the GPU H-PLOC), so they
  * live here rather than in one builder's file: a builder can be swapped for
  * another without changing the code that feeds it or reads its trees
- * (docs/design/bvh-framework.md, "Builder contract").
+ * (docs/internals/design/bvh-framework.md, "Builder contract").
  */
 
 /** Triangle geometry in object space, as CPU arrays. Every builder takes it. */
@@ -83,13 +83,13 @@ export interface GpuBuildOptions {
     /**
      * The triangle format the tree is written in: `'records'` (48 bytes, the
      * default) or `'indexed'` (16 bytes, mesh-relative vertex indices;
-     * docs/design/indexed-leaves.md). The nodes are the same either way.
+     * docs/internals/design/indexed-leaves.md). The nodes are the same either way.
      */
     readonly triangleLeaves?: 'records' | 'indexed';
     /**
      * The node format the tree is written in: `'f32'` (64 bytes, the default)
      * or `'quantized'` (32-byte nodes on a per-mesh grid, the frame slot
-     * first; docs/design/compressed-nodes.md).
+     * first; docs/internals/design/compressed-nodes.md).
      * A coordinate of magnitude 2^100 or more, or a non-finite one, makes a quantized box empty on that axis (hits there are lost).
      */
     readonly nodeFormat?: 'f32' | 'quantized';

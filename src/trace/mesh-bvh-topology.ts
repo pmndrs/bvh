@@ -30,9 +30,9 @@ export { TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from '../topology.ts';
 export interface MeshTreeTopologyOptions {
     /** Leaves with more triangles than this are cut in half until they fit. At most {@link MAX_LEAF_PRIMITIVES} (the default). */
     readonly maxLeafPrimitives?: number;
-    /** The triangle format: `'records'` (48 bytes, the default) or `'indexed'` (16 bytes; docs/design/indexed-leaves.md). */
+    /** The triangle format: `'records'` (48 bytes, the default) or `'indexed'` (16 bytes; docs/internals/design/indexed-leaves.md). */
     readonly triangleLeaves?: 'records' | 'indexed';
-    /** The node format: `'f32'` (64 bytes, the default) or `'quantized'` (32 bytes; docs/design/compressed-nodes.md). */
+    /** The node format: `'f32'` (64 bytes, the default) or `'quantized'` (32 bytes; docs/internals/design/compressed-nodes.md). */
     readonly nodeFormat?: 'f32' | 'quantized';
 }
 

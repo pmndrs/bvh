@@ -1,5 +1,5 @@
 // @pmndrs/bvh/three: three.js in, the engine-free core's inputs out. The only
-// part of the package that imports three (a peer dependency); see docs/three.md.
+// part of the package that imports three (a peer dependency); see docs/internals/three.md.
 
 // Scenes: three objects to buildTraceScene / SceneTrees inputs, and back.
 export {
