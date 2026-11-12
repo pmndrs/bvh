@@ -129,7 +129,7 @@ struct BvhHit {
     triangle: u32,       // triangle index within the instance's mesh
     barycentrics: vec2f, // weights of vertices 1 and 2
     frontFace: bool,     // true on the side the mesh was authored as front (also when mirrored)
-    material: u32,       // the instance's material index (a merged hit: its source's), BVH_NO_MATERIAL for none
+    material: u32,       // the triangle's material, else the instance's (a merged hit: its source's), BVH_NO_MATERIAL for none
     normal: vec3f,       // world-space geometric normal of the authored front side, unit length; 0 on a miss
 }
 
@@ -512,9 +512,10 @@ fn bvhHitInstance(instance: BvhInstance, triangle: BvhTriangle, slot: u32) -> u3
     return select(instance.instanceIndex, triangle.padding, (instance.flags & BVH_INSTANCE_FLAG_MERGED) != 0u);
 }
 
-// A merged triangle's flags word, whose bits 16-31 hold its source's material.
-fn bvhMergedMaterialFlags(instance: BvhInstance, triangle: BvhTriangle, slot: u32) -> u32 {
-    return triangle.flags;
+// The triangle's material code (material + 1, 0: none), flags bits 16-31: its mesh's
+// triangleMaterials, or in a merged mesh its source's.
+fn bvhTriangleMaterialCode(instance: BvhInstance, triangle: BvhTriangle, slot: u32) -> u32 {
+    return triangle.flags >> BVH_MATERIAL_SHIFT;
 }
 `;
 
@@ -575,8 +576,20 @@ fn bvhHitInstance(instance: BvhInstance, triangle: BvhTriangle, slot: u32) -> u3
     return bvhMergedSource(instance.triangleOffset, slot).x;
 }
 
-fn bvhMergedMaterialFlags(instance: BvhInstance, triangle: BvhTriangle, slot: u32) -> u32 {
-    return bvhMergedSource(instance.triangleOffset, slot).y << BVH_MATERIAL_SHIFT;
+// The triangle's material code (material + 1, 0: none): a merged triangle's from its
+// group's side table; another mesh's from its material table (header w: how far back
+// it starts, 0 for none), 16 bits per original triangle.
+fn bvhTriangleMaterialCode(instance: BvhInstance, triangle: BvhTriangle, slot: u32) -> u32 {
+    if ((instance.flags & BVH_INSTANCE_FLAG_MERGED) != 0u) {
+        return bvhMergedSource(instance.triangleOffset, slot).y;
+    }
+    let distance = bvhTraceTriangles[instance.triangleOffset - 1u].w;
+    if (distance == 0u) {
+        return 0u;
+    }
+    let original = triangle.originalIndex;
+    let word = bvhTraceTriangles[instance.triangleOffset - distance + (original >> 3u)][(original >> 1u) & 3u];
+    return (word >> ((original & 1u) * 16u)) & 0xffffu;
 }
 `;
 }
@@ -828,12 +841,11 @@ fn bvhTransformDirection(instance: BvhInstance, direction: vec3f) -> vec3f {
     );
 }
 
-// The material code (material + 1, 0: none) in bits 16-31 of an instance's or
-// a merged triangle's flags word, as BvhHit.material.
+// The material code (material + 1, 0: none) is bits 16-31 of an instance's or a
+// triangle's flags word; BvhHit.material is the material it names.
 const BVH_MATERIAL_SHIFT: u32 = ${MATERIAL_SHIFT}u;
 
-fn bvhMaterialFromFlags(flags: u32) -> u32 {
-    let code = flags >> BVH_MATERIAL_SHIFT;
+fn bvhMaterialFromCode(code: u32) -> u32 {
     return select(code - 1u, BVH_NO_MATERIAL, code == 0u);
 }
 
@@ -848,8 +860,8 @@ fn bvhMaterialFromFlags(flags: u32) -> u32 {
 // not), as frontFace does. A merged mesh stores world-space corners, so the
 // cross is already in world space, and the flip bit (a mirrored source)
 // turns it back to the authored side. Either way frontFace is
-// dot(normal, direction) < 0. The material is the instance's, or, in a
-// merged mesh, the triangle's (its source's).
+// dot(normal, direction) < 0. The material is the triangle's when it has one
+// (triangleMaterials, or a merged triangle's source's), else the instance's.
 fn bvhFinishClosest(found: BvhHit, record: u32, slot: u32) -> BvhHit {
     var hit = found;
     if (hit.t < 0.0) {
@@ -866,11 +878,9 @@ fn bvhFinishClosest(found: BvhHit, record: u32, slot: u32) -> BvhHit {
     }
     let normalLength = length(normal);
     hit.normal = select(vec3f(0.0), normal / normalLength, normalLength > 0.0);
-    var materialFlags = instance.flags;
-    if (merged) {
-        materialFlags = bvhMergedMaterialFlags(instance, triangle, slot);
-    }
-    hit.material = bvhMaterialFromFlags(materialFlags);
+    // The triangle's material when it has one, else the instance's (a merged record has none).
+    let triangleCode = bvhTriangleMaterialCode(instance, triangle, slot);
+    hit.material = bvhMaterialFromCode(select(instance.flags >> BVH_MATERIAL_SHIFT, triangleCode, triangleCode != 0u));
     return hit;
 }
 

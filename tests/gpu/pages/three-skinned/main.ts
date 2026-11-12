@@ -329,6 +329,7 @@ try {
                 reference.push(posed);
                 originals.set(posed, child);
             }
+            // The two-group skinned mesh folded into one mesh, as the sync folds it (same group order, so the same triangle indices).
             const referenceScene = bvhSceneFromObject3D(reference);
             const instances = referenceScene.instances.map((instance, i) => {
                 const source = referenceScene.sources[i];

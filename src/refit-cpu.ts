@@ -15,10 +15,18 @@
 import {
     GPU_LAYOUT_CHILD_STRIDE_WORDS,
     GPU_LAYOUT_EMPTY_CHILD,
+    GPU_LAYOUT_INDEXED_ID_MASK,
+    GPU_LAYOUT_INDEXED_TRIANGLE_BYTES,
+    GPU_LAYOUT_INDEXED_TRIANGLE_WORD,
     GPU_LAYOUT_NO_PARENT,
+    GPU_LAYOUT_NODE_BYTES,
     GPU_LAYOUT_NODE_WORD,
     GPU_LAYOUT_NODE_WORDS,
+    GPU_LAYOUT_TRIANGLE_BYTES,
+    GPU_LAYOUT_TRIANGLE_WORD,
+    type GpuLayoutMeshBvh,
 } from './gpu-layout.ts';
+import { dequantizeNodes } from './quantized-nodes.ts';
 
 /** Largest finite f32. An empty box is stored as a point here, which no ray can reach (see gpu-refit.ts). */
 export const BVH_FLOAT_MAX = 3.4028234663852886e38;
@@ -342,4 +350,55 @@ export function refitOrderOf(parents: Uint32Array, nodeCount: number): Uint32Arr
     const order = new Uint32Array(nodeCount);
     for (let node = 0; node < nodeCount; node++) order[starts[deepest - depth[node]]++] = node;
     return order;
+}
+
+/** A mesh tree refit to a new pose on the CPU ({@link refitLayoutToPose}). */
+export interface PosedLayout {
+    /** `f32` nodes (64 bytes each), refit: their boxes are exact for the pose. */
+    readonly nodes: ArrayBuffer;
+    /** 48-byte records with the posed corners (flags, ids and padding kept); null for an indexed tree, whose triangles name vertices and don't change. */
+    readonly triangles: ArrayBuffer | null;
+    /** The posed root box, `[minX, minY, minZ, maxX, maxY, maxZ]`. */
+    readonly bounds: Float32Array;
+}
+
+/**
+ * Refits a mesh tree (any builder's, in the GPU layout, `f32` or quantized
+ * nodes, records or indexed triangles) to `positions` (`x, y, z` per vertex,
+ * the mesh's own vertex numbering) on the CPU, keeping its shape: the CPU
+ * path of a deforming mesh's pose (`SceneTrees.setPoseCpu`). Each slot's
+ * corners come from `indices` (the mesh's, or none for a triangle list) by
+ * the slot's original index. The layout itself is not changed.
+ */
+export function refitLayoutToPose(layout: GpuLayoutMeshBvh, positions: Float32Array, indices: Uint16Array | Uint32Array | null | undefined): PosedLayout {
+    const { nodeCount, triangleCount } = layout;
+    const nodes = dequantizeNodes(layout).nodes.slice(0, nodeCount * GPU_LAYOUT_NODE_BYTES);
+    const indexed = layout.triangleLeaves === 'indexed';
+    const recordWords = GPU_LAYOUT_TRIANGLE_BYTES / 4;
+    const source = new Uint32Array(layout.triangles, 0, (triangleCount * (indexed ? GPU_LAYOUT_INDEXED_TRIANGLE_BYTES : GPU_LAYOUT_TRIANGLE_BYTES)) / 4);
+    const triangles = indexed ? null : layout.triangles.slice(0, triangleCount * GPU_LAYOUT_TRIANGLE_BYTES);
+    const recordFloats = triangles ? new Float32Array(triangles) : null;
+    const vertexCount = positions.length / 3;
+    const boxes = new Float32Array(triangleCount * PRIMITIVE_BOX_FLOATS);
+    const corners = [GPU_LAYOUT_TRIANGLE_WORD.vertex0, GPU_LAYOUT_TRIANGLE_WORD.vertex1, GPU_LAYOUT_TRIANGLE_WORD.vertex2];
+    for (let slot = 0; slot < triangleCount; slot++) {
+        const original = indexed
+            ? source[slot * 4 + GPU_LAYOUT_INDEXED_TRIANGLE_WORD.idFlags] & GPU_LAYOUT_INDEXED_ID_MASK
+            : source[slot * recordWords + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
+        const box = slot * PRIMITIVE_BOX_FLOATS;
+        boxes.fill(Infinity, box, box + 3);
+        boxes.fill(-Infinity, box + 4, box + 7);
+        for (let corner = 0; corner < 3; corner++) {
+            const vertex = indices ? indices[original * 3 + corner] : original * 3 + corner;
+            if (!(vertex < vertexCount)) throw new RangeError(`refitLayoutToPose: triangle ${original} uses vertex ${vertex}, the pose has ${vertexCount}`);
+            for (let axis = 0; axis < 3; axis++) {
+                const value = positions[vertex * 3 + axis];
+                if (recordFloats) recordFloats[slot * recordWords + corners[corner] + axis] = value;
+                if (value < boxes[box + axis]) boxes[box + axis] = value;
+                if (value > boxes[box + 4 + axis]) boxes[box + 4 + axis] = value;
+            }
+        }
+    }
+    const { rootBox } = refitOnCpu(new Float32Array(nodes), new Uint32Array(nodes), 0, nodeCount, layout.parents, boxes);
+    return { nodes, triangles, bounds: Float32Array.from(rootBox) };
 }

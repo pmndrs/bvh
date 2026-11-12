@@ -73,6 +73,10 @@ const seen = picker.intersectsFrustum(frustum, camera.layers); // [{ object, ins
 - It returns three's `intersectObject(root, true)` with three's own `Mesh.raycast`: the same triangles, `side`,
   `near`/`far`, `instanceId` and `batchId`, sorted. Hidden objects are hit too, as three's `Raycaster` hits them
   (`includeHidden: false` skips them). `raycaster.firstHitOnly` returns the one closest hit over the scene.
+- Multi-material meshes are folded as `bvhSceneFromObject3D` and the sync fold them (one instance per object, the
+  groups in one mesh; `multiMaterial: 'groups'` splits them), so `picker.sourceOf(i)` is the same source as
+  `scene.sources[i]`. Each hit still gets its group's `side` and `face.materialIndex`; `picker.meshSourceOf(i)` with
+  `threeGroupOf` or `threeMaterialOf` gives a hit's group from its triangle.
 - **Differs from three:** layers 8-31 aren't seen, skinned and morphed meshes are read in their rest pose, and points,
   lines and sprites aren't read.
 - Raycasts see the scene as of the last `update()`. Call `scene.updateMatrixWorld()` and `update()` after objects move,

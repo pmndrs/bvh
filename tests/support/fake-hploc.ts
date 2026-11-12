@@ -72,7 +72,8 @@ export class FakeHploc implements HplocBatchBuilder {
         return pool as unknown as GpuHplocScratchPool;
     }
 
-    createBatch(geometries: readonly GpuMeshGeometry[], _options?: unknown, pool?: GpuHplocScratchPool): GpuHplocBatch {
+    createBatch(geometries: readonly GpuMeshGeometry[], options?: { readonly triangleLeaves?: 'records' | 'indexed' }, pool?: GpuHplocScratchPool): GpuHplocBatch {
+        const triangleLeaves = options?.triangleLeaves === 'indexed' ? 'indexed' : 'records';
         const index = this.created++;
         if (!pool) this.violations.push(`batch ${index} without a pool`);
         else if (pool.isDestroyed) this.violations.push(`batch ${index} on a freed pool`);
@@ -88,7 +89,8 @@ export class FakeHploc implements HplocBatchBuilder {
         // The arrays are read now, as the real batch uploads them.
         const copies = geometries.map((geometry) => {
             const cpu = geometry as MeshGeometry;
-            return { positions: cpu.positions.slice(), indices: cpu.indices ? Uint32Array.from(cpu.indices) : null, triangleFlags: cpu.triangleFlags?.slice() ?? null };
+            // Flags and materials as the real batch uploads them (packed into the flags word).
+            return { positions: cpu.positions.slice(), indices: cpu.indices ? Uint32Array.from(cpu.indices) : null, triangleFlags: cpu.triangleFlags?.slice() ?? null, triangleMaterials: cpu.triangleMaterials ? Array.from(cpu.triangleMaterials) : null };
         });
         const triangleTotal = copies.reduce((sum, mesh) => sum + (mesh.indices ? mesh.indices.length : mesh.positions.length / 3) / 3, 0);
         let finished = false;
@@ -112,7 +114,7 @@ export class FakeHploc implements HplocBatchBuilder {
                     throw new Error(`batch ${index}'s readback failed (test)`);
                 }
                 finished = true;
-                return this.trees(copies, triangleTotal, () => letGo('let go'));
+                return this.trees(copies, triangleTotal, triangleLeaves, () => letGo('let go'));
             },
             destroy: () => {
                 if (destroyed) return;
@@ -140,11 +142,12 @@ export class FakeHploc implements HplocBatchBuilder {
         await settle();
     }
 
-    private async trees(meshes: readonly MeshGeometry[], triangleTotal: number, onLetGo: () => void): Promise<GpuTreeBuffers> {
-        const trees = await Promise.all(meshes.map((mesh) => buildMeshBvhAsync(mesh, { maxLeafPrimitives: 1 })));
+    private async trees(meshes: readonly MeshGeometry[], triangleTotal: number, triangleLeaves: 'records' | 'indexed', onLetGo: () => void): Promise<GpuTreeBuffers> {
+        const trees = await Promise.all(meshes.map((mesh) => buildMeshBvhAsync(mesh, { maxLeafPrimitives: 1, triangleLeaves })));
+        const bytes = triangleLeaves === 'indexed' ? 16 : 48;
         const usage = 0x4 | 0x8 | 0x80;
         const nodes = this.device.createBuffer({ label: 'fake hploc nodes', size: triangleTotal * 64, usage });
-        const triangles = this.device.createBuffer({ label: 'fake hploc triangles', size: triangleTotal * 48, usage });
+        const triangles = this.device.createBuffer({ label: 'fake hploc triangles', size: triangleTotal * bytes, usage });
         const parents = this.device.createBuffer({ label: 'fake hploc parents', size: triangleTotal * 4, usage });
         // The parents go with the outputs either way (destroyed, or freed at an adoption): that is the batch letting go.
         const destroyParents = parents.destroy.bind(parents);
@@ -161,12 +164,12 @@ export class FakeHploc implements HplocBatchBuilder {
         let triangleOffset = 0;
         for (const tree of trees) {
             this.device.queue.writeBuffer(nodes, nodeOffset * 64, tree.nodes, 0, tree.nodeCount * 64);
-            this.device.queue.writeBuffer(triangles, triangleOffset * 48, tree.triangles, 0, tree.triangleCount * 48);
+            this.device.queue.writeBuffer(triangles, triangleOffset * bytes, tree.triangles, 0, tree.triangleCount * bytes);
             ranges.push({ nodeOffset, nodeCount: tree.nodeCount, triangleOffset, triangleCount: tree.triangleCount, leafCount: tree.leafCount, maxDepth: tree.maxDepth, bounds: tree.bounds, problem: null });
             nodeOffset += tree.nodeCount;
             triangleOffset += tree.triangleCount;
         }
-        return { nodes, triangles, parents, meshes: ranges, destroy: () => [nodes, triangles, parents].forEach((buffer) => buffer.destroy()) };
+        return { nodes, triangles, parents, meshes: ranges, ...(triangleLeaves === 'indexed' ? { triangleLeaves } : {}), destroy: () => [nodes, triangles, parents].forEach((buffer) => buffer.destroy()) };
     }
 }
 

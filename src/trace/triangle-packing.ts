@@ -6,7 +6,7 @@
 
 import { MAX_REFERENCE_INDEX, TRIANGLE_BYTES, TRIANGLE_WORD, TRIANGLE_WORDS } from './layout.ts';
 import type { MeshGeometry } from './mesh-bvh.ts';
-import { checkTriangleFlags } from '../mesh-input.ts';
+import { packedTriangleFlags } from '../mesh-input.ts';
 
 export function countTriangles(geometry: MeshGeometry): number {
     const entries = geometry.indices ? geometry.indices.length : geometry.positions.length / 3;
@@ -19,24 +19,24 @@ export function countTriangles(geometry: MeshGeometry): number {
 /** Checked access to a mesh's triangles. */
 export interface CheckedGeometry {
     readonly triangleCount: number;
+    /** The flags word of each original triangle as the records hold it: the input's flags with its material in bits 16-31, or null for all 0. */
+    readonly flags: Uint32Array | null;
     /** The vertex used by `corner` (0, 1 or 2) of `triangle`; throws if it does not exist. */
     vertexOf(triangle: number, corner: number): number;
 }
 
 /** Validates the geometry the way every mesh BVH needs it, and returns checked vertex access. */
 export function checkGeometry(geometry: MeshGeometry): CheckedGeometry {
-    const { positions, indices, triangleFlags } = geometry;
+    const { positions, indices } = geometry;
     if (positions.length % 3 !== 0) throw new RangeError('positions must hold three floats per vertex');
     const vertexCount = positions.length / 3;
     const triangleCount = countTriangles(geometry);
     if (triangleCount === 0) throw new RangeError('a mesh BVH needs at least one triangle');
     if (triangleCount > MAX_REFERENCE_INDEX) throw new RangeError(`too many triangles for one BVH: ${triangleCount}`);
-    if (triangleFlags && triangleFlags.length < triangleCount) {
-        throw new RangeError('triangleFlags must have one entry per triangle');
-    }
-    checkTriangleFlags(triangleFlags, triangleCount, 'mesh');
+    const flags = packedTriangleFlags(geometry, triangleCount, 'mesh');
     return {
         triangleCount,
+        flags,
         vertexOf(triangle, corner) {
             const vertex = indices ? indices[triangle * 3 + corner] : triangle * 3 + corner;
             if (vertex >= vertexCount) throw new RangeError(`triangle ${triangle} uses vertex ${vertex}, but there are ${vertexCount}`);
@@ -72,7 +72,8 @@ export function growBoxByTriangle(
  * shared by two triangles has identical bits in both (the watertight test needs that).
  */
 export function packTriangles(geometry: MeshGeometry, checked: CheckedGeometry, order: Uint32Array): ArrayBuffer {
-    const { positions, triangleFlags } = geometry;
+    const { positions } = geometry;
+    const { flags } = checked;
     const triangleCount = checked.triangleCount;
     const trianglesBuffer = new ArrayBuffer(triangleCount * TRIANGLE_BYTES);
     const floats = new Float32Array(trianglesBuffer);
@@ -89,7 +90,7 @@ export function packTriangles(geometry: MeshGeometry, checked: CheckedGeometry, 
             floats[base + TRIANGLE_WORD.vertex2 + axis] = positions[c + axis];
         }
         words[base + TRIANGLE_WORD.originalIndex] = original;
-        words[base + TRIANGLE_WORD.flags] = triangleFlags ? triangleFlags[original] : 0;
+        words[base + TRIANGLE_WORD.flags] = flags ? flags[original] : 0;
         words[base + TRIANGLE_WORD.padding] = 0;
     }
     return trianglesBuffer;

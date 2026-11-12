@@ -15,7 +15,13 @@
  * - poses 4-6 after the swap, on tinybvh's tree;
  * - then a bend held still for 150 updates: the refit's cost passes 1.1x the
  *   built tree's and holds, so the cloth is rebuilt on the GPU from its pose
- *   (a drift rebuild), and the rebuilt tree is checked too.
+ *   (a drift rebuild), and the rebuilt tree is checked too;
+ * - then poses on the CPU (`setPoseCpu`), on the rebuilt GPU tree: refit on the
+ *   CPU and copied in, the GPU pose they replace no longer refit.
+ *
+ * The cloth has per-triangle materials (every fourth triangle without one,
+ * taking its instance's), so every check compares materials too, through the
+ * refits and the drift rebuild (whose flags come from a buffer of their own).
  */
 
 import { SceneTrees } from '../../../../src/scene/scene-trees.ts';
@@ -33,7 +39,7 @@ const CELLS = 40;
 const STRIDE = 5;
 const OFFSET = 1;
 
-function cloth(): { positions: Float32Array; indices: Uint16Array } {
+function cloth(): { positions: Float32Array; indices: Uint16Array; triangleMaterials: Uint16Array } {
     const positions = new Float32Array((CELLS + 1) * (CELLS + 1) * 3);
     for (let row = 0; row <= CELLS; row++) {
         for (let column = 0; column <= CELLS; column++) positions.set([column / CELLS * 4 - 2, 0, row / CELLS * 4 - 2], (row * (CELLS + 1) + column) * 3);
@@ -45,7 +51,8 @@ function cloth(): { positions: Float32Array; indices: Uint16Array } {
             indices.set([corner, corner + 1, corner + CELLS + 2, corner, corner + CELLS + 2, corner + CELLS + 1], (row * CELLS + column) * 6);
         }
     }
-    return { positions, indices };
+    const triangleMaterials = Uint16Array.from({ length: CELLS * CELLS * 2 }, (_, triangle) => (triangle % 4 === 3 ? 0xffff : triangle % 7));
+    return { positions, indices, triangleMaterials };
 }
 
 function pose(rest: Float32Array, wave: number, bend: number): Float32Array {
@@ -76,7 +83,7 @@ await runGpuTest(
             const clothMesh = scene.addMesh(rest, { deforming: { bounds: [-3, -3, -3, 3, 3, 3] } });
             const rockMesh = scene.addMesh(rock);
             const instances: (TraceSceneInstance & { readonly mesh: number })[] = [
-                { mesh: clothMesh, meshIndex: 0, instanceIndex: 10, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], static: true },
+                { mesh: clothMesh, meshIndex: 0, instanceIndex: 10, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], static: true, material: 20 },
                 { mesh: clothMesh, meshIndex: 0, instanceIndex: 11, objectToWorld: [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 1, 0, 1] },
                 { mesh: rockMesh, meshIndex: 1, instanceIndex: 12, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 3, 0, 1], static: true, material: 3 },
             ];
@@ -106,7 +113,7 @@ await runGpuTest(
                 const name = `${label} ${state}`;
                 await device.queue.onSubmittedWorkDone();
                 const reference = assembleTraceScene(
-                    [buildMeshBvhWithTinyBvh({ positions, indices: rest.indices }, tinyBvh), buildMeshBvhWithTinyBvh(rock, tinyBvh)],
+                    [buildMeshBvhWithTinyBvh({ positions, indices: rest.indices, triangleMaterials: rest.triangleMaterials }, tinyBvh), buildMeshBvhWithTinyBvh(rock, tinyBvh)],
                     instances.map(({ mesh: _mesh, ...instance }) => instance),
                 );
                 const gpu = await traceOnGpu(device, kernel, scene.traceBuffers, rays);
@@ -165,11 +172,23 @@ await runGpuTest(
             assert(scene.meshStatus(clothMesh).builtBy === 'gpu', 'the drift rebuild was not placed');
             await check('after the drift rebuild', positions);
 
+            // Poses on the CPU, on the rebuilt GPU tree (its layout was read back): no GPU refit, the top-level box follows.
+            const refitsBefore = scene.deformingCounts.refits;
+            for (let step = 7; step <= 8; step++) {
+                positions = pose(rest.positions, step * 0.7, 0.2);
+                scene.setPoseCpu(clothMesh, positions);
+                frame();
+                await check(`cpu pose ${step}`, positions);
+            }
+            assert(scene.deformingCounts.cpuPoses === 2, `${scene.deformingCounts.cpuPoses} CPU poses written, expected 2`);
+            assert(scene.deformingCounts.refits === refitsBefore, 'a GPU refit ran after a CPU pose replaced the GPU one');
+
             const counts = scene.deformingCounts;
             results[`${label} refits`] = counts.refits;
             results[`${label} driftRebuilds`] = counts.driftRebuilds;
             results[`${label} updatesToRebuild`] = updates;
             results[`${label} driftRatioAtRebuild`] = drift;
+            results[`${label} cpuPoses`] = counts.cpuPoses;
             scene.dispose();
             kernel.destroy();
             vertexBuffer.destroy();

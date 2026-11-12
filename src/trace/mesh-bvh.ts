@@ -20,6 +20,12 @@ export interface MeshGeometry {
      * (see `TRIANGLE_FLAG_FILTER`). Defaults to 0.
      */
     readonly triangleFlags?: Uint32Array | null;
+    /**
+     * Optional per-triangle material (0-65534, 0xffff for none), by original
+     * triangle number; a hit without one takes its instance's material
+     * (`MeshInput.triangleMaterials`).
+     */
+    readonly triangleMaterials?: Uint16Array | Uint32Array | ArrayLike<number> | null;
 }
 
 /** The result of building a mesh BVH. All indices are relative to this mesh. */

@@ -24,7 +24,7 @@ import {
     type GpuLayoutMeshBvh,
     type GpuLayoutTriangleLeaves,
 } from './gpu-layout.ts';
-import { checkTriangleFlags, type GpuBuildOptions, type MeshInput } from './mesh-input.ts';
+import { packedTriangleFlags, type GpuBuildOptions, type MeshInput } from './mesh-input.ts';
 import { packIndexedTrianglesInOrder } from './indexed-leaves.ts';
 import { builderNodeFormat } from './quantized-nodes.ts';
 
@@ -318,13 +318,13 @@ export function singleTriangleLayout(geometry: MeshInput, box: Float32Array, tri
 /** Triangles in tree order (`order[position]` is the triangle there), 48 bytes each, corners as they are. */
 export function packTrianglesInOrder(geometry: MeshInput, order: Uint32Array, triangleLeaves?: GpuLayoutTriangleLeaves): ArrayBuffer {
     if (triangleLeaves === 'indexed') return packIndexedTrianglesInOrder(geometry, order);
-    const { positions, indices, triangleFlags } = geometry;
+    const { positions, indices } = geometry;
     const buffer = new ArrayBuffer(order.length * GPU_LAYOUT_TRIANGLE_BYTES);
     const words = new Uint32Array(buffer);
     const floats = new Float32Array(buffer);
     const triangleWords = GPU_LAYOUT_TRIANGLE_BYTES / 4;
     const t = GPU_LAYOUT_TRIANGLE_WORD;
-    checkTriangleFlags(triangleFlags, order.length, 'mesh');
+    const triangleFlags = packedTriangleFlags(geometry, order.length, 'mesh');
     const corners = [t.vertex0, t.vertex1, t.vertex2];
     order.forEach((triangle, position) => {
         const base = position * triangleWords;

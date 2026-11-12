@@ -24,9 +24,10 @@
  * the triangle's `padding` word (the source instance index), and triangle
  * flags bit 1 flips `frontFace`. Builders still write 0 to both; nothing moved.
  * Also in 2, before its release: bits 16-31 of the instance `flags` word hold
- * the instance's material + 1 (0 for none), and in a merged mesh bits 16-31
- * of each triangle's `flags` word hold its source instance's. Builders write
- * 0 there; the scene assembly writes them.
+ * the instance's material + 1 (0 for none), and bits 16-31 of each
+ * triangle's `flags` word the triangle's (`MeshInput.triangleMaterials`,
+ * which builders write; in a merged mesh its source's, which the scene
+ * assembly writes). A hit takes the triangle's, else the instance's.
  * Also in 2, before its release: indexed leaves, a second triangle format
  * beside the records ({@link GpuLayoutTriangleLeaves}). It is a variant of
  * version 2, not a new version: serialized trees name their format in header
@@ -220,6 +221,14 @@ export const GPU_LAYOUT_MESH_HEADER_WORD = {
     sideTableDistance: 1,
     /** Merged meshes: `triangleOffset` minus the source table's first `vec4u` (0 otherwise). */
     sourceTableDistance: 2,
+    /**
+     * Other meshes with per-triangle materials: `triangleOffset` minus their
+     * material table's first `vec4u` (0: none). The table holds each original
+     * triangle's material code (material + 1, 0 for none) as 16 bits, two to a
+     * word, eight to a `vec4u`, by original index. A merged mesh keeps its
+     * materials in its side table instead.
+     */
+    materialTableDistance: 3,
 } as const;
 
 /** The tracer's largest leaf; larger leaves are cut in half until they fit. */

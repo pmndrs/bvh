@@ -84,7 +84,7 @@ import {
 import { createRadixSort, createRadixSortPipelines, RADIX_BINS, radixPassCount, SORT_TILE_WORDS, sortTilesOf, sortTileTable, type RadixSort, type RadixSortPipelines } from './gpu-radix-sort.ts';
 import { createScanBindGroups, createScanPipelines, encodeScan, SCAN_PARAMS_BYTES, scanParams, scanTileSumWords, type ScanBindGroups } from './gpu-scan.ts';
 import { dispatchWorkgroups2d } from './gpu-workgroup-scan.ts';
-import { checkTriangleFlags, isGpuMeshBuffers, meshTriangleCount, type GpuBuildOptions, type GpuMeshGeometry, type GpuMeshTreeRange, type GpuTreeBuffers } from './mesh-input.ts';
+import { isGpuMeshBuffers, packedTriangleFlags, meshTriangleCount, type GpuBuildOptions, type GpuMeshGeometry, type GpuMeshTreeRange, type GpuTreeBuffers } from './mesh-input.ts';
 
 /** Bits of the Morton codes: 10 per axis. */
 export const LBVH_MORTON_BITS = 30;
@@ -182,12 +182,12 @@ export function checkGeometry(geometry: GpuMeshGeometry, index: number): void {
         }
         if (geometry.triangleFlagsBuffer && triangles * 4 > geometry.triangleFlagsBuffer.size) throw new RangeError(`${where}: the flags buffer is too small for ${triangles} triangles`);
     } else {
-        const { positions, triangleFlags } = geometry;
+        const { positions } = geometry;
         if (positions.length % 3 !== 0 || positions.length === 0 || !Number.isInteger(triangles) || triangles < 1) {
             throw new RangeError(`${where}: needs at least one triangle, with three floats per vertex and three indices per triangle`);
         }
-        if (triangleFlags && triangleFlags.length < triangles) throw new RangeError(`${where}: triangleFlags must have one entry per triangle`);
-        checkTriangleFlags(triangleFlags, triangles, where);
+        // Checks the flags (bit 0 only) and the materials.
+        packedTriangleFlags(geometry, triangles, where);
     }
     if (triangles > GPU_LAYOUT_MAX_TRIANGLES) throw new RangeError(`${where}: too many triangles for one tree: ${triangles}`);
 }
@@ -488,7 +488,7 @@ export function placeMeshes(geometries: readonly GpuMeshGeometry[]): MeshPlaceme
         } else {
             vertexCount = geometry.positions.length / 3;
             if (geometry.indices) indexFormat = geometry.indices instanceof Uint16Array ? LBVH_INDEX_FORMAT.uint16 : LBVH_INDEX_FORMAT.uint32;
-            hasFlags = Boolean(geometry.triangleFlags);
+            hasFlags = Boolean(geometry.triangleFlags || geometry.triangleMaterials);
         }
         const placement: MeshPlacement = {
             geometry,
@@ -971,7 +971,9 @@ export function uploadBatchGeometry(queue: GPUQueue, meshes: readonly MeshPlacem
         const geometry = mesh.geometry;
         if (isGpuMeshBuffers(geometry)) continue;
         queue.writeBuffer(buffers.positions, mesh.positionByteStart, geometry.positions.buffer as ArrayBuffer, geometry.positions.byteOffset, geometry.positions.byteLength);
-        const { indices, triangleFlags } = geometry;
+        const { indices } = geometry;
+        // The input's flags with each triangle's material in bits 16-31, as the records get them.
+        const triangleFlags = packedTriangleFlags(geometry, mesh.triangleCount, 'mesh');
         if (indices) {
             // writeBuffer copies whole words; a 16-bit index list of odd length gets one padding index.
             let data: Uint16Array | Uint32Array = indices;

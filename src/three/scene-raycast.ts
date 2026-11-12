@@ -24,6 +24,11 @@
  * (`includeHidden: false` skips them). `raycaster.firstHitOnly` gives the
  * closest hit only (one, over the whole scene, as three-mesh-bvh's `ObjectBVH`).
  *
+ * **Multi-material meshes** fold as `bvhSceneFromObject3D` folds them
+ * (`multiMaterial`, default `'triangles'`), so instance N is the same object
+ * there and here; each triangle's group still decides its `side` and its
+ * intersection's `face.materialIndex`.
+ *
  * **Differs from three.** Layers: three tests all 32 layers, the walk's
  * instance mask holds layers 0-7 (`rayMaskFromLayers`), so an object only on
  * layers 8-31 is never hit (`layers: false` in the options ignores layers on
@@ -44,7 +49,7 @@
  * (it still answers from the last `update()`); moved objects aren't detected.
  */
 
-import { BackSide, type BufferGeometry, DoubleSide, FrontSide, Vector3, type BatchedMesh, type Frustum, type Intersection, type Material, type Mesh, type Object3D, type Raycaster } from 'three';
+import { BackSide, type BufferGeometry, DoubleSide, FrontSide, Vector3, type BatchedMesh, type Frustum, type Intersection, type Mesh, type Object3D, type Raycaster } from 'three';
 import { CpuSceneBvh, type CpuSceneHit } from '../query/cpu-scene.ts';
 import type { TinyBvhBuilder } from '../tinybvh.ts';
 import { buildMeshBvhWithTinyBvh } from '../trace/mesh-bvh-topology.ts';
@@ -52,7 +57,7 @@ import type { MeshBvh } from '../trace/mesh-bvh.ts';
 import type { TraceSceneInstance } from '../trace/scene-assembly.ts';
 import { invertAffineInto } from '../trace/top-level.ts';
 import { intersectionFields, positionVersionOf, preparedBoundsTreeBuilder } from './raycast.ts';
-import { meshGeometryOf, rayMaskFromLayers, threeFaceIndex, walkObject3D, type BvhSceneFromObject3DOptions, type BvhThreeMeshSource, type BvhThreeSource } from './scene.ts';
+import { meshGeometryOf, rayMaskFromLayers, sourceOfWalked, threeFaceIndex, threeFirstIndex, threeGroupOf, threeMaterialOf, walkObject3D, type BvhSceneFromObject3DOptions, type BvhThreeMeshSource, type BvhThreeSource } from './scene.ts';
 
 export interface BvhSceneRaycasterOptions extends BvhSceneFromObject3DOptions {
     /** The tinybvh builder; default the one `prepareBoundsTrees` loaded. */
@@ -135,6 +140,11 @@ export class BvhSceneRaycaster {
         return this.entries[instanceIndex]?.source ?? null;
     }
 
+    /** The geometry and range (or folded groups) of instance `instanceIndex`'s mesh (for `threeFaceIndex`, `threeGroupOf`, `threeMaterialOf`). */
+    meshSourceOf(instanceIndex: number): BvhThreeMeshSource | null {
+        return this.entries[instanceIndex]?.meshSource ?? null;
+    }
+
     /** Instances (objects, instances of instanced and batched meshes, and groups) in the scene. */
     get instanceCount(): number {
         return this.entries.length;
@@ -165,7 +175,7 @@ export class BvhSceneRaycaster {
                 const versions = versionsOf(instance.geometry);
                 meshKeys.push(`${instance.meshKey}|${objectId(versions.position)}.${versions.positionVersion}|${objectId(versions.index)}.${versions.indexVersion}`);
                 meshVersions.push(versions);
-                meshSources.push({ geometry: instance.geometry, start: instance.range.start, count: instance.range.count });
+                meshSources.push(instance.meshSource);
             }
             const batched = instance.object as unknown as BatchedMesh;
             // three's Raycaster ignores `visible`; a BatchedMesh skips its hidden instances.
@@ -173,7 +183,7 @@ export class BvhSceneRaycaster {
             const instanceIndex = instances.length;
             instances.push({ meshIndex: mesh, instanceIndex, objectToWorld: instance.objectToWorld, visible, mask: instance.mask, material: instance.material });
             entries.push({
-                source: { object: instance.object, instanceId: instance.instanceId, group: instance.range.group, materialIndex: instance.range.materialIndex, mesh, static: instance.static },
+                source: sourceOfWalked(instance, mesh),
                 meshSource: meshSources[mesh],
                 meshKey: instance.meshKey,
                 objectToWorld: instance.objectToWorld,
@@ -217,8 +227,9 @@ export class BvhSceneRaycaster {
             {
                 firstHitOnly,
                 mask: (this.options.layers ?? true) ? rayMaskFromLayers(raycaster.layers) : 0xff,
-                accept: (instance, _triangle, frontFace) => {
-                    const side = this.materialOf(this.entries[instance].source)?.side ?? FrontSide;
+                accept: (instance, triangle, frontFace) => {
+                    const entry = this.entries[instance];
+                    const side = threeMaterialOf(entry.source, entry.meshSource, triangle)?.side ?? FrontSide;
                     if (side === FrontSide) return frontFace;
                     if (side === BackSide) return !frontFace;
                     return side === DoubleSide;
@@ -266,11 +277,6 @@ export class BvhSceneRaycaster {
         }
     }
 
-    private materialOf(source: BvhThreeSource): Material | null {
-        const material = source.object.material;
-        return Array.isArray(material) ? (material[source.materialIndex] ?? null) : (material ?? null);
-    }
-
     private intersectionOf(hit: CpuSceneHit, origin: Vector3, unit: Vector3): Intersection {
         const entry = this.entries[hit.instance];
         const { source, meshSource } = entry;
@@ -280,12 +286,14 @@ export class BvhSceneRaycaster {
         const m = scratchRows;
         const localDirection = new Vector3(m[0] * unit.x + m[1] * unit.y + m[2] * unit.z, m[4] * unit.x + m[5] * unit.y + m[6] * unit.z, m[8] * unit.x + m[9] * unit.y + m[10] * unit.z);
         const faceIndex = threeFaceIndex(meshSource, hit.triangle);
-        const firstIndex = meshSource.start + hit.triangle * 3;
+        const firstIndex = threeFirstIndex(meshSource, hit.triangle);
+        // three's face.materialIndex: the group's (a folded mesh's from the triangle), else 0.
+        const materialIndex = threeGroupOf(meshSource, hit.triangle)?.materialIndex ?? (source.group >= 0 ? source.materialIndex : 0);
         const intersection: Intersection = {
             distance: hit.t,
             point: origin.clone().addScaledVector(unit, hit.t),
             object: source.object as Mesh,
-            ...intersectionFields(geometry, faceIndex, firstIndex, hit.u, hit.v, localDirection, source.group >= 0 ? source.materialIndex : 0),
+            ...intersectionFields(geometry, faceIndex, firstIndex, hit.u, hit.v, localDirection, materialIndex),
         };
         if (source.instanceId >= 0) {
             if ((source.object as unknown as BatchedMesh).isBatchedMesh) (intersection as Intersection & { batchId?: number }).batchId = source.instanceId;

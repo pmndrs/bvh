@@ -177,6 +177,8 @@ function postable(geometry: MeshGeometry, transferInput: boolean): { geometry: M
         positions: prepare(geometry.positions),
         indices: geometry.indices ? prepare(geometry.indices) : geometry.indices,
         triangleFlags: geometry.triangleFlags ? prepare(geometry.triangleFlags) : geometry.triangleFlags,
+        // Copied, never moved: a scene still reads them (an indexed scene's material table).
+        ...(geometry.triangleMaterials ? { triangleMaterials: geometry.triangleMaterials } : {}),
     };
     return { geometry: posted, transfer: [...transfer], moved };
 }

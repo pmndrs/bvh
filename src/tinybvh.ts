@@ -28,7 +28,7 @@ import {
 } from './gpu-layout.ts';
 import { singleLeafTopology, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from './topology.ts';
 import { TINYBVH_WASM_BASE64 } from './tinybvh-wasm.ts';
-import { checkTriangleFlags, type MeshInput } from './mesh-input.ts';
+import { packedTriangleFlags, type MeshInput } from './mesh-input.ts';
 import { builderNodeFormat } from './quantized-nodes.ts';
 import { checkTriangleLeaves, indexedTrianglesFromRecordWords } from './indexed-leaves.ts';
 
@@ -371,11 +371,10 @@ function buildGpuLayout(wasm: TinyBvhExports, geometry: MeshInput, options: Tiny
     if (!Number.isInteger(maxLeaf) || maxLeaf < 1 || maxLeaf > GPU_LAYOUT_MAX_LEAF_PRIMITIVES) {
         throw new RangeError(`maxLeafPrimitives must be an integer from 1 to ${GPU_LAYOUT_MAX_LEAF_PRIMITIVES}, got ${maxLeaf}`);
     }
-    const { triangleFlags } = geometry;
     const indexed = checkTriangleLeaves(options.triangleLeaves, 'tinybvh') === 'indexed';
     const { vertexCount, triangleCount } = countInput(geometry);
-    if (triangleFlags && triangleFlags.length < triangleCount) throw new RangeError('triangleFlags must have one entry per triangle');
-    checkTriangleFlags(triangleFlags, triangleCount, 'mesh');
+    // The flags the records get: the input's filter bit and its triangles' materials in bits 16-31.
+    const triangleFlags = packedTriangleFlags(geometry, triangleCount, 'mesh');
 
     return withTinyBvhTree(wasm, geometry, options, (wasmBuildMs) => {
         const flagsPointer = triangleFlags ? allocateInput(wasm, triangleCount * 4, 'triangle flags') : 0;

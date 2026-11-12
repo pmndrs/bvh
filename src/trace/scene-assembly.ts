@@ -18,7 +18,9 @@ import {
     INDEXED_TRIANGLE_WORDS,
     MESH_HEADER_WORD,
     TRACE_STACK_SIZE,
+    MATERIAL_SHIFT,
     TRIANGLE_BYTES,
+    TRIANGLE_WORD,
     TRIANGLE_WORDS,
     checkInstanceMask,
     indexedLeadingUnits,
@@ -26,11 +28,12 @@ import {
     positionStrideFloats,
     type PositionLayout,
     type TriangleLeaves,
+    writeIndexedMeshHeader,
 } from './layout.ts';
 import { checkNodeFormat, quantizeNodes } from '../quantized-nodes.ts';
 import { gpuLayoutNodeBytes, gpuLayoutNodeSlots, type GpuLayoutNodeFormat } from '../gpu-layout.ts';
 import { checkTriangleLeaves, indexedFromRecords, weldExactBits, weldPositions } from '../indexed-leaves.ts';
-import { checkTriangleFlags } from '../mesh-input.ts';
+import { checkTriangleFlags, triangleMaterialCodes } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
 import { markIndexedSceneTriangles } from './indexed-scene-buffers.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
@@ -182,7 +185,11 @@ export interface TraceSceneAssemblyOptions {
     /**
      * Indexed scenes: each mesh's geometry, parallel to `meshes` (null where
      * the mesh is null), whose positions go into the scene's positions buffer.
-     * Merged groups take theirs from the plan.
+     * Merged groups take theirs from the plan. Per-triangle materials: a
+     * geometry's `triangleMaterials` when it has them, else the tree's
+     * records' (flags bits 16-31), which is what a records scene reports from
+     * the same tree; both present and different throws. A records scene
+     * always reports the tree's.
      */
     readonly geometries?: readonly (MeshGeometry | null)[];
     /**
@@ -234,9 +241,12 @@ export function assembleTraceScene(
     const nodeBytes = gpuLayoutNodeBytes(nodeFormat);
     let totalNodes = 0;
     let totalTriangles = 0;
+    // Indexed: an unmerged mesh's per-triangle material codes go into a table before its header
+    // (the geometry's triangleMaterials, else the tree's records' bits: the same materials a records scene reports).
+    const materialCodes = placed.map((mesh, index) => (indexed && mesh && index < meshes.length ? indexedMaterialCodes(mesh, geometryOf(index), index) : null));
     const allPlacements = placed.map((mesh, index): TraceSceneMeshPlacement => {
         const sources = index >= meshes.length ? merged!.plan.groups[index - meshes.length].sources.length : 0;
-        const leading = indexed && mesh ? indexedLeadingUnits(mesh.triangleCount, sources) : 0;
+        const leading = indexed && mesh ? indexedLeadingUnits(mesh.triangleCount, sources, materialCodes[index] !== null) : 0;
         // A quantized mesh's frame slot comes right before its root.
         if (quantized && mesh) totalNodes++;
         const placement: TraceSceneMeshPlacement = {
@@ -266,7 +276,7 @@ export function assembleTraceScene(
             new Uint8Array(mesh.triangles, 0, mesh.triangleCount * TRIANGLE_BYTES),
         );
     });
-    const placedPositions = indexed ? placeIndexedTriangles(placed, allPlacements, geometryOf, triangles, positionLayout, options.weld ?? true) : null;
+    const placedPositions = indexed ? placeIndexedTriangles(placed, allPlacements, geometryOf, triangles, positionLayout, options.weld ?? true, materialCodes) : null;
     if (placedPositions) {
         const welded = options.weld ?? true;
         allPlacements.forEach((placement, index) => {
@@ -364,6 +374,38 @@ export function assembleTraceScene(
 }
 
 /**
+ * An indexed scene's material table for one mesh: `geometry.triangleMaterials`
+ * when it has them, else what the tree's records carry in flags bits 16-31
+ * (a records scene reads those, so both formats report the same materials).
+ * Throws when both are there and disagree (the tree was built from other
+ * materials). An indexed tree's leaves carry no materials: only the geometry's count.
+ */
+function indexedMaterialCodes(mesh: MeshBvh, geometry: MeshGeometry, index: number): Uint16Array | null {
+    const where = `assembleTraceScene: mesh ${index}`;
+    const own = triangleMaterialCodes(geometry.triangleMaterials, mesh.triangleCount, where);
+    if (mesh.triangleLeaves === 'indexed') return own;
+    const words = new Uint32Array(mesh.triangles, 0, mesh.triangleCount * TRIANGLE_WORDS);
+    let fromTree: Uint16Array | null = null;
+    for (let slot = 0; slot < mesh.triangleCount; slot++) {
+        const code = words[slot * TRIANGLE_WORDS + TRIANGLE_WORD.flags] >>> MATERIAL_SHIFT;
+        if (code === 0 && !fromTree) continue;
+        fromTree ??= new Uint16Array(mesh.triangleCount);
+        const triangle = words[slot * TRIANGLE_WORDS + TRIANGLE_WORD.originalIndex];
+        if (triangle < mesh.triangleCount) fromTree[triangle] = code;
+    }
+    if (!own || !fromTree) return own ?? fromTree;
+    for (let triangle = 0; triangle < own.length; triangle++) {
+        if (own[triangle] !== fromTree[triangle]) {
+            const name = (code: number) => (code === 0 ? 'none' : String(code - 1));
+            throw new RangeError(
+                `${where}: geometries[${index}].triangleMaterials gives triangle ${triangle} material ${name(own[triangle])}, the tree's records ${name(fromTree[triangle])}; build the tree from the same materials (or drop one of them)`,
+            );
+        }
+    }
+    return own;
+}
+
+/**
  * An indexed scene's triangles and positions: each placed tree's indexed
  * triangles (converted from records if need be) with its vertex indices
  * through the mesh's weld, its header's vertex base, and its positions at
@@ -376,6 +418,7 @@ function placeIndexedTriangles(
     triangles: ArrayBuffer,
     positionLayout: PositionLayout,
     weld: boolean,
+    materialCodes: readonly (Uint16Array | null)[],
 ): { positions: ArrayBuffer; vertexCount: number; bases: number[]; counts: number[] } {
     const words = new Uint32Array(triangles);
     const welds = placed.map((mesh, index) => {
@@ -411,7 +454,8 @@ function placeIndexedTriangles(
             }
             words[to + 3] = source[from + 3];
         }
-        words[(offset - 1) * 4 + MESH_HEADER_WORD.vertexBase] = bases[index];
+        if (index < materialCodes.length && materialCodes[index]) writeIndexedMeshHeader(words, offset, bases[index], materialCodes[index]);
+        else words[(offset - 1) * 4 + MESH_HEADER_WORD.vertexBase] = bases[index];
         // Bits, not values: the walk must see exactly the bits the builders' boxes came from.
         const kept = new Uint32Array(result.positions.buffer, result.positions.byteOffset, result.vertexCount * 3);
         for (let vertex = 0; vertex < result.vertexCount; vertex++) {

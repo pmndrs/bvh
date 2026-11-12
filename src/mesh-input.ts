@@ -18,10 +18,72 @@ export interface MeshInput {
      * set. Bits 1-31 are reserved: bit 1 flips `frontFace` on merged static
      * meshes' triangles, bits 2-15 are 0, and bits 16-31 carry a merged
      * triangle's source material, which the scene assembly writes from the
-     * instance's `material` (not from here). Every builder throws, naming the
-     * triangle, if a reserved bit is set.
+     * instance's `material` (or from {@link triangleMaterials}). Every builder
+     * throws, naming the triangle, if a reserved bit is set.
      */
     readonly triangleFlags?: Uint32Array | null;
+    /**
+     * Per-triangle material index, by original triangle number: 0-65534, or
+     * {@link TRIANGLE_MATERIAL_NONE} (0xffff; `NO_MATERIAL`, 0xffffffff, too)
+     * for none. A hit on a triangle with a material reports it as
+     * `BvhHit.material`; one without falls back to its instance's material.
+     * Records keep it in flags bits 16-31 (material + 1), every builder writes
+     * it there; indexed scenes keep a per-mesh table before the mesh's header
+     * (docs/internals/design/indexed-leaves.md). Omit it (the default) for
+     * the instance's material only. Anything else throws, naming the triangle.
+     */
+    readonly triangleMaterials?: Uint16Array | Uint32Array | ArrayLike<number> | null;
+}
+
+/** A {@link MeshInput.triangleMaterials} entry meaning "no material here": the hit takes its instance's. */
+export const TRIANGLE_MATERIAL_NONE = 0xffff;
+/** Largest per-triangle material (as `MAX_MATERIAL` in trace/layout.ts). */
+const MAX_TRIANGLE_MATERIAL = 0xfffe;
+/** Bits 16-31 of a triangle's flags: its material + 1 (`MATERIAL_SHIFT` in trace/layout.ts). */
+const TRIANGLE_MATERIAL_SHIFT = 16;
+
+/**
+ * The stored codes of `materials` (material + 1, 0 for none), one per
+ * triangle, or null when there are none. Throws a `RangeError` naming
+ * `where` and the triangle for a short array or a value outside 0-65534
+ * that is not {@link TRIANGLE_MATERIAL_NONE} or 0xffffffff.
+ */
+export function triangleMaterialCodes(
+    materials: MeshInput['triangleMaterials'],
+    triangleCount: number,
+    where: string,
+): Uint16Array | null {
+    if (!materials) return null;
+    if (materials.length < triangleCount) throw new RangeError(`${where}: triangleMaterials must have one entry per triangle (${materials.length} for ${triangleCount})`);
+    const codes = new Uint16Array(triangleCount);
+    for (let triangle = 0; triangle < triangleCount; triangle++) {
+        const material = materials[triangle];
+        if (material === TRIANGLE_MATERIAL_NONE || material === 0xffffffff) continue;
+        if (!Number.isInteger(material) || material < 0 || material > MAX_TRIANGLE_MATERIAL) {
+            throw new RangeError(`${where}: triangleMaterials[${triangle}] is ${material}; a material is an integer in 0-${MAX_TRIANGLE_MATERIAL}, or 0xffff for none`);
+        }
+        codes[triangle] = material + 1;
+    }
+    return codes;
+}
+
+/**
+ * The flags word every builder writes per original triangle: the input's
+ * `triangleFlags` (checked: bit 0 only) with the triangle's material code
+ * from `triangleMaterials` in bits 16-31. The input's own array when it has
+ * no materials, null when it has neither.
+ */
+export function packedTriangleFlags(geometry: MeshInput, triangleCount: number, where: string): Uint32Array | null {
+    const { triangleFlags } = geometry;
+    if (triangleFlags && triangleFlags.length < triangleCount) throw new RangeError(`${where}: triangleFlags must have one entry per triangle`);
+    checkTriangleFlags(triangleFlags, triangleCount, where);
+    const codes = triangleMaterialCodes(geometry.triangleMaterials, triangleCount, where);
+    if (!codes) return triangleFlags ?? null;
+    const flags = new Uint32Array(triangleCount);
+    for (let triangle = 0; triangle < triangleCount; triangle++) {
+        flags[triangle] = ((triangleFlags ? triangleFlags[triangle] : 0) | (codes[triangle] << TRIANGLE_MATERIAL_SHIFT)) >>> 0;
+    }
+    return flags;
 }
 
 /** The triangle flag bits a mesh's input may set: bit 0, `TRIANGLE_FLAG_FILTER` (trace/layout.ts). */

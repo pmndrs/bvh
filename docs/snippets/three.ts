@@ -45,10 +45,22 @@ export async function sync(device: GPUDevice, scene: Object3D, materialIndexOf: 
     return sync;
 }
 
-export function sourceOf(sync: SceneTreesObject3DSync, hitInstance: number): void {
+// #region source-of
+import { threeGroupOf, threeMaterialOf } from '@pmndrs/bvh/three';
+
+// #endregion
+
+export function sourceOf(sync: SceneTreesObject3DSync, hitInstance: number, hitTriangle: number): void {
     // #region source-of
     const source = sync.sourceOf(hitInstance); // { object, instanceId, group, materialIndex, mesh, static }
-    if (source) console.log(source.object.name, source.instanceId);
+    const meshSource = sync.meshSourceOf(hitInstance);
+    if (source && meshSource) {
+        console.log(source.object.name, source.instanceId);
+        // A folded multi-material mesh has group -1: the hit's triangle names its group and three material.
+        const group = threeGroupOf(meshSource, hitTriangle); // { group, materialIndex, material, ... } or null
+        const material = threeMaterialOf(source, meshSource, hitTriangle); // object.material[group.materialIndex], or object.material
+        console.log(group?.materialIndex, material?.name);
+    }
     // #endregion
 }
 
