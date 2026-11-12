@@ -1,6 +1,6 @@
 /**
  * Exclusive prefix sum of a `u32` array on the GPU, in place: reduce, then
- * scan (docs/design/bvh-framework.md, "Sort and scan"). Three dispatches:
+ * scan (docs/internals/design/bvh-framework.md, "Sort and scan"). Three dispatches:
  *
  * 1. `scanReduce`, one workgroup per tile of {@link SCAN_TILE_ITEMS}: the
  *    tile's sum.

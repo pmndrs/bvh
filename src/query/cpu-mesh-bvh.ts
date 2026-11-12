@@ -46,7 +46,7 @@
  * if the caller keeps using the same buffers elsewhere, for example a GPU
  * upload it will redo from them later.
  *
- * **Indexed trees** (`triangleLeaves: 'indexed'`, docs/design/indexed-leaves.md)
+ * **Indexed trees** (`triangleLeaves: 'indexed'`, docs/internals/design/indexed-leaves.md)
  * are taken with their geometry (`options.source`) and expanded to records
  * once, in the constructor (`recordsFromIndexed`): the queries, the
  * depth-first reorder and {@link CpuMeshBvh.refit} all read corners from the
@@ -55,7 +55,7 @@
  * writes records. Reading corners through the source's own positions instead
  * (16 bytes per triangle) is a later step.
  *
- * **Quantized trees** (`nodeFormat: 'quantized'`, docs/design/compressed-nodes.md)
+ * **Quantized trees** (`nodeFormat: 'quantized'`, docs/internals/design/compressed-nodes.md)
  * are decoded to 64-byte nodes once, in the constructor (`dequantizeNodes`).
  * Each decoded plane is exact (the frame rule), so {@link CpuMeshBvh.traverse}
  * hands `intersectsBounds` plain `f32` boxes that are a little looser than the
@@ -402,9 +402,9 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
 
     constructor(input: GpuLayoutMeshBvh, options: CpuMeshBvhOptions = {}) {
         // Indexed trees are queried as records: the CPU queries, the depth-first reorder and the
-        // refit read corners from the records (docs/design/indexed-leaves.md, "CpuMeshBvh").
+        // refit read corners from the records (docs/internals/design/indexed-leaves.md, "CpuMeshBvh").
         if (input.triangleLeaves === 'indexed' && !options.source) throw new RangeError('CpuMeshBvh: an indexed tree needs its geometry (options.source) for its corners');
-        // Quantized nodes are decoded once (docs/design/compressed-nodes.md, "CpuMeshBvh"): CPU trees
+        // Quantized nodes are decoded once (docs/internals/design/compressed-nodes.md, "CpuMeshBvh"): CPU trees
         // stay 64 bytes per node, and every box the queries see contains the exact one.
         const decoded = dequantizeNodes(input);
         const layout = decoded.triangleLeaves === 'indexed' ? recordsFromIndexed(decoded, options.source!.positions) : decoded;

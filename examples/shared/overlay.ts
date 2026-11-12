@@ -1,5 +1,5 @@
 /**
- * The overlay every example shares (docs/design/bvh-package-split.md, "P4"):
+ * The overlay every example shares (docs/internals/design/bvh-package-split.md, "P4"):
  *
  * - which builder made the trees and why (`builtBy`, `fallbackReason`);
  * - build milliseconds: CPU wall time, and GPU timestamps where the device has them;

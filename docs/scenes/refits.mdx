@@ -1,0 +1,85 @@
+---
+title: Refits
+description: GpuBvhRefit for a top level over moving instances, GpuMeshRefit for one deforming mesh, and when to rebuild.
+nav: 34
+sourcecode: src/gpu-refit.ts
+---
+
+A refit keeps a tree's shape and recomputes every box. `SceneTrees` uses both refits for you. Use them directly for
+trees you place in your own buffers. Both need `subgroups`.
+
+| | `GpuBvhRefit` | `GpuMeshRefit` |
+| --- | --- | --- |
+| Refits | any tree, from one box per primitive | one mesh's tree, from its moved vertices |
+| Typical use | a top level over instances that move every frame | a skinned or morphed mesh |
+| Input per frame | a buffer of primitive boxes your pass wrote | the posed vertex buffer (and the index buffer) |
+| Writes | the tree's boxes | the triangle records' corners, then the boxes |
+
+## A top level over moving instances
+
+{/* snippet: refit-top */}
+```ts
+import { GpuBvhRefit, leafSlotsOf, parentSlotsOf, type GpuLayoutMeshBvh } from '@pmndrs/bvh';
+
+const refit = new GpuBvhRefit(device);
+await refit.prepare();
+
+// Once per tree shape, from a CPU copy of the tree:
+const words = new Uint32Array(layout.nodes);
+refit.setShape({
+    nodeWordOffset: 0,
+    nodeCount: layout.nodeCount,
+    parentSlots: parentSlotsOf(words, 0, layout.nodeCount, layout.parents),
+    leafSlots: leafSlotsOf(words, 0, layout.nodeCount),
+    generation: 1,
+});
+
+// Every frame, after a pass wrote one box per primitive (8 floats: min x, y, z, unused,
+// max x, y, z, unused), in the order the tree's leaves index them:
+refit.encode(pass, treeBuffer, primitiveBoxes);
+```
+
+`BVH_INSTANCE_BOX_WGSL` is a WGSL helper for writing one instance's world box from its transform and its mesh's box.
+10,000 moving instances refit in about 0.09 ms of GPU time (RTX 3060 Laptop, Windows, two measurements of the refit's
+own page).
+
+## One deforming mesh
+
+{/* snippet: refit-mesh */}
+```ts
+import { GpuMeshRefit } from '@pmndrs/bvh';
+
+const meshRefit = new GpuMeshRefit(device, { diagnostics: true });
+await meshRefit.prepare();
+// Once, from a CPU copy of the tree (any builder's). For a tree inside shared buffers,
+// say where it sits: setTree(layout, { nodeWordOffset, triangleWordOffset }).
+meshRefit.setTree(layout);
+
+// Every frame, after the pass that writes the moved vertices:
+meshRefit.pollStats(); // maps an earlier frame's stats copy, without waiting
+const encoder = device.createCommandEncoder();
+const pass = encoder.beginComputePass();
+meshRefit.encode(pass, { nodes: nodeBuffer, triangles: triangleBuffer }, { positionBuffer: skinnedPositions, vertexCount, indexBuffer, indexFormat: 'uint32' });
+pass.end();
+meshRefit.copyStats(encoder); // with diagnostics only
+device.queue.submit([encoder.finish()]);
+
+// A frame or two late: the refit tree's SAH cost over its root's area. Rebuild when it drifts up.
+const cost = meshRefit.latestStats?.relativeCost;
+```
+
+- `setTree` takes the shape from a CPU copy of the tree. A tree from tinybvh is on the CPU already; one from H-PLOC or
+  the LBVH is read back once with the builder's `readLayouts(trees)`.
+- Several deforming meshes need one `GpuMeshRefit` each, and can share compiled pipelines:
+  `new GpuMeshRefit(device, { kernels: new GpuMeshRefitKernels(device) })`.
+- For a mesh inside a scene's shared buffers, `meshRefitPlacement(scene, meshIndex)` gives the offsets `setTree`
+  needs, and refuses merged meshes.
+
+## When to rebuild
+
+With `diagnostics: true`, both refits report the refit tree's quality, `latestStats.relativeCost` (its summed node
+half-area over the root's), a frame or two late. Nothing else is read back. Rebuild when it has stayed well above the
+built tree's cost (`relativeSahCost(floats, words, 0, layout.nodeCount)` over the built tree's nodes, on the CPU):
+`SceneTrees` rebuilds after 60 updates above 1.1 times.
+
+The CPU twin, `refitOnCpu`, gives the same boxes in TypeScript, for tests and for CPU trees (`CpuMeshBvh.refit`).

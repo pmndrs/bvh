@@ -505,7 +505,7 @@ export interface SharedEdgeCase extends OracleCase {
  * and the transformed ray's arithmetic is exercised too.
  *
  * `seam` changes how the quad's triangles share their corners
- * (docs/design/indexed-leaves.md, section 2):
+ * (docs/internals/design/indexed-leaves.md, section 2):
  * - `'shared'` (the default): by index, as `tessellatedQuad` writes them;
  * - `'split'`: every corner its own vertex (an unindexed soup), with the same
  *   bits, as an exporter writes a UV seam. Nothing may slip, in either

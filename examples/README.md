@@ -1,6 +1,6 @@
 # Examples
 
-A Vite multi-page site (BX.5, BX.9 in docs/design/bvh-package-split.md). Each example is one page with its source beside it and the shared overlay.
+A Vite multi-page site (BX.5, BX.9 in docs/internals/design/bvh-package-split.md). Each example is one page with its source beside it and the shared overlay.
 
 ```
 pnpm examples:dev                       # http://localhost:5310

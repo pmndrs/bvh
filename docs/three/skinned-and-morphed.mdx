@@ -1,0 +1,64 @@
+---
+title: Skinned and morphed meshes
+description: three's skinning and morph math in a TSL compute pass, feeding the GPU refit, with nothing read back.
+nav: 83
+sourcecode: src/three/deform.ts
+---
+
+three skins in the vertex shader, so its posed vertices never exist in a buffer. With a `renderer`, the sync runs a
+compute pass per posed mesh (`BvhPosePass`) that writes them into a buffer of ours, and `SceneTrees.setPose` refits the
+tree from it on the GPU.
+
+{/* snippet: posing */}
+```ts
+import type { Scene } from 'three/webgpu';
+
+// With a renderer, every SkinnedMesh and morph-target mesh is posed on the GPU (BvhPosePass).
+const sync = new SceneTreesObject3DSync(trees, scene, { renderer });
+await sync.ready; // the pose pipelines are compiled: every object is posed from the first update
+
+// Each frame, after the animation mixer:
+scene.updateMatrixWorld();
+sync.update(); // transforms, then each visible posed object's pass, then SceneTrees.setPose
+const encoder = device.createCommandEncoder();
+trees.update(encoder); // refits the posed trees on the GPU: nothing is read back
+device.queue.submit([encoder.finish()]);
+console.log(sync.poseCounts); // { posed, boundsMoved, waiting }
+```
+
+## Which meshes
+
+With a `renderer`, every `SkinnedMesh` and every mesh with position morph targets (`threeDeforms(mesh)`), unless
+`deforming: false` or a `(mesh) => boolean` says otherwise. Without a renderer they stay in their rest pose.
+
+Not posed: `BatchedMesh`, and an `InstancedMesh` with per-instance morphs (`morphTexture`) and more than one instance
+(the sync warns once and reads its rest pose). A posed object gets its own mesh per triangle range; its instances never
+merge. Hidden objects aren't posed.
+
+## The pass
+
+`BvhPosePass` runs three r187's math in three's order: morphs as `morphReference` does them, then skinning as
+`getSkinnedPosition` does it, after `skeleton.update()`. It writes one `vec4` per vertex. On the Apple M5 the posed
+vertices match three's CPU pose (`getVertexPosition`, `applyBoneTransform`) to 6.4e-7.
+
+- **Compile cost:** one shader per variant (skinned, morphed, both), shared by every posed mesh of that variant. The
+  sync compiles each variant when its first mesh is added. Until the compile settles, `update()` doesn't pose that
+  variant's objects (`sync.poseCounts.waiting`); `await sync.ready` has every object posed from the first update.
+- **Inputs are read once:** rest positions, skin indices and weights and morph targets are packed when the pass is made.
+  A new geometry object gets a new pass at `sync()`; editing those attributes in place is not followed.
+- **A replaced skeleton** gets a new pass at the next `update()`.
+
+## The top-level box follows the pose
+
+The top level keeps one box per deforming mesh. The sync sets it (`SceneTrees.setDeformBounds`) from `pass.bounds()`, a
+box that holds the pose, computed from the skeleton on the CPU. It moves only when the pose leaves the box, or the box
+grows past twice the padded pose. `deformSlack` (default 0.25 of the largest extent, on every side) sets the room.
+A walking character's root motion is followed.
+
+## Picking
+
+GPU picking (`TraceBatchKernel` or `BvhTraceNodes`) hits the posed surface. CPU picking on a posed mesh stays on three's
+own raycast (`acceleratedRaycast` falls back for a `SkinnedMesh` or morph targets), which poses each vertex on the CPU.
+
+Tested on the `three-skinned` GPU page (Apple M5): 0 disagreements over 16,384 rays at 4 frames, against three's CPU
+pose. The [skinned example](/examples/examples) shows nine characters.

@@ -66,7 +66,7 @@ export const GPU_LAYOUT_NODE_WORD = {
 } as const;
 
 /**
- * How a tree stores its nodes (docs/design/compressed-nodes.md). Every tree
+ * How a tree stores its nodes (docs/internals/design/compressed-nodes.md). Every tree
  * and scene is one or the other, and the walk is compiled for one
  * (`traceModuleWgsl({ nodeFormat })`):
  *
@@ -165,7 +165,7 @@ export const GPU_LAYOUT_TRIANGLE_WORD = {
 } as const;
 
 /**
- * How a tree stores its triangles (docs/design/indexed-leaves.md). Every tree
+ * How a tree stores its triangles (docs/internals/design/indexed-leaves.md). Every tree
  * and scene is one or the other, and the walk is compiled for one
  * (`traceModuleWgsl({ triangleLeaves })`):
  *

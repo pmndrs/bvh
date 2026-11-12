@@ -53,12 +53,12 @@ const RESULT_WORDS = 10;
 /** Written as the instance for a miss. */
 const NO_INSTANCE = 0xffffffff;
 
-/** The scene formats the page traces (docs/design/indexed-leaves.md): records, and indexed leaves with each position layout. */
+/** The scene formats the page traces (docs/internals/design/indexed-leaves.md): records, and indexed leaves with each position layout. */
 interface Format {
     readonly name: string;
     readonly triangleLeaves: 'records' | 'indexed';
     readonly positionLayout?: 'vec4' | 'packed';
-    /** Quantized nodes (docs/design/compressed-nodes.md); default f32. */
+    /** Quantized nodes (docs/internals/design/compressed-nodes.md); default f32. */
     readonly nodeFormat?: 'f32' | 'quantized';
 }
 const FORMATS: readonly Format[] = [

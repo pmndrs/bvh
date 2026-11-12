@@ -1,0 +1,71 @@
+---
+title: The builder contract
+description: What every builder takes and gives back, so one can replace another without touching the code that traces.
+nav: 11
+sourcecode: src/mesh-input.ts
+---
+
+Every builder follows one contract. Swapping tinybvh for H-PLOC, or a tree from a file for either, changes nothing in
+the code that traces rays.
+
+## In
+
+One mesh, or many:
+
+- **CPU arrays** (`MeshInput`): `positions` (`x, y, z` floats, tightly packed), optional `indices` (three per triangle,
+  `Uint16Array` or `Uint32Array`) and optional `triangleFlags` (one `u32` per triangle, bit 0 only). Every builder
+  takes these.
+- **GPU buffers** (`GpuMeshBuffers`): a position buffer and, optionally, an index buffer and a flags buffer, already
+  on the GPU. Only the GPU builders take these, for example the output of a skinning pass. The buffers need `COPY_SRC`.
+
+{/* snippet: gpu-input */}
+```ts
+// A mesh already on the GPU (the output of a skinning pass, say). The buffers need COPY_SRC usage.
+const mesh: GpuMeshGeometry = { positionBuffer, vertexCount, indexBuffer, indexFormat: 'uint32', triangleCount };
+```
+
+`isGpuMeshBuffers(mesh)` tells the two apart, and `meshTriangleCount(mesh)` counts either.
+
+## Options
+
+- `maxLeafPrimitives`: the largest leaf, 1 to 8 triangles. Default 8. The SAH may make smaller leaves.
+- `triangleLeaves` and `nodeFormat`: the [layout variants](/concepts/gpu-layout#variants).
+- GPU builders: the SAH costs (`traversalCost`, `intersectionCost`, both 1 by default). H-PLOC adds `mortonCodes` and
+  `tieBreak` ([Choosing a builder](/builders/choosing-a-builder#gpu-h-ploc)).
+
+## Out
+
+The tree in [the GPU layout](/concepts/gpu-layout):
+
+- `GpuLayoutMeshBvh` on the CPU: `nodes`, `triangles` (ArrayBuffers), `parents` (Uint32Array), `nodeCount`,
+  `triangleCount`, `leafCount`, `maxDepth` and `bounds`.
+- `GpuTreeBuffers` on the GPU: `nodes`, `triangles` and `parents` buffers shared by a batch, with one entry per mesh
+  in `meshes` (its offsets, counts, depth, and a `problem` when the build was refused). `readLayouts(trees)` copies
+  them back to the CPU; `destroy()` frees them.
+
+A tree's shape alone, before it is written in the layout, is a `MeshTreeTopology`. tinybvh's nodes become one with
+`topologyFromTinyBvhNodes`, and `buildMeshBvhFromTopology` writes it in the layout.
+
+## The rule
+
+A builder is used only after it passes **the oracle**: the same rays through its trees, the CPU walk and a tree-less
+reference must agree, on every GPU tested. See [The oracle rule](/concepts/oracle).
+
+`checkGpuLayout` checks any tree against its mesh: every triangle bit for bit, every box exactly the box below it,
+parents, depth and counts. `treeSahCost` scores a tree, so builders can be compared on the same mesh.
+
+{/* snippet: check */}
+```ts
+import { checkGpuLayout, GPU_LAYOUT_VERSION, treeSahCost, type GpuLayoutMeshBvh } from '@pmndrs/bvh';
+
+const problems = checkGpuLayout(layout, { positions, indices }); // [] when the tree is right
+if (problems.length) throw new Error(problems.join('\n'));
+const cost = treeSahCost(layout); // lower is better; compare builders on the same mesh
+```
+
+## Adding a builder
+
+A new builder (from a paper, say) has to write this layout, pass `checkGpuLayout` and the oracle, and add its rows to
+the benches. Only MIT or Apache-2.0 code may be ported, or code written from the paper alone; its licence goes in
+`licenses/` and `THIRD_PARTY.md`. The contributor notes are in
+[`docs/internals/design/bvh-framework.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/bvh-framework.md).

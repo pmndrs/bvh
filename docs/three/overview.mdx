@@ -1,0 +1,45 @@
+---
+title: three.js
+description: What @pmndrs/bvh/three gives a three.js app, on the GPU and on the CPU.
+nav: 80
+sourcecode: src/three/index.ts
+---
+
+`@pmndrs/bvh/three` is the only part of the package that imports three. three is an optional peer dependency, pinned to
+`>=0.187.0 <0.188.0`: `BvhTraceNodes` relies on three's WebGPU backend internals, so each three release is checked
+before the range widens.
+
+## On the GPU (WebGPURenderer)
+
+| You want | Use | Page |
+| --- | --- | --- |
+| The renderer's device | `deviceFromRenderer`, `deviceFromRendererAsync` | [Sharing a device](/engines/sharing-a-device#threejs) |
+| A scene graph's meshes and instances as trees, kept in step | `SceneTrees` + `SceneTreesObject3DSync` | [Scenes and the sync](/three/scenes-and-sync) |
+| Rays from TSL or a `wgslFn` | `BvhTraceNodes` | [BvhTraceNodes](/three/trace-nodes) |
+| Skinned and morphed meshes posed on the GPU | the sync with a `renderer`, `BvhPosePass` | [Skinned and morphed meshes](/three/skinned-and-morphed) |
+| The scene once, without the sync | `bvhSceneFromObject3D`, then `buildTraceScene` | [Scenes and the sync](/three/scenes-and-sync#without-scenetrees) |
+
+## On the CPU (any renderer)
+
+| You want | Use | Page |
+| --- | --- | --- |
+| Faster `Mesh.raycast` | `computeBoundsTree`, `acceleratedRaycast` | [CPU raycast](/three/cpu-raycast) |
+| A ray against the whole scene, frustum culling | `BvhSceneRaycaster`, `raycastScene` | [CPU raycast](/three/cpu-raycast#a-whole-scene) |
+| three-mesh-bvh's `MeshBVH` API: shapecast, bvhcast, closest point, refit, serialize | `geometry.boundsTree` (`BvhBoundsTree`, also exported as `MeshBVH`) | [The tree object](/three/bounds-tree) |
+| A tree built off the main thread | `GenerateMeshBvhWorker` | [CPU raycast](/three/cpu-raycast#off-the-main-thread) |
+| The tree's boxes drawn | `MeshBVHHelper`, `BVHHelper` | [The tree object](/three/bounds-tree#the-helper) |
+
+Coming from three-mesh-bvh? [The mapping and what's missing](/three/coming-from-three-mesh-bvh).
+
+## Types
+
+`/three` augments three's types as three-mesh-bvh does: `BufferGeometry.boundsTree` (a `BvhBoundsTree`),
+`computeBoundsTree`, `disposeBoundsTree` and `Raycaster.firstHitOnly`, so the setup needs no casts. A program that
+imports both libraries gets two declarations of the geometry members with different types (TS2717); `skipLibCheck`,
+on in most templates, hides it.
+
+## Not supported
+
+- WebGL2: `BvhTraceNodes` needs the WebGPU backend. The CPU raycast works with either backend.
+- Points, lines and sprites are not read.
+- Layers 8-31 are not seen: the instance mask holds layers 0-7.

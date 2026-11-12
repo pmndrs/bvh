@@ -101,8 +101,8 @@ try {
 
     const failures: string[] = [];
     const results: Record<string, unknown> = {};
-    // Records and indexed leaves (docs/design/indexed-leaves.md): BvhTraceNodes takes the format from SceneTrees.
-    // Then quantized nodes (docs/design/compressed-nodes.md): BvhTraceNodes takes the node format from SceneTrees too.
+    // Records and indexed leaves (docs/internals/design/indexed-leaves.md): BvhTraceNodes takes the format from SceneTrees.
+    // Then quantized nodes (docs/internals/design/compressed-nodes.md): BvhTraceNodes takes the node format from SceneTrees too.
     for (const [triangleLeaves, nodeFormat] of [['records', 'f32'], ['indexed', 'f32'], ['records', 'quantized'], ['indexed', 'quantized']] as const) {
         const label = nodeFormat === 'quantized' ? `quantized ${triangleLeaves}` : triangleLeaves;
         const random = createRandom(57);

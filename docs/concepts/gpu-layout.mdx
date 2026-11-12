@@ -1,0 +1,116 @@
+---
+title: The GPU layout
+description: Nodes, triangles, parents, instances and the top level, as every builder writes them and every walk reads them.
+nav: 10
+sourcecode: src/gpu-layout.ts
+---
+
+Every builder writes the same layout, and every walk (WGSL and CPU) reads it. It is part of the API:
+`GPU_LAYOUT_VERSION` (now 2) goes up with any change to it, and that is a breaking change. The word positions are
+exported (`GPU_LAYOUT_NODE_WORD`, `GPU_LAYOUT_TRIANGLE_WORD`, ...), so code that reads the buffers needs no magic numbers.
+
+Everything is plain arrays in a few storage buffers. They survive a worker hand-off (transferable `ArrayBuffer`s) and an
+upload without conversion.
+
+## One mesh's tree
+
+**Nodes: 64 bytes, two child boxes each** (the Aila-Laine layout most GPU BVH2 tracers use). One node read gives both
+children's boxes, so the walk tests both and visits the nearer first without a second fetch. Node 0 is the root.
+
+```text
+word  0-2  leftMin   (f32 x 3)    3  leftIndex
+word  4-6  leftMax   (f32 x 3)    7  rightIndex
+word  8-10 rightMin  (f32 x 3)   11  leftCount
+word 12-14 rightMax  (f32 x 3)   15  rightCount
+```
+
+A child with count 0 is an inner node at `index`. A child with a count is a leaf: `count` triangles (1 to 8) starting
+at triangle `index`. A tree of one triangle has an empty right child (`GPU_LAYOUT_EMPTY_CHILD`).
+
+**Triangles: 48 bytes each, in tree order.** Leaves point at contiguous runs, so there is no index indirection.
+
+```text
+word 0-2  v0 (f32 x 3)    3  original triangle index
+word 4-6  v1 (f32 x 3)    7  flags
+word 8-10 v2 (f32 x 3)   11  padding (a merged triangle's source instance)
+```
+
+The three corners are stored as they are, so a vertex two triangles share has the same bits in both. The watertight
+triangle test needs that. The original index maps a hit back to your UVs, normals and material groups.
+
+Flags: bit 0 (`TRIANGLE_FLAG_FILTER`) sends the triangle to the [triangle filter](/concepts/masks-filter-materials).
+Input flags may set bit 0 only; the builders throw for any other bit. Bits 1 and 16-31 are written by merged static
+meshes.
+
+**Parents: 4 bytes per node** (`GPU_LAYOUT_NO_PARENT` for the root), in a separate array that only refits read.
+Static scenes never upload them.
+
+**The mesh's box, depth and counts** come with the tree: `GpuLayoutMeshBvh` on the CPU, `GpuTreeBuffers` on the GPU.
+
+Reading a node from a CPU copy:
+
+{/* snippet: read-node */}
+```ts
+import { GPU_LAYOUT_NODE_WORD, GPU_LAYOUT_NODE_WORDS } from '@pmndrs/bvh';
+
+const floats = new Float32Array(layout.nodes);
+const words = new Uint32Array(layout.nodes);
+const base = node * GPU_LAYOUT_NODE_WORDS; // 16 words, 64 bytes
+const leftMin = floats.subarray(base + GPU_LAYOUT_NODE_WORD.leftMin, base + GPU_LAYOUT_NODE_WORD.leftMin + 3);
+const leftCount = words[base + GPU_LAYOUT_NODE_WORD.leftCount]; // 0: an inner node at leftIndex
+const leftIndex = words[base + GPU_LAYOUT_NODE_WORD.leftIndex]; // a leaf: its first triangle
+```
+
+## Instances and the top level
+
+- **Instance record: 64 bytes.** The world-to-object transform as a 3x4 matrix, the mesh's root node offset and
+  triangle offset, the instance index, and flags: `visible`, `mirrored`, `merged`, the 8-bit instance mask (bits 8-15)
+  and the material (bits 16-31, `material + 1`).
+- **The top-level tree** uses the same 64-byte nodes, over instance world boxes. Its leaves point at instance records.
+- Records and top-level nodes share one buffer, after a 64-byte header. So the walk binds **three storage buffers**:
+  nodes, triangles and top level. A default device allows 8 per shader stage.
+
+Rays are moved into object space, so moving an object never touches its tree. Mirrored and non-uniform scales work:
+the object-space direction is not renormalized, so `t` stays in world units.
+
+## The version
+
+{/* snippet: layout-version */}
+```ts
+// A WGSL walk of your own reads our word positions: refuse a layout it wasn't written for.
+const WALK_WRITTEN_FOR = 2;
+if (GPU_LAYOUT_VERSION !== WALK_WRITTEN_FOR) throw new Error(`@pmndrs/bvh layout ${GPU_LAYOUT_VERSION}, walk written for ${WALK_WRITTEN_FOR}`);
+```
+
+`deserializeLayout` refuses bytes from another layout version. A tree is cheap to rebuild, and a wrong word position
+would only show up as wrong rays.
+
+## Variants
+
+Two variants of version 2 trade speed for memory. Both are **off by default** until they are measured on the RTX 3060.
+Each is compiled into the walk, so the walk and the scene must agree.
+
+| Option | Default | Other value | What changes |
+| --- | --- | --- | --- |
+| `triangleLeaves` | `'records'` (48 B per triangle) | `'indexed'` | 16-byte triangles `vec4u(i0, i1, i2, id + flags)`, a 16-byte header per mesh, and the scene's own copy of the positions (a fourth binding), welded by exact bits. `positionLayout: 'vec4'` (16 B per vertex) or `'packed'` (12). |
+| `nodeFormat` | `'f32'` (64 B per node) | `'quantized'` | 32-byte nodes with 16-bit planes on a per-mesh grid, and a 32-byte frame slot before each mesh's root. Boxes round outward, so a decoded box always holds the exact one. The top level stays `f32`. |
+
+Pass them to `SceneTrees.create`, `buildTraceScene`, the builders' options, `traceModuleWgsl` and `TraceBatchKernel`.
+`SceneTrees` exposes the values it was made with (`trees.triangleLeaves`, `trees.positionLayout`, `trees.nodeFormat`).
+
+Measured on Sponza (5.74 million triangles), bytes beyond the app's own geometry: 448.1 MiB in the default layout,
+318.0 MiB indexed, 355.5 MiB quantized, 225.5 MiB with both. Trace speed against the default on the Apple M5
+(indicative): indexed 0.83-0.99x with `vec4` positions, quantized 0.93-0.97x. Details in
+[Memory](/performance/memory).
+
+## Size limits
+
+A default device caps one storage binding at 128 MiB: about 2.7 million triangles at 48 bytes, about 8 million with
+indexed leaves. Nothing is split across bindings. `uploadTraceScene` and `SceneTrees` throw a `RangeError` that names
+the limit to request. See [the device](/getting-started/installation#a-device-with-subgroups).
+
+## Contributors
+
+The design, with every word position and the reasons behind them, is in
+[`docs/internals/design/trace.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/trace.md),
+`indexed-leaves.md` and `compressed-nodes.md` next to it.

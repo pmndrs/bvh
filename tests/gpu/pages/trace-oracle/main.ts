@@ -26,13 +26,13 @@
  *   reference is the case's own instanced scene, so hits must name the source
  *   instance, its triangle and its authored side. The hook cases also run
  *   merged (`[hooks-merged]`), with the filter flags in the merged geometry.
- * - `indexed-*`, `merged-indexed-*`: indexed leaves (docs/design/indexed-leaves.md),
+ * - `indexed-*`, `merged-indexed-*`: indexed leaves (docs/internals/design/indexed-leaves.md),
  *   16-byte triangles read through the scene's positions buffer, with tinybvh,
  *   the GPU LBVH (records converted) and H-PLOC (written on the GPU, checked by
  *   `checkGpuLayout`) trees, `vec4` and `packed` positions, masks compiled out,
  *   and `-weld` (a tolerance weld at 1e-6 before building). The hook cases also
  *   run indexed (`[hooks]` names starting `indexed`).
- * - `quantized-*`, `merged-quantized-*`: quantized nodes (docs/design/compressed-nodes.md),
+ * - `quantized-*`, `merged-quantized-*`: quantized nodes (docs/internals/design/compressed-nodes.md),
  *   32-byte nodes on a per-mesh frame, outward-rounded: tinybvh (packed on the way
  *   out of the worker), the GPU LBVH and H-PLOC (packed by the GPU quantize pass,
  *   checked by `checkGpuLayout`), masks compiled out, combined with indexed leaves,
@@ -124,13 +124,13 @@ interface OracleVariant {
     merged?: boolean;
     /** The batch kernel's `hitNormal`; default true. */
     hitNormal?: boolean;
-    /** The scene's and kernel's triangle format (docs/design/indexed-leaves.md); default records. */
+    /** The scene's and kernel's triangle format (docs/internals/design/indexed-leaves.md); default records. */
     triangleLeaves?: 'records' | 'indexed';
     /** Indexed: the positions layout; default vec4. */
     positionLayout?: 'vec4' | 'packed';
     /** Weld each mesh's vertices within this distance before building (`weldPositions`); default 0, off. */
     weldTolerance?: number;
-    /** The trees', scene's and kernel's node format (docs/design/compressed-nodes.md); default f32. */
+    /** The trees', scene's and kernel's node format (docs/internals/design/compressed-nodes.md); default f32. */
     nodeFormat?: 'f32' | 'quantized';
 }
 

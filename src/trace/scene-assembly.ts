@@ -171,7 +171,7 @@ export interface TraceSceneAssemblyOptions {
      */
     readonly merged?: MergedStaticTrees;
     /**
-     * The scene's triangle format (docs/design/indexed-leaves.md). Default
+     * The scene's triangle format (docs/internals/design/indexed-leaves.md). Default
      * `'records'`: the scene is byte for byte what it was before the option
      * existed. `'indexed'` needs {@link geometries}; trees built as records
      * are converted (`indexedFromRecords`), indexed trees are placed as they are.
@@ -192,7 +192,7 @@ export interface TraceSceneAssemblyOptions {
      */
     readonly weld?: boolean;
     /**
-     * The scene's node format (docs/design/compressed-nodes.md). Default
+     * The scene's node format (docs/internals/design/compressed-nodes.md). Default
      * `'f32'`: the scene is byte for byte what it was before the option
      * existed. `'quantized'`: 32-byte nodes, each mesh's frame slot before its
      * root; `f32` trees are quantized (`quantizeNodes`), quantized trees are
@@ -473,7 +473,7 @@ export interface TraceSceneBuildOptions extends StaticMergeOptions {
     readonly build: (geometry: MeshGeometry) => MeshBvh | Promise<MeshBvh>;
     /**
      * Merge static instances whose mesh is used once into world-space meshes
-     * (static-merge.ts; docs/design/trace.md). Default false: every instance
+     * (static-merge.ts; docs/internals/design/trace.md). Default false: every instance
      * is a normal instance, and the scene is exactly what building each mesh
      * and calling `assembleTraceScene` gives.
      */

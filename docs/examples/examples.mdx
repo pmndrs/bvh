@@ -1,0 +1,35 @@
+---
+title: Examples
+description: The examples site, one line each, and how to run it.
+nav: 110
+---
+
+The examples live in [`examples/`](https://github.com/pmndrs/bvh/tree/main/examples): a Vite site where each page has
+its source beside it and a shared overlay (which builder ran and why, build ms, SAH cost, depth, bytes, Mrays/s, a
+frame-time graph). Most pages take a glTF dropped onto them.
+
+```bash
+pnpm examples:dev       # http://localhost:5310
+pnpm examples:build     # examples/dist, a static site
+pnpm examples:smoke     # every example in headless Chrome, each checking one thing it shows
+```
+
+## three.js
+
+| Page | Shows |
+| --- | --- |
+| [`three/raycast`](https://github.com/pmndrs/bvh/tree/main/examples/three/raycast) | `acceleratedRaycast` against three's `Mesh.raycast`, live, and a GPU batch of thousands of rays in one dispatch. |
+| [`three/pathtracer`](https://github.com/pmndrs/bvh/tree/main/examples/three/pathtracer) | A small TSL compute path tracer over `BvhTraceNodes`: closest hits, any-hit shadows, progressive accumulation. |
+| [`three/skinned`](https://github.com/pmndrs/bvh/tree/main/examples/three/skinned) | `BvhPosePass` skins on the GPU, `SceneTrees` refits, and GPU picking hits the moving characters. |
+| [`three/instances`](https://github.com/pmndrs/bvh/tree/main/examples/three/instances) | 6,000 `InstancedMesh` and 3,000 `BatchedMesh` instances moving, with a top-level refit every frame and picking. |
+| [`three/load-gltf`](https://github.com/pmndrs/bvh/tree/main/examples/three/load-gltf) | Fast first trees on a real glTF: GPU H-PLOC, then tinybvh from the worker pool, with a per-mesh timeline. |
+| [`three/inspector`](https://github.com/pmndrs/bvh/tree/main/examples/three/inspector) | tinybvh, H-PLOC and LBVH on one mesh: build times, SAH, depth, bytes, `MeshBVHHelper` and a heat map of nodes per ray. |
+
+## Planned
+
+- **Vanilla WebGPU:** `hello` (the smallest build), `raytrace` (a compute ray caster), `builders` (the builders side by
+  side), `workers-cpu`, `workers-gpu`, `fast-first` and `refit`.
+- **Node:** `bake` (build in Node, load with no build).
+- **Comparisons with three-mesh-bvh** (`compare/`): raycast, async builds, path tracer, skinned, tree quality.
+- **three:** `sdf`, once GPU closest-point queries exist.
+- **Babylon:** picking and GPU tracing, after the Babylon subpath.

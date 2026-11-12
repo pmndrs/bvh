@@ -1,6 +1,6 @@
 /**
  * Stable, segmented key-value radix sort of `u32` pairs on the GPU, least
- * significant digit first, reduce-then-scan (docs/design/bvh-framework.md,
+ * significant digit first, reduce-then-scan (docs/internals/design/bvh-framework.md,
  * "Sort and scan"): no decoupled look-back, so no workgroup waits on another
  * and nothing depends on forward progress between workgroups. The LBVH
  * builder sorts every mesh's Morton codes with it at once: each mesh is a

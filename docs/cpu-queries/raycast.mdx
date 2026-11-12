@@ -1,0 +1,66 @@
+---
+title: Raycast
+description: CpuMeshBvh, the CPU tree of one mesh, and its raycasts with sides, near and far.
+nav: 70
+sourcecode: src/query/cpu-mesh-bvh.ts
+---
+
+`CpuMeshBvh` is one mesh's tree on the CPU, in the same layout the GPU reads. Raycasts, shapecasts, bvhcasts and
+closest points all run one walk and one triangle test. It needs no GPU and no engine; three's types pass where points,
+rays, boxes and matrices are asked for.
+
+{/* snippet: create */}
+```ts
+import { BVH_DOUBLE_SIDE, CpuMeshBvh, type MeshInput } from '@pmndrs/bvh';
+
+const tree = await CpuMeshBvh.create(input, { maxLeafPrimitives: 8 }); // tinybvh, on this thread
+```
+
+Other ways to get one:
+
+- `CpuMeshBvh.build(input, tinyBvhBuilder, options)`, synchronously with a builder you loaded;
+- `new CpuMeshBvh(layout, { source })` over any tree in the layout (a GPU build read back, a file);
+- `generateCpuMeshBvh(pool, input)` from `@pmndrs/bvh/worker`, off the main thread;
+- `CpuMeshBvh.deserialize(bytes)` ([Serialization](/serialization/serialization-and-baking)).
+
+Quantized and indexed trees are decoded to the default layout when the tree is made.
+
+## Raycast
+
+{/* snippet: raycast */}
+```ts
+const ray = { origin: [0, 0, 5], direction: [0, 0, -1] }; // or a three Ray
+const hits = tree.raycast(ray, { side: BVH_DOUBLE_SIDE, near: 0, far: 100 }); // every hit, nearest first
+const first = tree.raycastFirst(ray, BVH_DOUBLE_SIDE); // or null
+if (first) console.log(first.distance, first.point, first.triangle, first.u, first.v, first.frontFace);
+```
+
+- `raycast(ray, options)` returns every hit, nearest first. `raycastFirst(ray, options)` returns the nearest or null.
+- `side`: `BVH_FRONT_SIDE` (default), `BVH_BACK_SIDE` or `BVH_DOUBLE_SIDE`, three's values. A three `Material` passes as
+  the side, as in three-mesh-bvh. Side culling is native to the CPU walk; a double-sided raycast is the GPU walk exactly.
+- `near` and `far` bound the distance (in the ray's units, whatever the direction's length).
+- A hit has `distance`, `t`, `point`, `triangle` (the original index), `u` and `v` (weights of corners 1 and 2) and
+  `frontFace`.
+
+A layout from a file is checked when the tree is made (children in range, every node reached once, leaves and original
+indices within the triangles), so a corrupt one throws instead of hanging a walk.
+
+## Tree positions and triangles
+
+Triangles are stored in tree order. `resolveTriangleIndex(treePosition)` maps a position (from `traverse` or
+`bvhcast`) to the original triangle, and `treePositionOf(triangle)` back. `getTriangle(treePosition)` returns the nine
+corner floats as the tree stores them. The source geometry is never reordered.
+
+## Speed
+
+Raycasts per second, Node 22 on the Apple M5 while other jobs ran (`bench/three-raycast.ts --seconds 2`, three runs,
+median; a 100,000-triangle torus knot, rays from outside, 81% hit; indicative):
+
+| | Build ms | `firstHitOnly` | All hits |
+| --- | ---: | ---: | ---: |
+| three's `Mesh.raycast` | none | 294 | 288 |
+| three-mesh-bvh 0.9.18, CENTER (its default) | 31 | 664,652 | 238,685 |
+| three-mesh-bvh 0.9.18, SAH | 95 | 647,330 | 286,503 |
+| `@pmndrs/bvh/three` (tinybvh) | 28 | 692,630 | 315,420 |
+
+Next: [Shapecast and bvhcast](/cpu-queries/shapecast).

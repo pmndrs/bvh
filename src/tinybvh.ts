@@ -1,6 +1,6 @@
 /**
  * tinybvh's default triangle builder (SIMD Bonsai), compiled to WebAssembly (stage B0 of
- * docs/design/bvh-framework.md). Its scalar H-PLOC builder can be asked for
+ * docs/internals/design/bvh-framework.md). Its scalar H-PLOC builder can be asked for
  * instead (`builder: 'hploc'`): the oracle the GPU H-PLOC (B2) is compared with.
  *
  * The .wasm is built from native/tinybvh-wasm.cpp by native/build-wasm.ts and
@@ -115,13 +115,13 @@ export interface TinyBvhLayoutOptions extends TinyBvhBuildOptions {
     /** Leaves with more triangles than this are cut in half until they fit. 1 to 8; default 8. */
     readonly maxLeafPrimitives?: number;
     /**
-     * `'indexed'`: 16-byte indexed triangles (docs/design/indexed-leaves.md).
+     * `'indexed'`: 16-byte indexed triangles (docs/internals/design/indexed-leaves.md).
      * The WASM writes records; they are converted on the way out of its
      * memory, with no 48-byte copy in JavaScript. Default `'records'`.
      */
     readonly triangleLeaves?: 'records' | 'indexed';
     /**
-     * `'quantized'`: 32-byte nodes (docs/design/compressed-nodes.md), packed
+     * `'quantized'`: 32-byte nodes (docs/internals/design/compressed-nodes.md), packed
      * from the WASM's 64-byte nodes on the way out of its memory. Default `'f32'`.
      */
     readonly nodeFormat?: 'f32' | 'quantized';

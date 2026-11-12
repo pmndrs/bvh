@@ -1,6 +1,6 @@
 /**
  * Merging static instances into world-space meshes (`mergeStaticInstances`,
- * off by default; docs/design/trace.md, "Merged static instances").
+ * off by default; docs/internals/design/trace.md, "Merged static instances").
  *
  * The two-level walk tests every instance box a ray enters. In scenes with
  * one instance per mesh (Sponza, Bistro) those boxes overlap a lot, and a ray

@@ -5,7 +5,7 @@ Status: **package and H-PLOC target decided by Dennis 2026-11-04** (see "Decided
 - [research/bvh-libraries.md](../../research/bvh-libraries.md) (code we can port);
 - [research/webgpu-compute-for-bvh.md](../../research/webgpu-compute-for-bvh.md) (what WebGPU allows).
 
-It extends [trace.md](trace.md), which covers the layout and the walk. How the builders work inside is in [bvh-builders.md](bvh-builders.md), how to use the package in [README.md](../../README.md), and an outline for splitting it out in [bvh-package-split.md](bvh-package-split.md). Decisions it relies on are in [DECISIONS](../DECISIONS.md) (2026-11-04):
+It extends [trace.md](trace.md), which covers the layout and the walk. How the builders work inside is in [bvh-builders.md](bvh-builders.md), how to use the package in [README.md](../../../README.md), and an outline for splitting it out in [bvh-package-split.md](bvh-package-split.md). Decisions it relies on are in [DECISIONS](../DECISIONS.md) (2026-11-04):
 - BVH work on the GPU where possible;
 - subgroups first, with one declared fallback;
 - three.js is the only adapter until v1.

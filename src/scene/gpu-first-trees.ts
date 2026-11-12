@@ -14,7 +14,7 @@
  *
  * **A cap on a batch's bytes** (`maxBatchBytes`, off by default here, 256 MiB
  * through `SceneTrees`' `gpuMaxBatchBytes`: the P9
- * peak-memory lever, docs/design/bvh-builders.md "Build peak memory"). The
+ * peak-memory lever, docs/internals/design/bvh-builders.md "Build peak memory"). The
  * meshes are split into batches of at most that many GPU bytes each (inputs,
  * scratch and outputs), built one after another. Every capped batch of this
  * builder, whichever `build` asked for it (the load, a deforming mesh's own

@@ -1,0 +1,101 @@
+---
+title: Shapecast and bvhcast
+description: Box, sphere and custom shapes against a tree, and one tree against another, with three-mesh-bvh's contract.
+nav: 71
+sourcecode: src/query/cpu-mesh-bvh.ts
+---
+
+## Shapecast
+
+`shapecast` has three-mesh-bvh's contract (0.9.18), with its argument order and meaning:
+
+{/* snippet: shapecast */}
+```ts
+import { sphereIntersectsBox, sphereIntersectsTriangle } from '@pmndrs/bvh';
+
+const sphere = { center: { x: 0, y: 0, z: 1 }, radius: 0.5 };
+const touched: number[] = [];
+tree.shapecast({
+    intersectsBounds: (box) => sphereIntersectsBox(sphere, box), // false skips the box
+    intersectsTriangle: (triangle, triangleIndex) => {
+        if (sphereIntersectsTriangle(sphere, triangle)) touched.push(triangleIndex); // the original index
+        return false; // true stops the cast
+    },
+});
+const any = tree.intersectsSphere(sphere); // the same test as one call
+```
+
+- `intersectsBounds(box, isLeaf, score, depth, nodeIndex)` decides whether the walk enters a box: falsy skips it,
+  `BVH_CONTAINED` takes its whole subtree as contained, anything else truthy (`BVH_INTERSECTED`, `true`) enters it.
+  The root's box is never asked about; the first boxes asked are its children, at depth 1.
+- `intersectsTriangle(triangle, triangleIndex, contained, depth)` gets each triangle of an entered leaf or contained box,
+  as a scratch `ExtendedTriangle`, with its **original** index. A truthy return stops the cast.
+- `intersectsRange(offset, count, contained, depth, nodeIndex, box)` gets a range of tree positions first; a truthy
+  return stops the cast. With neither callback, the cast stops at the first contained box.
+- `boundsTraverseOrder(box)` scores boxes; of two siblings the lower score is visited first.
+- Casts may nest.
+
+`traverse(callbacks)` is the raw box walk underneath, with boxes as `Float32Array(6)` and tree-position ranges.
+
+## Boxes and spheres
+
+{/* snippet: box */}
+```ts
+import { OrientedBox } from '@pmndrs/bvh';
+
+const box = { min: { x: -1, y: -1, z: -1 }, max: { x: 1, y: 1, z: 1 } };
+const rotated = [0.7071, 0.7071, 0, 0, -0.7071, 0.7071, 0, 0, 0, 0, 1, 0, 0, 0.5, 0, 1]; // box to mesh, column-major
+const inside = tree.intersectsBox(box, rotated);
+
+// The oriented box and the triangle class have three-mesh-bvh's methods, over plain points.
+const obb = new OrientedBox();
+obb.min.x = obb.min.y = obb.min.z = -1;
+obb.max.x = obb.max.y = obb.max.z = 1;
+obb.needsUpdate = true;
+console.log(obb.distanceToPoint({ x: 3, y: 0, z: 0 }));
+```
+
+- `intersectsBox(box, boxToMesh)`: an oriented box test (`boxToMesh` may be left out).
+- `intersectsSphere(sphere)`: `{ center, radius }`.
+- `intersectsGeometry(other, geometryToBvh)`: another tree (a `bvhcast`), or `{ positions, indices }`.
+
+The shape classes (`ExtendedTriangle`, `OrientedBox`, `SeparatingAxisBounds`) and their math (`triangleIntersectsTriangle`,
+`closestPointsSegmentToSegment`, `sphereIntersectsBox`, ...) are three-mesh-bvh's, ported operation for operation over
+plain `{ x, y, z }` points. They give its results bit for bit (4,000 random triangle pairs with coplanar and degenerate
+cases, 3,000 oriented-box cases, in the unit tests).
+
+## Bvhcast
+
+One tree against another, three-mesh-bvh's walk step for step:
+
+{/* snippet: bvhcast */}
+```ts
+let pairs = 0;
+tree.bvhcast(other, otherToTree, {
+    // Tree positions in each tree (three-mesh-bvh's indirect mode): map them with resolveTriangleIndex.
+    intersectsTriangles: (triangle1, triangle2, i1, i2) => {
+        if (triangle1.intersectsTriangle(triangle2)) {
+            pairs++;
+            console.log(tree.resolveTriangleIndex(i1), other.resolveTriangleIndex(i2));
+        }
+        return false;
+    },
+});
+const touching = tree.intersectsGeometry(other, otherToTree); // a bvhcast that stops at the first pair
+```
+
+- `intersectsTriangles(triangle1, triangle2, i1, i2, depth1, nodeIndex1, depth2, nodeIndex2)` gets every pair of
+  triangles of two overlapping leaves, the other's moved into this tree's space, with **tree positions** (as in
+  three-mesh-bvh's indirect mode). Map them with each tree's `resolveTriangleIndex`.
+- `intersectsRanges(...)` gets the overlapping leaves first.
+- Unlike three-mesh-bvh, casts may nest, and a cast with neither callback throws.
+
+## Agreement and speed
+
+Two callers' patterns against three-mesh-bvh 0.9.18 (`bench/query-parity.ts`, Node 22 on the Apple M5, a furnished room
+of 269,764 triangles, 2,000 capsules and 100 brush placements, means of 3 rounds; indicative):
+
+| Pattern | Agreement | Ours | three-mesh-bvh |
+| --- | --- | ---: | ---: |
+| A character controller (two capsule shapecasts per step) | 2,000 of 2,000 capsules: the same 4.9 million contact triangles | 1.71 ms per capsule | 1.84 ms |
+| three-bvh-csg's `collectIntersectingTriangles` (bvhcast, room against a 3,380-triangle sphere brush) | 100 of 100 placements: the same 21,160 pairs | 1.51 ms per placement | 1.61 ms |

@@ -1,0 +1,58 @@
+---
+title: Deforming meshes
+description: Skinned and morphed meshes whose vertices move on the GPU, refit every frame and rebuilt when the tree drifts.
+nav: 33
+sourcecode: src/scene/deforming-trees.ts
+---
+
+A deforming mesh keeps its triangles and their connectivity; only the vertices move. `SceneTrees` keeps the shape of
+the tree its builder made and refits the boxes from each pose on the GPU, with nothing read back per vertex.
+
+{/* snippet: deforming */}
+```ts
+// bounds: a box every pose stays in (object space), kept by the top level. true: the rest pose's box.
+const mesh = trees.addMesh(character, { deforming: { bounds: [-1, 0, -1, 1, 2, 1] } });
+trees.addInstance({ mesh, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] });
+
+// Each frame, after your pass wrote the posed vertices (STORAGE and COPY_SRC usage):
+trees.setPose(mesh, { positionBuffer: skinnedPositions, vertexCount, indexBuffer, indexFormat: 'uint32' });
+// the next trees.update(encoder) refits the tree on the GPU, and rebuilds it if the refit drifted.
+console.log(trees.driftRatio(mesh), trees.deformingCounts);
+```
+
+## The pose
+
+`setPose(mesh, vertices)` takes the moved vertices as a GPU buffer, in the mesh's own vertex order and indices:
+`positionBuffer`, `vertexCount`, and optionally `positionStrideFloats`, `positionOffsetFloats`, `indexBuffer`,
+`indexFormat` and `indexOffset`. The buffer needs `STORAGE` usage, and `COPY_SRC` for drift rebuilds.
+
+The next `update(encoder)` refits the tree before anything traces: `GpuMeshRefit` rewrites the corners of the mesh's
+triangle records and refits its boxes bottom-up, in the update's encoder. A tree placed later (a swap, a rebuild) is
+refit at once from the latest pose, so a tree built from an older pose never shows.
+
+In three, the sync does all of this for `SkinnedMesh` and morph targets: see [Skinned and morphed meshes](/three/skinned-and-morphed).
+
+## The deform box
+
+The top level holds the mesh's **deform box**, a box every pose stays in, not the refit root's box. So a pose never
+needs a readback or a new top-level shape. Give it with `deforming: { bounds }` at `addMesh` (`true` uses the rest
+pose's box). For poses that leave it, such as a character walking, call `setDeformBounds(mesh, box)`; every instance of
+the mesh is refit into the top level at the next update.
+
+## Drift and rebuilds
+
+A refit tree gets worse as the pose moves away from the one it was built in. The refit's relative SAH cost is copied
+out at most once every 15 updates per posed mesh (`STATS_EVERY_FRAMES`) and read back a few frames later. When every
+sample has stayed above 1.1 times the built tree's cost (`DRIFT_THRESHOLD`) for 60 updates (`DRIFT_HOLD_FRAMES`), the
+mesh is rebuilt with H-PLOC from the current pose. A sway rarely holds that long; a bend that stays does.
+
+`driftRatio(mesh)` gives the latest ratio. `deformingCounts` counts refits, rebuilds and poses skipped.
+
+## Rules
+
+- Deforming meshes never merge, and each posed object needs its own mesh (its own pose).
+- Without `subgroups`, poses are skipped (`deformingCounts.posesSkipped`) and rays see the pose the tree was built in.
+- With indexed leaves, a deforming mesh is not welded (its vertices must stay the app's).
+- With quantized nodes, the refit runs on a 64-byte `f32` copy of the nodes, and a pass re-quantizes it.
+
+To refit trees outside `SceneTrees`, see [Refits](/scenes/refits).

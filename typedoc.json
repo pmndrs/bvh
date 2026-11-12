@@ -1,0 +1,26 @@
+{
+    "$schema": "https://typedoc.org/schema.json",
+    "name": "@pmndrs/bvh",
+    "entryPoints": ["src/index.ts", "src/three/index.ts", "src/worker/index.ts"],
+    "tsconfig": "tsconfig.json",
+    "out": "api-docs",
+    "readme": "none",
+    "includeVersion": false,
+    "excludePrivate": true,
+    "excludeProtected": true,
+    "excludeInternal": true,
+    "excludeExternals": true,
+    "exclude": ["**/*.test.ts"],
+    "sort": ["kind", "alphabetical"],
+    "navigationLinks": {
+        "Docs": "https://bvh.docs.pmnd.rs",
+        "GitHub": "https://github.com/pmndrs/bvh"
+    },
+    "validation": {
+        "notExported": false,
+        "invalidLink": false,
+        "rewrittenLink": false,
+        "unusedMergeModuleWith": false
+    },
+    "treatWarningsAsErrors": false
+}

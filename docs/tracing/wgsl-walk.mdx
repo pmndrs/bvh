@@ -1,0 +1,145 @@
+---
+title: Tracing in WGSL
+description: Binding the walk in your own kernel, the closest and any entry points, masks, the triangle filter, the stack and the watertight test.
+nav: 60
+sourcecode: src/trace/wgsl.ts
+---
+
+`traceModuleWgsl(options)` returns WGSL text: the structs, the walk and its entry points. Put it in your shader and call
+the functions by name. Everything it declares starts with `bvh`, `Bvh` or `BVH_`, so it won't collide with your code.
+
+{/* snippet: own-kernel */}
+```ts
+import { traceModuleEntries, traceModuleWgsl, type SceneTrees } from '@pmndrs/bvh';
+
+    // The walk's three bindings land at group 0, bindings 0-2: nodes, triangles, top level.
+    const code = /* wgsl */ `
+${traceModuleWgsl({ traceSlot: { group: 0, firstBinding: 0 } })}
+
+@group(1) @binding(0) var<storage, read> points: array<vec4f>;
+@group(1) @binding(1) var<storage, read_write> shade: array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+    if (id.x >= arrayLength(&shade)) { return; }
+    let sun = normalize(vec3f(0.3, 1.0, 0.2));
+    let blocked = bvhTraceAny(BvhRay(points[id.x].xyz, 1e-3, sun, 1e30));
+    shade[id.x] = select(1.0, 0.0, blocked);
+}`;
+    const sceneLayout = device.createBindGroupLayout({ entries: traceModuleEntries().map((entry, binding) => ({ ...entry, binding })) });
+    const ioLayout = device.createBindGroupLayout({
+        entries: [
+            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        ],
+    });
+    const pipeline = await device.createComputePipelineAsync({
+        layout: device.createPipelineLayout({ bindGroupLayouts: [sceneLayout, ioLayout] }),
+        compute: { module: device.createShaderModule({ code }), entryPoint: 'main' },
+    });
+
+    // Make the scene's bind group again whenever trees.version changes (a buffer grew).
+    const { nodes, triangles, topLevel } = trees.buffers;
+    const sceneGroup = device.createBindGroup({ layout: sceneLayout, entries: [nodes, triangles, topLevel].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+    const ioGroup = device.createBindGroup({ layout: ioLayout, entries: [{ binding: 0, resource: { buffer: points } }, { binding: 1, resource: { buffer: shade } }] });
+
+    const encoder = device.createCommandEncoder();
+    trees.update(encoder); // before anything traces
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, sceneGroup);
+    pass.setBindGroup(1, ioGroup);
+    pass.dispatchWorkgroups(Math.ceil(count / 64));
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+```
+
+## The entry points
+
+```wgsl
+struct BvhRay { origin: vec3f, tMin: f32, direction: vec3f, tMax: f32 }   // 32 bytes
+struct BvhHit { t: f32, instance: u32, triangle: u32, barycentrics: vec2f, frontFace: bool,
+                material: u32, normal: vec3f }
+
+fn bvhTraceClosest(ray: BvhRay) -> BvhHit
+fn bvhTraceAny(ray: BvhRay) -> bool
+fn bvhTraceClosestMasked(ray: BvhRay, mask: u32) -> BvhHit   // unless rayMasks: false
+fn bvhTraceAnyMasked(ray: BvhRay, mask: u32) -> bool         // unless rayMasks: false
+```
+
+- **Closest hit** returns the nearest hit in `[tMin, tMax]`. `hit.t < 0` is a miss.
+- **Any hit** returns at the first triangle hit in `[tMin, tMax]`. Use it for shadows and visibility.
+- `hit.instance` is the instance's `instanceIndex`; `hit.triangle` the triangle's original index in its mesh;
+  `hit.barycentrics` the weights of corners 1 and 2 (corner 0 is `1 - u - v`).
+- `hit.frontFace` is true when the ray hit the side the mesh was authored as front, through mirrored transforms too.
+  Back-face hits count as hits.
+- `hit.normal` is the world-space geometric normal of the authored front side, unit length (0 on a miss).
+- `hit.material` is the instance's material, or `BVH_NO_MATERIAL`.
+- Pass a unit-length world direction: `t` is then the distance in world units, through scaled instances too.
+
+{/* snippet: masked */}
+```ts
+    const code = /* wgsl */ `
+${traceModuleWgsl()}
+fn shadowFrom(p: vec3f, l: vec3f) -> bool {
+    // Only instances whose mask has bit 0 cast shadows here.
+    return bvhTraceAnyMasked(BvhRay(p, 1e-3, l, 1e30), 0x1u);
+}
+fn firstHit(o: vec3f, d: vec3f) -> BvhHit {
+    let hit = bvhTraceClosest(BvhRay(o, 0.0, d, 1e30)); // all ones: every instance with a non-zero mask
+    // hit.t < 0: a miss. Else hit.instance, hit.triangle, hit.barycentrics (corners 1 and 2),
+    // hit.frontFace, hit.material (BVH_NO_MATERIAL for none) and hit.normal (world, geometric).
+    return hit;
+}`;
+```
+
+Masks and the filter are on [Masks, the triangle filter and materials](/concepts/masks-filter-materials).
+
+## Options
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `traceSlot` | `{ group: 0, firstBinding: 0 }` | Where the bindings land: nodes, triangles, top level, in order (and positions, for indexed leaves). |
+| `triangleFilter` | `DEFAULT_TRIANGLE_FILTER_WGSL` (every triangle blocks) | Your `bvhTrianglePasses`, or `null` to declare it yourself. |
+| `rayMasks` | `true` | `false` compiles masks out. |
+| `triangleLeaves`, `positionLayout`, `nodeFormat` | records, `vec4`, `f32` | Must match the scene. |
+
+Compile the walk for the scene it reads:
+
+{/* snippet: match-scene */}
+```ts
+// Compile the walk for the scene's formats (all three are off by default).
+const options = { triangleLeaves: trees.triangleLeaves, positionLayout: trees.positionLayout, nodeFormat: trees.nodeFormat };
+const walk = traceModuleWgsl({ traceSlot: { group: 0, firstBinding: 0 }, ...options });
+const entries = traceModuleEntries(options); // a fourth binding, the positions, for indexed leaves
+```
+
+All three buffers are `read-only-storage` in the compute stage; `traceModuleEntries(options)` gives the layout entries
+without binding numbers. A kernel refuses buffers of the other format.
+
+## How the walk works
+
+- **One loop, one stack per thread** (`array<u32, 64>` in private memory) for both levels. Entering an instance pushes a
+  marker, moves the ray into object space and continues with that mesh's root.
+- **Both child boxes are tested** with a precomputed inverse direction. Closest hit goes to the nearer child first;
+  any hit goes to the **farther** child first. A shadow ray starts on a surface, so the nearer child is mostly the
+  geometry it starts on. That made any-hit 1.1-2.8x faster on the bench scenes, with the same answers.
+- **Boxes beyond the current closest hit are skipped.**
+
+## The stack size
+
+64 entries. The top level and one mesh tree share it: 47 levels are left for a mesh tree (`GPU_TREE_MAX_DEPTH`), and
+`SceneTrees` refuses deeper trees, and the CPU walk throws a `RangeError` past the stack. tinybvh's trees on real
+scenes are about 28 deep.
+
+## The watertight test
+
+The triangle test is watertight (Woop, Benthin and Wald 2013), with per-ray shear rows computed once per ray. No ray
+slips between two triangles that share an edge, on every GPU the [oracle](/concepts/oracle) runs on. It needs
+bit-identical shared vertices, which the layout keeps. Building the per-ray rows with `select()` instead of indexing a
+vector by a per-ray value kept it fast: Sponza closest-hit went from 61 to 101 Mrays/s on the RTX 3060.
+
+## In three.js
+
+`BvhTraceNodes.module` is this walk as a three node: include it in a `wgslFn`, or use the TSL helpers
+([BvhTraceNodes](/three/trace-nodes)).
