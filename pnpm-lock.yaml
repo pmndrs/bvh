@@ -8,6 +8,12 @@ importers:
 
   .:
     devDependencies:
+      '@babylonjs/core':
+        specifier: 9.35.0
+        version: 9.35.0
+      '@dimforge/rapier3d-compat':
+        specifier: 0.21.0
+        version: 0.21.0
       '@eslint/js':
         specifier: ^9.39.5
         version: 9.39.5
@@ -20,6 +26,12 @@ importers:
       '@webgpu/types':
         specifier: ^0.1.64
         version: 0.1.74
+      bvh-tree:
+        specifier: 1.0.1
+        version: 1.0.1
+      bvh.js:
+        specifier: 0.0.13
+        version: 0.0.13
       eslint:
         specifier: ^9.39.5
         version: 9.39.5
@@ -47,8 +59,14 @@ importers:
 
 packages:
 
+  '@babylonjs/core@9.35.0':
+    resolution: {integrity: sha512-qY2uU4gVC1GA7vPfLtnF57bPBBuu5nGnh9efGZVWtba9naxeeH+Nkj919vEFhoBvmiDxbRXMOBKLp/wWC0YzYA==}
+
   '@dimforge/rapier3d-compat@0.12.0':
     resolution: {integrity: sha512-uekIGetywIgopfD97oDL5PfeezkFpNhwlzlaEYNOA0N6ghdsOvh/HYjSMek5Q2O1PYvRSDFcqFVJl4r4ZBwOow==}
+
+  '@dimforge/rapier3d-compat@0.21.0':
+    resolution: {integrity: sha512-tCl1HPGwOhn5aCQbgqWbOH+Nx/5fnr3IPAnzQuR7zIhC/raqi2yxC6LhvZqjdI2El5hQgY5RDAwDrAjAi2FdPA==}
 
   '@esbuild/aix-ppc64@0.25.12':
     resolution: {integrity: sha512-Hhmwd6CInZ3dwpuGTF8fJG6yoWmsToE+vYgD4nytZVxcu1ulHpUQRAB1UJ8+N1Am3Mz4+xOByoQoSZf4D+CpkA==}
@@ -552,6 +570,12 @@ packages:
   brace-expansion@5.0.12:
     resolution: {integrity: sha512-YovQ3rzhaLMIrDjNDMkNS01tea93qhEhG5xy8f6+R0l+dw3Ki+5sCoIoI942iuLZTHWogWktgwVDhU09iNEimQ==}
     engines: {node: 20 || >=22}
+
+  bvh-tree@1.0.1:
+    resolution: {integrity: sha512-oNi2ebOZnPVUjLP9QboCuthXnVpOCeCcIQBWWo+0W2Yvh5yaH6u2+dZCa515vj+7Yh+tcNJJDie/U8K0tEPPRQ==}
+
+  bvh.js@0.0.13:
+    resolution: {integrity: sha512-7jVxKGyyATOwEoqFvghXoStJXkkmqf7JIXYEG44eMtMXQoeCwZL2n1z5/kZogFKvCaN7XweS2TKnqdyDrd0DJA==}
 
   cac@6.7.14:
     resolution: {integrity: sha512-b6Ilus+c3RrdDk+JhLKUAQfzzgLEPy6wcXqS7f/xe1EETvsDP6GORG7SFuOs6cID5YkqchW/LXZbX5bc8j7ZcQ==}
@@ -1057,7 +1081,11 @@ packages:
 
 snapshots:
 
+  '@babylonjs/core@9.35.0': {}
+
   '@dimforge/rapier3d-compat@0.12.0': {}
+
+  '@dimforge/rapier3d-compat@0.21.0': {}
 
   '@esbuild/aix-ppc64@0.25.12':
     optional: true
@@ -1477,6 +1505,10 @@ snapshots:
   brace-expansion@5.0.12:
     dependencies:
       balanced-match: 4.0.4
+
+  bvh-tree@1.0.1: {}
+
+  bvh.js@0.0.13: {}
 
   cac@6.7.14: {}
 
