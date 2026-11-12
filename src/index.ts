@@ -75,9 +75,11 @@ export { singleLeafTopology, TOPOLOGY_EMPTY_CHILD, TOPOLOGY_WORDS_PER_NODE, type
 export { createMeshLayoutBuilder, type MeshLayoutBuilder, type MeshLayoutBuilderKind, type MeshLayoutResult } from './mesh-builder.ts';
 export {
     createTinyBvhBuilder,
+    TINYBVH_RELEASE_ABOVE_BYTES,
     topologyFromTinyBvhNodes,
     type TinyBvhBuild,
     type TinyBvhBuilder,
+    type TinyBvhBuilderOptions,
     type TinyBvhBuildOptions,
     type TinyBvhLayoutBuild,
     type TinyBvhLayoutOptions,

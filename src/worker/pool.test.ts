@@ -16,6 +16,8 @@ class FakeWorker {
     static started: FakeWorker[] = [];
     /** Every worker fails to load (its first message errors), as when a bundler didn't ship the file. */
     static failToLoad = false;
+    /** The WASM memory each answer reports (mesh-bvh-worker.ts sends the builder's). */
+    static heapBytes = 64 * 2 ** 20;
     onmessage: ((event: { data: BuildResponse }) => void) | null = null;
     onerror: ((event: { message: string; preventDefault?: () => void }) => void) | null = null;
     terminated = false;
@@ -42,7 +44,7 @@ class FakeWorker {
             buildMeshBvhAsync(moved.geometry, moved.options).then((bvh) => {
                 this.busy--;
                 if (this.terminated) return;
-                const answer = structuredClone({ id: moved.id, bvh }, { transfer: meshBvhTransferables(bvh) });
+                const answer = structuredClone({ id: moved.id, bvh, heapBytes: FakeWorker.heapBytes }, { transfer: meshBvhTransferables(bvh) });
                 this.onmessage?.({ data: answer });
             });
         }, 5);
@@ -57,6 +59,7 @@ afterEach(() => {
     vi.unstubAllGlobals();
     FakeWorker.started = [];
     FakeWorker.failToLoad = false;
+    FakeWorker.heapBytes = 64 * 2 ** 20;
 });
 
 describe('createBvhWorkerPool', () => {
@@ -89,9 +92,34 @@ describe('createBvhWorkerPool', () => {
         expect(trees.map((tree) => tree.triangleCount)).toEqual(Array.from({ length: 7 }, (_, index) => 2 * (2 + index) ** 2));
         expect(FakeWorker.started).toHaveLength(3);
         expect(FakeWorker.started.every((worker) => worker.maxBusy === 1)).toBe(true);
-        expect(pool.stats).toEqual({ queued: 0, running: 0, workers: 3, finished: 7 });
+        expect(pool.stats).toEqual({ queued: 0, running: 0, workers: 3, finished: 7, recycled: 0 });
         pool.dispose();
         expect(FakeWorker.started.every((worker) => worker.terminated)).toBe(true);
+    });
+
+    it('ends a worker whose build left its WASM memory past recycleAboveBytes, and starts a fresh one for the next build', async () => {
+        vi.stubGlobal('Worker', FakeWorker);
+        const pool = createBvhWorkerPool({ size: 1 });
+        await pool.build(quad(3));
+        expect(pool.stats).toMatchObject({ workers: 1, recycled: 0 });
+        FakeWorker.heapBytes = 1300 * 2 ** 20;
+        const big = await pool.build(quad(4));
+        expect(big.triangleCount).toBe(32);
+        expect(pool.stats).toMatchObject({ workers: 0, recycled: 1 });
+        expect(FakeWorker.started[0].terminated).toBe(true);
+        FakeWorker.heapBytes = 64 * 2 ** 20;
+        await pool.build(quad(5));
+        expect(FakeWorker.started).toHaveLength(2);
+        expect(pool.stats).toMatchObject({ workers: 1, recycled: 1 });
+        // Infinity keeps the worker whatever its memory.
+        FakeWorker.heapBytes = 1300 * 2 ** 20;
+        const keeping = createBvhWorkerPool({ size: 1, recycleAboveBytes: Infinity });
+        await keeping.build(quad(3));
+        await keeping.build(quad(3));
+        expect(keeping.stats).toMatchObject({ workers: 1, recycled: 0 });
+        expect(() => createBvhWorkerPool({ recycleAboveBytes: -1 })).toThrow(RangeError);
+        pool.dispose();
+        keeping.dispose();
     });
 
     it('copies the input by default and moves it with transferInput', async () => {

@@ -63,6 +63,13 @@ const { layout, buildMs } = tiny.buildLayout({ positions, indices }, { maxLeafPr
 `@pmndrs/bvh/worker` ([Workers](/workers/workers)). In Node it needs no GPU: see
 [Serialization and baking](/serialization/serialization-and-baking).
 
+**Memory.** Each builder has its own WebAssembly memory, which starts at 64 MiB and grows to a build's peak: about
+230 bytes per triangle (tinybvh's working arrays, the input copies and the output; one 5.7M-triangle mesh: 1,349 MiB).
+A WebAssembly memory never shrinks, so after a build that left it past `releaseAboveBytes` (default 256 MiB,
+`TINYBVH_RELEASE_ABOVE_BYTES`) the builder drops its instance and starts a fresh one on the next build; the old memory
+is freed when the garbage collector collects it (`createTinyBvhBuilder({ releaseAboveBytes: Infinity })` keeps one
+instance). `tiny.heapBytes`, `tiny.lastBuildHeapBytes` and `tiny.releases` show what it holds.
+
 ## GPU H-PLOC
 
 {/* snippet: hploc */}

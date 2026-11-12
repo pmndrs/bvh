@@ -63,6 +63,31 @@ describe('tinybvh in WASM', () => {
         }
     });
 
+    it('starts a fresh WASM instance after a build that grew the memory past releaseAboveBytes, with the same trees', async () => {
+        const positions = randomSoup(5_000, 5);
+        const keeping = await createTinyBvhBuilder({ releaseAboveBytes: Infinity });
+        const releasing = await createTinyBvhBuilder({ releaseAboveBytes: 0 });
+        expect(keeping.heapBytes).toBe(64 * 2 ** 20);
+        expect(keeping.lastBuildHeapBytes).toBe(0);
+        const kept = keeping.buildLayout({ positions });
+        expect(keeping.releases).toBe(0);
+        expect(keeping.heapBytes).toBe(keeping.lastBuildHeapBytes);
+        const released = releasing.buildLayout({ positions });
+        // Every result is a copy, so it stays readable after its memory was dropped.
+        expect(releasing.releases).toBe(1);
+        expect(releasing.heapBytes).toBe(0);
+        expect(releasing.lastBuildHeapBytes).toBeGreaterThan(0);
+        expect(new Uint8Array(released.layout.nodes)).toEqual(new Uint8Array(kept.layout.nodes));
+        // The next build starts the new instance.
+        const again = releasing.buildLayout({ positions });
+        expect(releasing.releases).toBe(2);
+        expect(new Uint8Array(again.layout.triangles)).toEqual(new Uint8Array(kept.layout.triangles));
+        // A build that throws still releases.
+        expect(() => releasing.build({ positions: randomSoup(1, 1), indices: Uint32Array.of(0, 1, 9) })).toThrow(/index 2/);
+        expect(releasing.releases).toBe(3);
+        await expect(createTinyBvhBuilder({ releaseAboveBytes: Number.NaN })).rejects.toThrow(RangeError);
+    });
+
     it('refuses an index that points past the vertices', async () => {
         const builder = await createTinyBvhBuilder();
         expect(() => builder.build({ positions: randomSoup(1, 1), indices: Uint32Array.of(0, 1, 9) })).toThrow(/index 2/);

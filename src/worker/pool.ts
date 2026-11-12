@@ -17,6 +17,14 @@
  *
  * Builds are started in the order they were asked for (first in, first out).
  * A caller that wants the makespan short asks for its biggest meshes first.
+ *
+ * A WASM memory can grow but never shrink, and tinybvh's grows to about 230
+ * bytes per triangle for the build in flight. So a worker whose build left its
+ * memory past `recycleAboveBytes` (256 MiB by default: a mesh of about a
+ * million triangles) is ended once it has answered, and the next build starts
+ * a fresh one; the operating system gets the memory back at once. Big builds
+ * belong in this pool for that reason: on the main thread the memory stays
+ * until the garbage collector frees the builder's dropped instance.
  */
 
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
@@ -44,7 +52,19 @@ export interface BvhWorkerPoolOptions {
      * choose for itself with {@link BvhBuildRequest.transferInput}.
      */
     readonly transferInput?: boolean;
+    /**
+     * A worker whose last build left its tinybvh WASM memory larger than this
+     * many bytes is ended after answering, and a fresh worker takes the next
+     * build: the memory goes back to the system at once. Default
+     * {@link WORKER_RECYCLE_ABOVE_BYTES} (256 MiB); `Infinity` keeps workers
+     * for the pool's life. Inline builds (no `Worker`) release their WASM
+     * instance the same way (`createTinyBvhBuilder`'s `releaseAboveBytes`).
+     */
+    readonly recycleAboveBytes?: number;
 }
+
+/** {@link BvhWorkerPoolOptions.recycleAboveBytes}'s default: 256 MiB. */
+export const WORKER_RECYCLE_ABOVE_BYTES = 256 * 2 ** 20;
 
 /** Per-build options of {@link BvhWorkerPool.build}, besides the tree's own. */
 export interface BvhBuildRequest {
@@ -69,6 +89,8 @@ export interface BvhWorkerPoolStats {
     readonly workers: number;
     /** Builds finished (built, failed or cancelled while running) since the pool was made. */
     readonly finished: number;
+    /** Workers ended because a build left their WASM memory past `recycleAboveBytes`. */
+    readonly recycled: number;
 }
 
 export interface BvhWorkerPool {
@@ -165,6 +187,9 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
     const mode = options.worker ?? 'auto';
     const size = options.size ?? defaultWorkerPoolSize();
     if (!Number.isInteger(size) || size < 1) throw new RangeError(`a worker pool needs a size of at least 1, got ${size}`);
+    const recycleAboveBytes = options.recycleAboveBytes ?? WORKER_RECYCLE_ABOVE_BYTES;
+    if (!(recycleAboveBytes >= 0)) throw new RangeError(`a worker pool's recycleAboveBytes must be a number of bytes (or Infinity), got ${recycleAboveBytes}`);
+    let recycled = 0;
     let inline = mode === 'never' || typeof Worker === 'undefined';
     if (inline && mode === 'always') throw new Error('@pmndrs/bvh/worker: a worker was required, but this environment has no Worker');
 
@@ -242,6 +267,13 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
             finished++;
             const response = event.data;
             settle(job, 'error' in response ? { error: new Error(response.error) } : { bvh: response.bvh });
+            if ((response.heapBytes ?? 0) > recycleAboveBytes) {
+                // Its WASM memory can't shrink: end the worker, and let pump start a fresh one if it is needed.
+                const index = workers.indexOf(entry);
+                if (index >= 0) workers.splice(index, 1);
+                entry.worker.terminate();
+                recycled++;
+            }
             pump();
         };
         entry.worker.onerror = (event) => {
@@ -328,6 +360,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
                 running: inline ? inlineRunning : workers.filter((entry) => entry.job !== null).length,
                 workers: workers.length,
                 finished,
+                recycled,
             };
         },
         build(geometry, buildOptions = {}, request = {}) {

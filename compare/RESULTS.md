@@ -175,7 +175,7 @@ What each library holds beyond the app's geometry. "Own": the library's exact bu
 
 | | Knot own / heap | Room own / heap | Sponza own / heap | Sponza bytes per triangle (heap) |
 | --- | --- | --- | --- | ---: |
-| @pmndrs/bvh | 8.0 / 8.1 MiB | 20.1 / 20.2 MiB | **459.7 / 1,740 MiB** (1,285 of it tinybvh's WASM heap) | 84 (tree) + 235 (builder heap) |
+| @pmndrs/bvh | 8.0 / 8.1 MiB | 20.1 / 20.2 MiB | **459.7 / 391 MiB** (was 1,740, 1,285 of it tinybvh's WASM heap, before the builder released it) | 84 (tree) |
 | three-mesh-bvh, CENTER | 0.85 / 0.94 MiB | 2.4 / 2.5 MiB | 51.5 / 47.1 MiB | 9 |
 | bvh-tree | 12.2 (arrays only) / 19.6 MiB | 32.9 / 54.9 MiB | 701 / 1,152 MiB | 210 |
 | Babylon, submesh octree | not counted / 6.6 MiB | 19.0 MiB heap | 363 MiB heap | 66 |
@@ -185,7 +185,7 @@ What each library holds beyond the app's geometry. "Own": the library's exact bu
 The gap, named:
 
 - **Ours against three-mesh-bvh: 9 to 10 times** the bytes beyond the geometry (Sponza 460 against 47 to 52 MiB; 84 against 9 bytes per triangle), as `docs/internals/design/memory.md` found per mesh (8 to 9 times). Our tree copies every triangle's corners into a 48-byte record (56% of it), so the GPU walk reads one buffer and never the app's index; our nodes are 64 bytes with two child boxes; our leaves hold about 2 triangles against their 7, so there are 3.6 times the boxes. three-mesh-bvh reuses the app's positions and reorders the app's own index in place. The same trade shows on the GPU: 470 against 225 MB, where their walk reads its own vec4 copy of the positions. Indexed leaves and quantized nodes (`docs/internals/design/indexed-leaves.md`, `compressed-nodes.md`) are the levers that close part of it.
-- **New here: tinybvh's WASM heap.** Building Sponza as **one** 5.74M-triangle mesh grows tinybvh's WASM memory by 1,285 MiB, and a WASM memory never shrinks: the process keeps it as long as the builder lives (`createTinyBvhBuilder`; each worker of the pool has its own). Per-mesh builds (how `SceneTrees` builds Sponza's meshes) stay at its 64 MiB start (`memory.md`); the knot and the room didn't grow it at all. An app that builds one huge mesh on the main thread should drop the builder afterwards, or build on the GPU or in a worker that ends.
+- **tinybvh's WASM heap (fixed on the wrapper side).** Building Sponza as **one** 5.74M-triangle mesh grew tinybvh's WASM memory to 1,349 MiB, and a WASM memory never shrinks, so the builder kept it for its life. Where it goes, step by step: our input copies 102 MiB, tinybvh's build (its vertex copy and build arrays) 599 MiB, the layout it writes 649 MiB (nodes allocated for the worst case, 373 MiB for 197 used, and 263 MiB of records, all copied out). Now: our positions copy is freed after tinybvh's build (1,316 MiB peak); `createTinyBvhBuilder` drops an instance whose build left it past `releaseAboveBytes` (default 256 MiB) and starts a fresh one, so the build's heap growth in a fresh process is **391 MiB instead of 1,707** (the table's ours-Sponza heap); and the worker pool ends a worker whose build grew past `recycleAboveBytes` (default 256 MiB). The peak itself stays: lowering it needs `native/` changes (`docs/internals/design/memory.md`). Per-mesh builds (how `SceneTrees` builds Sponza's meshes) stay at its 64 MiB start; the knot and the room didn't grow it at all.
 - bvh-tree and Rapier hold about 210 bytes per triangle each (bvh-tree: a JS array of 9 doubles and two 28-byte box arrays per triangle, plus node objects; Rapier: its copy of the trimesh and parry's tree in WASM). Babylon holds 66 (submeshes, the octree and the `Vector3` position cache its picking makes).
 
 ## Honest gaps
@@ -196,7 +196,7 @@ What three-mesh-bvh has and we don't (`docs/internals/PARITY.md`), and what the 
 - **Points and lines** (`PointsBVH`, `LineSegmentsBVH`): missing (3.2, 3.3); our leaves are triangles only.
 - **GPU closest point, GPU shapecast, `sampleTrianglePoint`, `ClusteredBVH`, SDF generation**: missing (8.5 to 8.10). Only rays run on our GPU walk.
 - `ObjectBVH.shapecast` (5.3) and `getJSONStructure` (7.5): missing. Partial: `SkinnedMeshBVH` (3.4, GPU posing only), `maxDepth` (4.3, accepted, not honoured), per-index `computeBatchedBoundsTree` (5.5), `StaticGeometryGenerator` (6.3, GPU only), three-mesh-bvh's serialization format (7.1), `onProgress` (0 and 1 only). `ParallelMeshBVHWorker`: won't (cross-origin isolation; big meshes go to the GPU builder).
-- **Memory**: 9 to 10 times three-mesh-bvh's beyond the geometry, plus tinybvh's WASM heap after a huge single-mesh build (above).
+- **Memory**: 9 to 10 times three-mesh-bvh's beyond the geometry. A huge single-mesh build still peaks at about 230 bytes per triangle of WASM memory while it runs (above); the builder now releases it afterwards.
 - **CPU refit speed** (1.6 to 2 times slower than three-mesh-bvh's, from 6 to 7), and years of use behind their shapecasts.
 - Rapier is a physics engine (collisions, character controllers, joints) and answers box and point queries faster; Babylon is a whole engine; bvh.js inserts, deletes and moves single objects and has LOD frustum culling. We have none of that.
 
