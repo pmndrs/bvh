@@ -54,7 +54,7 @@
 
 import { CodeNode, REVISION, StorageBufferAttribute, StructTypeNode, type Node, type NodeBuilder } from 'three/webgpu';
 import { float, storage, wgslFn } from 'three/tsl';
-import { traceModuleWgsl } from '../trace/wgsl.ts';
+import { traceModuleWgsl, type AnyHitOrder } from '../trace/wgsl.ts';
 
 /** Where the trace buffers come from: a `SceneTrees` (buffers and version), or fixed buffers (`uploadTraceScene`). */
 export interface BvhTraceBufferSource {
@@ -75,6 +75,8 @@ export interface BvhTraceNodesOptions {
     readonly triangleFilter?: string;
     /** As `traceModuleWgsl`'s `rayMasks`. Default true: the `*Masked` helpers exist. */
     readonly rayMasks?: boolean;
+    /** As `traceModuleWgsl`'s `anyHitOrder`: the any-hit walk's child order. Default `'far'`; `'larger'` for rays from outside the geometry. */
+    readonly anyHitOrder?: AnyHitOrder;
 }
 
 /** The parts of three's `WebGPURenderer` this file uses (see {@link threeInternals}). */
@@ -237,7 +239,7 @@ function buffersOf(triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4'
 
 /** The walk's text without its binding declarations: three declares the storage nodes instead. */
 function moduleWithoutBindings(options: BvhTraceNodesOptions, triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4' | 'packed', nodeFormat: 'f32' | 'quantized'): string {
-    const text = traceModuleWgsl({ triangleFilter: options.triangleFilter, rayMasks: options.rayMasks, triangleLeaves, positionLayout, nodeFormat });
+    const text = traceModuleWgsl({ triangleFilter: options.triangleFilter, rayMasks: options.rayMasks, anyHitOrder: options.anyHitOrder, triangleLeaves, positionLayout, nodeFormat });
     let removed = 0;
     const stripped = text.replace(/^@group\(\d+\) @binding\(\d+\) var<storage, read> bvhTrace(?:Nodes|Triangles|TopLevel|Positions): array<(?:vec4[fu]|f32)>;$/gm, () => {
         removed++;

@@ -26,6 +26,7 @@ import {
     RAY_FLOATS,
     TraceBatchKernel,
     uploadTraceScene,
+    type AnyHitOrder,
     type TraceSceneBuffers,
 } from '@pmndrs/bvh';
 import { BufferAttribute, BufferGeometry, Mesh, MeshBasicMaterial } from 'three';
@@ -35,11 +36,13 @@ import { MeshBVH, SAH } from 'three-mesh-bvh';
 import { BVHComputeData } from 'three-mesh-bvh/webgpu';
 import { oursTinyBvh } from '../adapters/ours.ts';
 import type { CompareGeometry, CompareRay } from '../adapters/types.ts';
+import { countOurs, countTheirs, type WorkPerRay } from './gpu-counts.ts';
 
 export type GpuMode = 'closest' | 'any';
 
 export interface GpuTracer {
-    readonly id: 'ours' | 'tmbvh';
+    /** `ours` (the library's default kernel), `ours-larger` (`anyHitOrder: 'larger'`, any-hit only differs) or `tmbvh`. */
+    readonly id: 'ours' | 'ours-larger' | 'tmbvh';
     readonly name: string;
     /** GPU bytes of the structure the walk reads. */
     readonly bytes: number;
@@ -51,6 +54,8 @@ export interface GpuTracer {
     dispatch(mode: GpuMode): Promise<number>;
     /** The last dispatch's answers: `t` per ray (negative for a miss), or 1/0 blocked. */
     read(mode: GpuMode): Promise<Float32Array>;
+    /** The walk's work per ray on the mode's rays, from a counted copy of the walk (gpu-counts.ts). */
+    counts(mode: GpuMode): Promise<WorkPerRay>;
     dispose(): void;
 }
 
@@ -63,20 +68,26 @@ export function packRaysFor(rays: readonly CompareRay[], tMax: number): Float32A
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
-export async function createOursGpu(device: GPUDevice, geometry: CompareGeometry): Promise<GpuTracer> {
+export interface OursGpuOptions {
+    /** The kernel's any-hit child order (`TraceBatchKernelOptions.anyHitOrder`). Default: the library's (`'far'`). */
+    readonly anyHitOrder?: AnyHitOrder;
+}
+
+export async function createOursGpu(device: GPUDevice, geometry: CompareGeometry, options: OursGpuOptions = {}): Promise<GpuTracer> {
+    const { anyHitOrder } = options;
     const tinyBvh = await oursTinyBvh();
     const tree = buildMeshBvhWithTinyBvh({ positions: geometry.positions, indices: geometry.indices }, tinyBvh);
     const scene = assembleTraceScene([tree], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY }]);
     const buffers: TraceSceneBuffers = uploadTraceScene(device, scene, 'compare ours');
-    const kernel = await TraceBatchKernel.create(device, { label: 'compare ours', rayMasks: false, hitNormal: false });
+    const kernel = await TraceBatchKernel.create(device, { label: 'compare ours', rayMasks: false, hitNormal: false, anyHitOrder });
     const timestamps = device.features.has('timestamp-query');
     const querySet = timestamps ? device.createQuerySet({ type: 'timestamp', count: 2 }) : null;
     const resolve = timestamps ? device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }) : null;
     const stampRead = timestamps ? device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }) : null;
-    const sets = new Map<GpuMode, { rays: GPUBuffer; results: GPUBuffer; read: GPUBuffer; count: number; bytes: number }>();
+    const sets = new Map<GpuMode, { rays: GPUBuffer; results: GPUBuffer; read: GPUBuffer; count: number; bytes: number; packed: Float32Array }>();
     return {
-        id: 'ours',
-        name: '@pmndrs/bvh (TraceBatchKernel)',
+        id: anyHitOrder === 'larger' ? 'ours-larger' : 'ours',
+        name: `@pmndrs/bvh (TraceBatchKernel${anyHitOrder ? `, anyHitOrder '${anyHitOrder}'` : ''})`,
         bytes: buffers.byteLength,
         bytesMethod: 'TraceSceneBuffers.byteLength: nodes, triangle records and the one-instance top level',
         timing: timestamps ? 'timestamps' : 'wall clock',
@@ -89,7 +100,7 @@ export async function createOursGpu(device: GPUDevice, geometry: CompareGeometry
             device.queue.writeBuffer(rays, 0, packed as Float32Array<ArrayBuffer>);
             const results = device.createBuffer({ label: 'compare hits', size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
             const read = device.createBuffer({ label: 'compare hits read', size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-            sets.set(mode, { rays, results, read, count, bytes });
+            sets.set(mode, { rays, results, read, count, bytes, packed });
         },
         async dispatch(mode) {
             const set = sets.get(mode)!;
@@ -129,6 +140,9 @@ export async function createOursGpu(device: GPUDevice, geometry: CompareGeometry
                 for (let i = 0; i < set.count; i++) out[i] = words[i];
             }
             return out;
+        },
+        counts(mode) {
+            return countOurs(device, buffers, mode, sets.get(mode)!.packed, anyHitOrder);
         },
         dispose() {
             for (const set of sets.values()) [set.rays, set.results, set.read].forEach((buffer) => buffer.destroy());
@@ -200,7 +214,7 @@ export async function createTmbvhGpu(renderer: WebGPURenderer, geometry: Compare
     const nodes = bvhData.storage as unknown as Record<'nodes' | 'index' | 'attributes' | 'transforms', unknown>;
     const bytes = storageBytes(nodes.nodes) + storageBytes(nodes.index) + storageBytes(nodes.attributes) + storageBytes(nodes.transforms);
     const timestamps = renderer.hasFeature('timestamp-query') && (renderer as unknown as { backend: { trackTimestamp: boolean } }).backend.trackTimestamp;
-    const kernels = new Map<GpuMode, { node: ReturnType<typeof tmbvhKernel>; input: StorageBufferAttribute; results: StorageBufferAttribute; count: number; compiled: boolean }>();
+    const kernels = new Map<GpuMode, { node: ReturnType<typeof tmbvhKernel>; input: StorageBufferAttribute; results: StorageBufferAttribute; count: number; compiled: boolean; packed: Float32Array }>();
     return {
         id: 'tmbvh',
         name: 'three-mesh-bvh/webgpu (BVHComputeData, SAH)',
@@ -217,7 +231,7 @@ export async function createTmbvhGpu(renderer: WebGPURenderer, geometry: Compare
             const count = packed.length / RAY_FLOATS;
             const input = new StorageBufferAttribute(packed, 4);
             const results = new StorageBufferAttribute(count, 4);
-            kernels.set(mode, { node: tmbvhKernel(bvhData, mode, input, results, count), input, results, count, compiled: false });
+            kernels.set(mode, { node: tmbvhKernel(bvhData, mode, input, results, count), input, results, count, compiled: false, packed });
         },
         async dispatch(mode) {
             const kernel = kernels.get(mode)!;
@@ -244,6 +258,9 @@ export async function createTmbvhGpu(renderer: WebGPURenderer, geometry: Compare
             const out = new Float32Array(kernel.count);
             for (let i = 0; i < kernel.count; i++) out[i] = vec4s[i * 4];
             return out;
+        },
+        counts(mode) {
+            return countTheirs(renderer, bvhData, mode, kernels.get(mode)!.packed);
         },
         dispose() {
             for (const kernel of kernels.values()) {

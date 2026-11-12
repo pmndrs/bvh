@@ -4,7 +4,7 @@
  */
 
 import { meshBvhTransferables, type MeshBvh, type MeshBvhBuildOptions, type MeshGeometry } from './mesh-bvh.ts';
-import { buildMeshBvhAsync } from './mesh-bvh-build.ts';
+import { buildMeshBvhAsync, tinyBvhHeapBytes } from './mesh-bvh-build.ts';
 
 export interface BuildRequest {
     readonly id: number;
@@ -13,8 +13,8 @@ export interface BuildRequest {
 }
 
 export type BuildResponse =
-    | { readonly id: number; readonly bvh: MeshBvh }
-    | { readonly id: number; readonly error: string };
+    | { readonly id: number; readonly bvh: MeshBvh; readonly heapBytes?: number }
+    | { readonly id: number; readonly error: string; readonly heapBytes?: number };
 
 /** The few worker-scope members we use. The project's tsconfig only has the DOM library. */
 interface WorkerScope {
@@ -32,9 +32,10 @@ scope.onmessage = (event) => {
     queue = queue.then(async () => {
         try {
             const bvh = await buildMeshBvhAsync(geometry, options);
-            scope.postMessage({ id, bvh }, meshBvhTransferables(bvh));
+            // heapBytes: the worker's WASM memory after the build, for the pool's recycling (pool.ts).
+            scope.postMessage({ id, bvh, heapBytes: tinyBvhHeapBytes() }, meshBvhTransferables(bvh));
         } catch (error) {
-            scope.postMessage({ id, error: error instanceof Error ? error.message : String(error) }, []);
+            scope.postMessage({ id, error: error instanceof Error ? error.message : String(error), heapBytes: tinyBvhHeapBytes() }, []);
         }
     });
 };

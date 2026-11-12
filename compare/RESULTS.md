@@ -84,15 +84,17 @@ Agreement: three-mesh-bvh, bvh-tree and three agree with ours on every ray of ev
 
 ## compare/gpu: GPU rays, ours against three-mesh-bvh/webgpu
 
-1,048,576 seeded rays per dispatch on the M5's GPU, GPU timestamps, 7 paired rounds (ratio within each round; the rounds' spread was under 0.02 everywhere). Any hit: inside rays within a quarter of the diagonal, outside rays within two diagonals (occlusion).
+1,048,576 seeded rays per dispatch on the M5's GPU, GPU timestamps, 7 paired rounds (ratio within each round). Any hit: inside rays within a quarter of the diagonal, outside rays within two diagonals (occlusion). Ours runs twice: the default kernel, and with `anyHitOrder: 'larger'` (any-hit enters the larger child first; closest hit is the same kernel). Both are checked against each other on every ray (0 differ) and against three-mesh-bvh.
 
-| Scene | Closest, outside | Closest, inside | Any, outside | Any, inside | GPU bytes, ours / theirs |
+| Scene | Closest, outside | Closest, inside | Any, outside: default / `'larger'` | Any, inside: default / `'larger'` | GPU bytes, ours / theirs |
 | --- | --- | --- | --- | --- | --- |
-| Knot (100k) | 1.07x (183 / 171 Mrays/s), 2 of their rays disagree | 1.07x (186 / 174) | 1.26x (234 / 186) | 1.23x (257 / 208) | 8.2 / 3.8 MB |
-| Furnished room (270k) | **0.91x** (229 / 253) | **0.88x** (193 / 219), 1 disagrees | **0.31x** (304 / 982) | 0.99x (516 / 518) | 20.6 / 10.6 MB |
-| Sponza (5.74M) | **0.97x** (193 / 198), 7 disagree | 1.11x (171 / 154), 2 disagree | 1.28x (382 / 298) | 1.28x (298 / 232) | 470 / 225 MB |
+| Knot (100k) | 1.07x (163 / 155 Mrays/s), 2 of their rays disagree | 1.08x (137 / 127) | 1.26x / 1.17x (214, 198 / 171) | 1.25x / 1.20x | 8.2 / 3.8 MB |
+| Furnished room (270k) | **0.85-0.91x** (229 / 253) | **0.86-0.88x**, 1 disagrees | **0.32x / 1.73x** (304, 1,547 / 982) | 1.05x / 1.13x | 20.6 / 10.6 MB |
+| Sponza (5.74M) | **0.96x**, 7 disagree | 1.12x, 2 disagree | 1.28x / 1.48x (353, 406 / 276) | 1.28x / 1.39x | 470 / 225 MB |
 
-The ratio is ours over theirs. Where three-mesh-bvh disagrees on a ray (another distance; once a hit at t = 0) the ratio is shown but not ranked. GPU bytes are what each walk reads: ours, nodes, 48-byte triangle records and the top level; theirs, nodes, index, its vec4 copy of the positions and transforms.
+The ratio is ours over theirs. Where three-mesh-bvh disagrees on a ray (another distance; once a hit at t = 0) the ratio is shown but not ranked. GPU bytes are what each walk reads: ours, nodes, 48-byte triangle records and the top level; theirs, nodes, index, its vec4 copy of the positions and transforms. Absolute rates move by up to 30% between runs with the M5's heat and load; the paired ratios moved by under 0.05.
+
+**The room's any hit from outside (0.31x before).** Not a harness artefact: both walks get the same packed rays and `tMax`, both stop at the first triangle hit in the interval (three-mesh-bvh's `bvh_RaycastAnyHit` returns `STOP_TRAVERSAL` from its range callback; its order is fixed, right child first), every ray is blocked in both, and ours is the leanest kernel. The counted walks (`?counts` on the page, `compare/gpu/gpu-counts.ts`: a counted copy of each library's own loop, same rays) found the cause. Mean work was close (ours 19.1 box tests and 3.9 triangles per ray, theirs 11.9 and 3.9), but the slowest ray of each 32 consecutive rays (one SIMD group) needed **78.5 box tests in ours against 24.3 in theirs**, which is the 3.2x. Our default any-hit order goes to the farther child first (chosen for shadow rays that start on a surface, T1.3); a ray from outside the room then descends into the far side's furniture before it meets the shell it already crossed. Near-first helped a little (0.41x; slowest of 32: 66.5). Entering the child with the larger box first (`anyHitOrder: 'larger'`: the likelier blocker, by the SAH's own area argument) cut the slowest of 32 to 23.0 and gave 1.73x. It is a setting, not the default: on the surface-ray bench it is 1.15-1.42x far-first on instanced trees but 0.78x on merged surface rays (`docs/internals/design/trace.md`, "Any-hit child order"). Workgroup size (64 both), the triangle test and the top level were not the cause: closest-hit, which shares them, was within 0.85-1.12x.
 
 ## compare/build: build, refit, memory
 
@@ -100,14 +102,16 @@ Median of 3 builds on one thread, ms; ratio to ours.
 
 | Library | Knot build | Room build | Sponza build | Knot refit | Room refit | Sponza refit |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| @pmndrs/bvh (tinybvh) | 33 | 84 | 1,499 | 32 | 75 | 1,178 |
-| three-mesh-bvh, CENTER | 25 (0.75) | 82 (0.97) | 1,538 (1.03) | 4.9 (0.15) | 13 (0.18) | 170 (0.14) |
-| three-mesh-bvh, SAH | 110 (3.3) | 352 (4.2) | 7,011 (4.7) | 4.5 (0.14) | 13 (0.17) | 177 (0.15) |
+| @pmndrs/bvh (tinybvh) | 33 | 84 | 1,499 | **4.5** (was 32) | **13** (was 75) | **359** (was 1,178) |
+| three-mesh-bvh, CENTER | 25 (0.75) | 82 (0.97) | 1,538 (1.03) | 2.6 (0.58) | 8.1 (0.61) | 177 (0.49) |
+| three-mesh-bvh, SAH | 110 (3.3) | 352 (4.2) | 7,011 (4.7) | 4.5 (earlier run) | 13 | 177 |
 | bvh-tree | 92 (2.8) | 270 (3.2) | 11,301 (7.5) | n/a | n/a | n/a |
 | Babylon, submesh octree | 9.9 (0.30) | 17 (0.20) | 421 (0.28) | 2.2 (octree rebuilt) | 4.6 | 57 |
 | Rapier | 22 (0.65) | 70 (0.83) | 1,329 (0.89) | n/a (rebuilt) | n/a | n/a |
 | ours, H-PLOC (CPU twin) | 282 | 872 | 10,699 | | | |
 | ours, LBVH (CPU twin) | 113 | 335 | 9,170 | | | |
+
+**Refit, the 6-7x.** The refit columns are new for ours and three-mesh-bvh CENTER: medians of 21 refits interleaved between the two (order reversed every other round, alternating two moved copies), at a low load; the SAH row keeps the earlier run's times, without ratios. Before, the same paired run gave ours 16.1 / 37.3 / 1,001 ms against CENTER's 2.6 / 7.6 / 169 (0.16-0.20). The cost was ours, not the layout: `refitOnCpu` found its node order by walking every node's parent chain and sorting with a comparator, kept a JavaScript array per node box, and built a temporary array per primitive union; `CpuMeshBvh.refit` validated every corner in one pass, allocated a per-triangle box array, then rewrote the corners and the boxes. Now the order is a stable counting sort on depth (worked out once per tree and kept), node boxes are one `Float64Array`, and the refit reads the leaves' corners straight from the triangle records (`refitRecordsOnCpu`, bit for bit `refitOnCpu` over boxes of the same corners); validation is still a complete first pass that only reads, so a refit that throws leaves the tree untouched. Ours is now 1.6-2x three-mesh-bvh's: it still writes 48-byte records (nine corner floats per triangle) and two-box 64-byte nodes, where three-mesh-bvh reads the app's positions in place.
 
 The twins are TypeScript references for the GPU builders, which are much faster: on the furnished room, `compare/build`'s GPU H-PLOC tree was traceable 14.6 ms after the call (10.4 ms of GPU batches, submit to readback), against 84 ms for tinybvh on the CPU. After the refits, every library's closest hits on 512 rays agree with our refitted tree except Babylon's (1 ray on Sponza).
 
@@ -160,7 +164,7 @@ After the motion, three-mesh-bvh agrees on every query (boundary ties only); bvh
 ## Where another library wins
 
 - **Rapier**: box queries 2.3 to 2.7 times our rate, closest point 1.7 to 2.4 times, and closest-hit rays on the knot (inside, 1.28x) and the room (1.02x outside, 1.16x inside); within 5% of ours on Sponza. It gives no triangle id, and holds 2.5 times our tree's memory (below).
-- **three-mesh-bvh**: CPU refit 6 to 7 times faster (32-byte one-box nodes over the app's positions; ours rewrites 48-byte records and two-box nodes); box queries 1.2 to 1.4 times ours; closest point up to 1.5 times on the knot and the room; CENTER builds as fast as tinybvh; `ObjectBVH` updates twice as fast as our CPU top-level rebuild. On the GPU its `/webgpu` walk beats ours on the furnished room (closest 0.88 to 0.91x, and **any hit from outside 0.31x**: 982 against 304 Mrays/s) and on Sponza's closest from outside (0.97x, though 7 of its rays disagree). Its worker build stalls frames a little less than ours.
+- **three-mesh-bvh**: CPU refit 1.6 to 2 times faster (was 6 to 7 before the refit fix above; 32-byte one-box nodes over the app's positions, where ours rewrites 48-byte records and two-box nodes); box queries 1.2 to 1.4 times ours; closest point up to 1.5 times on the knot and the room; CENTER builds as fast as tinybvh; `ObjectBVH` updates twice as fast as our CPU top-level rebuild. On the GPU its `/webgpu` walk beats ours on the furnished room's closest hits (0.85 to 0.91x) and on Sponza's closest from outside (0.96x, though 7 of its rays disagree). Its any hit from outside the room was 3.2 times our default kernel's (982 against 304 Mrays/s); with `anyHitOrder: 'larger'` ours is 1.73 times theirs there (above). Its worker build stalls frames a little less than ours.
 - **bvh.js**: builds a scene tree about 3 times faster than ours and culls boxes 1.2 times faster at 10,000 objects; its frustum culling is faster too, but disagrees on a few objects.
 - **Babylon**: builds fastest (it builds almost nothing); its picking is the floor it looks like.
 - Ours leads closest and all hits against every library on Sponza, against all but Rapier on the room, and sphere queries everywhere (up to 2.3 times three-mesh-bvh's).
@@ -171,7 +175,7 @@ What each library holds beyond the app's geometry. "Own": the library's exact bu
 
 | | Knot own / heap | Room own / heap | Sponza own / heap | Sponza bytes per triangle (heap) |
 | --- | --- | --- | --- | ---: |
-| @pmndrs/bvh | 8.0 / 8.1 MiB | 20.1 / 20.2 MiB | **459.7 / 1,740 MiB** (1,285 of it tinybvh's WASM heap) | 84 (tree) + 235 (builder heap) |
+| @pmndrs/bvh | 8.0 / 8.1 MiB | 20.1 / 20.2 MiB | **459.7 / 391 MiB** (was 1,740, 1,285 of it tinybvh's WASM heap, before the builder released it) | 84 (tree) |
 | three-mesh-bvh, CENTER | 0.85 / 0.94 MiB | 2.4 / 2.5 MiB | 51.5 / 47.1 MiB | 9 |
 | bvh-tree | 12.2 (arrays only) / 19.6 MiB | 32.9 / 54.9 MiB | 701 / 1,152 MiB | 210 |
 | Babylon, submesh octree | not counted / 6.6 MiB | 19.0 MiB heap | 363 MiB heap | 66 |
@@ -181,7 +185,7 @@ What each library holds beyond the app's geometry. "Own": the library's exact bu
 The gap, named:
 
 - **Ours against three-mesh-bvh: 9 to 10 times** the bytes beyond the geometry (Sponza 460 against 47 to 52 MiB; 84 against 9 bytes per triangle), as `docs/internals/design/memory.md` found per mesh (8 to 9 times). Our tree copies every triangle's corners into a 48-byte record (56% of it), so the GPU walk reads one buffer and never the app's index; our nodes are 64 bytes with two child boxes; our leaves hold about 2 triangles against their 7, so there are 3.6 times the boxes. three-mesh-bvh reuses the app's positions and reorders the app's own index in place. The same trade shows on the GPU: 470 against 225 MB, where their walk reads its own vec4 copy of the positions. Indexed leaves and quantized nodes (`docs/internals/design/indexed-leaves.md`, `compressed-nodes.md`) are the levers that close part of it.
-- **New here: tinybvh's WASM heap.** Building Sponza as **one** 5.74M-triangle mesh grows tinybvh's WASM memory by 1,285 MiB, and a WASM memory never shrinks: the process keeps it as long as the builder lives (`createTinyBvhBuilder`; each worker of the pool has its own). Per-mesh builds (how `SceneTrees` builds Sponza's meshes) stay at its 64 MiB start (`memory.md`); the knot and the room didn't grow it at all. An app that builds one huge mesh on the main thread should drop the builder afterwards, or build on the GPU or in a worker that ends.
+- **tinybvh's WASM heap (fixed on the wrapper side).** Building Sponza as **one** 5.74M-triangle mesh grew tinybvh's WASM memory to 1,349 MiB, and a WASM memory never shrinks, so the builder kept it for its life. Where it goes, step by step: our input copies 102 MiB, tinybvh's build (its vertex copy and build arrays) 599 MiB, the layout it writes 649 MiB (nodes allocated for the worst case, 373 MiB for 197 used, and 263 MiB of records, all copied out). Now: our positions copy is freed after tinybvh's build (1,316 MiB peak); `createTinyBvhBuilder` drops an instance whose build left it past `releaseAboveBytes` (default 256 MiB) and starts a fresh one, so the build's heap growth in a fresh process is **391 MiB instead of 1,707** (the table's ours-Sponza heap); and the worker pool ends a worker whose build grew past `recycleAboveBytes` (default 256 MiB). The peak itself stays: lowering it needs `native/` changes (`docs/internals/design/memory.md`). Per-mesh builds (how `SceneTrees` builds Sponza's meshes) stay at its 64 MiB start; the knot and the room didn't grow it at all.
 - bvh-tree and Rapier hold about 210 bytes per triangle each (bvh-tree: a JS array of 9 doubles and two 28-byte box arrays per triangle, plus node objects; Rapier: its copy of the trimesh and parry's tree in WASM). Babylon holds 66 (submeshes, the octree and the `Vector3` position cache its picking makes).
 
 ## Honest gaps
@@ -192,8 +196,8 @@ What three-mesh-bvh has and we don't (`docs/internals/PARITY.md`), and what the 
 - **Points and lines** (`PointsBVH`, `LineSegmentsBVH`): missing (3.2, 3.3); our leaves are triangles only.
 - **GPU closest point, GPU shapecast, `sampleTrianglePoint`, `ClusteredBVH`, SDF generation**: missing (8.5 to 8.10). Only rays run on our GPU walk.
 - `ObjectBVH.shapecast` (5.3) and `getJSONStructure` (7.5): missing. Partial: `SkinnedMeshBVH` (3.4, GPU posing only), `maxDepth` (4.3, accepted, not honoured), per-index `computeBatchedBoundsTree` (5.5), `StaticGeometryGenerator` (6.3, GPU only), three-mesh-bvh's serialization format (7.1), `onProgress` (0 and 1 only). `ParallelMeshBVHWorker`: won't (cross-origin isolation; big meshes go to the GPU builder).
-- **Memory**: 9 to 10 times three-mesh-bvh's beyond the geometry, plus tinybvh's WASM heap after a huge single-mesh build (above).
-- **CPU refit speed** (6 to 7 times slower than three-mesh-bvh's), and years of use behind their shapecasts.
+- **Memory**: 9 to 10 times three-mesh-bvh's beyond the geometry. A huge single-mesh build still peaks at about 230 bytes per triangle of WASM memory while it runs (above); the builder now releases it afterwards.
+- **CPU refit speed** (1.6 to 2 times slower than three-mesh-bvh's, from 6 to 7), and years of use behind their shapecasts.
 - Rapier is a physics engine (collisions, character controllers, joints) and answers box and point queries faster; Babylon is a whole engine; bvh.js inserts, deletes and moves single objects and has LOD frustum culling. We have none of that.
 
 What we have and they don't: GPU builds (H-PLOC, LBVH), GPU refits of mesh trees and the top level, one layout that every builder writes and every walk (CPU and WGSL) reads, a WGSL walk outside three's node system (a raw compute pass, another engine, a worker's device), and the oracle (the CPU port of the walk that checks the GPU's answers).

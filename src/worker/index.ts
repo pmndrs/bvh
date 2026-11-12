@@ -16,6 +16,7 @@ export {
     type BvhWorkerPool,
     type BvhWorkerPoolOptions,
     type BvhWorkerPoolStats,
+    WORKER_RECYCLE_ABOVE_BYTES,
 } from './pool.ts';
 export { generateCpuMeshBvh } from './generate.ts';
 export { createMeshBvhBuilder, type MeshBvhBuilder, type MeshBvhBuilderConfig } from '../trace/mesh-bvh-async.ts';

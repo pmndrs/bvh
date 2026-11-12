@@ -62,6 +62,7 @@ import { decodeQuantizedNode, readNodeFrame, type NodeFrame } from '../quantized
 import { GPU_LAYOUT_QUANTIZED_NODE_WORDS as QUANTIZED_NODE_WORDS } from '../gpu-layout.ts';
 import type { TraceSceneData } from './scene-assembly.ts';
 import type { TrianglePasses } from './triangle-filter.ts';
+import type { AnyHitOrder } from './wgsl.ts';
 
 export interface CpuHit {
     readonly t: number;
@@ -164,6 +165,8 @@ export interface CpuTracerOptions {
     readonly triangleFilter?: TrianglePasses;
     /** As the trace module's `rayMasks` option. Default true. */
     readonly rayMasks?: boolean;
+    /** As the trace module's `anyHitOrder` option: any-hit's child order. Default `'far'`. Answers are the same either way. */
+    readonly anyHitOrder?: AnyHitOrder;
     /**
      * Ask `triangleFilter` about every triangle, flagged or not, as if each had
      * `TRIANGLE_FLAG_FILTER` set. The CPU mesh tree (`CpuMeshBvh`) uses it for
@@ -196,6 +199,14 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
     const triangleFilter = options.triangleFilter;
     const filterEveryTriangle = options.filterEveryTriangle ?? false;
     const rayMasks = options.rayMasks ?? true;
+    const anyHitOrder = options.anyHitOrder ?? 'far';
+    // Half the surface area of a box, as the WGSL's bvhBoxHalfArea (f32 products, so the order is the GPU's).
+    const halfArea = (floats: Float32Array, minWord: number, maxWord: number): number => {
+        const x = Math.fround(floats[maxWord] - floats[minWord]);
+        const y = Math.fround(floats[maxWord + 1] - floats[minWord + 1]);
+        const z = Math.fround(floats[maxWord + 2] - floats[minWord + 2]);
+        return Math.fround(Math.fround(Math.fround(x * y) + Math.fround(y * z)) + Math.fround(z * x));
+    };
     const nodeFloats = new Float32Array(scene.nodes);
     const nodeWords = new Uint32Array(scene.nodes);
     const quantized = scene.nodeFormat === 'quantized';
@@ -330,8 +341,13 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
                 const hitRight = rightEntry < BOX_MISS;
 
                 if (hitLeft && hitRight) {
-                    // As in the WGSL: closest-hit takes the nearer child first, any-hit the farther one.
-                    const leftFirst = stopAtFirstHit ? leftEntry > rightEntry : leftEntry <= rightEntry;
+                    // As in the WGSL: closest-hit takes the nearer child first; any-hit the farther one
+                    // (anyHitOrder 'far'), the nearer ('near') or the larger ('larger').
+                    const leftFirst = !stopAtFirstHit || anyHitOrder === 'near'
+                        ? leftEntry <= rightEntry
+                        : anyHitOrder === 'larger'
+                          ? halfArea(floats, nodeWord + NODE_WORD.leftMin, nodeWord + NODE_WORD.leftMax) >= halfArea(floats, nodeWord + NODE_WORD.rightMin, nodeWord + NODE_WORD.rightMax)
+                          : leftEntry > rightEntry;
                     if (leftFirst) {
                         stack.push(rightReference);
                         current = leftReference;

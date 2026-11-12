@@ -17,6 +17,7 @@ import { makeRays, RAY_SETS } from '../../../compare/core/rays.ts';
 import type { Measurement } from '../../../compare/core/suites.ts';
 import { createOursGpu, createTmbvhGpu, packRaysFor, type GpuTracer } from '../../../compare/gpu/gpu-trace.ts';
 import { gpuSuite } from '../../../compare/gpu/gpu-suite.ts';
+import type { WorkPerRay } from '../../../compare/gpu/gpu-counts.ts';
 import { GpuRays } from '../../shared/gpu-rays.ts';
 import { createComparePage, expectAgreement, quick } from '../../shared/compare.ts';
 import { ready } from '../../shared/smoke.ts';
@@ -29,7 +30,11 @@ const scale = diagonal(geometry);
 // Any hit: inside rays as short shadow-like rays (a quarter of the diagonal); outside rays as long occlusion tests.
 const anyLength = (set: string) => (set === 'outside' ? scale * 2 : scale * 0.25);
 
-const tracers: GpuTracer[] = [await createOursGpu(app.device, geometry), await createTmbvhGpu(app.renderer, geometry)];
+// Ours twice: the library's default kernel, and with anyHitOrder 'larger' (the any-hit order for rays that
+// start away from surfaces; closest hit is the same kernel). ?counts: the walks' work per ray as well.
+const params = new URLSearchParams(location.search);
+const tracers: GpuTracer[] = [await createOursGpu(app.device, geometry), await createOursGpu(app.device, geometry, { anyHitOrder: 'larger' }), await createTmbvhGpu(app.renderer, geometry)];
+const workPerRay: ({ set: string; mode: string; library: string } & WorkPerRay)[] = [];
 const all: Measurement[] = [];
 const packedBySet = new Map<string, Float32Array>();
 for (const set of RAY_SETS) {
@@ -38,8 +43,28 @@ for (const set of RAY_SETS) {
     packedBySet.set(set, closest);
     const results = await gpuSuite(tracers, sceneName, { closest, any: packRaysFor(rays, anyLength(set)), count, anyTMax: anyLength(set), scale, set }, quick ? { rounds: 2, dispatches: 3, warmups: 1 } : { rounds: 7 }, log);
     all.push(...results);
+    if (params.has('counts')) {
+        for (const mode of ['closest', 'any'] as const) {
+            for (const tracer of tracers) {
+                const work = await tracer.counts(mode);
+                workPerRay.push({ set, mode, library: tracer.id, ...work });
+                log(`${tracer.id} ${mode}/${set} per ray: ${work.boxTests.toFixed(1)} box tests, ${work.leaves.toFixed(1)} leaves, ${work.triangleTests.toFixed(1)} triangle tests, ${work.simdMaxBoxTests.toFixed(1)} box tests on the slowest of 32; ${(work.hitShare * 100).toFixed(1)}% hit`);
+            }
+        }
+    }
 }
-const names = { ours: '@pmndrs/bvh (TraceBatchKernel)', tmbvh: 'three-mesh-bvh/webgpu', 'ours-over-tmbvh': 'ours / three-mesh-bvh, paired' };
+if (workPerRay.length) {
+    panel.paragraph(
+        `Work per ray (counted copies of each walk, same rays): ${workPerRay.map((w) => `${w.library} ${w.mode}/${w.set}: ${w.boxTests.toFixed(1)} box tests, ${w.leaves.toFixed(1)} leaves, ${w.triangleTests.toFixed(1)} triangles`).join('; ')}.`,
+    );
+}
+const names = {
+    ours: '@pmndrs/bvh (TraceBatchKernel)',
+    'ours-larger': "@pmndrs/bvh, anyHitOrder 'larger'",
+    tmbvh: 'three-mesh-bvh/webgpu',
+    'ours-over-tmbvh': 'ours / three-mesh-bvh, paired',
+    'ours-larger-over-tmbvh': "ours ('larger') / three-mesh-bvh, paired",
+};
 panel.table(`GPU traversal, ${count.toLocaleString('en-US')} rays per dispatch`, all, ['closest/outside', 'any/outside', 'closest/inside', 'any/inside', 'gpu-bytes'], names);
 panel.table('Paired ratio (median of rounds; above 1: ours faster)', all, ['closest/outside/ratio', 'any/outside/ratio', 'closest/inside/ratio', 'any/inside/ratio'], names);
 panel.paragraph(`Timing: ${tracers.map((t) => `${t.name}: ${t.timing}`).join('; ')}. GPU bytes are what each walk reads: our 48-byte triangle records hold the corners; three-mesh-bvh reads its own vec4 copy of the positions and the index.`);
@@ -101,9 +126,11 @@ panel.csv(app.device);
 for (const tracer of tracers) tracer.dispose();
 gpuRays.destroy();
 
-const checked = expectAgreement(all, ['tmbvh'], log);
+const checked = expectAgreement(all, ['tmbvh', 'ours-larger'], log);
+// Our two kernels are the same walk in another child order: they must give the same answers on every ray.
+for (const m of all) if (m.library === 'ours-larger' && m.agreement && m.agreement.disagree > 0) throw new Error(`anyHitOrder 'larger' disagrees with the default kernel on ${m.metric}: ${m.agreement.disagree} rays`);
 if (agreement.disagree) throw new Error(`the GPU-built tree disagrees with the tinybvh tree on ${agreement.disagree} rays`);
 let frames = 0;
 app.loop(async () => {
-    if (++frames === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, status: panel.statusText, checkedAgainstOurs: checked, gpuBuiltChecked: agreement.checked });
+    if (++frames === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, status: panel.statusText, workPerRay, checkedAgainstOurs: checked, gpuBuiltChecked: agreement.checked });
 });

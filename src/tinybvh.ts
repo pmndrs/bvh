@@ -138,6 +138,19 @@ export interface TinyBvhLayoutBuild {
 }
 
 export interface TinyBvhBuilder {
+    /**
+     * Bytes of the WASM memory this builder holds now. A WASM memory grows to
+     * a build's peak (tinybvh's working arrays, the input copies and the
+     * output, about 230 bytes per triangle) and can never shrink, so after a
+     * build that grew it past {@link TinyBvhBuilderOptions.releaseAboveBytes}
+     * the builder starts a fresh WASM instance and drops the old one, which
+     * the garbage collector then frees.
+     */
+    readonly heapBytes: number;
+    /** WASM instances this builder has dropped after big builds (see {@link TinyBvhBuilderOptions.releaseAboveBytes}). */
+    readonly releases: number;
+    /** Bytes of the WASM memory at the end of the last build, before any release (0 before the first build). */
+    readonly lastBuildHeapBytes: number;
     /** Builds one mesh's tree and returns its shape. Synchronous; one at a time. */
     build(geometry: MeshInput, options?: TinyBvhBuildOptions): TinyBvhBuild;
     /**
@@ -148,6 +161,23 @@ export interface TinyBvhBuilder {
      */
     buildLayout(geometry: MeshInput, options?: TinyBvhLayoutOptions): TinyBvhLayoutBuild;
 }
+
+export interface TinyBvhBuilderOptions {
+    /**
+     * After a build that leaves the WASM memory larger than this many bytes,
+     * the builder replaces its WASM instance with a fresh one (64 MiB), so the
+     * grown memory is garbage once nothing else holds it (every result is
+     * copied out of it). Default {@link TINYBVH_RELEASE_ABOVE_BYTES}, 256 MiB:
+     * one build of about a million triangles or more. The next build pays a
+     * synchronous instantiation of the compiled module (well under a
+     * millisecond for its 130 KB). `Infinity` keeps one instance for the
+     * builder's life, as before.
+     */
+    readonly releaseAboveBytes?: number;
+}
+
+/** {@link TinyBvhBuilderOptions.releaseAboveBytes}'s default: 256 MiB. */
+export const TINYBVH_RELEASE_ABOVE_BYTES = 256 * 2 ** 20;
 
 let compiled: Promise<WebAssembly.Module> | null = null;
 
@@ -191,18 +221,57 @@ function makeImports(getMemory: () => WebAssembly.Memory, output: string[]): Web
     };
 }
 
-/** Compiles and starts tinybvh. Each builder has its own WASM memory. */
-export async function createTinyBvhBuilder(): Promise<TinyBvhBuilder> {
-    compiled ??= WebAssembly.compile(decodeBase64(TINYBVH_WASM_BASE64));
+/** One started tinybvh: its exports, with the memory the imports write messages from. */
+function startInstance(module: WebAssembly.Module): TinyBvhExports {
     const output: string[] = [];
     let memory: WebAssembly.Memory | null = null;
-    const instance = await WebAssembly.instantiate(await compiled, makeImports(() => memory as WebAssembly.Memory, output));
+    // Synchronous: the module is compiled already, and small, so this is allowed on a page's main thread too.
+    const instance = new WebAssembly.Instance(module, makeImports(() => memory as WebAssembly.Memory, output));
     const wasm = instance.exports as unknown as TinyBvhExports;
     memory = wasm.memory;
     wasm._initialize();
+    return wasm;
+}
+
+/**
+ * Compiles and starts tinybvh. Each builder has its own WASM memory, which a
+ * big build grows; past `options.releaseAboveBytes` the builder starts again
+ * on a fresh one (see {@link TinyBvhBuilderOptions}).
+ */
+export async function createTinyBvhBuilder(options: TinyBvhBuilderOptions = {}): Promise<TinyBvhBuilder> {
+    const releaseAboveBytes = options.releaseAboveBytes ?? TINYBVH_RELEASE_ABOVE_BYTES;
+    if (!(releaseAboveBytes >= 0)) throw new RangeError(`createTinyBvhBuilder: releaseAboveBytes must be a number of bytes (or Infinity), got ${releaseAboveBytes}`);
+    compiled ??= WebAssembly.compile(decodeBase64(TINYBVH_WASM_BASE64));
+    const module = await compiled;
+    let wasm: TinyBvhExports | null = startInstance(module);
+    let releases = 0;
+    let lastBuildHeapBytes = 0;
+    // The WASM memory is dropped after the build that grew it (the result is a copy), and the
+    // next build starts a fresh instance; an idle builder then holds no big memory.
+    const run = <T>(build: (exports: TinyBvhExports) => T): T => {
+        const exports = (wasm ??= startInstance(module));
+        try {
+            return build(exports);
+        } finally {
+            lastBuildHeapBytes = exports.memory.buffer.byteLength;
+            if (lastBuildHeapBytes > releaseAboveBytes) {
+                wasm = null;
+                releases++;
+            }
+        }
+    };
     return {
-        build: (geometry, options = {}) => buildTopology(wasm, geometry, options),
-        buildLayout: (geometry, options = {}) => buildGpuLayout(wasm, geometry, options),
+        get heapBytes() {
+            return wasm ? wasm.memory.buffer.byteLength : 0;
+        },
+        get releases() {
+            return releases;
+        },
+        get lastBuildHeapBytes() {
+            return lastBuildHeapBytes;
+        },
+        build: (geometry, buildOptions = {}) => run((exports) => buildTopology(exports, geometry, buildOptions)),
+        buildLayout: (geometry, buildOptions = {}) => run((exports) => buildGpuLayout(exports, geometry, buildOptions)),
     };
 }
 
@@ -257,7 +326,7 @@ function withTinyBvhTree<T>(wasm: TinyBvhExports, geometry: MeshInput, options: 
     if (builder === undefined) throw new RangeError(`unknown tinybvh builder: ${String(options.builder)}`);
     const { positions, indices } = geometry;
     const { vertexCount, triangleCount } = countInput(geometry);
-    const positionPointer = allocateInput(wasm, positions.length * 4, 'positions');
+    let positionPointer = allocateInput(wasm, positions.length * 4, 'positions');
     let indexPointer = 0;
     try {
         if (indices) indexPointer = allocateInput(wasm, indices.length * 4, 'indices');
@@ -268,11 +337,15 @@ function withTinyBvhTree<T>(wasm: TinyBvhExports, geometry: MeshInput, options: 
         const wasmStart = performance.now();
         const status = wasm.tbvh_build(positionPointer, vertexCount, indexPointer, triangleCount, builder);
         const wasmBuildMs = performance.now() - wasmStart;
+        // tinybvh keeps its own 16-byte copy of the vertices (the indices it reads in place), so ours
+        // goes now: the layout's arrays can reuse the space (Sponza as one mesh: 1,349 -> 1,316 MiB).
+        wasm.tbvh_free(positionPointer);
+        positionPointer = 0;
         throwOnStatus(wasm, status, geometry, vertexCount);
         return read(wasmBuildMs);
     } finally {
         wasm.tbvh_release();
-        wasm.tbvh_free(positionPointer);
+        if (positionPointer) wasm.tbvh_free(positionPointer);
         if (indexPointer) wasm.tbvh_free(indexPointer);
     }
 }

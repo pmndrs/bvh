@@ -21,15 +21,23 @@ const gc = (globalThis as { gc?: () => void }).gc;
 if (!gc) throw new Error('run with --expose-gc');
 
 // Every WASM memory the library instantiates (tinybvh's, Rapier's), so the heap growth can be split.
-const memories: WebAssembly.Memory[] = [];
+// Held weakly: a builder that drops a grown memory (tinybvh's releaseAboveBytes) must be able to lose it.
+const memories: WeakRef<WebAssembly.Memory>[] = [];
 const instantiate = WebAssembly.instantiate;
 (WebAssembly as { instantiate: unknown }).instantiate = (...args: unknown[]) =>
     (instantiate as (...a: unknown[]) => Promise<unknown>).apply(WebAssembly, args).then((result) => {
         const instance = (result as { instance?: WebAssembly.Instance }).instance ?? (result as WebAssembly.Instance);
-        for (const value of Object.values(instance.exports ?? {})) if (value instanceof WebAssembly.Memory) memories.push(value);
+        for (const value of Object.values(instance.exports ?? {})) if (value instanceof WebAssembly.Memory) memories.push(new WeakRef(value));
         return result;
     });
-const wasmBytes = () => memories.reduce((sum, memory) => sum + memory.buffer.byteLength, 0);
+// tinybvh starts its instances synchronously from the compiled module (new WebAssembly.Instance).
+const NativeInstance = WebAssembly.Instance;
+(WebAssembly as { Instance: unknown }).Instance = function (module: WebAssembly.Module, imports?: WebAssembly.Imports) {
+    const instance = new NativeInstance(module, imports);
+    for (const value of Object.values(instance.exports)) if (value instanceof WebAssembly.Memory) memories.push(new WeakRef(value));
+    return instance;
+};
+const wasmBytes = () => memories.reduce((sum, memory) => sum + (memory.deref()?.buffer.byteLength ?? 0), 0);
 
 const adapter = adapterById(adapterId);
 const geometry = loadScene(sceneId);
@@ -43,6 +51,9 @@ const used = () => {
 const before = used();
 const wasmBefore = wasmBytes();
 const built = adapter.build(geometry);
+// A later turn: a WeakRef's target read in this one stays alive until it ends, and a memory the
+// builder dropped (tinybvh's releaseAboveBytes) should be collectable when it is measured.
+await new Promise((resolve) => setTimeout(resolve, 0));
 const after = used();
 const wasmAfter = wasmBytes();
 const reported = built.memory();

@@ -9,8 +9,19 @@ import type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
 
 let tinyBvh: Promise<TinyBvhBuilder> | null = null;
+let started: TinyBvhBuilder | null = null;
+
+/**
+ * Bytes this thread's tinybvh WASM memory had grown to at the end of its last
+ * build (0 before the first). The builder drops a memory that grew past its
+ * `releaseAboveBytes`, but the garbage collector frees it only later; a pool
+ * worker reports this so the pool can end the worker instead (pool.ts).
+ */
+export function tinyBvhHeapBytes(): number {
+    return started?.lastBuildHeapBytes ?? 0;
+}
 
 export async function buildMeshBvhAsync(geometry: MeshGeometry, options: MeshBvhBuildOptions = {}): Promise<MeshBvh> {
-    tinyBvh ??= createTinyBvhBuilder();
+    tinyBvh ??= createTinyBvhBuilder().then((builder) => (started = builder));
     return buildMeshBvhWithTinyBvh(geometry, await tinyBvh, { maxLeafPrimitives: options.maxLeafPrimitives, triangleLeaves: options.triangleLeaves, nodeFormat: options.nodeFormat });
 }

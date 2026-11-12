@@ -17,6 +17,14 @@
  *
  * Builds are started in the order they were asked for (first in, first out).
  * A caller that wants the makespan short asks for its biggest meshes first.
+ *
+ * A WASM memory can grow but never shrink, and tinybvh's grows to about 230
+ * bytes per triangle for the build in flight. So a worker whose build left its
+ * memory past `recycleAboveBytes` (256 MiB by default: a mesh of about a
+ * million triangles) is ended once it has answered, and the next build starts
+ * a fresh one; the operating system gets the memory back at once. Big builds
+ * belong in this pool for that reason: on the main thread the memory stays
+ * until the garbage collector frees the builder's dropped instance.
  */
 
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
@@ -44,7 +52,19 @@ export interface BvhWorkerPoolOptions {
      * choose for itself with {@link BvhBuildRequest.transferInput}.
      */
     readonly transferInput?: boolean;
+    /**
+     * A worker whose last build left its tinybvh WASM memory larger than this
+     * many bytes is ended after answering, and a fresh worker takes the next
+     * build: the memory goes back to the system at once. Default
+     * {@link WORKER_RECYCLE_ABOVE_BYTES} (256 MiB); `Infinity` keeps workers
+     * for the pool's life. Inline builds (no `Worker`) release their WASM
+     * instance the same way (`createTinyBvhBuilder`'s `releaseAboveBytes`).
+     */
+    readonly recycleAboveBytes?: number;
 }
+
+/** {@link BvhWorkerPoolOptions.recycleAboveBytes}'s default: 256 MiB. */
+export const WORKER_RECYCLE_ABOVE_BYTES = 256 * 2 ** 20;
 
 /** Per-build options of {@link BvhWorkerPool.build}, besides the tree's own. */
 export interface BvhBuildRequest {
@@ -69,6 +89,8 @@ export interface BvhWorkerPoolStats {
     readonly workers: number;
     /** Builds finished (built, failed or cancelled while running) since the pool was made. */
     readonly finished: number;
+    /** Workers ended because a build left their WASM memory past `recycleAboveBytes`. */
+    readonly recycled: number;
 }
 
 export interface BvhWorkerPool {
@@ -106,8 +128,6 @@ interface Job {
 interface PoolWorker {
     readonly worker: Worker;
     job: Job | null;
-    /** Builds this worker answered: a worker that fails before its first answer may mean workers don't load here. */
-    answered: number;
     nextId: number;
 }
 
@@ -167,6 +187,9 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
     const mode = options.worker ?? 'auto';
     const size = options.size ?? defaultWorkerPoolSize();
     if (!Number.isInteger(size) || size < 1) throw new RangeError(`a worker pool needs a size of at least 1, got ${size}`);
+    const recycleAboveBytes = options.recycleAboveBytes ?? WORKER_RECYCLE_ABOVE_BYTES;
+    if (!(recycleAboveBytes >= 0)) throw new RangeError(`a worker pool's recycleAboveBytes must be a number of bytes (or Infinity), got ${recycleAboveBytes}`);
+    let recycled = 0;
     let inline = mode === 'never' || typeof Worker === 'undefined';
     if (inline && mode === 'always') throw new Error('@pmndrs/bvh/worker: a worker was required, but this environment has no Worker');
 
@@ -176,6 +199,8 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
     /** Builds running inline now (a tinybvh build can't be stopped, so dispose settles them and drops their result). */
     const inlineJobs = new Set<Job>();
     let finished = 0;
+    /** Whether any worker of this pool ever answered, even one since recycled: until then a failure may mean workers can't load. */
+    let everAnswered = false;
     let disposed = false;
 
     const settle = (job: Job, outcome: { bvh: MeshBvh } | { error: Error }): void => {
@@ -240,17 +265,24 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
             const job = entry.job;
             if (!job || event.data.id !== entry.nextId - 1) return;
             entry.job = null;
-            entry.answered++;
+            everAnswered = true;
             finished++;
             const response = event.data;
             settle(job, 'error' in response ? { error: new Error(response.error) } : { bvh: response.bvh });
+            if ((response.heapBytes ?? 0) > recycleAboveBytes) {
+                // Its WASM memory can't shrink: end the worker, and let pump start a fresh one if it is needed.
+                const index = workers.indexOf(entry);
+                if (index >= 0) workers.splice(index, 1);
+                entry.worker.terminate();
+                recycled++;
+            }
             pump();
         };
         entry.worker.onerror = (event) => {
             event.preventDefault?.();
             const message = `@pmndrs/bvh/worker: a BVH worker failed: ${event.message || 'it could not be loaded'}`;
-            if (entry.answered === 0 && workers.every((other) => other.answered === 0)) {
-                // No worker has ever answered: workers probably can't load here (a bundler that didn't copy
+            if (!everAnswered) {
+                // No worker of this pool has ever answered (a recycled one counts): workers probably can't load here (a bundler that didn't copy
                 // the worker file, a blocked origin). Build inline from now on.
                 fallBackToInline(message);
                 pump();
@@ -304,7 +336,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
             let entry = workers.find((candidate) => candidate.job === null);
             if (!entry && workers.length < size) {
                 try {
-                    entry = { worker: startWorker(), job: null, answered: 0, nextId: 1 };
+                    entry = { worker: startWorker(), job: null, nextId: 1 };
                 } catch (error) {
                     fallBackToInline(`@pmndrs/bvh/worker: a worker could not be started: ${toError(error).message}`);
                     continue;
@@ -330,6 +362,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
                 running: inline ? inlineRunning : workers.filter((entry) => entry.job !== null).length,
                 workers: workers.length,
                 finished,
+                recycled,
             };
         },
         build(geometry, buildOptions = {}, request = {}) {
