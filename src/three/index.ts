@@ -16,6 +16,7 @@ export {
     rayMaskFromLayers,
     threeFaceIndex,
     threeGroupOf,
+    threeMaterialOf,
     threeTriangleRanges,
     type BvhSceneFromObject3DOptions,
     type BvhThreeGroupRange,

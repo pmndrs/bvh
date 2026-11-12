@@ -51,8 +51,11 @@ console.log(trees.deformingCounts.cpuPoses);
 The next `update(encoder)` refits the tree on the CPU (`refitLayoutToPose`), copies its nodes (re-quantized with
 quantized nodes) and corners (indexed: its vertices) in through the update's encoder, and moves the mesh's top-level
 box to the posed root box. A tree placed later gets the latest pose too. It costs a pass over the triangles and an
-upload of the mesh's tree per pose, so it suits small meshes or a few poses a second. The latest of `setPose` and
-`setPoseCpu` wins.
+upload of the mesh's tree per pose, so it suits small meshes or a few poses a second. With subgroups the latest of
+`setPose` and `setPoseCpu` wins; without them `setPose` is skipped, so the last `setPoseCpu` stays. A GPU-built first
+tree works too: a deforming mesh's GPU build reads its layout back for this. If a placed tree has no layout (its
+readback failed, or a custom first-tree builder ignored `readLayouts`) it warns once, and the pose waits for the next
+tree (tinybvh's refinement).
 
 ## The deform box
 

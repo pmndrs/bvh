@@ -52,6 +52,13 @@
  *   instance is refused (warned once, read in its rest pose): the pass
  *   gives every instance `morphTargetInfluences`.
  *
+ * - **Multi-material meshes** fold as `bvhSceneFromObject3D` folds them
+ *   (`multiMaterial`, default `'triangles'`): one mesh and instance per object
+ *   (and instance) holding every group, each triangle with its group's
+ *   material; the source's `group` and `materialIndex` are -1, and
+ *   `threeGroupOf(sync.meshSourceOf(hit.instance), hit.triangle)` or
+ *   `threeMaterialOf` give a hit's. A posed object folds too (one posed mesh).
+ *
  * `BvhHit.instance` is the SceneTrees instance's `instanceIndex`, which the
  * sync sets to its handle: {@link SceneTreesObject3DSync.sourceOf} maps it to
  * the three object, instance and group.
@@ -70,6 +77,7 @@ import {
     instanceMaskFromLayers,
     meshGeometryOf,
     multiplyMatrices,
+    sourceOfWalked,
     walkObject3D,
     type BvhSceneFromObject3DOptions,
     type BvhThreeMeshSource,
@@ -312,7 +320,7 @@ export class SceneTreesObject3DSync {
         return this.byHandle.get(instanceIndex)?.source ?? null;
     }
 
-    /** The geometry and range of a hit instance's mesh (for {@link threeFaceIndex}), or null. */
+    /** The geometry and range (or folded groups) of a hit instance's mesh (for `threeFaceIndex`, `threeGroupOf`, `threeMaterialOf`), or null. */
     meshSourceOf(instanceIndex: number): BvhThreeMeshSource | null {
         return this.byHandle.get(instanceIndex)?.mesh.source ?? null;
     }
@@ -410,14 +418,7 @@ export class SceneTreesObject3DSync {
                     key: instance.key,
                     handle,
                     mesh,
-                    source: {
-                        object: instance.object,
-                        instanceId: instance.instanceId,
-                        group: instance.range.group,
-                        materialIndex: instance.range.materialIndex,
-                        mesh: mesh.handle,
-                        static: instance.static,
-                    },
+                    source: sourceOfWalked(instance, mesh.handle),
                     objectToWorld: Float64Array.from(instance.objectToWorld),
                     visible: instance.visible,
                     mask: instance.mask,
@@ -561,7 +562,7 @@ export class SceneTreesObject3DSync {
     }
 
     private addPlainMesh(instance: WalkedInstance): TrackedMesh {
-        const source = { geometry: instance.geometry, start: instance.range.start, count: instance.range.count };
+        const source = instance.meshSource;
         return { key: instance.meshKey, handle: this.trees.addMesh(meshGeometryOf(source)), source, users: 0, pose: null, vertices: null, indexBuffer: null };
     }
 
@@ -580,7 +581,7 @@ export class SceneTreesObject3DSync {
             pose = { object, geometry: object.geometry, pass, skeleton, bones: skeleton?.bones.length ?? 0, box, meshes: new Set() };
             this.poses.set(object, pose);
         }
-        const source = { geometry: instance.geometry, start: instance.range.start, count: instance.range.count };
+        const source = instance.meshSource;
         const geometry = meshGeometryOf(source);
         let indexBuffer: GPUBuffer | null = null;
         if (geometry.indices) {

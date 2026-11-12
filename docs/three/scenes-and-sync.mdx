@@ -40,11 +40,16 @@ sync.update();
 - `Mesh`, `InstancedMesh` (instances below its `count`), `BatchedMesh` (active, visible instances) and `SkinnedMesh`
   (posed on the GPU with a `renderer`; [Skinned and morphed meshes](/three/skinned-and-morphed)).
 - The triangles three's `Mesh.raycast` tests: the draw range and, with an array of materials, the groups within it.
-  `bvhSceneFromObject3D` makes a multi-material mesh one mesh and instance whose triangles carry their group's material
-  (`triangleMaterials`, from `material(mesh, info)` per group; `threeGroupOf` maps a hit back to its group). The sync
-  keeps each group its own mesh and instance, with the group's material (`multiMaterial: 'groups'` does that in
-  `bvhSceneFromObject3D` too). Ranges are read as three steps through them, even off
-  a multiple of 3 or overlapping.
+  Ranges are read as three steps through them, even off a multiple of 3 or overlapping.
+- **Multi-material meshes** (an array of materials, with groups) are folded: one mesh holding every group, in group
+  order, and one instance per object (and per instance of an `InstancedMesh`). Each triangle carries its group's
+  material (`triangleMaterials`, from `material(mesh, info)`, asked once per group with `info.group` and
+  `info.materialIndex`). The sync, `bvhSceneFromObject3D` and `BvhSceneRaycaster` fold the same way, so instance N is
+  the same object in all three. A folded source's `group` and `materialIndex` are -1 (the hit's
+  triangle names its group: see "Hits back to objects" below). An object whose instances give a group different materials (an
+  `InstancedMesh` with a material per instance) is not folded: it keeps one mesh per group, shared by its instances,
+  with each instance's material on the instance. `multiMaterial: 'groups'` keeps one mesh and instance per group for
+  every object, as the sync and the scene raycaster did before.
 - Indexed, non-indexed and interleaved positions. Interleaved, normalized or non-float positions are compacted once per
   geometry.
 - One mesh per geometry and range, shared by every object and instance that uses it.
@@ -60,12 +65,27 @@ Call `scene.updateMatrixWorld()` first: world matrices are read as they are.
 
 {/* snippet: source-of */}
 ```ts
+import { threeGroupOf, threeMaterialOf } from '@pmndrs/bvh/three';
+
 const source = sync.sourceOf(hitInstance); // { object, instanceId, group, materialIndex, mesh, static }
-if (source) console.log(source.object.name, source.instanceId);
+const meshSource = sync.meshSourceOf(hitInstance);
+if (source && meshSource) {
+    console.log(source.object.name, source.instanceId);
+    // A folded multi-material mesh has group -1: the hit's triangle names its group and three material.
+    const group = threeGroupOf(meshSource, hitTriangle); // { group, materialIndex, material, ... } or null
+    const material = threeMaterialOf(source, meshSource, hitTriangle); // object.material[group.materialIndex], or object.material
+    console.log(group?.materialIndex, material?.name);
+}
 ```
 
-`hit.triangle` is the triangle within its mesh (a group, draw range or batch range). `threeFaceIndex(meshSource,
-triangle)` turns it into three's `faceIndex`; `sync.meshSourceOf(instance)` gives the mesh source.
+`hit.triangle` is the triangle within its mesh (a folded mesh's groups one after another, a group, a draw range or a
+batch range). `threeFaceIndex(meshSource, triangle)` turns it into three's `faceIndex`; `sync.meshSourceOf(instance)`
+gives the mesh source (`BvhSceneRaycaster.meshSourceOf`, or `scene.meshSources[source.mesh]`, elsewhere).
+
+`hit.material` is what your `material` callback returned for the hit triangle's group (or the instance's answer, for
+a mesh of one material). To get from a hit to three's `object.material[i]`, either return `info.materialIndex` (or a
+value you map back from it) in the callback, or call `threeMaterialOf(source, meshSource, hit.triangle)`, which works
+without a callback. `threeGroupOf(meshSource, hit.triangle)` gives the group itself.
 
 ## Static objects
 

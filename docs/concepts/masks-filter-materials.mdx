@@ -113,7 +113,10 @@ trees.addInstance({ mesh, objectToWorld: matrix, material: 7 });
   per mesh before its header, and merged groups their side table. `triangleFlags` still may set bit 0 only.
 - A merged triangle takes its source triangle's material, else its source instance's.
 - It costs one select after the walk, nothing in the loop.
-- `bvhSceneFromObject3D` fills it from a multi-material mesh's groups ([Scenes and the sync](/three/scenes-and-sync)).
+- `assembleTraceScene` with prebuilt trees: records scenes report the trees' bits. Indexed scenes take
+  `geometries[i].triangleMaterials` when it is there, else the tree's records' bits, so both formats report the same;
+  both present and different throws.
+- `@pmndrs/bvh/three` fills it from a multi-material mesh's groups ([Scenes and the sync](/three/scenes-and-sync)).
 
 The hit also has `normal`: the world-space geometric normal of the authored front side, unit length. Interpolated
 normals need your own attributes, through `hit.triangle` and `hit.barycentrics`.

@@ -329,8 +329,8 @@ try {
                 reference.push(posed);
                 originals.set(posed, child);
             }
-            // One mesh and instance per group, as the sync makes them.
-            const referenceScene = bvhSceneFromObject3D(reference, { multiMaterial: 'groups' });
+            // The two-group skinned mesh folded into one mesh, as the sync folds it (same group order, so the same triangle indices).
+            const referenceScene = bvhSceneFromObject3D(reference);
             const instances = referenceScene.instances.map((instance, i) => {
                 const source = referenceScene.sources[i];
                 const handle = handleOf.get(`${originals.get(source.object)!.id}:${source.instanceId}:${source.group}`);
