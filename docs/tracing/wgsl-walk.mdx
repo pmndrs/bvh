@@ -74,7 +74,8 @@ fn bvhTraceAnyMasked(ray: BvhRay, mask: u32) -> bool         // unless rayMasks:
 - `hit.frontFace` is true when the ray hit the side the mesh was authored as front, through mirrored transforms too.
   Back-face hits count as hits.
 - `hit.normal` is the world-space geometric normal of the authored front side, unit length (0 on a miss).
-- `hit.material` is the instance's material, or `BVH_NO_MATERIAL`.
+- `hit.material` is the triangle's material (`triangleMaterials`) when it has one, else the instance's, else
+  `BVH_NO_MATERIAL`.
 - Pass a unit-length world direction: `t` is then the distance in world units, through scaled instances too.
 
 {/* snippet: masked */}

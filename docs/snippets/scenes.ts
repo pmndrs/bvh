@@ -91,6 +91,18 @@ export function deforming(trees: SceneTrees, character: MeshGeometry, skinnedPos
     // #endregion
 }
 
+export function deformingOnCpu(trees: SceneTrees, cloth: MeshGeometry, posedPositions: Float32Array): void {
+    // #region deforming-cpu
+    const mesh = trees.addMesh(cloth, { deforming: true });
+    trees.addInstance({ mesh, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] });
+
+    // x, y, z per vertex, the mesh's own vertices; with or without subgroups.
+    trees.setPoseCpu(mesh, posedPositions);
+    // the next trees.update(encoder) refits the tree on the CPU, uploads it and moves the top-level box.
+    console.log(trees.deformingCounts.cpuPoses);
+    // #endregion
+}
+
 export async function options(device: GPUDevice): Promise<SceneTrees> {
     // #region options
     const trees = await SceneTrees.create(device, {

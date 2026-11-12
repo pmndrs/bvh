@@ -17,6 +17,7 @@ import { type TracedHit } from '../../../../src/trace/oracle-compare.ts';
 import { buildOracleCases, sharedEdgeCase, SMALL_SIZES, unpackRay, type OracleCase } from './cases.ts';
 import { computeReferenceAnswers, evaluateCase } from './check.ts';
 import { buildHookCases, hookMasks, hookPassName, hookReferenceAnswers, writeHookFlags } from './hooks.ts';
+import { triangleMaterialReference, withTriangleMaterials } from './materials.ts';
 
 // Mesh trees come from tinybvh (WASM), the only mesh builder since B0.
 const tinyBvh = await createTinyBvhBuilder();
@@ -49,6 +50,20 @@ describe('oracle cases on the CPU traversal', () => {
             const { result, stats, scene } = traceOnCpu(oracleCase, reference);
             expect(result.failures, result.failures.join('\n')).toEqual([]);
             expect(stats.maxStackSize).toBeLessThanOrEqual(scene.requiredStackSize);
+        });
+    }
+});
+
+describe('per-triangle material cases on the CPU traversal', () => {
+    // The deep mesh only adds time here: its one mesh is covered by the others' rule.
+    for (const plain of buildOracleCases(SMALL_SIZES).filter((entry) => entry.name !== 'deep-mesh')) {
+        it(`${plain.name}: the reference moved to the material rule is the reference of the case with materials, and the walk agrees`, { timeout: 60_000 }, () => {
+            const oracleCase = withTriangleMaterials(plain);
+            const moved = triangleMaterialReference(oracleCase, computeReferenceAnswers(plain));
+            const traced = computeReferenceAnswers(oracleCase);
+            if (moved) expect(moved.closest.map((hit) => hit?.material)).toEqual(traced.closest.map((hit) => hit?.material));
+            const { result } = traceOnCpu(oracleCase, moved ?? traced);
+            expect(result.failures, result.failures.join('\n')).toEqual([]);
         });
     }
 });

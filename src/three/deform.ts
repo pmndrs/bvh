@@ -597,9 +597,14 @@ export class BvhPosePass implements BvhPosePassLike {
     }
 }
 
-/** The vertices `SceneTrees.setPose` takes for one of a pose pass's meshes (a geometry range). */
+/**
+ * The vertices `SceneTrees.setPose` takes for one of a pose pass's meshes (a
+ * geometry range). With `indexBuffer` (the mesh's indices; needed for indexed
+ * geometry, and for a folded multi-material mesh, whose indices are its
+ * groups' one after another) the refit reads every vertex of the pass through it.
+ */
 export function poseVertices(pass: BvhPosePassLike, geometry: BufferGeometry, start: number, count: number, indexBuffer: GPUBuffer | null): MeshRefitVertices {
-    if (geometry.index) {
+    if (geometry.index || indexBuffer) {
         if (!indexBuffer) throw new Error('@pmndrs/bvh/three: an indexed range needs its index buffer');
         return { positionBuffer: pass.buffer, vertexCount: pass.vertexCount, positionStrideFloats: 4, indexBuffer, indexFormat: 'uint32' };
     }

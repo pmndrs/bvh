@@ -8,7 +8,8 @@
  * - word 3 (original index) becomes the triangle's index in its source mesh;
  * - word 11 (padding) becomes the source instance index;
  * - flags (word 7) get bit 1 (`TRIANGLE_FLAG_FLIP_FRONT_FACE`) for a mirrored
- *   source and bits 16-31 the source's material + 1, OR-ed in, so bit 0 (the
+ *   source and bits 16-31 the triangle's material + 1 (`sourceMaterials`: the
+ *   source triangle's, else the source instance's), OR-ed in, so bit 0 (the
  *   filter flag) stays.
  *
  * The group's sources are contiguous in its geometry (`StaticMergeSource.firstTriangle`),
@@ -21,10 +22,8 @@ import {
     INDEXED_FLAG_SHIFT,
     INDEXED_ID_MASK,
     INDEXED_TRIANGLE_WORDS,
-    MATERIAL_BITS,
     MATERIAL_SHIFT,
     MESH_HEADER_WORD,
-    materialCode,
     TRIANGLE_FLAG_FLIP_FRONT_FACE,
     TRIANGLE_WORD,
     TRIANGLE_WORDS,
@@ -49,6 +48,12 @@ struct BvhMergedParams {
 @group(0) @binding(0) var<storage, read_write> bvhMergedTriangles: array<u32>;
 @group(0) @binding(1) var<storage, read> bvhMergedSources: array<vec4u>;
 @group(0) @binding(2) var<uniform> bvhMergedParams: BvhMergedParams;
+// Each merged triangle's material code (material + 1, 0: none), 16 bits, two to a word, by geometry triangle.
+@group(0) @binding(3) var<storage, read> bvhMergedMaterials: array<u32>;
+
+fn bvhMergedMaterialCode(merged: u32) -> u32 {
+    return (bvhMergedMaterials[merged >> 1u] >> ((merged & 1u) * 16u)) & 0xffffu;
+}
 
 const BVH_MERGED_WORKGROUP_SIZE: u32 = ${WORKGROUP_SIZE}u;
 const BVH_MERGED_TRIANGLE_WORDS: u32 = ${TRIANGLE_WORDS}u;
@@ -80,7 +85,7 @@ fn bvhMergedIdentity(
     let source = bvhMergedSources[low];
     bvhMergedTriangles[base + ${TRIANGLE_WORD.originalIndex}u] = merged - source.x;
     bvhMergedTriangles[base + ${TRIANGLE_WORD.padding}u] = source.y;
-    bvhMergedTriangles[base + ${TRIANGLE_WORD.flags}u] = bvhMergedTriangles[base + ${TRIANGLE_WORD.flags}u] | source.z;
+    bvhMergedTriangles[base + ${TRIANGLE_WORD.flags}u] = bvhMergedTriangles[base + ${TRIANGLE_WORD.flags}u] | source.z | (bvhMergedMaterialCode(merged) << ${MATERIAL_SHIFT}u);
 }
 
 // The indexed twin (writeMergedIndexedIdentity): word 3 of a 16-byte triangle becomes the
@@ -113,18 +118,26 @@ fn bvhMergedIdentityIndexed(
     let source = bvhMergedSources[low];
     let flags = (idFlags >> ${INDEXED_FLAG_SHIFT}u) | (source.z & ${TRIANGLE_FLAG_FLIP_FRONT_FACE}u);
     bvhMergedTriangles[word] = (merged - source.x) | (flags << ${INDEXED_FLAG_SHIFT}u);
-    bvhMergedTriangles[bvhMergedParams.sideWordOffset + slot] = low | (source.z & ${MATERIAL_BITS}u);
+    bvhMergedTriangles[bvhMergedParams.sideWordOffset + slot] = low | (bvhMergedMaterialCode(merged) << ${MATERIAL_SHIFT}u);
 }
 `;
 }
 
-/** The kernel's per-source table for a group, sources in geometry order. */
+/** The kernel's per-triangle material codes for a group (`sourceMaterials`), two to a word. */
+export function mergedMaterialTable(group: StaticMergeGroup): Uint32Array<ArrayBuffer> {
+    const codes = group.sourceMaterials;
+    const table = new Uint32Array(Math.max(1, Math.ceil(codes.length / 2)));
+    for (let triangle = 0; triangle < codes.length; triangle++) table[triangle >> 1] |= codes[triangle] << ((triangle & 1) * 16);
+    return table;
+}
+
+/** The kernel's per-source table for a group, sources in geometry order: (first triangle, instance index, flip flag, 0). */
 export function mergedSourceTable(group: StaticMergeGroup): Uint32Array<ArrayBuffer> {
     const table = new Uint32Array(Math.max(1, group.sources.length) * MERGED_SOURCE_WORDS);
     group.sources.forEach((source, index) => {
         table[index * MERGED_SOURCE_WORDS] = source.firstTriangle;
         table[index * MERGED_SOURCE_WORDS + 1] = source.instanceIndex;
-        table[index * MERGED_SOURCE_WORDS + 2] = ((source.mirrored ? TRIANGLE_FLAG_FLIP_FRONT_FACE : 0) | (materialCode(source.material, source.instanceIndex) << MATERIAL_SHIFT)) >>> 0;
+        table[index * MERGED_SOURCE_WORDS + 2] = source.mirrored ? TRIANGLE_FLAG_FLIP_FRONT_FACE : 0;
     });
     return table;
 }
@@ -175,6 +188,9 @@ export class GpuMergedIdentity {
         const table = mergedSourceTable(group);
         const sources = this.device.createBuffer({ label: `${this.label} sources`, size: table.byteLength, usage: USAGE.STORAGE | USAGE.COPY_DST });
         this.device.queue.writeBuffer(sources, 0, table);
+        const materialTable = mergedMaterialTable(group);
+        const materials = this.device.createBuffer({ label: `${this.label} materials`, size: materialTable.byteLength, usage: USAGE.STORAGE | USAGE.COPY_DST });
+        this.device.queue.writeBuffer(materials, 0, materialTable);
         const params = this.device.createBuffer({ label: `${this.label} params`, size: 16, usage: USAGE.UNIFORM | USAGE.COPY_DST });
         if (indexed) {
             this.writeIndexedTables(triangles, group, triangleOffset, triangleCount, indexed.vertexBase);
@@ -183,7 +199,7 @@ export class GpuMergedIdentity {
         } else {
             this.device.queue.writeBuffer(params, 0, new Uint32Array([triangleOffset * TRIANGLE_WORDS, triangleCount, group.sources.length, 0]));
         }
-        this.retired.push(sources, params);
+        this.retired.push(sources, params, materials);
         const pass = encoder.beginComputePass({ label: this.label });
         pass.setPipeline(pipeline);
         pass.setBindGroup(
@@ -195,6 +211,7 @@ export class GpuMergedIdentity {
                     { binding: 0, resource: { buffer: triangles } },
                     { binding: 1, resource: { buffer: sources } },
                     { binding: 2, resource: { buffer: params } },
+                    { binding: 3, resource: { buffer: materials } },
                 ],
             }),
         );

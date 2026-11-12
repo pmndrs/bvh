@@ -17,8 +17,17 @@
  *   positions are read through the attribute, so interleaved, normalized and
  *   non-float positions work.
  * - **Meshes.** One mesh per geometry and triangle range, shared by every
- *   object (and every instance) that uses it. With an array of materials, each
- *   group is its own mesh, so each can carry its own material index.
+ *   object (and every instance) that uses it. With an array of materials
+ *   (`multiMaterial: 'triangles'`, the default), one mesh of all the groups
+ *   (in group order) with one instance per object (and per instance of an
+ *   instanced mesh), and each triangle carries its group's material
+ *   (`MeshInput.triangleMaterials`, from `material(object, info)` per group);
+ *   `BvhThreeMeshSource.groups`, {@link threeGroupOf} and
+ *   {@link threeMaterialOf} map a hit's triangle back to its group and three
+ *   material. `bvhSceneFromObject3D`, `SceneTreesObject3DSync` and
+ *   `BvhSceneRaycaster` fold the same way, so instance N is the same object
+ *   in all three. `multiMaterial: 'groups'` keeps one mesh and instance per
+ *   group, with the group's material on the instance.
  * - **Instances.** One per `Mesh`, per instance of an `InstancedMesh` (below
  *   its `count`: `matrixWorld x instanceMatrix`), and per active instance of a
  *   `BatchedMesh` (`matrixWorld x getMatrixAt(i)`, its geometry's range). The
@@ -35,7 +44,17 @@
  *   ({@link rayMaskFromLayers}) both hit. `layers: false` gives every instance
  *   `0xff` instead.
  * - **Materials.** Optional: `material(object, info)` returns an index
- *   (0-65534) per instance and group, reported as `BvhHit.material`.
+ *   (0-65534) per instance and group, reported as `BvhHit.material`. For a
+ *   multi-material mesh it is asked once per group (`info.group`,
+ *   `info.materialIndex`: the group's `materialIndex` into the array), and the
+ *   answer becomes that group's triangles' material; undefined leaves them
+ *   without one. An object whose instances give a group different answers
+ *   (an `InstancedMesh` with a material per instance) is not folded: it
+ *   keeps one mesh per group, shared by its instances, with each instance's
+ *   answer on the instance, as `'groups'` does. A hit's `material` is then
+ *   what the callback returned for its group; to get back to three's
+ *   `object.material[i]`, return (or map from) `info.materialIndex`, or call
+ *   {@link threeMaterialOf} with the hit's triangle.
  * - **Static.** `static` (true, or a function of the object and instance)
  *   marks instances that never move, for `mergeStaticInstances`, and the
  *   SceneTrees sync never pushes their transforms.
@@ -45,6 +64,7 @@
 
 import { Matrix4, type BatchedMesh, type BufferAttribute, type BufferGeometry, type InstancedMesh, type InterleavedBufferAttribute, type Layers, type Material, type Mesh, type Object3D } from 'three';
 import { MAX_MATERIAL } from '../trace/layout.ts';
+import { TRIANGLE_MATERIAL_NONE } from '../mesh-input.ts';
 import type { MeshGeometry } from '../trace/mesh-bvh.ts';
 import type { TraceSceneInstance } from '../trace/scene-assembly.ts';
 
@@ -73,6 +93,18 @@ export interface BvhSceneFromObject3DOptions {
     readonly layers?: boolean;
     /** The material index (0-65534) of an instance's triangles, reported as `BvhHit.material`. Default: none. */
     readonly material?: (mesh: Mesh, info: BvhThreeMaterialInfo) => number | undefined;
+    /**
+     * How a multi-material mesh (an array of materials, with groups) becomes
+     * meshes, the same in `bvhSceneFromObject3D`, `SceneTreesObject3DSync`
+     * and `BvhSceneRaycaster`. `'triangles'` (the default): one mesh and
+     * instance holding every group, each triangle with its group's material
+     * (`triangleMaterials`); its source's `group` and `materialIndex` are -1
+     * ({@link threeGroupOf} and {@link threeMaterialOf} give a hit's). An
+     * object whose instances give a group different materials falls back to
+     * `'groups'`. `'groups'`: one mesh and instance per group, with the
+     * group's material on the instance.
+     */
+    readonly multiMaterial?: 'triangles' | 'groups';
 }
 
 /** The three object behind one instance. `BvhHit.instance` (and `CpuHit.instanceIndex`) indexes these. */
@@ -80,13 +112,29 @@ export interface BvhThreeSource {
     readonly object: Mesh;
     /** The instance of an `InstancedMesh` or `BatchedMesh`, or -1 for a plain mesh. */
     readonly instanceId: number;
-    /** The geometry group, or -1. */
+    /**
+     * The geometry group, or -1: for a mesh with one material, and for a
+     * folded multi-material mesh (`multiMaterial: 'triangles'`), which holds
+     * every group ({@link threeGroupOf} gives a hit triangle's).
+     */
     readonly group: number;
-    /** The group's `materialIndex`, or -1. */
+    /** The group's `materialIndex`, or -1 (see {@link group}; {@link threeMaterialOf} gives a hit triangle's three material). */
     readonly materialIndex: number;
     /** Position of this instance's mesh in {@link BvhThreeScene.meshes}. */
     readonly mesh: number;
     readonly static: boolean;
+}
+
+/** One geometry group of a multi-material mesh ({@link BvhThreeMeshSource.groups}). */
+export interface BvhThreeGroupRange {
+    /** First index (vertex) of the group's triangles, and how many indices, a multiple of 3. */
+    readonly start: number;
+    readonly count: number;
+    /** The group's position in `geometry.groups`, and its `materialIndex`. */
+    readonly group: number;
+    readonly materialIndex: number;
+    /** What `material(object, info)` gave its triangles (`triangleMaterials`), or undefined. */
+    readonly material: number | undefined;
 }
 
 /** Where one of {@link BvhThreeScene.meshes} came from. */
@@ -96,6 +144,12 @@ export interface BvhThreeMeshSource {
     readonly start: number;
     /** Indices (vertices) in the range, a multiple of 3; `start` need not be (see `threeTriangleRanges`). */
     readonly count: number;
+    /**
+     * A folded multi-material mesh (`multiMaterial: 'triangles'`): its groups' ranges, one
+     * after another in the mesh's triangles; `start` and `count` are then the
+     * first group's start and the total. Absent for one range.
+     */
+    readonly groups?: readonly BvhThreeGroupRange[];
 }
 
 /** `buildTraceScene` / `SceneTrees` inputs, with the three objects behind them. */
@@ -110,7 +164,42 @@ export interface BvhThreeScene {
 
 /** Converts a hit's triangle (its index within its mesh) to three's `faceIndex` on the source geometry. */
 export function threeFaceIndex(meshSource: BvhThreeMeshSource, triangle: number): number {
-    return Math.floor((meshSource.start + triangle * 3) / 3);
+    return Math.floor(threeFirstIndex(meshSource, triangle) / 3);
+}
+
+/** The first index (vertex, for non-indexed geometry) of a hit's triangle in the source geometry, as three steps through it. */
+export function threeFirstIndex(meshSource: BvhThreeMeshSource, triangle: number): number {
+    const found = groupAt(meshSource, triangle);
+    return found ? found.range.start + found.local * 3 : meshSource.start + triangle * 3;
+}
+
+/** The geometry group a hit's triangle came from, in a folded multi-material mesh (`multiMaterial: 'triangles'`); null for a mesh of one range. */
+export function threeGroupOf(meshSource: BvhThreeMeshSource, triangle: number): BvhThreeGroupRange | null {
+    return groupAt(meshSource, triangle)?.range ?? null;
+}
+
+/**
+ * The three material that draws a hit's triangle: `object.material[i]` of
+ * its group (a folded mesh's from the triangle, a per-group instance's from
+ * its source), or the object's one material. `source` and `meshSource` are
+ * the hit instance's (`sourceOf`, `meshSourceOf` or `scene.meshSources[source.mesh]`).
+ */
+export function threeMaterialOf(source: BvhThreeSource, meshSource: BvhThreeMeshSource, triangle: number): Material | null {
+    const material = source.object.material;
+    if (!Array.isArray(material)) return material ?? null;
+    const index = threeGroupOf(meshSource, triangle)?.materialIndex ?? source.materialIndex;
+    return material[index] ?? null;
+}
+
+function groupAt(meshSource: BvhThreeMeshSource, triangle: number): { range: BvhThreeGroupRange; local: number } | null {
+    if (!meshSource.groups) return null;
+    let first = 0;
+    for (const range of meshSource.groups) {
+        const count = range.count / 3;
+        if (triangle < first + count) return { range, local: triangle - first };
+        first += count;
+    }
+    return null;
 }
 
 /** A ray mask from three's layers (a camera's or a raycaster's): layers 0-7 as bits 0-7. */
@@ -260,8 +349,11 @@ export interface WalkedInstance {
     readonly key: string;
     readonly object: Mesh;
     readonly instanceId: number;
+    /** The triangles: one range, or a folded mesh's whole (group and materialIndex -1). */
     readonly range: TriangleRange;
     readonly meshKey: string;
+    /** The instance's mesh: its range, or a folded mesh's groups. */
+    readonly meshSource: BvhThreeMeshSource;
     readonly geometry: BufferGeometry;
     readonly objectToWorld: Float64Array;
     readonly visible: boolean;
@@ -325,35 +417,72 @@ export function instancesOf(object: Mesh, out: (instanceId: number, record: Inst
     }
 }
 
-/** One mesh's instances with their keys and state (its children are not visited). */
+/** One mesh's instances with their keys and state (its children are not visited); a multi-material mesh folded per {@link BvhSceneFromObject3DOptions.multiMaterial}. */
 export function walkMesh(mesh: Mesh, options: BvhSceneFromObject3DOptions, out: WalkedInstance[]): void {
     if (!mesh.isMesh || !mesh.geometry?.getAttribute('position')) return;
     const staticOption = options.static ?? false;
     const visible = effectivelyVisible(mesh);
     const mask = instanceMaskFromLayers(mesh.layers, options.layers ?? true);
+    const geometry = mesh.geometry;
+    const walked: { instanceId: number; record: InstanceRecordInput; isStatic: boolean; ranges: { range: TriangleRange; material: number | undefined }[] }[] = [];
     instancesOf(mesh, (instanceId, record, batchRange) => {
-        const ranges = threeTriangleRanges(mesh.geometry, mesh.material, batchRange ?? mesh.geometry.drawRange);
+        const ranges = threeTriangleRanges(geometry, mesh.material, batchRange ?? geometry.drawRange);
         const isStatic = typeof staticOption === 'function' ? staticOption(mesh, instanceId) : staticOption;
-        for (const range of ranges) {
-            const material = checkMaterial(
-                options.material?.(mesh, { instanceId, group: range.group, materialIndex: range.materialIndex, threeMaterial: range.threeMaterial }),
-                mesh,
-            );
-            out.push({
-                key: `${mesh.id}:${instanceId}:${range.group}`,
-                object: mesh,
-                instanceId,
+        walked.push({
+            instanceId,
+            record,
+            isStatic,
+            ranges: ranges.map((range) => ({
                 range,
-                meshKey: `${mesh.geometry.uuid}:${range.start}:${range.count}`,
-                geometry: mesh.geometry,
-                objectToWorld: record.objectToWorld,
-                visible: visible && record.visible,
-                mask,
+                material: checkMaterial(options.material?.(mesh, { instanceId, group: range.group, materialIndex: range.materialIndex, threeMaterial: range.threeMaterial }), mesh),
+            })),
+        });
+    });
+    const fold = Array.isArray(mesh.material) && options.multiMaterial !== 'groups' && sameGroupMaterials(walked);
+    for (const { instanceId, record, isStatic, ranges } of walked) {
+        const common = { object: mesh, instanceId, geometry, objectToWorld: record.objectToWorld, visible: visible && record.visible, mask, static: isStatic };
+        if (fold && ranges.length > 0) {
+            const groups: BvhThreeGroupRange[] = ranges.map(({ range, material }) => ({ start: range.start, count: range.count, group: range.group, materialIndex: range.materialIndex, material }));
+            const count = groups.reduce((sum, group) => sum + group.count, 0);
+            out.push({
+                ...common,
+                key: `${mesh.id}:${instanceId}:groups`,
+                range: { start: groups[0].start, count, group: -1, materialIndex: -1, threeMaterial: null },
+                // The groups and their materials: objects on the geometry whose answers differ get meshes of their own.
+                meshKey: `${geometry.uuid}:groups:${groups.map((group) => `${group.start}.${group.count}.${group.material ?? '-'}`).join(',')}`,
+                meshSource: { geometry, start: groups[0].start, count, groups },
+                // A folded mesh's materials are its triangles'.
+                material: undefined,
+            });
+            continue;
+        }
+        for (const { range, material } of ranges) {
+            out.push({
+                ...common,
+                key: `${mesh.id}:${instanceId}:${range.group}`,
+                range,
+                meshKey: `${geometry.uuid}:${range.start}:${range.count}`,
+                meshSource: { geometry, start: range.start, count: range.count },
                 material,
-                static: isStatic,
             });
         }
-    });
+    }
+}
+
+/**
+ * Every instance gives each group the same material: then one folded mesh
+ * serves them all. Otherwise (an `InstancedMesh` with a material per
+ * instance) folding would copy the mesh once per instance.
+ */
+function sameGroupMaterials(walked: readonly { ranges: readonly { range: TriangleRange; material: number | undefined }[] }[]): boolean {
+    const byGroup = new Map<number, number | undefined>();
+    for (const { ranges } of walked) {
+        for (const { range, material } of ranges) {
+            if (!byGroup.has(range.group)) byGroup.set(range.group, material);
+            else if (byGroup.get(range.group) !== material) return false;
+        }
+    }
+    return true;
 }
 
 /** Walks the root: every instance with its key, mesh key and state (the shared part of the scene builder and the sync). */
@@ -384,8 +513,8 @@ export function bvhSceneFromObject3D(root: Object3D | readonly Object3D[], optio
         let mesh = meshIndex.get(walked.meshKey);
         if (mesh === undefined) {
             mesh = meshes.length;
-            meshes.push(meshInputOf(walked.geometry, walked.range.start, walked.range.count));
-            meshSources.push({ geometry: walked.geometry, start: walked.range.start, count: walked.range.count });
+            meshes.push(meshGeometryOf(walked.meshSource));
+            meshSources.push(walked.meshSource);
             meshIndex.set(walked.meshKey, mesh);
         }
         const instanceIndex = instances.length;
@@ -398,12 +527,33 @@ export function bvhSceneFromObject3D(root: Object3D | readonly Object3D[], optio
             material: walked.material,
             static: walked.static,
         });
-        sources.push({ object: walked.object, instanceId: walked.instanceId, group: walked.range.group, materialIndex: walked.range.materialIndex, mesh, static: walked.static });
+        sources.push(sourceOfWalked(walked, mesh));
     }
     return { meshes, meshSources, instances, sources };
 }
 
+/** A walked instance's source, with its mesh's position (or handle). */
+export function sourceOfWalked(walked: WalkedInstance, mesh: number): BvhThreeSource {
+    return { object: walked.object, instanceId: walked.instanceId, group: walked.range.group, materialIndex: walked.range.materialIndex, mesh, static: walked.static };
+}
+
 /** {@link meshInputOf}, for the sync. */
 export function meshGeometryOf(source: BvhThreeMeshSource): MeshGeometry {
-    return meshInputOf(source.geometry, source.start, source.count);
+    return source.groups ? groupedMeshInputOf(source.geometry, source.groups) : meshInputOf(source.geometry, source.start, source.count);
+}
+
+/** A multi-material mesh's groups as one mesh input: their triangles one after another, each with its group's material. */
+function groupedMeshInputOf(geometry: BufferGeometry, groups: readonly BvhThreeGroupRange[]): MeshGeometry {
+    const position = geometry.getAttribute('position') as BufferAttribute | InterleavedBufferAttribute;
+    const index = geometry.index;
+    const total = groups.reduce((sum, range) => sum + range.count, 0);
+    const indices = new Uint32Array(total);
+    const triangleMaterials = new Uint16Array(total / 3);
+    let at = 0;
+    for (const range of groups) {
+        for (let k = 0; k < range.count; k++) indices[at + k] = index ? index.getX(range.start + k) : range.start + k;
+        triangleMaterials.fill(range.material ?? TRIANGLE_MATERIAL_NONE, at / 3, (at + range.count) / 3);
+        at += range.count;
+    }
+    return { positions: sharedPositionsOf(position), indices, triangleMaterials };
 }

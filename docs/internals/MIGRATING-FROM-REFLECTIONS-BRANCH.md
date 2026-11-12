@@ -48,6 +48,12 @@ What changed:
 - **Storage.** It is `material + 1` in instance flags bits 16-31 (it was bits 8-31; bits 8-15 now hold the mask). Reflections never reads the word itself, so nothing changes there.
 - **Cost.** The walk no longer works out the normal and material at every accepted triangle. It keeps the instance record and triangle slot and works them out once, after the walk.
 
+### Per-triangle materials
+
+`MeshInput.triangleMaterials` (one value per original triangle, 0-65534, `TRIANGLE_MATERIAL_NONE` = 0xffff for none) gives a mesh a material per triangle. A hit's material is the triangle's when it has one, else the instance's, else `BVH_NO_MATERIAL`, in every format, builder and merge (a merged triangle takes its source triangle's, else its source instance's). `triangleFlags` still may set bit 0 only. In three, a multi-material mesh's groups fill it through the `material` callback (asked per group), so such a mesh is one mesh and instance; `threeGroupOf` and `threeMaterialOf` map a hit's triangle back to its group and three material, and `multiMaterial: 'groups'` keeps the old one mesh and instance per group.
+
+**Breaking (`@pmndrs/bvh/three`): multi-material meshes are folded by default in `bvhSceneFromObject3D`, `SceneTreesObject3DSync` and `BvhSceneRaycaster`.** Before, each group was its own mesh and instance, with `sourceOf(hit.instance).group` and `.materialIndex` naming it and the group's `material` answer on the instance. Now such an object is one instance (per object, or per instance of an `InstancedMesh`), so there are fewer instances, the instance indices of everything after it shift, and its source's `group` and `materialIndex` are -1. `hit.material` still is the group's answer (now from the triangle). To find the group or three material of a hit: `threeGroupOf(meshSource, hit.triangle)` or `threeMaterialOf(source, meshSource, hit.triangle)`, with `meshSource` from `sync.meshSourceOf(hit.instance)`, `picker.meshSourceOf(i)` or `scene.meshSources[source.mesh]`; `hit.triangle` counts across the groups, so use `threeFaceIndex` for three's `faceIndex`. Code that keys hits by `object:instanceId:group`, or counts instances per group, should pass `multiMaterial: 'groups'` to keep the old layout. An object whose instances give a group different materials stays split per group (not folded), as before.
+
 ## 3. Batch hit records
 
 Reflections traces inline, through `traceModuleWgsl`, so this only matters for `HIT_RECORD_WORD`, which `loadPmndrsBvh` checks. `batchKernelWgsl(mode, { hitNormal })`:
@@ -100,6 +106,10 @@ Leaving it off changes nothing: the scene is byte for byte the instanced one.
 - **Sizes:** nothing moved. Nodes are 64 bytes, triangles 48 and instance records 64.
 
 In reflections, set `PMNDRS_BVH_LAYOUT_VERSION = 2`, or `loadPmndrsBvh` refuses `main`. Serialized trees from version 1 are refused by `deserializeLayout`. Reflections builds its trees at startup, so it has none.
+
+## 7. Deforming meshes without subgroups
+
+`SceneTrees.setPose` needs subgroups (the GPU refit). Without them it is skipped, counted in `deformingCounts.posesSkipped`, and now warned once. `SceneTrees.setPoseCpu(mesh, positions)` takes the pose as a `Float32Array` (`x, y, z` per vertex, the mesh's own vertices) and refits on the CPU at the next update, with or without subgroups: records, indexed (meshes added as deforming are never welded) and quantized nodes. The mesh's top-level box follows the pose. `deformingCounts.cpuPoses` counts the poses written.
 
 ## Checklist
 

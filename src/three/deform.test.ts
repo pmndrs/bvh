@@ -454,11 +454,13 @@ describe('SceneTreesObject3DSync with skinned and morphed meshes', () => {
             },
         });
         await sync.ready;
-        // a: one mesh; b: two groups; rigid: one rest-pose mesh.
+        // a: one mesh; b: its two groups folded into one mesh (each triangle with its group's material); rigid: one rest-pose mesh.
         expect(passes).toHaveLength(2);
         const deforming = [...trees.meshes.values()].filter((mesh) => mesh.options?.deforming);
-        expect(deforming).toHaveLength(3);
-        expect(trees.meshes.size).toBe(4);
+        expect(deforming).toHaveLength(2);
+        expect(trees.meshes.size).toBe(3);
+        const folded = deforming.find((mesh) => mesh.geometry.triangleMaterials)!;
+        expect(folded.geometry.indices).toHaveLength(a.geometry.index!.count);
 
         trees.log.length = 0;
         const before = renderer.computes;
@@ -466,11 +468,14 @@ describe('SceneTreesObject3DSync with skinned and morphed meshes', () => {
         root.updateMatrixWorld(true);
         sync.update();
         expect(renderer.computes - before).toBe(2);
-        expect(trees.log.filter((line) => line.startsWith('setPose'))).toHaveLength(3);
+        expect(trees.log.filter((line) => line.startsWith('setPose'))).toHaveLength(2);
         expect(sync.poseCounts.posed).toBe(2);
         // The root bone walked away: the box moved, and holds the CPU pose.
         expect(sync.poseCounts.boundsMoved).toBeGreaterThan(0);
-        const aMesh = [...trees.meshes.entries()].find(([, mesh]) => mesh.options?.deforming && mesh.geometry.indices?.length === a.geometry.index!.count)![0];
+        const aMesh = [...trees.meshes.entries()].find(([, mesh]) => mesh.options?.deforming && !mesh.geometry.triangleMaterials)![0];
+        // The folded mesh's refit reads its own index buffer (the groups' indices one after another) too.
+        const bMesh = [...trees.meshes.entries()].find(([, mesh]) => mesh.geometry === folded.geometry)![0];
+        expect(trees.poses.get(bMesh)).toMatchObject({ positionBuffer: passes[1].buffer, vertexCount: a.geometry.attributes.position.count, indexFormat: 'uint32' });
         expect(contains(Float32Array.from(trees.bounds.get(aMesh)!), cpuPose(a))).toEqual([]);
         // An indexed range's refit reads our index buffer and the pass's vec4 vertices.
         const vertices = trees.poses.get(aMesh)!;
@@ -487,8 +492,34 @@ describe('SceneTreesObject3DSync with skinned and morphed meshes', () => {
         expect(disposed).toEqual([passes[1]]);
         expect(trees.meshes.size).toBe(2);
         sync.dispose();
+        expect(trees.meshes.size).toBe(0);
         expect(disposed).toEqual([passes[1], passes[0]]);
         void gpu;
+    });
+
+    it('a non-indexed multi-material posed mesh folds into one mesh whose refit reads its own index buffer over every vertex', async () => {
+        const { renderer } = fakeRenderer();
+        const random = createRandom(31);
+        const geometry = new BoxGeometry(1, 1, 1, 2, 2, 2).toNonIndexed();
+        const position = geometry.attributes.position;
+        geometry.morphAttributes.position = [new Float32BufferAttribute(Array.from({ length: position.count * 3 }, () => random() - 0.5), 3)];
+        geometry.morphTargetsRelative = true;
+        const morphed = new Mesh(geometry, [0, 1, 2, 3, 4, 5].map(() => new MeshBasicMaterial()));
+        morphed.updateMorphTargets();
+        const root = new Group();
+        root.add(morphed);
+        root.updateMatrixWorld(true);
+        const trees = new PosingTrees();
+        const sync = new SceneTreesObject3DSync(trees, root, { renderer });
+        await sync.ready;
+        expect(trees.meshes.size).toBe(1);
+        const [[handle, mesh]] = [...trees.meshes.entries()];
+        expect(mesh.geometry.indices).toHaveLength(position.count);
+        sync.update();
+        // Not the non-indexed range path (vertex count = the range, an offset): the folded indices name the pass's vertices.
+        expect(trees.poses.get(handle)).toMatchObject({ vertexCount: position.count, indexFormat: 'uint32' });
+        expect(trees.poses.get(handle)!.indexBuffer).toBeDefined();
+        sync.dispose();
     });
 
     it('compiles each pose variant once when its first mesh is added, and dispatches nothing until update()', async () => {

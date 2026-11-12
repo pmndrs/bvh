@@ -33,7 +33,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createFakeGpu } from '../../tests/support/fake-gpu.ts';
 import { SceneTrees } from '../scene/scene-trees.ts';
-import { TRIANGLE_FLAG_FILTER } from '../trace/layout.ts';
+import { NO_MATERIAL, TRIANGLE_FLAG_FILTER } from '../trace/layout.ts';
 import { createTinyBvhBuilder } from '../tinybvh.ts';
 import { createCpuTracer } from '../trace/cpu-traversal.ts';
 import { buildMeshBvhWithTinyBvh } from '../trace/mesh-bvh-topology.ts';
@@ -42,7 +42,9 @@ import { createRandom } from '../trace/oracle-fixtures.ts';
 import { buildTraceScene } from '../trace/scene-assembly.ts';
 import type { Mat4 } from '../trace/top-level.ts';
 import type { SceneInstanceChange, SceneInstanceDescriptor } from '../scene/scene-trees.ts';
-import { bvhSceneFromObject3D, effectivelyVisible, rayMaskFromLayers, threeFaceIndex, threeTriangleRanges, type BvhThreeScene } from './scene.ts';
+import { bvhSceneFromObject3D, effectivelyVisible, rayMaskFromLayers, threeFaceIndex, threeGroupOf, threeMaterialOf, threeTriangleRanges, type BvhThreeScene, type BvhThreeSource } from './scene.ts';
+import { prepareBoundsTrees } from './raycast.ts';
+import { BvhSceneRaycaster } from './scene-raycast.ts';
 import { SceneTreesObject3DSync, type SceneTreesTarget } from './scene-trees-sync.ts';
 
 const tinyBvh = await createTinyBvhBuilder();
@@ -144,7 +146,10 @@ async function compareWithThree(scene: BvhThreeScene, root: Object3D, seed: numb
         sided
             ? {
                   triangleFilter: (candidate) => {
-                      const side = scene.instances[candidate.instance].material as Side;
+                      // A multi-material mesh's side is its triangle's (its group's material), else the instance's.
+                      const instance = scene.instances[candidate.instance];
+                      const own = scene.meshes[instance.meshIndex].triangleMaterials?.[candidate.triangle];
+                      const side = (own !== undefined && own !== 0xffff ? own : instance.material) as Side;
                       return (side === FrontSide && !candidate.frontFace) || (side === BackSide && candidate.frontFace);
                   },
               }
@@ -285,8 +290,9 @@ describe('bvhSceneFromObject3D', () => {
         const mesh = new Mesh(geometry, [0, 1, 2, 3, 4, 5].map(() => material()));
         mesh.updateMatrixWorld();
         const scene = bvhSceneFromObject3D(mesh);
-        expect(scene.meshes).toHaveLength(6);
-        for (const input of scene.meshes) expect(input.positions).toBe(scene.meshes[0].positions);
+        // One mesh of the six groups.
+        expect(scene.meshes).toHaveLength(1);
+        expect(scene.meshSources[0].groups).toHaveLength(6);
         expect(scene.meshes[0].positions.length).toBe(count * 3);
         // A second conversion reuses it while the data's version holds, and compacts again after an edit.
         expect(bvhSceneFromObject3D(mesh).meshes[0].positions).toBe(scene.meshes[0].positions);
@@ -307,10 +313,12 @@ describe('bvhSceneFromObject3D', () => {
             expect(instance.instanceIndex).toBe(index);
             expect(instance.meshIndex).toBe(scene.sources[index].mesh);
         });
-        // 9 of the InstancedMesh's 12, 4 batched instances (one hidden), the box's 6 groups.
+        // 9 of the InstancedMesh's 12, 4 batched instances (one hidden), the box's 6 groups in one mesh and instance.
         expect(scene.sources.filter((source) => (source.object as InstancedMesh).isInstancedMesh)).toHaveLength(9);
         expect(scene.sources.filter((source) => (source.object as BatchedMesh).isBatchedMesh)).toHaveLength(4);
-        expect(scene.sources.filter((source) => source.group >= 0).map((source) => source.materialIndex)).toEqual([0, 1, 2, 3, 4, 5]);
+        const grouped = scene.meshSources.filter((source) => source.groups);
+        expect(grouped).toHaveLength(1);
+        expect(grouped[0].groups!.map((range) => range.materialIndex)).toEqual([0, 1, 2, 3, 4, 5]);
     });
 
     it('maps visibility, layers and materials', () => {
@@ -584,5 +592,172 @@ describe('SceneTreesObject3DSync', () => {
         expect(sync.update()).toMatchObject({ moved: 0, changed: 5 });
         expect(trees.log.every((line) => line.endsWith('{"visible":false}'))).toBe(true);
         expect(materialCalls).toBe(callsAtSync);
+    });
+});
+
+describe('bvhSceneFromObject3D with multi-material meshes', () => {
+    it('turns a multi-material mesh into one mesh whose triangles carry their groups\' materials (through the material callback), and maps hits back to the groups', async () => {
+        const geometry = new BoxGeometry(1, 1, 1, 2, 2, 2);
+        const materials = [0, 1, 2, 3, 4, 5].map(() => material());
+        const box = new Mesh(geometry, materials);
+        // Another object on the same geometry and materials shares the mesh; a third with other answers gets its own.
+        const twin = new Mesh(geometry, materials);
+        twin.position.set(3, 0, 0);
+        const other = new Mesh(geometry, materials);
+        other.position.set(-3, 0, 0);
+        const root = new Group();
+        root.add(box, twin, other);
+        root.updateMatrixWorld(true);
+        const scene = bvhSceneFromObject3D(root, {
+            // Group 2 (materialIndex 2) has none: its triangles fall back to the instance's (none here).
+            material: (mesh, info) => (info.materialIndex === 2 ? undefined : (mesh === other ? 100 : 10) + info.materialIndex),
+        });
+        expect(scene.instances).toHaveLength(3);
+        expect(scene.meshes).toHaveLength(2);
+        expect(scene.instances.map((instance) => instance.material)).toEqual([undefined, undefined, undefined]);
+        expect(scene.sources.map((source) => [source.mesh, source.group, source.materialIndex])).toEqual([[0, -1, -1], [0, -1, -1], [1, -1, -1]]);
+        const source = scene.meshSources[0];
+        expect(source.groups!.map((range) => [range.group, range.materialIndex, range.material])).toEqual([[0, 0, 10], [1, 1, 11], [2, 2, undefined], [3, 3, 13], [4, 4, 14], [5, 5, 15]]);
+        const perGroup = geometry.groups[0].count / 3;
+        expect(Array.from(scene.meshes[0].triangleMaterials!)).toEqual([10, 11, 0xffff, 13, 14, 15].flatMap((value) => new Array<number>(perGroup).fill(value)));
+        expect(Array.from(scene.meshes[1].triangleMaterials!).slice(0, perGroup)).toEqual(new Array<number>(perGroup).fill(100));
+
+        // Traced: each hit's material is its group's, and its triangle maps back to three's face and group.
+        const trace = await buildTraceScene(scene.meshes, scene.instances, { build });
+        const tracer = createCpuTracer(trace);
+        const raycaster = new Raycaster();
+        const random = createRandom(41);
+        let hits = 0;
+        for (let r = 0; r < 600; r++) {
+            const origin = new Vector3((random() - 0.5) * 12, (random() - 0.5) * 6, (random() - 0.5) * 6);
+            const direction = new Vector3((random() - 0.5) * 6, (random() - 0.5) * 2, (random() - 0.5) * 2).sub(origin).normalize();
+            raycaster.set(origin, direction);
+            const expected = threeFirstHit(raycaster, root);
+            const ours = tracer.closest({ origin: origin.toArray(), direction: direction.toArray(), tMin: 0, tMax: 1e30 });
+            if (!expected || !ours || Math.abs(ours.t - expected.distance) > 1e-4) continue;
+            const hitSource = scene.sources[ours.instanceIndex];
+            const meshSource = scene.meshSources[hitSource.mesh];
+            if (threeFaceIndex(meshSource, ours.triangleIndex) !== expected.faceIndex) continue; // an edge tie
+            hits++;
+            const group = threeGroupOf(meshSource, ours.triangleIndex)!;
+            expect(group.materialIndex).toBe(expected.face!.materialIndex);
+            const want = group.materialIndex === 2 ? NO_MATERIAL : (hitSource.object === other ? 100 : 10) + group.materialIndex;
+            expect(ours.material).toBe(want);
+        }
+        expect(hits).toBeGreaterThan(100);
+
+        // multiMaterial: 'groups' keeps one mesh and instance per group, as the sync does, the group's material on the instance.
+        const split = bvhSceneFromObject3D(root, { multiMaterial: 'groups', material: (mesh, info) => (info.materialIndex === 2 ? undefined : (mesh === other ? 100 : 10) + info.materialIndex) });
+        expect(split.meshes).toHaveLength(6);
+        expect(split.meshes.every((mesh) => !mesh.triangleMaterials)).toBe(true);
+        expect(split.instances.slice(0, 6).map((instance) => instance.material)).toEqual([10, 11, undefined, 13, 14, 15]);
+        expect(split.sources.slice(0, 6).map((source) => source.group)).toEqual([0, 1, 2, 3, 4, 5]);
+    });
+});
+
+describe('multi-material meshes: the scene builder, the sync and the scene raycaster fold alike', () => {
+    /** A box of six groups (twice, sharing the mesh), an instanced box of six groups, a one-material sphere. */
+    function multiScene() {
+        const geometry = new BoxGeometry(1, 1, 1, 2, 2, 2);
+        const materials = [0, 1, 2, 3, 4, 5].map(() => material());
+        const root = new Group();
+        const box = new Mesh(geometry, materials);
+        const twin = new Mesh(geometry, materials);
+        twin.position.set(3, 0, 0);
+        const instanced = new InstancedMesh(new BoxGeometry(0.5, 0.5, 0.5), materials, 4);
+        for (let i = 0; i < 4; i++) instanced.setMatrixAt(i, new Matrix4().makeTranslation(-3, i, 0));
+        const sphere = new Mesh(new SphereGeometry(0.5, 6, 4), material());
+        sphere.position.set(0, 3, 0);
+        root.add(box, twin, instanced, sphere);
+        root.updateMatrixWorld(true);
+        return { root, box, instanced, materials };
+    }
+    const plain = (source: BvhThreeSource | null) => source && [source.object.id, source.instanceId, source.group, source.materialIndex, source.static];
+    const byMaterialIndex = (_mesh: Mesh, info: { materialIndex: number }) => (info.materialIndex >= 0 ? 20 + info.materialIndex : undefined);
+
+    for (const multiMaterial of [undefined, 'groups'] as const) {
+        it(`instance N is the same source everywhere (multiMaterial: ${multiMaterial ?? "default 'triangles'"})`, async () => {
+            await prepareBoundsTrees();
+            const { root } = multiScene();
+            const options = { material: byMaterialIndex, ...(multiMaterial ? { multiMaterial } : {}) };
+            const scene = bvhSceneFromObject3D(root, options);
+            const trees = new RecordingTrees();
+            const sync = new SceneTreesObject3DSync(trees, root, options);
+            const picker = new BvhSceneRaycaster(root, options);
+            const handles = [...trees.instances.keys()];
+            // Folded: 2 boxes + 4 instances + 1 sphere; split: 6 groups each of 6 objects, + the sphere.
+            expect(scene.sources).toHaveLength(multiMaterial ? 37 : 7);
+            expect(handles).toHaveLength(scene.sources.length);
+            expect(picker.instanceCount).toBe(scene.sources.length);
+            expect(sync.meshCount).toBe(scene.meshes.length);
+            scene.sources.forEach((source, index) => {
+                expect(plain(sync.sourceOf(handles[index]))).toEqual(plain(source));
+                expect(plain(picker.sourceOf(index))).toEqual(plain(source));
+                expect(sync.meshSourceOf(handles[index])?.groups?.length).toBe(scene.meshSources[source.mesh].groups?.length);
+                expect(picker.meshSourceOf(index)?.groups?.length).toBe(scene.meshSources[source.mesh].groups?.length);
+                // The same instance materials, and the same per-triangle materials on the meshes.
+                expect(trees.instances.get(handles[index])!.material).toBe(scene.instances[index].material);
+                expect(trees.meshes.get(sync.sourceOf(handles[index])!.mesh)!.triangleMaterials).toEqual(scene.meshes[source.mesh].triangleMaterials);
+            });
+            if (!multiMaterial) {
+                expect(scene.sources.filter((source) => source.object.material instanceof Array).every((source) => source.group === -1 && source.materialIndex === -1)).toBe(true);
+                expect(scene.meshes.filter((mesh) => mesh.triangleMaterials)).toHaveLength(2);
+            }
+            sync.dispose();
+        });
+    }
+
+    it("threeMaterialOf and threeGroupOf take a folded hit back to object.material[i]; with the material option returning info.materialIndex, hit.material names it too", async () => {
+        const { root, materials } = multiScene();
+        const scene = bvhSceneFromObject3D(root, { material: (_mesh, info) => (info.materialIndex >= 0 ? info.materialIndex : undefined) });
+        const tracer = createCpuTracer(await buildTraceScene(scene.meshes, scene.instances, { build }));
+        const random = createRandom(9);
+        let hits = 0;
+        for (let r = 0; r < 800; r++) {
+            const origin = new Vector3(-3.5 + 7 * random(), -0.6 + 4.2 * random(), 6);
+            const hit = tracer.closest({ origin: origin.toArray(), direction: [0, 0, -1], tMin: 0, tMax: 100 });
+            if (!hit) continue;
+            const source = scene.sources[hit.instanceIndex];
+            const meshSource = scene.meshSources[source.mesh];
+            const three = threeMaterialOf(source, meshSource, hit.triangleIndex);
+            if (Array.isArray(source.object.material)) {
+                hits++;
+                const group = threeGroupOf(meshSource, hit.triangleIndex)!;
+                expect(three).toBe(materials[group.materialIndex]);
+                expect(three).toBe(materials[hit.material]);
+            } else {
+                expect(three).toBe(source.object.material);
+                expect(hit.material).toBe(NO_MATERIAL);
+            }
+        }
+        expect(hits).toBeGreaterThan(50);
+    });
+
+    it('an InstancedMesh with a material per instance is not folded: one mesh per group, shared by every instance', async () => {
+        await prepareBoundsTrees();
+        const count = 2000;
+        const geometry = new BoxGeometry(0.2, 0.2, 0.2);
+        const many = new InstancedMesh(geometry, [0, 1, 2, 3, 4, 5].map(() => material()), count);
+        for (let i = 0; i < count; i++) many.setMatrixAt(i, new Matrix4().makeTranslation(i % 50, Math.floor(i / 50), 0));
+        const same = new InstancedMesh(geometry, many.material, 100);
+        const root = new Group();
+        root.add(many, same);
+        root.updateMatrixWorld(true);
+        // A material per instance on `many`, the same for every instance of `same`.
+        const options = { material: (mesh: Mesh, info: { instanceId: number; materialIndex: number }) => (mesh === many ? info.instanceId % 300 : info.materialIndex) };
+        const scene = bvhSceneFromObject3D(root, options);
+        // many: 6 group meshes (as 'groups'), its instances' materials on the instances; same: one folded mesh.
+        expect(scene.meshes).toHaveLength(7);
+        expect(scene.instances).toHaveLength(count * 6 + 100);
+        expect(scene.instances.slice(0, 6).map((instance) => instance.material)).toEqual([0, 0, 0, 0, 0, 0]);
+        expect(scene.instances[6 * 7].material).toBe(7);
+        expect(scene.sources[6 * 7 + 2]).toMatchObject({ instanceId: 7, group: 2, materialIndex: 2 });
+        expect(scene.sources.at(-1)).toMatchObject({ object: same, instanceId: 99, group: -1, materialIndex: -1 });
+        const trees = new RecordingTrees();
+        const sync = new SceneTreesObject3DSync(trees, root, options);
+        expect(sync.meshCount).toBe(7);
+        expect(trees.meshes.size).toBe(7);
+        expect(new BvhSceneRaycaster(root, options).instanceCount).toBe(count * 6 + 100);
+        sync.dispose();
     });
 });

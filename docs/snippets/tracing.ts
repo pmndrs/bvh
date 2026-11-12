@@ -109,6 +109,22 @@ export function filterFlags(trees: SceneTrees, positions: Float32Array, indices:
     return mesh;
 }
 
+// #region triangle-materials
+import { TRIANGLE_MATERIAL_NONE } from '@pmndrs/bvh';
+
+// #endregion
+
+export function triangleMaterials(trees: SceneTrees, positions: Float32Array, indices: Uint32Array, matrix: Float32Array): void {
+    // #region triangle-materials
+    // One material per triangle (0-65534), by original triangle; TRIANGLE_MATERIAL_NONE (0xffff) takes the instance's.
+    const triangleMaterials = new Uint16Array(indices.length / 3).fill(TRIANGLE_MATERIAL_NONE);
+    triangleMaterials.fill(3, 0, 100); // triangles 0-99 are material 3
+    const mesh = trees.addMesh({ positions, indices, triangleMaterials });
+    trees.addInstance({ mesh, objectToWorld: matrix, material: 7 });
+    // hit.material: 3 on triangles 0-99, 7 (the instance's) on the others.
+    // #endregion
+}
+
 export function masksAndMaterials(trees: SceneTrees, mesh: number, matrix: Float32Array): void {
     // #region masks-materials
     // 8-bit instance masks (default 0xff) and a material index per instance (0-65534).
