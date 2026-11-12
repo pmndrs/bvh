@@ -40,7 +40,10 @@ sync.update();
 - `Mesh`, `InstancedMesh` (instances below its `count`), `BatchedMesh` (active, visible instances) and `SkinnedMesh`
   (posed on the GPU with a `renderer`; [Skinned and morphed meshes](/three/skinned-and-morphed)).
 - The triangles three's `Mesh.raycast` tests: the draw range and, with an array of materials, the groups within it.
-  Each group is its own mesh, so it can carry its own material. Ranges are read as three steps through them, even off
+  `bvhSceneFromObject3D` makes a multi-material mesh one mesh and instance whose triangles carry their group's material
+  (`triangleMaterials`, from `material(mesh, info)` per group; `threeGroupOf` maps a hit back to its group). The sync
+  keeps each group its own mesh and instance, with the group's material (`multiMaterial: 'groups'` does that in
+  `bvhSceneFromObject3D` too). Ranges are read as three steps through them, even off
   a multiple of 3 or overlapping.
 - Indexed, non-indexed and interleaved positions. Interleaved, normalized or non-float positions are compacted once per
   geometry.

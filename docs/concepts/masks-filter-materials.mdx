@@ -88,8 +88,32 @@ kernel's 40-byte hit record). `BVH_NO_MATERIAL` (`0xffffffff`, `NO_MATERIAL` in 
 is what a miss reports.
 
 - It costs no binding and two loads per ray, after the walk.
-- A merged static triangle keeps its source instance's material.
+- A merged static triangle keeps its source's material.
 - In three, the sync's `material(mesh, info)` callback sets it per object and group.
+
+### Per-triangle materials
+
+A mesh can carry a material per triangle instead: `MeshInput.triangleMaterials`, one value per original triangle,
+0 to 65534, or `TRIANGLE_MATERIAL_NONE` (`0xffff`) for none. **A hit's material is its triangle's when it has one,
+else its instance's, else `BVH_NO_MATERIAL`.**
+
+{/* snippet: triangle-materials */}
+```ts
+import { TRIANGLE_MATERIAL_NONE } from '@pmndrs/bvh';
+
+// One material per triangle (0-65534), by original triangle; TRIANGLE_MATERIAL_NONE (0xffff) takes the instance's.
+const triangleMaterials = new Uint16Array(indices.length / 3).fill(TRIANGLE_MATERIAL_NONE);
+triangleMaterials.fill(3, 0, 100); // triangles 0-99 are material 3
+const mesh = trees.addMesh({ positions, indices, triangleMaterials });
+trees.addInstance({ mesh, objectToWorld: matrix, material: 7 });
+// hit.material: 3 on triangles 0-99, 7 (the instance's) on the others.
+```
+
+- Records keep it in flags bits 16-31 (`material + 1`), which every builder writes. Indexed scenes keep a 16-bit table
+  per mesh before its header, and merged groups their side table. `triangleFlags` still may set bit 0 only.
+- A merged triangle takes its source triangle's material, else its source instance's.
+- It costs one select after the walk, nothing in the loop.
+- `bvhSceneFromObject3D` fills it from a multi-material mesh's groups ([Scenes and the sync](/three/scenes-and-sync)).
 
 The hit also has `normal`: the world-space geometric normal of the authored front side, unit length. Interpolated
 normals need your own attributes, through `hit.triangle` and `hit.barycentrics`.

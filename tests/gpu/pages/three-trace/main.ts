@@ -186,7 +186,8 @@ try {
             const own = await traceOnGpu(device, kernel, trees.traceBuffers, rays, mask);
             const ownUnmasked = await traceOnGpu(device, kernel, trees.traceBuffers, rays);
             // The CPU reference from the same three objects (instance i = sources[i]).
-            const scene = bvhSceneFromObject3D(root, syncOptions);
+            // One mesh and instance per group, as the sync makes them.
+            const scene = bvhSceneFromObject3D(root, { ...syncOptions, multiMaterial: 'groups' });
             const reference = createCpuTracer(await buildTraceScene(scene.meshes, scene.instances, { build: (geometry) => buildMeshBvhWithTinyBvh(geometry, tinyBvh) }));
             const positionOf = new Map(scene.sources.map((source, index) => [`${source.object.id}:${source.instanceId}:${source.group}`, index]));
             const toReference = (hit: CpuHit | null): CpuHit | null => {

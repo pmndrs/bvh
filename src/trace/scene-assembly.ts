@@ -26,11 +26,12 @@ import {
     positionStrideFloats,
     type PositionLayout,
     type TriangleLeaves,
+    writeIndexedMeshHeader,
 } from './layout.ts';
 import { checkNodeFormat, quantizeNodes } from '../quantized-nodes.ts';
 import { gpuLayoutNodeBytes, gpuLayoutNodeSlots, type GpuLayoutNodeFormat } from '../gpu-layout.ts';
 import { checkTriangleLeaves, indexedFromRecords, weldExactBits, weldPositions } from '../indexed-leaves.ts';
-import { checkTriangleFlags } from '../mesh-input.ts';
+import { checkTriangleFlags, triangleMaterialCodes } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
 import { markIndexedSceneTriangles } from './indexed-scene-buffers.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
@@ -234,9 +235,13 @@ export function assembleTraceScene(
     const nodeBytes = gpuLayoutNodeBytes(nodeFormat);
     let totalNodes = 0;
     let totalTriangles = 0;
+    // Indexed: an unmerged mesh's per-triangle material codes go into a table before its header.
+    const materialCodes = placed.map((mesh, index) =>
+        indexed && mesh && index < meshes.length ? triangleMaterialCodes(geometryOf(index).triangleMaterials, mesh.triangleCount, `assembleTraceScene: mesh ${index}`) : null,
+    );
     const allPlacements = placed.map((mesh, index): TraceSceneMeshPlacement => {
         const sources = index >= meshes.length ? merged!.plan.groups[index - meshes.length].sources.length : 0;
-        const leading = indexed && mesh ? indexedLeadingUnits(mesh.triangleCount, sources) : 0;
+        const leading = indexed && mesh ? indexedLeadingUnits(mesh.triangleCount, sources, materialCodes[index] !== null) : 0;
         // A quantized mesh's frame slot comes right before its root.
         if (quantized && mesh) totalNodes++;
         const placement: TraceSceneMeshPlacement = {
@@ -266,7 +271,7 @@ export function assembleTraceScene(
             new Uint8Array(mesh.triangles, 0, mesh.triangleCount * TRIANGLE_BYTES),
         );
     });
-    const placedPositions = indexed ? placeIndexedTriangles(placed, allPlacements, geometryOf, triangles, positionLayout, options.weld ?? true) : null;
+    const placedPositions = indexed ? placeIndexedTriangles(placed, allPlacements, geometryOf, triangles, positionLayout, options.weld ?? true, materialCodes) : null;
     if (placedPositions) {
         const welded = options.weld ?? true;
         allPlacements.forEach((placement, index) => {
@@ -376,6 +381,7 @@ function placeIndexedTriangles(
     triangles: ArrayBuffer,
     positionLayout: PositionLayout,
     weld: boolean,
+    materialCodes: readonly (Uint16Array | null)[],
 ): { positions: ArrayBuffer; vertexCount: number; bases: number[]; counts: number[] } {
     const words = new Uint32Array(triangles);
     const welds = placed.map((mesh, index) => {
@@ -411,7 +417,8 @@ function placeIndexedTriangles(
             }
             words[to + 3] = source[from + 3];
         }
-        words[(offset - 1) * 4 + MESH_HEADER_WORD.vertexBase] = bases[index];
+        if (index < materialCodes.length && materialCodes[index]) writeIndexedMeshHeader(words, offset, bases[index], materialCodes[index]);
+        else words[(offset - 1) * 4 + MESH_HEADER_WORD.vertexBase] = bases[index];
         // Bits, not values: the walk must see exactly the bits the builders' boxes came from.
         const kept = new Uint32Array(result.positions.buffer, result.positions.byteOffset, result.vertexCount * 3);
         for (let vertex = 0; vertex < result.vertexCount; vertex++) {

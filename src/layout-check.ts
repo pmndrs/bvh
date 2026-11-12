@@ -32,7 +32,7 @@ import {
     GPU_LAYOUT_TRIANGLE_WORD,
     type GpuLayoutMeshBvh,
 } from './gpu-layout.ts';
-import type { MeshInput } from './mesh-input.ts';
+import { packedTriangleFlags, type MeshInput } from './mesh-input.ts';
 import { recordsFromIndexed } from './indexed-leaves.ts';
 import { dequantizeNodes, nodeFrameOf, QUANTIZE_MARGIN_STEPS, readNodeFrame, type NodeFrame } from './quantized-nodes.ts';
 import { GPU_LAYOUT_QUANTIZED_NODE_BYTES } from './gpu-layout.ts';
@@ -94,8 +94,10 @@ function checkLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, options: Lay
         return problems.length >= maxProblems;
     };
 
-    const { positions, indices, triangleFlags } = geometry;
+    const { positions, indices } = geometry;
     const triangleCount = indices ? indices.length / 3 : positions.length / 3 / 3;
+    // What the records' flags hold: the input's flags and its triangles' materials (bits 16-31).
+    const triangleFlags = packedTriangleFlags(geometry, triangleCount, 'checkGpuLayout');
     const { nodeCount } = layout;
     if (layout.triangleCount !== triangleCount) report(`the layout has ${layout.triangleCount} triangles, the mesh ${triangleCount}`);
     if (nodeCount < 1 || layout.nodes.byteLength < nodeCount * GPU_LAYOUT_NODE_BYTES) report(`${nodeCount} nodes in ${layout.nodes.byteLength} bytes`);
@@ -367,5 +369,6 @@ function checkIndexedLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, optio
         }
     }
     if (problems.length > 0) return problems;
-    return checkLayout(recordsFromIndexed(layout, positions), geometry, options, frame);
+    // An indexed tree has no material bits (an indexed scene keeps them in a table), so its records are checked without them.
+    return checkLayout(recordsFromIndexed(layout, positions), { ...geometry, triangleMaterials: null }, options, frame);
 }

@@ -48,7 +48,9 @@ import {
     BVH_QUERY_CLOSEST,
     RAY_MASK_ALL,
     instanceMaskFromFlags,
-    materialFromFlags,
+    hitMaterialCode,
+    indexedMaterialCode,
+    materialFromCode,
     TRIANGLE_WORDS,
     REF_INSTANCE_MARKER,
     makeReference,
@@ -68,7 +70,7 @@ export interface CpuHit {
     readonly u: number;
     readonly v: number;
     readonly frontFace: boolean;
-    /** The instance's material index (a merged hit: its source's), or `NO_MATERIAL`. As `BvhHit.material`. */
+    /** The triangle's material (`triangleMaterials`; a merged hit: its source's) when it has one, else the instance's, or `NO_MATERIAL`. As `BvhHit.material`. */
     readonly material: number;
     /** World-space geometric normal of the authored front side, unit length. As `BvhHit.normal`. */
     readonly normal: readonly [number, number, number];
@@ -470,7 +472,13 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
         }
         const length = Math.hypot(world[0], world[1], world[2]);
         const normal: [number, number, number] = length > 0 ? [world[0] / length, world[1] / length, world[2] / length] : [0, 0, 0];
-        const material = merged ? materialFromFlags((mergedSource(offset, slot, triangleFlags).materialCode << MATERIAL_SHIFT) >>> 0) : materialFromFlags(flags);
+        // As the WGSL: the triangle's material when it has one, else the instance's.
+        const triangleCode = merged
+            ? mergedSource(offset, slot, triangleFlags).materialCode
+            : indexed
+              ? indexedMaterialCode(triangleWords, offset, triangle.original)
+              : triangleFlags >>> MATERIAL_SHIFT;
+        const material = materialFromCode(hitMaterialCode(triangleCode, flags));
         return { ...hit, material, normal };
     }
 

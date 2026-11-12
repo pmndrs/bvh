@@ -36,6 +36,7 @@ import type { TraceRay } from './rays.ts';
 export type { TraceRay } from './rays.ts';
 import type { TraceSceneInstance } from './scene-assembly.ts';
 import type { TrianglePasses } from './triangle-filter.ts';
+import { triangleMaterialCodes } from '../mesh-input.ts';
 import { BVH_QUERY_ANY, BVH_QUERY_CLOSEST, NO_MATERIAL, RAY_MASK_ALL, checkInstanceMask, materialCode, type BvhQuery } from './layout.ts';
 
 
@@ -47,7 +48,7 @@ export interface ReferenceHit {
     readonly u: number;
     readonly v: number;
     readonly frontFace: boolean;
-    /** The instance's material index, or `NO_MATERIAL`. */
+    /** The triangle's material (`triangleMaterials`), else the instance's, or `NO_MATERIAL`. */
     readonly material: number;
     /** World-space geometric normal of the authored front side, unit length. */
     readonly normal: readonly [number, number, number];
@@ -72,7 +73,7 @@ export interface ReferenceScene {
     readonly mirrored: Uint8Array;
     /** Each triangle's instance mask (0xff unless the instance gives one). */
     readonly instanceMasks: Uint8Array;
-    /** Each triangle's instance material (`NO_MATERIAL` for none). */
+    /** Each triangle's material: its mesh's `triangleMaterials` entry, else its instance's (`NO_MATERIAL` for none). */
     readonly materials: Uint32Array;
     /** Asked about every hit; true lets the ray through. Undefined: every triangle blocks. */
     readonly triangleFilter?: TrianglePasses;
@@ -132,6 +133,8 @@ export function buildReferenceScene(
             ];
         };
         const triangles = countTriangles(mesh);
+        // A triangle's own material wins over its instance's.
+        const triangleCodes = triangleMaterialCodes(mesh.triangleMaterials, triangles, `mesh ${instance.meshIndex}`);
         for (let triangle = 0; triangle < triangles; triangle++) {
             const corner = (index: number): number => (mesh.indices ? mesh.indices[triangle * 3 + index] : triangle * 3 + index);
             const a = toWorld(corner(0));
@@ -147,7 +150,7 @@ export function buildReferenceScene(
             triangleIndices[slot] = triangle;
             mirrored[slot] = instanceMirrored;
             instanceMasks[slot] = instanceMask;
-            materials[slot] = instanceMaterial;
+            materials[slot] = triangleCodes && triangleCodes[triangle] !== 0 ? triangleCodes[triangle] - 1 : instanceMaterial;
             slot++;
         }
     }

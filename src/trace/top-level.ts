@@ -55,7 +55,8 @@ export interface TraceInstance {
     readonly mask?: number;
     /**
      * The instance's material index (0 to `MAX_MATERIAL`, 65534), reported as
-     * `BvhHit.material`; stored as material + 1 in bits 16-31 of the record's
+     * `BvhHit.material` for triangles without one of their own
+     * (`MeshInput.triangleMaterials`); stored as material + 1 in bits 16-31 of the record's
      * flags. Omitted (or `NO_MATERIAL`): none, and hits report `NO_MATERIAL`.
      * Anything else is a `RangeError`. A merged record may not have one: its
      * triangles carry their sources' materials.

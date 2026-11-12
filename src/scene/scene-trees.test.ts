@@ -31,6 +31,8 @@ import type { GpuMeshTreeRange } from '../mesh-input.ts';
 import { gatherStandIn } from '../../tests/support/top-level-gather.ts';
 import { quantizeNodeWords } from '../quantized-nodes.ts';
 import { FakeHploc, settle } from '../../tests/support/fake-hploc.ts';
+import { addToTally, compareClosest, newTally } from '../trace/oracle-compare.ts';
+import { buildReferenceScene, traceClosestReference } from '../trace/reference-tracer.ts';
 
 /** The merged-identity WGSL, line by line on the CPU. */
 function mergedIdentityStandIn(bindings: ReadonlyMap<number, FakeBinding>): void {
@@ -50,8 +52,14 @@ function mergedIdentityStandIn(bindings: ReadonlyMap<number, FakeBinding>): void
         const at = low * MERGED_SOURCE_WORDS;
         triangles[base + TRIANGLE_WORD.originalIndex] = merged - sources[at];
         triangles[base + TRIANGLE_WORD.padding] = sources[at + 1];
-        triangles[base + TRIANGLE_WORD.flags] = (triangles[base + TRIANGLE_WORD.flags] | sources[at + 2]) >>> 0;
+        triangles[base + TRIANGLE_WORD.flags] = (triangles[base + TRIANGLE_WORD.flags] | sources[at + 2] | (materialOf(bindings, merged) << 16)) >>> 0;
     }
+}
+
+/** A merged triangle's material code from the identity pass's per-triangle table (binding 3, two codes to a word). */
+function materialOf(bindings: ReadonlyMap<number, FakeBinding>, merged: number): number {
+    const table = new Uint32Array(bindings.get(3)!.buffer.bytes.buffer);
+    return (table[merged >> 1] >>> ((merged & 1) * 16)) & 0xffff;
 }
 
 /** The quantize pass (gpu-quantize.ts, `bvhqQuantize`) on the CPU: the CPU encoder it matches bit for bit (bvh-blas-refit checks that on GPUs). */
@@ -85,7 +93,7 @@ function mergedIdentityIndexedStandIn(bindings: ReadonlyMap<number, FakeBinding>
         const at = low * MERGED_SOURCE_WORDS;
         const flags = (triangles[word] >>> INDEXED_FLAG_SHIFT) | (sources[at + 2] & 2);
         triangles[word] = ((merged - sources[at]) | (flags << INDEXED_FLAG_SHIFT)) >>> 0;
-        triangles[sideWordOffset + slot] = (low | (sources[at + 2] & 0xffff0000)) >>> 0;
+        triangles[sideWordOffset + slot] = (low | (materialOf(bindings, merged) << 16)) >>> 0;
     }
 }
 
@@ -110,7 +118,11 @@ class StandInGpuBuilder implements FirstTreeBuilder {
         this.requests.push([...requests]);
         const members = requests.map(({ slot, generation, geometry }) => {
             const cpu = geometry as MeshGeometry;
-            return { slot, generation, geometry: { positions: cpu.positions.slice(), indices: cpu.indices ? Uint32Array.from(cpu.indices) : null, triangleFlags: cpu.triangleFlags?.slice() ?? null } };
+            return {
+                slot,
+                generation,
+                geometry: { positions: cpu.positions.slice(), indices: cpu.indices ? Uint32Array.from(cpu.indices) : null, triangleFlags: cpu.triangleFlags?.slice() ?? null, triangleMaterials: cpu.triangleMaterials ?? null },
+            };
         });
         const batch = new Promise<GpuTreeBatchResult>((resolve) => this.pending.push({ members, resolve }));
         return { notBuilt: [], batches: [batch], buildingBytes: 1000 };
@@ -1075,6 +1087,157 @@ describe('SceneTrees with gpuMaxBatchBytes (the real queue, a stand-in H-PLOC)',
         frame();
         expect((scene as unknown as { gpuReadsGeometryLater: Set<number> }).gpuReadsGeometryLater.size).toBe(0);
         await withinTime(scene.whenBuilt(), 'whenBuilt');
+        scene.dispose();
+    });
+});
+
+/** Closest hits against the brute-force reference, material and normal included when both name the same triangle. */
+function referenceMismatches(scene: SceneTrees, geometries: readonly MeshGeometry[], instances: readonly Instance[], rays: readonly TraceRay[]): { mismatches: string[]; checked: number } {
+    const tracer = createCpuTracer(readScene(scene));
+    const expected = buildReferenceScene(geometries, instances.map((instance) => ({ ...instance, instanceIndex: instance.instanceIndex! })));
+    const tally = newTally();
+    let checked = 0;
+    rays.forEach((ray, index) => {
+        const hit = tracer.closest(ray);
+        const want = traceClosestReference(expected, ray);
+        addToTally(tally, compareClosest(hit && { hit: true, ...hit }, want, ray), `ray ${index}`);
+        if (hit && want && hit.triangleIndex === want.triangleIndex && hit.instanceIndex === want.instanceIndex) checked++;
+    });
+    return { mismatches: tally.examples.slice(0, tally.mismatches), checked };
+}
+
+describe('SceneTrees with per-triangle materials', () => {
+    for (const triangleLeaves of ['records', 'indexed'] as const) {
+        it(`${triangleLeaves}: GPU trees, tinybvh's and merged groups report each triangle's material, else the instance's`, async () => {
+            const { scene, stand, frame } = await setUp({ holdRefinements: true, mergeStaticInstances: true, triangleLeaves });
+            const { geometries: plain, instances, rays } = sceneOf(5);
+            // Materials on meshes 0, 1 (merged) and 4 (instanced twice); every fourth triangle has none and takes its instance's.
+            const geometries = plain.map((geometry, index) =>
+                index === 2 || index === 3 ? geometry : { ...geometry, triangleMaterials: Array.from({ length: geometry.indices!.length / 3 }, (_, k) => (k % 4 === 3 ? 0xffff : 20 + ((k + index) % 5))) },
+            );
+            const twin: Instance = { mesh: -1, meshIndex: 4, instanceIndex: 200, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1], material: 9 };
+            const all = [...instances, twin];
+            addAll(scene, geometries, all);
+            frame();
+            expect(scene.counts.mergedGroups).toBe(1);
+            await stand!.finishBatch();
+            frame();
+            expect(scene.counts).toMatchObject({ onGpuTrees: 2, onTinybvhTrees: 0 });
+            const many = [...rays, ...randomRays(createRandom(3), 3000, [-6, -6, -6, 6, 6, 6], 1)];
+            const onGpu = referenceMismatches(scene, geometries, all, many);
+            expect(onGpu.mismatches).toEqual([]);
+            expect(onGpu.checked).toBeGreaterThan(100);
+            await scene.whenRefined();
+            scene.releaseRefinements();
+            frame();
+            expect(scene.counts).toMatchObject({ onGpuTrees: 0, onTinybvhTrees: 2 });
+            const onTinybvh = referenceMismatches(scene, geometries, all, many);
+            expect(onTinybvh.mismatches).toEqual([]);
+            expect(onTinybvh.checked).toBeGreaterThan(100);
+            expect(() => scene.addMesh({ ...plain[0], triangleMaterials: [70000] })).toThrow(/triangleMaterials/);
+            scene.dispose();
+        });
+    }
+});
+
+describe('SceneTrees.setPoseCpu', () => {
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    /** The quad moved by (5, 0, 1): a pose outside the rest pose's box. */
+    const posed = (geometry: MeshGeometry): Float32Array => geometry.positions.map((value, index) => value + (index % 3 === 0 ? 5 : index % 3 === 2 ? 1 + 0.1 * Math.sin(index) : 0));
+    const down = (x: number, y: number) => ({ origin: [x, y, 3] as const, direction: [0, 0, -1] as const, tMin: 0, tMax: 100 });
+
+    for (const triangleLeaves of ['records', 'indexed'] as const) {
+        for (const nodeFormat of ['f32', 'quantized'] as const) {
+            it(`without subgroups (${triangleLeaves}, ${nodeFormat}): the CPU walk over the uploaded buffers hits the posed geometry, and a skipped GPU pose warns once`, async () => {
+                const warnings: string[] = [];
+                const { gpu, scene, frame } = await setUp({ stand: false, triangleLeaves, nodeFormat, warn: (message) => warnings.push(message) });
+                const geometry = { ...tessellatedQuad(6, 1), triangleMaterials: Array.from({ length: 72 }, (_, k) => k % 3) };
+                const still = tessellatedQuad(3, 1);
+                const cloth = scene.addMesh(geometry, { deforming: true });
+                const rock = scene.addMesh(still);
+                const instances: Instance[] = [
+                    { mesh: cloth, meshIndex: 0, instanceIndex: 1, objectToWorld: identity, material: 4 },
+                    { mesh: rock, meshIndex: 1, instanceIndex: 2, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -4, 0, 0, 1] },
+                ];
+                for (const instance of instances) scene.addInstance(instance);
+                // A pose given before the tree exists is written when it arrives.
+                const first = posed(geometry);
+                scene.setPoseCpu(cloth, first);
+                frame();
+                await scene.whenRefined();
+                frame();
+                expect(scene.deformingCounts.cpuPoses).toBe(1);
+                const rays = randomRays(createRandom(5), 3000, [-6, -3, -3, 8, 3, 3], 1);
+                const check = (pose: Float32Array) => {
+                    const result = referenceMismatches(scene, [{ ...geometry, positions: pose }, still], instances, rays);
+                    expect(result.mismatches).toEqual([]);
+                    expect(result.checked).toBeGreaterThan(50);
+                };
+                check(first);
+                const tracer = () => createCpuTracer(readScene(scene));
+                // The top-level box moved with the pose: the rest pose's place is empty, the posed one is hit.
+                expect(tracer().closest(down(0.1, 0.2))).toBeNull();
+                expect(tracer().closest(down(5.1, 0.2))?.t).toBeCloseTo(2, 0);
+
+                // A GPU pose is skipped without subgroups, with one warning that names setPoseCpu.
+                const vertices = gpu.device.createBuffer({ size: 49 * 12, usage: 0x80 | 0x4 });
+                scene.setPose(cloth, { positionBuffer: vertices, vertexCount: 49 });
+                scene.setPose(cloth, { positionBuffer: vertices, vertexCount: 49 });
+                expect(scene.deformingCounts.posesSkipped).toBe(2);
+                expect(warnings.filter((message) => message.includes('setPoseCpu'))).toHaveLength(1);
+
+                // Back to rest, then another pose: each is written at the next update.
+                scene.setPoseCpu(cloth, geometry.positions);
+                frame();
+                check(geometry.positions);
+                expect(tracer().closest(down(0.1, 0.2))?.t).toBeCloseTo(3, 5);
+                const second = geometry.positions.map((value, index) => (index % 3 === 2 ? value - 0.5 + 0.3 * Math.cos(index) : value));
+                scene.setPoseCpu(cloth, second);
+                frame();
+                check(second);
+                expect(scene.deformingCounts.cpuPoses).toBe(3);
+                // Nothing due: nothing written.
+                frame();
+                expect(scene.deformingCounts.cpuPoses).toBe(3);
+
+                expect(() => scene.setPoseCpu(rock, still.positions)).toThrow(/not added as deforming/);
+                expect(() => scene.setPoseCpu(cloth, new Float32Array(9))).toThrow(/49 vertices/);
+                scene.dispose();
+            });
+        }
+    }
+
+    it("with subgroups: a CPU pose replaces the GPU one (no refit pass), and a GPU pose afterwards replaces it", async () => {
+        const gpu = createFakeGpu({}, { features: ['subgroups'], kernels: { bvhMergedIdentity: mergedIdentityStandIn } });
+        const scene = await SceneTrees.create(gpu.device, { gpuFirstTrees: false, topLevel: 'cpu' });
+        const passes: string[] = [];
+        const frame = () => {
+            const encoder = gpu.createEncoder();
+            scene.update(encoder);
+            passes.push(...(encoder as unknown as { commands: { dispatch?: { entryPoint: string } }[] }).commands.flatMap((command) => (command.dispatch ? [command.dispatch.entryPoint] : [])));
+            gpu.submit(encoder);
+        };
+        const geometry = tessellatedQuad(4, 1);
+        const cloth = scene.addMesh(geometry, { deforming: true });
+        scene.addInstance({ mesh: cloth, objectToWorld: identity });
+        frame();
+        await scene.whenRefined();
+        frame();
+        const vertices = gpu.device.createBuffer({ size: 25 * 12, usage: 0x80 | 0x4 });
+        scene.setPose(cloth, { positionBuffer: vertices, vertexCount: 25 });
+        scene.setPoseCpu(cloth, posed(geometry));
+        passes.length = 0;
+        frame();
+        expect(passes).not.toContain('meshRefitTriangles');
+        expect(scene.deformingCounts.cpuPoses).toBe(1);
+        expect(createCpuTracer(readScene(scene)).closest(down(5.1, 0.2))?.t).toBeCloseTo(2, 0);
+        scene.setPose(cloth, { positionBuffer: vertices, vertexCount: 25 });
+        passes.length = 0;
+        frame();
+        expect(passes).toContain('meshRefitTriangles');
+        expect(scene.deformingCounts.cpuPoses).toBe(1);
+        // The top level has the deform box back (the fake GPU runs no refit, so the tree still holds the CPU pose, outside it).
+        expect(createCpuTracer(readScene(scene)).closest(down(5.1, 0.2))).toBeNull();
         scene.dispose();
     });
 });

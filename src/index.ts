@@ -14,6 +14,7 @@
 export {
     isGpuMeshBuffers,
     meshTriangleCount,
+    TRIANGLE_MATERIAL_NONE,
     type GpuBuildOptions,
     type GpuMeshBuffers,
     type GpuMeshGeometry,
@@ -132,9 +133,11 @@ export {
     levelOrderOf,
     parentSlotsOf,
     PRIMITIVE_BOX_FLOATS,
+    refitLayoutToPose,
     refitOnCpu,
     relativeSahCost,
     type CpuRefitResult,
+    type PosedLayout,
 } from './refit-cpu.ts';
 
 // CPU queries on one mesh's tree (P8): raycasts, the box walk shapecasts build on, refit, saving.

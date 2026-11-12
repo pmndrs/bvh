@@ -49,7 +49,12 @@
  * world normal (`BvhHit.material`, `BvhHit.normal`) are checked against the
  * reference too (normals to a cosine of 0.9999), merged variants included:
  * several cases give most instances a material, and every variant must report
- * some hits with one. Then the hook cases (hooks.ts) run on tinybvh trees,
+ * some hits with one. The `materials-*` variants give every other mesh
+ * per-triangle materials (materials.ts; every fourth triangle without one), so
+ * a hit's material is its triangle's, else its instance's; records, indexed
+ * (the table before the mesh's header), quantized and merged (the side table),
+ * from tinybvh and the GPU builders; each must report some hits with their
+ * triangle's own material. Then the hook cases (hooks.ts) run on tinybvh trees,
  * with ray masks on and off: a filter on flagged triangles, a filter that depends on
  * the query (a surface that casts no shadow), and instance masks against
  * several ray masks with a filter that reads the ray mask. Each traced mask is
@@ -99,6 +104,7 @@ import {
 } from './cases.ts';
 import { buildMeshBvhWithTmbvh } from '../trace-bench/tmbvh-convert.ts';
 import { buildHookCases, hookMasks, hookPassName, hookReferenceAnswers, writeHookFlags } from './hooks.ts';
+import { triangleMaterialReference, withTriangleMaterials } from './materials.ts';
 import {
     computeReferenceAnswersYielding,
     evaluateCase,
@@ -132,6 +138,12 @@ interface OracleVariant {
     weldTolerance?: number;
     /** The trees', scene's and kernel's node format (docs/internals/design/compressed-nodes.md); default f32. */
     nodeFormat?: 'f32' | 'quantized';
+    /**
+     * Per-triangle materials on every other mesh (materials.ts): each hit's material is its
+     * triangle's, else its instance's. Its trees and walk are another variant's, so the shared
+     * edges and seams are left to that one.
+     */
+    triangleMaterials?: boolean;
 }
 
 /** The tolerance weld's distance in the `-weld` variant: far below the quads' 0.5 grid, far above an ulp at 2 (2.4e-7). */
@@ -162,6 +174,11 @@ const VARIANTS: OracleVariant[] = [
     { name: 'merged-quantized-tinybvh', treeSource: 'tinybvh', merged: true, nodeFormat: 'quantized' },
     { name: 'merged-quantized-hploc', treeSource: 'gpu-hploc', merged: true, nodeFormat: 'quantized' },
     { name: 'merged-quantized-indexed-hploc', treeSource: 'gpu-hploc', merged: true, nodeFormat: 'quantized', triangleLeaves: 'indexed', positionLayout: 'packed' },
+    { name: 'materials-tinybvh', treeSource: 'tinybvh', triangleMaterials: true },
+    { name: 'materials-quantized-lbvh', treeSource: 'gpu-lbvh', nodeFormat: 'quantized', triangleMaterials: true },
+    { name: 'materials-indexed-hploc', treeSource: 'gpu-hploc', triangleLeaves: 'indexed', triangleMaterials: true },
+    { name: 'materials-merged-hploc', treeSource: 'gpu-hploc', merged: true, triangleMaterials: true },
+    { name: 'materials-merged-quantized-indexed-tinybvh', treeSource: 'tinybvh', merged: true, nodeFormat: 'quantized', triangleLeaves: 'indexed', triangleMaterials: true },
 ];
 
 /** Variants whose one-ulp seam slips must equal `watertight-tinybvh`'s: the same trees and corner bits, the other format. */
@@ -293,6 +310,20 @@ function countMaterialHits(answers: GpuAnswers, rayCount: number): number {
     for (let index = 0; index < rayCount; index++) {
         const material = hitAt(answers, index)?.material;
         if (material !== undefined && material !== NO_MATERIAL) count++;
+    }
+    return count;
+}
+
+/** Closest hits whose material is their triangle's own `triangleMaterials` entry (material variants). */
+function countOwnMaterialHits(answers: GpuAnswers, oracleCase: OracleCase): number {
+    const meshOf = new Map(oracleCase.instances.map((instance) => [instance.instanceIndex, instance.meshIndex]));
+    let count = 0;
+    for (let index = 0; index < oracleCase.rays.length / 8; index++) {
+        const hit = hitAt(answers, index);
+        if (!hit || hit.material === undefined) continue;
+        const mesh = meshOf.get(hit.instanceIndex);
+        const own = mesh === undefined ? undefined : oracleCase.meshes[mesh].triangleMaterials?.[hit.triangleIndex];
+        if (own !== undefined && own !== 0xffff && own === hit.material) count++;
     }
     return count;
 }
@@ -487,6 +518,8 @@ await runGpuTest(async ({ device, log }) => {
     for (const kind of ['gpu-lbvh', 'gpu-hploc'] as const) gpuBuilders.set(kind, await createMeshLayoutBuilder(device, { prefer: kind, label: `oracle ${kind}` }));
     const skipped: string[] = [];
     const materialHitsByVariant = new Map<string, number>();
+    /** Material variants: closest hits whose material is their triangle's own (not the instance's). */
+    const ownMaterialHitsByVariant = new Map<string, number>();
     const seamReports = new Map<string, SharedEdgeReport[]>();
     const seamLeaks: Record<string, { slipped: number; slippedAny: number; referenceMisses: number }> = {};
     endPhase('references');
@@ -508,15 +541,20 @@ await runGpuTest(async ({ device, log }) => {
         const results = { cases: {} as Record<string, unknown>, sharedEdges: [] as SharedEdgeReport[] };
         byTest[variant.name] = results;
 
-        for (const [caseIndex, oracleCase] of cases.entries()) {
+        for (const [caseIndex, plainCase] of cases.entries()) {
+            const oracleCase = variant.triangleMaterials ? withTriangleMaterials(plainCase) : plainCase;
+            const reference = variant.triangleMaterials
+                ? (triangleMaterialReference(oracleCase, references[caseIndex]) ?? (await computeReferenceAnswersYielding(oracleCase)))
+                : references[caseIndex];
             const { answers, built } = await traceCase(device, kernel, builder, oracleCase, variant);
 
-            const result = evaluateCase(oracleCase, tracerAnswers(answers), references[caseIndex]);
+            const result = evaluateCase(oracleCase, tracerAnswers(answers), reference);
             const stackUsed = probeStackDepth(built.data, oracleCase);
             deepestStackUsed = Math.max(deepestStackUsed, stackUsed);
             deepestRequired = Math.max(deepestRequired, built.data.requiredStackSize);
             const materialHits = countMaterialHits(answers, oracleCase.rays.length / 8);
             if (answers.hitNormal) materialHitsByVariant.set(variant.name, (materialHitsByVariant.get(variant.name) ?? 0) + materialHits);
+            if (variant.triangleMaterials) ownMaterialHitsByVariant.set(variant.name, (ownMaterialHitsByVariant.get(variant.name) ?? 0) + countOwnMaterialHits(answers, oracleCase));
             results.cases[oracleCase.name] = { ...summarize(result, stackUsed, built.data, built.buildMs), materialHits };
             log(
                 `[${variant.name}] ${oracleCase.name}: ${result.rays} rays, closest ${result.closest.mismatches} mismatches / ${result.closest.ambiguous} ambiguous, ` +
@@ -527,6 +565,11 @@ await runGpuTest(async ({ device, log }) => {
             for (const failure of result.failures) failures.push(`[${variant.name}] ${oracleCase.name}: ${failure}`);
         }
 
+        if (variant.triangleMaterials) {
+            endPhase(variant.name);
+            kernel.destroy();
+            continue;
+        }
         for (const transformed of [false, true]) {
             const report = await runSharedEdgeCase(device, kernel, builder, sharedEdgeCase(sharedRays, transformed), variant);
             results.sharedEdges.push(report);
@@ -631,6 +674,7 @@ await runGpuTest(async ({ device, log }) => {
     builder.dispose();
     // The material comparison only means something if hits carry materials.
     for (const [name, count] of materialHitsByVariant) if (count === 0) failures.push(`[${name}] no closest hit reported a material`);
+    for (const [name, count] of ownMaterialHitsByVariant) if (count === 0) failures.push(`[${name}] no closest hit reported its triangle's own material`);
 
     const limits = device.limits;
     assert(failures.length === 0, failures.slice(0, 12).join('\n'));
@@ -654,6 +698,7 @@ await runGpuTest(async ({ device, log }) => {
         hooks,
         oneUlpSeamLeaks: seamLeaks,
         materialHits: Object.fromEntries(materialHitsByVariant),
+        ownMaterialHits: Object.fromEntries(ownMaterialHitsByVariant),
         traceStorageBuffers: TRACE_MODULE_ENTRIES.length,
         batchKernelStorageBuffers: TRACE_MODULE_ENTRIES.length + 2,
         maxStorageBuffersPerShaderStage: limits.maxStorageBuffersPerShaderStage,

@@ -32,6 +32,28 @@ refit at once from the latest pose, so a tree built from an older pose never sho
 
 In three, the sync does all of this for `SkinnedMesh` and morph targets: see [Skinned and morphed meshes](/three/skinned-and-morphed).
 
+## Poses on the CPU
+
+`setPoseCpu(mesh, positions)` takes the pose as a `Float32Array` (`x, y, z` per vertex, the mesh's own vertices),
+with or without `subgroups`:
+
+{/* snippet: deforming-cpu */}
+```ts
+const mesh = trees.addMesh(cloth, { deforming: true });
+trees.addInstance({ mesh, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] });
+
+// x, y, z per vertex, the mesh's own vertices; with or without subgroups.
+trees.setPoseCpu(mesh, posedPositions);
+// the next trees.update(encoder) refits the tree on the CPU, uploads it and moves the top-level box.
+console.log(trees.deformingCounts.cpuPoses);
+```
+
+The next `update(encoder)` refits the tree on the CPU (`refitLayoutToPose`), copies its nodes (re-quantized with
+quantized nodes) and corners (indexed: its vertices) in through the update's encoder, and moves the mesh's top-level
+box to the posed root box. A tree placed later gets the latest pose too. It costs a pass over the triangles and an
+upload of the mesh's tree per pose, so it suits small meshes or a few poses a second. The latest of `setPose` and
+`setPoseCpu` wins.
+
 ## The deform box
 
 The top level holds the mesh's **deform box**, a box every pose stays in, not the refit root's box. So a pose never
@@ -51,7 +73,8 @@ mesh is rebuilt with H-PLOC from the current pose. A sway rarely holds that long
 ## Rules
 
 - Deforming meshes never merge, and each posed object needs its own mesh (its own pose).
-- Without `subgroups`, poses are skipped (`deformingCounts.posesSkipped`) and rays see the pose the tree was built in.
+- Without `subgroups`, `setPose` is skipped (`deformingCounts.posesSkipped`, with one warning) and rays see the pose
+  the tree was built in: use `setPoseCpu` there.
 - With indexed leaves, a deforming mesh is not welded (its vertices must stay the app's).
 - With quantized nodes, the refit runs on a 64-byte `f32` copy of the nodes, and a pass re-quantizes it.
 

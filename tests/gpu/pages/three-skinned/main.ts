@@ -329,7 +329,8 @@ try {
                 reference.push(posed);
                 originals.set(posed, child);
             }
-            const referenceScene = bvhSceneFromObject3D(reference);
+            // One mesh and instance per group, as the sync makes them.
+            const referenceScene = bvhSceneFromObject3D(reference, { multiMaterial: 'groups' });
             const instances = referenceScene.instances.map((instance, i) => {
                 const source = referenceScene.sources[i];
                 const handle = handleOf.get(`${originals.get(source.object)!.id}:${source.instanceId}:${source.group}`);

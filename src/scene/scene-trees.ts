@@ -93,7 +93,8 @@
  * the frame's encoder; it records copies and passes, and the caller submits.
  */
 
-import { checkTriangleFlags } from '../mesh-input.ts';
+import { checkTriangleFlags, packedTriangleFlags, triangleMaterialCodes } from '../mesh-input.ts';
+import { refitLayoutToPose } from '../refit-cpu.ts';
 import {
     BVH_NODE_BYTES,
     checkInstanceMask,
@@ -107,6 +108,7 @@ import {
     MESH_HEADER_WORD,
     indexedLeadingUnits,
     positionStrideFloats,
+    writeIndexedMeshHeader,
     QUANTIZED_NODE_BYTES,
     type NodeFormat,
     type PositionLayout,
@@ -400,6 +402,10 @@ interface MeshSlot {
     vertices: { offset: number; count: number } | null;
     readonly triangleCount: number;
     readonly bounds: Float32Array;
+    /** Indexed, unmerged: each original triangle's material code (`triangleMaterials`), for the table before its header; else null. */
+    readonly materialCodes: Uint16Array | null;
+    /** Deforming meshes: what a CPU pose ({@link SceneTrees.setPoseCpu}) needs; null for the others. */
+    readonly cpuPose: CpuPose | null;
     gpu: 'none' | 'building' | 'built' | 'refused';
     tinybvh: 'none' | 'building' | 'built' | 'failed';
     fallbackReason: string | null;
@@ -408,6 +414,21 @@ interface MeshSlot {
     users: number;
     startedAt: number;
     abort: AbortController | null;
+}
+
+/** A deforming mesh's CPU pose state. */
+interface CpuPose {
+    /** The mesh's own indices (a copy: the geometry may move into a worker), or null for a triangle list. */
+    readonly indices: Uint16Array | Uint32Array | null;
+    readonly vertexCount: number;
+    /** The placed tree's layout on the CPU (tinybvh's, or a GPU tree's read back), or null before one arrives. */
+    layout: GpuLayoutMeshBvh | null;
+    /** The latest CPU pose, or null. */
+    positions: Float32Array | null;
+    /** The pose still has to be written into the placed tree. */
+    due: boolean;
+    /** A CPU pose moved the mesh's top-level box off its deform box. */
+    moved: boolean;
 }
 
 interface InstanceSlot {
@@ -590,6 +611,11 @@ export class SceneTrees {
     /** Deforming meshes' refits and drift rebuilds; null without subgroups (they keep the pose their tree was built in). */
     private readonly deforming: DeformingTrees | null;
     private posesSkipped = 0;
+    private posesSkippedWarned = false;
+    /** CPU poses written ({@link setPoseCpu}). */
+    private cpuPoses = 0;
+    /** Staging buffers of CPU poses copied in the last update's encoder, freed at the next update. */
+    private retiredStaging: GPUBuffer[] = [];
 
     private readonly meshSlots = new SlotPool();
     private readonly instanceSlots = new SlotPool();
@@ -787,13 +813,16 @@ export class SceneTrees {
         this.checkLive();
         const triangleCount = countTriangles(geometry);
         checkTriangleFlags(geometry.triangleFlags, triangleCount, 'SceneTrees.addMesh');
+        const materialCodes = triangleMaterialCodes(geometry.triangleMaterials, triangleCount, 'SceneTrees.addMesh');
         if (triangleCount === 0) throw new RangeError('SceneTrees.addMesh: the mesh has no triangles');
         const slot = this.meshSlots.take();
-        const state = this.newMeshSlot(slot, -1, geometry, triangleCount, options.deforming !== undefined && options.deforming !== false);
+        const state = this.newMeshSlot(slot, -1, geometry, triangleCount, options.deforming !== undefined && options.deforming !== false, materialCodes);
         this.meshes.set(slot, state);
         if (state.deforming && this.deforming) {
             const box = typeof options.deforming === 'object' ? options.deforming.bounds : state.bounds;
-            this.deforming.meshAdded(slot, triangleCount, box);
+            // A drift rebuild reads the pose from the GPU: it gets the flags and materials from a buffer of its own.
+            const flags = geometry.triangleFlags || geometry.triangleMaterials ? packedTriangleFlags(geometry, triangleCount, 'SceneTrees.addMesh') : null;
+            this.deforming.meshAdded(slot, triangleCount, box, flags);
         }
         this.newMeshes.push(slot);
         return slot;
@@ -804,7 +833,9 @@ export class SceneTrees {
      * own indices and triangle order, `STORAGE` usage; `COPY_SRC` too for drift
      * rebuilds). The next update refits its tree from them, before anything
      * traces. Without subgroups the pose is skipped (counted in
-     * `deformingCounts.posesSkipped`) and rays see the pose the tree was built in.
+     * `deformingCounts.posesSkipped`, with one warning) and rays see the pose
+     * the tree was built in: give such devices the pose on the CPU with
+     * {@link setPoseCpu} instead.
      */
     setPose(mesh: number, vertices: MeshRefitVertices): void {
         this.checkLive();
@@ -813,9 +844,56 @@ export class SceneTrees {
         if (!state.deforming) throw new RangeError(`SceneTrees.setPose: mesh ${mesh} was not added as deforming`);
         if (!this.deforming) {
             this.posesSkipped++;
+            if (!this.posesSkippedWarned) {
+                this.posesSkippedWarned = true;
+                this.warn(
+                    '@pmndrs/bvh: SceneTrees.setPose was skipped: the device has no subgroups, so there is no GPU refit and the mesh is traced in the pose its tree was built in. ' +
+                        'Give the pose on the CPU with SceneTrees.setPoseCpu(mesh, positions) instead (deformingCounts.posesSkipped counts the skipped poses).',
+                );
+            }
             return;
         }
         this.deforming.posed(mesh, vertices);
+        // The latest pose wins: a CPU pose given before is not written again, and the top level gets the deform box back.
+        if (state.cpuPose) {
+            state.cpuPose.positions = null;
+            state.cpuPose.due = false;
+            if (state.cpuPose.moved) {
+                state.cpuPose.moved = false;
+                const box = this.deforming.deformBox(mesh);
+                if (box) this.moveTopLevelBox(mesh, box);
+            }
+        }
+    }
+
+    /**
+     * A deforming mesh's new pose on the CPU: `positions` holds `x, y, z` per
+     * vertex in the mesh's own numbering (as many vertices as the geometry it
+     * was added with; its indices and triangle order are kept). The next
+     * {@link update} refits the mesh's tree on the CPU (`refitLayoutToPose`),
+     * writes its nodes (re-quantized with `nodeFormat: 'quantized'`) and its
+     * corners (indexed: its vertices in the positions buffer) through the
+     * update's encoder, and moves the mesh's top-level box to the posed
+     * tree's root box. With or without subgroups: the path for devices
+     * without them, where {@link setPose} is skipped, and for poses an app
+     * computes on the CPU. A tree that arrives later (a swap, a rebuild) gets
+     * the latest pose too. It costs a pass over the triangles and an upload
+     * of the mesh's nodes and triangles per pose, so it suits small meshes or
+     * a few poses a second. `positions` is read at the update; it must not
+     * change before then. A later {@link setPose} replaces it.
+     */
+    setPoseCpu(mesh: number, positions: Float32Array): void {
+        this.checkLive();
+        const state = this.meshes.get(mesh);
+        if (!state || state.group >= 0) throw new RangeError(`SceneTrees.setPoseCpu: no mesh ${mesh}`);
+        if (!state.deforming || !state.cpuPose) throw new RangeError(`SceneTrees.setPoseCpu: mesh ${mesh} was not added as deforming`);
+        if (positions.length !== state.cpuPose.vertexCount * 3) {
+            throw new RangeError(`SceneTrees.setPoseCpu: mesh ${mesh} has ${state.cpuPose.vertexCount} vertices, the pose ${positions.length / 3}`);
+        }
+        state.cpuPose.positions = positions;
+        state.cpuPose.due = true;
+        // The latest pose wins: a GPU pose given before is not refit again.
+        this.deforming?.unposed(mesh);
     }
 
     /**
@@ -846,9 +924,9 @@ export class SceneTrees {
         this.cpuTopLevelStale = true;
     }
 
-    /** Deforming meshes' refits, drift rebuilds, and poses skipped without subgroups. */
-    get deformingCounts(): DeformingTreeCounts & { readonly posesSkipped: number } {
-        return { ...(this.deforming?.counts ?? { refitting: 0, refits: 0, driftRebuilds: 0 }), posesSkipped: this.posesSkipped };
+    /** Deforming meshes' refits, drift rebuilds, poses skipped without subgroups, and CPU poses written ({@link setPoseCpu}). */
+    get deformingCounts(): DeformingTreeCounts & { readonly posesSkipped: number; readonly cpuPoses: number } {
+        return { ...(this.deforming?.counts ?? { refitting: 0, refits: 0, driftRebuilds: 0 }), posesSkipped: this.posesSkipped, cpuPoses: this.cpuPoses };
     }
 
     /** A deforming mesh's latest refit cost over its built tree's (NaN before a sample, or without subgroups). */
@@ -856,7 +934,7 @@ export class SceneTrees {
         return this.deforming?.driftRatio(mesh) ?? NaN;
     }
 
-    private newMeshSlot(slot: number, group: number, geometry: MeshGeometry, triangleCount: number, deforming = false): MeshSlot {
+    private newMeshSlot(slot: number, group: number, geometry: MeshGeometry, triangleCount: number, deforming = false, materialCodes: Uint16Array | null = null): MeshSlot {
         const previous = this.retiredGenerations.get(slot) ?? 0;
         // Indexed: the exact-bit weld (no coordinate moves). A deforming mesh's pose is copied vertex for vertex, so it stays unwelded.
         const welded = this.triangleLeaves === 'indexed' && this.weld && !deforming ? weldPositions(geometry) : geometry;
@@ -869,6 +947,8 @@ export class SceneTrees {
             vertices: null,
             triangleCount,
             bounds: geometryBounds(geometry.positions),
+            materialCodes: this.triangleLeaves === 'indexed' ? materialCodes : null,
+            cpuPose: deforming ? { indices: geometry.indices ? geometry.indices.slice() : null, vertexCount: geometry.positions.length / 3, layout: null, positions: null, due: false, moved: false } : null,
             gpu: 'none',
             tinybvh: 'none',
             fallbackReason: null,
@@ -1210,6 +1290,7 @@ export class SceneTrees {
         this.triangles.releaseRetired();
         this.positions?.releaseRetired();
         for (const buffer of this.retiredTopLevel.splice(0)) buffer.destroy();
+        for (const buffer of this.retiredStaging.splice(0)) buffer.destroy();
         this.identity.releaseRetired();
         // The caller has submitted the frame that copied these GPU trees out (or dropped them).
         for (const outputs of this.outputsToRelease) this.releaseOutputs(outputs);
@@ -1232,6 +1313,8 @@ export class SceneTrees {
             this.placeTrees(encoder, arrived);
             this.cpuTopLevelStale = true;
         }
+        // CPU poses, after the trees placed above (their copies and growths are in the encoder before these).
+        this.writeCpuPoses(encoder);
         let failure: unknown = null;
         // Poses and trees placed above, refit before anything traces; then a drift rebuild if one is due.
         if (this.deforming?.encode(encoder, { nodes: this.nodes.buffer, triangles: this.triangles.buffer, positions: this.positions?.buffer ?? null }, this.updates)) this.encoderWritesStorage = true;
@@ -1261,6 +1344,7 @@ export class SceneTrees {
         this.positions?.destroy();
         this.cpuTopLevel.destroy();
         for (const buffer of this.retiredTopLevel.splice(0)) buffer.destroy();
+        for (const buffer of this.retiredStaging.splice(0)) buffer.destroy();
         for (const outputs of this.liveOutputs) outputs.destroy();
         this.liveOutputs.clear();
         for (const resolve of this.builtWaiters.splice(0)) resolve();
@@ -1770,7 +1854,12 @@ export class SceneTrees {
         const state = this.meshes.get(tree.slot)!;
         const vertexBase = state.vertices?.offset ?? 0;
         if (state.group >= 0) this.identity.encode(encoder, this.triangles.buffer, this.groups[state.group].group, triangleOffset, size.triangleCount, this.positions ? { vertexBase } : undefined);
-        else if (this.positions) this.triangles.write(triangleOffset - 1, meshHeader(vertexBase));
+        else if (this.positions) {
+            const leading = this.leadingOf(tree.slot, size.triangleCount);
+            const words = new Uint32Array(leading * INDEXED_TRIANGLE_WORDS);
+            writeIndexedMeshHeader(words, leading, vertexBase, state.materialCodes);
+            this.triangles.write(triangleOffset - leading, words);
+        }
     }
 
     /**
@@ -2035,7 +2124,8 @@ export class SceneTrees {
      */
     private tinybvhOptions(slot: number): MeshBvhBuildOptions {
         const indexed = this.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const } : {};
-        return this.nodeFormat === 'quantized' && !this.deforming?.has(slot) ? { ...indexed, nodeFormat: 'quantized' } : indexed;
+        // Deforming meshes' trees stay f32 (the refits work on f32 nodes; they are quantized on the way in).
+        return this.nodeFormat === 'quantized' && !this.meshes.get(slot)?.deforming ? { ...indexed, nodeFormat: 'quantized' } : indexed;
     }
 
     /** A tinybvh tree's nodes into the storage at its root `nodeOffset` (quantized: its frame slot first; packed here if the worker sent f32). */
@@ -2056,7 +2146,7 @@ export class SceneTrees {
         if (!this.positions) return 0;
         const state = this.meshes.get(slot);
         const sources = state && state.group >= 0 ? this.groups[state.group].group.sources.length : 0;
-        return indexedLeadingUnits(triangleCount, sources);
+        return indexedLeadingUnits(triangleCount, sources, Boolean(state?.materialCodes));
     }
 
     /**
@@ -2103,9 +2193,76 @@ export class SceneTrees {
         if (bvh.triangleLeaves !== 'indexed') throw new Error('@pmndrs/bvh: an indexed scene got a records tree from tinybvh');
         const words = new Uint32Array((leading + bvh.triangleCount) * INDEXED_TRIANGLE_WORDS);
         words.set(new Uint32Array(bvh.triangles, 0, bvh.triangleCount * INDEXED_TRIANGLE_WORDS), leading * INDEXED_TRIANGLE_WORDS);
-        if (state.group >= 0) writeMergedIndexedIdentity(words, this.groups[state.group].group, leading, bvh.triangleCount);
-        words[(leading - 1) * INDEXED_TRIANGLE_WORDS + MESH_HEADER_WORD.vertexBase] = state.vertices?.offset ?? 0;
+        if (state.group >= 0) {
+            writeMergedIndexedIdentity(words, this.groups[state.group].group, leading, bvh.triangleCount);
+            words[(leading - 1) * INDEXED_TRIANGLE_WORDS + MESH_HEADER_WORD.vertexBase] = state.vertices?.offset ?? 0;
+        } else {
+            writeIndexedMeshHeader(words, leading, state.vertices?.offset ?? 0, state.materialCodes);
+        }
         this.triangles.write(triangleOffset - leading, words);
+    }
+
+    /**
+     * Writes every due CPU pose ({@link setPoseCpu}) into its mesh's placed
+     * tree: refit on the CPU, then copied in from staging buffers through
+     * `encoder`, after whatever the update recorded before (a tree's copy or
+     * a growth would otherwise overwrite a queue write). The mesh's top-level
+     * box becomes the posed root box.
+     */
+    private writeCpuPoses(encoder: GPUCommandEncoder): void {
+        for (const state of this.meshes.values()) {
+            const pose = state.cpuPose;
+            if (!pose?.due || !pose.layout || !pose.positions) continue;
+            const placed = this.placed.get(state.slot);
+            if (!placed) continue;
+            const posed = refitLayoutToPose(pose.layout, pose.positions, pose.indices);
+            if (this.nodeFormat === 'quantized') {
+                const quantized = quantizeNodes({ ...pose.layout, nodes: posed.nodes, nodeFormat: 'f32' });
+                this.stagedCopy(encoder, this.nodes, placed.nodeOffset - 1, quantized.nodes);
+            } else {
+                this.stagedCopy(encoder, this.nodes, placed.nodeOffset, posed.nodes);
+            }
+            if (posed.triangles) {
+                this.stagedCopy(encoder, this.triangles, placed.triangleOffset, posed.triangles);
+            } else if (this.positions && state.vertices) {
+                // Indexed: deforming meshes are never welded, so pose vertex v is scene vertex base + v.
+                const stride = positionStrideFloats(this.positionLayout);
+                const count = pose.vertexCount;
+                const data = new Float32Array(Math.max(1, count) * stride);
+                for (let vertex = 0; vertex < count; vertex++) {
+                    data[vertex * stride] = pose.positions[vertex * 3];
+                    data[vertex * stride + 1] = pose.positions[vertex * 3 + 1];
+                    data[vertex * stride + 2] = pose.positions[vertex * 3 + 2];
+                }
+                this.stagedCopy(encoder, this.positions, state.vertices.offset, data.buffer);
+            }
+            this.moveTopLevelBox(state.slot, posed.bounds);
+            this.encoderWritesStorage = true;
+            pose.due = false;
+            pose.moved = true;
+            this.cpuPoses++;
+        }
+    }
+
+    /** A placed mesh's box in the top level, for every instance of it at the next update. */
+    private moveTopLevelBox(mesh: number, box: ArrayLike<number>): void {
+        const placed = this.placed.get(mesh);
+        if (!placed) return;
+        const moved: PlacedTree = { ...placed, bounds: Array.from({ length: 6 }, (_, k) => box[k]) };
+        this.placed.set(mesh, moved);
+        this.gpuTopLevel?.setMeshTree(mesh, moved);
+        for (const [slot, instance] of this.instances) if (instance.mesh === mesh) this.dirtyInstances.add(slot);
+        this.cpuTopLevelStale = true;
+    }
+
+    /** Copies `data` into `storage` at unit `offset` through a staging buffer, in `encoder`. */
+    private stagedCopy(encoder: GPUCommandEncoder, storage: GrowableStorage, offset: number, data: ArrayBuffer): void {
+        const size = Math.ceil(data.byteLength / 4) * 4;
+        const staging = this.device.createBuffer({ label: `${this.label} cpu pose`, size, usage: 0x4 /* COPY_SRC */, mappedAtCreation: true });
+        new Uint8Array(staging.getMappedRange()).set(new Uint8Array(data));
+        staging.unmap();
+        encoder.copyBufferToBuffer(staging, 0, storage.buffer, offset * storage.unitBytes, size);
+        this.retiredStaging.push(staging);
     }
 
     private recordPlacement(tree: ArrivedTree, size: TreeSize, nodeOffset: number, triangleOffset: number, replaced: TreeBuilder | null, triangleLeading = 0): void {
@@ -2148,6 +2305,12 @@ export class SceneTrees {
                 0,
             );
             this.deforming.treePlaced(tree.slot, placement, layout);
+        }
+        if (state.cpuPose) {
+            // A CPU pose given before is written into the new tree too, at this update.
+            state.cpuPose.layout = tree.source === 'tinybvh' ? tree.bvh : tree.built.layout;
+            state.cpuPose.moved = false;
+            state.cpuPose.due = state.cpuPose.positions !== null;
         }
         if (replaced === 'gpu' && tree.source === 'tinybvh') this.swaps++;
         this.onTree?.({
@@ -2359,12 +2522,6 @@ function fitReserve(storage: GrowableStorage, extra: number, reserve: number): n
     }
 }
 
-/** An indexed mesh's header: its vertex base (merged groups' headers are written with their side tables). */
-function meshHeader(vertexBase: number): Uint32Array<ArrayBuffer> {
-    const header = new Uint32Array(INDEXED_TRIANGLE_WORDS);
-    header[MESH_HEADER_WORD.vertexBase] = vertexBase;
-    return header;
-}
 
 function treeSize(tree: ArrivedTree): TreeSize {
     const source = tree.source === 'tinybvh' ? tree.bvh : tree.built.tree;

@@ -29,8 +29,9 @@
  * this refit takes the new tree's shape. A sway rarely holds long enough; a
  * bend that stays does.
  *
- * Needs subgroups (the refit). Without them deforming meshes stay in the pose
- * their tree was built in (`SceneTrees` counts the poses it skipped).
+ * Needs subgroups (the refit). Without them a GPU pose is skipped (`SceneTrees`
+ * counts the poses it skipped and warns once); `SceneTrees.setPoseCpu` refits
+ * on the CPU instead, with or without subgroups.
  */
 
 import type { GpuLayoutMeshBvh } from '../gpu-layout.ts';
@@ -73,6 +74,10 @@ interface DeformingMesh {
     readonly deformBox: Float32Array;
     /** The latest pose, or null while the mesh is in the pose its geometry gave. */
     vertices: MeshRefitVertices | null;
+    /** The flags words its records hold (filter bit, material bits 16-31), for a drift rebuild; null when all are 0. */
+    readonly flags: Uint32Array | null;
+    /** {@link flags} on the GPU, made at the first drift rebuild. */
+    flagsBuffer: GPUBuffer | null;
     placement: DeformingTreePlacement | null;
     builtCost: number;
     shapeGeneration: number;
@@ -136,9 +141,11 @@ export class DeformingTrees {
         return true;
     }
 
-    /** A deforming mesh was added. */
-    meshAdded(slot: number, triangleCount: number, deformBox: ArrayLike<number>): void {
+    /** A deforming mesh was added; `flags` are its records' flags words (input flags and materials), or null when all are 0. */
+    meshAdded(slot: number, triangleCount: number, deformBox: ArrayLike<number>, flags: Uint32Array | null = null): void {
         this.meshes.set(slot, {
+            flags,
+            flagsBuffer: null,
             slot,
             refit: new GpuMeshRefit(this.device, { label: `${this.label} ${slot}`, diagnostics: true, kernels: this.kernels }),
             triangleCount,
@@ -160,7 +167,17 @@ export class DeformingTrees {
         const mesh = this.meshes.get(slot);
         if (!mesh) return;
         mesh.refit.dispose();
+        mesh.flagsBuffer?.destroy();
         this.meshes.delete(slot);
+    }
+
+    /** The mesh's pose came from the CPU (`SceneTrees.setPoseCpu`): forget the GPU one, so it is not refit again. */
+    unposed(slot: number): void {
+        const mesh = this.meshes.get(slot);
+        if (!mesh) return;
+        mesh.vertices = null;
+        mesh.refitDue = false;
+        mesh.driftSince = -1;
     }
 
     /** A new pose: the tree follows it at the next update. */
@@ -246,7 +263,12 @@ export class DeformingTrees {
     rebuildGeometry(slot: number): GpuMeshBuffers | null {
         const mesh = this.meshes.get(slot);
         if (!mesh?.vertices) return null;
-        return { ...mesh.vertices, triangleCount: mesh.triangleCount };
+        if (mesh.flags && !mesh.flagsBuffer) {
+            // The rebuilt tree keeps the flags and materials the first one had: COPY_SRC for the batch's copy.
+            mesh.flagsBuffer = this.device.createBuffer({ label: `${this.label} ${slot} flags`, size: mesh.flags.byteLength, usage: 0x80 | 0x8 | 0x4 });
+            this.device.queue.writeBuffer(mesh.flagsBuffer, 0, mesh.flags.buffer as ArrayBuffer, mesh.flags.byteOffset, mesh.flags.byteLength);
+        }
+        return { ...mesh.vertices, triangleCount: mesh.triangleCount, ...(mesh.flagsBuffer ? { triangleFlagsBuffer: mesh.flagsBuffer } : {}) };
     }
 
     rebuildStarted(slot: number, started: boolean): void {
@@ -272,7 +294,10 @@ export class DeformingTrees {
     }
 
     dispose(): void {
-        for (const mesh of this.meshes.values()) mesh.refit.dispose();
+        for (const mesh of this.meshes.values()) {
+            mesh.refit.dispose();
+            mesh.flagsBuffer?.destroy();
+        }
         this.meshes.clear();
     }
 

@@ -114,10 +114,11 @@ export const TRIANGLE_FLAG_FILTER = 1;
  * static-merge.ts) that come from a mirrored source instance: they are stored
  * in world space, where a mirror reverses the authored winding. Builders never
  * write it, and an input's `triangleFlags` may not set it (only bit 0;
- * bits 1-31 throw). Bits 2-15 are reserved, 0. Bits 16-31 hold the source
- * instance's material in a merged mesh ({@link MATERIAL_SHIFT}: material + 1,
- * 0 for none), written by `assembleTraceScene`, because a merged record has
- * no single material; 0 everywhere else.
+ * bits 1-31 throw). Bits 2-15 are reserved, 0. Bits 16-31 hold the
+ * triangle's material ({@link MATERIAL_SHIFT}: material + 1, 0 for none):
+ * the mesh input's `triangleMaterials`, which every builder writes, and in a
+ * merged mesh its source's (the source triangle's, else the source
+ * instance's), which `assembleTraceScene` writes.
  */
 export const TRIANGLE_FLAG_FLIP_FRONT_FACE = 2;
 
@@ -184,9 +185,47 @@ export function positionStrideFloats(layout: PositionLayout | undefined): number
     return layout === 'packed' ? 3 : 4;
 }
 
-/** Units (16 bytes each) of an indexed scene's region before a mesh's first triangle: the header, and a merged mesh's side and source tables. */
-export function indexedLeadingUnits(triangleCount: number, sourceCount = 0): number {
-    return sourceCount > 0 ? 1 + Math.ceil(triangleCount / 4) + Math.ceil(sourceCount / 4) : 1;
+/** Units (16 bytes each) of an unmerged indexed mesh's material table: 16 bits per triangle. */
+export function indexedMaterialTableUnits(triangleCount: number): number {
+    return Math.ceil(triangleCount / 8);
+}
+
+/**
+ * Units (16 bytes each) of an indexed scene's region before a mesh's first
+ * triangle: the header, and a merged mesh's side and source tables, or an
+ * unmerged mesh's material table (`materials`, when it has per-triangle materials).
+ */
+export function indexedLeadingUnits(triangleCount: number, sourceCount = 0, materials = false): number {
+    if (sourceCount > 0) return 1 + Math.ceil(triangleCount / 4) + Math.ceil(sourceCount / 4);
+    return materials ? 1 + indexedMaterialTableUnits(triangleCount) : 1;
+}
+
+/**
+ * Writes an unmerged indexed mesh's header (its vertex base, and with
+ * `codes` the material table's distance) and its material table (`codes`:
+ * each original triangle's material code, by original index) into `words`
+ * (4 per 16-byte unit), the mesh's first triangle at unit `triangleOffset`.
+ * The region must be {@link indexedLeadingUnits}`(n, 0, codes !== null)` units.
+ */
+export function writeIndexedMeshHeader(words: Uint32Array, triangleOffset: number, vertexBase: number, codes: Uint16Array | null): void {
+    const header = (triangleOffset - 1) * INDEXED_TRIANGLE_WORDS;
+    words.fill(0, header, header + INDEXED_TRIANGLE_WORDS);
+    words[header + MESH_HEADER_WORD.vertexBase] = vertexBase;
+    if (!codes) return;
+    const units = indexedMaterialTableUnits(codes.length);
+    const start = (triangleOffset - 1 - units) * INDEXED_TRIANGLE_WORDS;
+    if (start < 0) throw new RangeError(`the mesh at ${triangleOffset} has no room for its material table`);
+    words.fill(0, start, header);
+    for (let triangle = 0; triangle < codes.length; triangle++) words[start + (triangle >> 1)] |= codes[triangle] << ((triangle & 1) * 16);
+    words[header + MESH_HEADER_WORD.materialTableDistance] = 1 + units;
+}
+
+/** An unmerged indexed mesh's material code (material + 1, 0: none) for `original`, from its material table; 0 without one. */
+export function indexedMaterialCode(words: Uint32Array, triangleOffset: number, original: number): number {
+    const distance = words[(triangleOffset - 1) * INDEXED_TRIANGLE_WORDS + MESH_HEADER_WORD.materialTableDistance];
+    if (distance === 0) return 0;
+    const word = words[(triangleOffset - distance) * INDEXED_TRIANGLE_WORDS + (original >> 1)];
+    return (word >>> ((original & 1) * 16)) & 0xffff;
 }
 
 /** @deprecated The old name of {@link TRIANGLE_FLAG_FILTER}, from when the bit only meant an alpha test. */
@@ -270,12 +309,15 @@ export function checkInstanceMask(mask: number | undefined, instanceIndex: numbe
 }
 
 /**
- * The per-instance material: bits 16-31 of the instance `flags` word, and of
- * the triangle `flags` word in a merged mesh (where each triangle carries its
- * source instance's), stored as `material + 1` so that 0 means none. The walk
- * reports it as `BvhHit.material`, {@link NO_MATERIAL} for none. Written only
- * by this package (`buildTopLevel`, `assembleTraceScene`); a mesh input's
- * `triangleFlags` may still set bit 0 only.
+ * The material: bits 16-31 of the instance `flags` word, and of the triangle
+ * `flags` word (a mesh input's `triangleMaterials`; in a merged mesh, its
+ * source's), stored as `material + 1` so that 0 means none. A hit's material
+ * ({@link hitMaterialCode}) is the triangle's when it has one, else the
+ * instance's; the walk reports it as `BvhHit.material`, {@link NO_MATERIAL}
+ * for none. Indexed scenes keep the triangle's code in a per-mesh table
+ * instead (`MESH_HEADER_WORD.materialTableDistance`, or a merged side table).
+ * Written only by this package; a mesh input's `triangleFlags` may still set
+ * bit 0 only.
  */
 export const MATERIAL_SHIFT = 16;
 /** The material's bits in an instance or triangle `flags` word. */
@@ -299,7 +341,17 @@ export function materialCode(material: number | undefined, instanceIndex: number
     return material + 1;
 }
 
-/** The material index in an instance's or a merged triangle's `flags` word, or {@link NO_MATERIAL}. */
+/** A hit's material code: the triangle's (`triangleCode`, material + 1) when it has one, else the instance's from its `flags` word. */
+export function hitMaterialCode(triangleCode: number, instanceFlags: number): number {
+    return triangleCode !== 0 ? triangleCode : instanceFlags >>> MATERIAL_SHIFT;
+}
+
+/** The material index of a code (material + 1, 0: none), or {@link NO_MATERIAL}. */
+export function materialFromCode(code: number): number {
+    return code === 0 ? NO_MATERIAL : code - 1;
+}
+
+/** The material index in an instance's or a triangle's `flags` word, or {@link NO_MATERIAL}. */
 export function materialFromFlags(flags: number): number {
     const code = flags >>> MATERIAL_SHIFT;
     return code === 0 ? NO_MATERIAL : code - 1;

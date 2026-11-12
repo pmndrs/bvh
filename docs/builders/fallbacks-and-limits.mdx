@@ -12,7 +12,7 @@ paths.
 
 | Situation | What happens | Where it says so |
 | --- | --- | --- |
-| No device, or no `subgroups` | Every tree is built by tinybvh; the top level is built on the CPU; refits and poses are skipped | `builder.fallbackReason`, `SceneTrees.gpuFirstTrees.reason`, `SceneTrees.deformingCounts.posesSkipped` |
+| No device, or no `subgroups` | Every tree is built by tinybvh; the top level is built on the CPU; refits and GPU poses are skipped (`setPoseCpu` poses on the CPU) | `builder.fallbackReason`, `SceneTrees.gpuFirstTrees.reason`, `SceneTrees.deformingCounts.posesSkipped` |
 | A mesh too big for one batch's buffers (or for the builder) | That mesh goes to tinybvh | `planGpuHplocBatches(...).tooBig`, the result's `fallbackReason` |
 | A GPU tree refused (bad index, NaN boxes, a wait that ran out, too deep) | That mesh goes to tinybvh | `mesh.problem`, the result's `fallbackReason`, `SceneTreeEvent.fallbackReason` |
 | A tree deeper than `gpuMaxDepth` (default `GPU_TREE_MAX_DEPTH`) | `SceneTrees` refuses it: a GPU tree leaves the mesh to tinybvh, a tinybvh tree leaves the mesh on the tree it has | `SceneTreeEvent.fallbackReason` |

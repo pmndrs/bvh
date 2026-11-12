@@ -24,7 +24,8 @@
  * triangle's index in its source mesh, the padding word the source instance
  * index, and flags bit 1 marks triangles of a mirrored source (world-space
  * winding is the reverse of the authored one), and flags bits 16-31 the
- * source's material + 1 (0 for none). The walk takes the hit's instance and
+ * triangle's material + 1 (0 for none): the source mesh's per-triangle
+ * material (`triangleMaterials`) if it has one, else the source instance's. The walk takes the hit's instance and
  * material from the triangle when the record has `INSTANCE_FLAG.merged`, and
  * flips `frontFace` (and the hit normal) on bit 1. Nothing grows: the words
  * were already there. Material is not a grouping key.
@@ -54,7 +55,7 @@ import {
 } from './layout.ts';
 import { checkTriangleLeaves } from '../indexed-leaves.ts';
 import type { MeshGeometry } from './mesh-bvh.ts';
-import { checkTriangleFlags } from '../mesh-input.ts';
+import { checkTriangleFlags, triangleMaterialCodes } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
 import { invertAffine, type Mat4 } from './top-level.ts';
 import type { TraceSceneInstance } from './scene-assembly.ts';
@@ -89,7 +90,12 @@ export interface StaticMergeGroup {
     readonly sourceTriangles: Uint32Array;
     /** Per triangle of `geometry`: 1 when it comes from a mirrored source (`TRIANGLE_FLAG_FLIP_FRONT_FACE`). */
     readonly flipFrontFace: Uint8Array;
-    /** Per triangle of `geometry`: its source's material as stored in flags bits 16-31 (material + 1, 0 for none). */
+    /**
+     * Per triangle of `geometry`: its material as stored in flags bits 16-31
+     * (material + 1, 0 for none): the source mesh's `triangleMaterials` entry,
+     * else the source instance's material. The group's `geometry` carries no
+     * materials; assembly writes these.
+     */
     readonly sourceMaterials: Uint16Array;
     readonly sources: readonly StaticMergeSource[];
     /** Always true: instances that don't contribute to GI, or aren't visible, never merge. */
@@ -240,7 +246,13 @@ export function mergeStaticGeometry(
             for (let triangle = 0; triangle < triangles; triangle++) sourceTriangles[triangleBase + triangle] = triangle;
             if (member.mirrored) flipFrontFace.fill(1, triangleBase, triangleBase + triangles);
             const material = materialCode(instance.material, instance.instanceIndex);
-            if (material !== 0) sourceMaterials.fill(material, triangleBase, triangleBase + triangles);
+            // The source triangle's own material wins over its instance's.
+            const own = triangleMaterialCodes(mesh.triangleMaterials, triangles, `mesh ${instance.meshIndex} (instance ${instance.instanceIndex})`);
+            if (own) {
+                for (let triangle = 0; triangle < triangles; triangle++) sourceMaterials[triangleBase + triangle] = own[triangle] !== 0 ? own[triangle] : material;
+            } else if (material !== 0) {
+                sourceMaterials.fill(material, triangleBase, triangleBase + triangles);
+            }
             if (triangleFlags && mesh.triangleFlags) {
                 if (mesh.triangleFlags.length < triangles) throw new RangeError(`mesh ${instance.meshIndex}: triangleFlags must have one entry per triangle`);
                 triangleFlags.set(mesh.triangleFlags.subarray(0, triangles), triangleBase);
@@ -297,8 +309,9 @@ function transformPositions(source: Float32Array, e: Mat4, out: Float32Array, of
  * from `group.geometry` by any builder: each record's original index (the
  * builder's, an index into the group's geometry) becomes the source mesh's
  * triangle index, the padding word the source instance index, flags bit 1
- * is set for a mirrored source, and flags bits 16-31 get the source's
- * material + 1 (0 for none). Bit 0 (the filter flag) is kept; a record with
+ * is set for a mirrored source, and flags bits 16-31 get the triangle's
+ * material + 1 (`group.sourceMaterials`: its source triangle's, else its
+ * source instance's; 0 for none). Bit 0 (the filter flag) is kept; a record with
  * any other flag bit set throws, since builders only write bit 0.
  *
  * Call it once on fresh records (it reads the builder's original index):

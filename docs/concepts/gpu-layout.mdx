@@ -39,8 +39,8 @@ The three corners are stored as they are, so a vertex two triangles share has th
 triangle test needs that. The original index maps a hit back to your UVs, normals and material groups.
 
 Flags: bit 0 (`TRIANGLE_FLAG_FILTER`) sends the triangle to the [triangle filter](/concepts/masks-filter-materials).
-Input flags may set bit 0 only; the builders throw for any other bit. Bits 1 and 16-31 are written by merged static
-meshes.
+Input flags may set bit 0 only; the builders throw for any other bit. Bit 1 is written by merged static meshes. Bits
+16-31 hold the triangle's material + 1 (`MeshInput.triangleMaterials`, or a merged triangle's source's), 0 for none.
 
 **Parents: 4 bytes per node** (`GPU_LAYOUT_NO_PARENT` for the root), in a separate array that only refits read.
 Static scenes never upload them.

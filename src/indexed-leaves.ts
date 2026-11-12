@@ -245,7 +245,7 @@ export interface WeldOptions {
 
 /**
  * The geometry with its vertices welded (`Uint32Array` indices into the kept
- * positions). Triangles keep their order, corner order and flags, so original
+ * positions). Triangles keep their order, corner order, flags and materials, so original
  * triangle indices and barycentrics mean what they meant.
  */
 export function weldPositions(geometry: MeshInput, options: WeldOptions = {}): MeshInput {
@@ -255,5 +255,5 @@ export function weldPositions(geometry: MeshInput, options: WeldOptions = {}): M
     const entries = source ? source.length : geometry.positions.length / 3;
     const indices = new Uint32Array(entries);
     for (let entry = 0; entry < entries; entry++) indices[entry] = weld.remap[source ? source[entry] : entry];
-    return { positions: weld.positions, indices, triangleFlags: geometry.triangleFlags };
+    return { positions: weld.positions, indices, triangleFlags: geometry.triangleFlags, ...(geometry.triangleMaterials ? { triangleMaterials: geometry.triangleMaterials } : {}) };
 }
