@@ -20,7 +20,7 @@ import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
 import { addToTally, compareAny, compareClosest, newTally } from './oracle-compare.ts';
 import { createRandom, randomAffine, randomRays, randomTriangleSoup, tessellatedQuad } from './oracle-fixtures.ts';
 import { buildReferenceScene, traceAnyReference, traceClosestReference } from './reference-tracer.ts';
-import { buildTraceScene, type TraceSceneInstance } from './scene-assembly.ts';
+import { assembleTraceScene, buildTraceScene, type TraceSceneInstance } from './scene-assembly.ts';
 
 const tinyBvh = await createTinyBvhBuilder();
 
@@ -142,6 +142,28 @@ describe('per-triangle materials', () => {
             expect(after[slot * TRIANGLE_WORDS + TRIANGLE_WORD.flags]).toBe(before[slot * TRIANGLE_WORDS + TRIANGLE_WORD.flags]);
         }
         expect(posed.bounds[2]).toBeCloseTo(tree.bounds[2] + 0.5, 6);
+    });
+
+    it("assembleTraceScene with a prebuilt tree: records and indexed take the same materials (the geometry's, else the tree's bits), and a mismatch throws", () => {
+        const geometry = geometries[0];
+        const plain = { positions: geometry.positions, indices: geometry.indices };
+        const tree = buildMeshBvhWithTinyBvh(geometry, tinyBvh);
+        const instances: TraceSceneInstance[] = [{ meshIndex: 0, instanceIndex: 0, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], material: 9 }];
+        const down = Array.from({ length: 400 }, (_, k) => ({ origin: [-0.95 + 1.9 * ((k % 20) / 19), -0.95 + 1.9 * (Math.floor(k / 20) / 19), 2] as const, direction: [0, 0, -1] as const, tMin: 0, tMax: 10 }));
+        const materials = (scene: ReturnType<typeof assembleTraceScene>) => down.map((ray) => createCpuTracer(scene).closest(ray)?.material ?? -1);
+        const records = materials(assembleTraceScene([tree], instances));
+        // The tree carries the materials, the geometry doesn't: indexed reads the tree's bits, as records do.
+        const indexed = materials(assembleTraceScene([tree], instances, {}, { triangleLeaves: 'indexed', geometries: [plain] }));
+        expect(indexed).toEqual(records);
+        expect(new Set(records)).toEqual(new Set([1, 9]));
+        // Both, agreeing: the same.
+        expect(materials(assembleTraceScene([tree], instances, {}, { triangleLeaves: 'indexed', geometries: [geometry] }))).toEqual(records);
+        // A tree built without materials: the geometry's are used.
+        const bare = buildMeshBvhWithTinyBvh(plain, tinyBvh);
+        expect(materials(assembleTraceScene([bare], instances, {}, { triangleLeaves: 'indexed', geometries: [geometry] }))).toEqual(records);
+        // Both, disagreeing: throws, naming the mesh and triangle.
+        const other = withMaterials(plain, 2);
+        expect(() => assembleTraceScene([tree], instances, {}, { triangleLeaves: 'indexed', geometries: [other] })).toThrow(/mesh 0: geometries\[0\]\.triangleMaterials gives triangle \d+/);
     });
 
     it('takes 0-65534 and 0xffff or 0xffffffff for none, refuses anything else naming the triangle, and app flags still may set bit 0 only', () => {

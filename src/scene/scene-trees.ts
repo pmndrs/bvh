@@ -612,6 +612,7 @@ export class SceneTrees {
     private readonly deforming: DeformingTrees | null;
     private posesSkipped = 0;
     private posesSkippedWarned = false;
+    private cpuPoseLayoutWarned = false;
     /** CPU poses written ({@link setPoseCpu}). */
     private cpuPoses = 0;
     /** Staging buffers of CPU poses copied in the last update's encoder, freed at the next update. */
@@ -880,7 +881,8 @@ export class SceneTrees {
      * the latest pose too. It costs a pass over the triangles and an upload
      * of the mesh's nodes and triangles per pose, so it suits small meshes or
      * a few poses a second. `positions` is read at the update; it must not
-     * change before then. A later {@link setPose} replaces it.
+     * change before then. With subgroups a later {@link setPose} replaces it;
+     * without them `setPose` is skipped, so this pose (or a later `setPoseCpu`) stays.
      */
     setPoseCpu(mesh: number, positions: Float32Array): void {
         this.checkLive();
@@ -1423,8 +1425,9 @@ export class SceneTrees {
         if (builder && states.length > 0) {
             const request = (state: MeshSlot): GpuTreeRequest => ({ slot: state.slot, generation: state.generation, geometry: state.geometry! });
             // Deforming meshes' trees are read back too (the refit needs their shape), so they get a batch of their own.
-            const others = states.filter((state) => !this.deforming?.has(state.slot)).map(request);
-            const deforming = states.filter((state) => this.deforming?.has(state.slot)).map(request);
+            // Split by the mesh's own flag, not by the GPU refit: without subgroups a CPU pose (setPoseCpu) needs the layout as much.
+            const others = states.filter((state) => !state.deforming).map(request);
+            const deforming = states.filter((state) => state.deforming).map(request);
             if (others.length > 0) this.startGpuBuilds(builder, others, { readLayouts: false, rebuild: false });
             if (deforming.length > 0) this.startGpuBuilds(builder, deforming, { readLayouts: true, rebuild: false });
         }
@@ -1596,7 +1599,7 @@ export class SceneTrees {
             if (this.placed.has(state.slot)) continue;
             // An arrived tree counts (it is placed at the next update), except a tinybvh tree that waits: the same rule as takeArrived's.
             const waitsForGpu = this.tinybvhTreeWaits(state, state.gpu === 'building', adoptionPending, loadBatchBuilding);
-            const gpuWaits = loadBatchBuilding && (this.deforming?.has(state.slot) ?? false);
+            const gpuWaits = loadBatchBuilding && this.deformingSlot(state.slot);
             const arrived = this.arrived.some((tree) => tree.slot === state.slot && tree.generation === state.generation && (tree.source === 'gpu' ? !gpuWaits : !waitsForGpu));
             if (arrived) continue;
             if (state.gpu === 'building' || state.tinybvh === 'building') waiting++;
@@ -1618,6 +1621,11 @@ export class SceneTrees {
         return (gpuTreeFirst && this.holdsRefinement(state.slot)) || (waitForAdoption && (state.gpu === 'building' || loadBatchBuilding));
     }
 
+    /** The mesh was added as deforming (with or without the GPU refit: its first trees come in a batch of their own, with layouts). */
+    private deformingSlot(slot: number): boolean {
+        return this.meshes.get(slot)?.deforming ?? false;
+    }
+
     /** No tree is placed, and none stored for the next update: the storages are empty (what adoption needs). */
     private nothingStored(): boolean {
         return this.placed.size === 0 && !this.arrived.some((tree) => tree.source === 'gpu' && tree.stored !== undefined);
@@ -1625,7 +1633,7 @@ export class SceneTrees {
 
     /** A first-tree GPU build of a mesh that doesn't deform (the main load batch, for adoption) is still running. */
     private loadBatchBuilding(): boolean {
-        for (const state of this.meshes.values()) if (state.gpu === 'building' && !(this.deforming?.has(state.slot) ?? false)) return true;
+        for (const state of this.meshes.values()) if (state.gpu === 'building' && !state.deforming) return true;
         return false;
     }
 
@@ -1665,7 +1673,7 @@ export class SceneTrees {
         }
         for (const tree of this.arrived) {
             if (tree.source !== 'gpu') continue;
-            if (loadBatchBuilding && !tree.rebuild && this.deforming?.has(tree.slot) && this.currentState(tree.slot, tree.generation)) {
+            if (loadBatchBuilding && !tree.rebuild && this.deformingSlot(tree.slot) && this.currentState(tree.slot, tree.generation)) {
                 // A deforming mesh's own batch waits for the main load batch, which is the one to adopt.
                 waiting.push(tree);
                 continue;
@@ -1965,7 +1973,7 @@ export class SceneTrees {
                 this.releaseOutputs(tree.built.outputs);
                 continue;
             }
-            if (loadBatchBuilding && !tree.rebuild && this.deforming?.has(tree.slot)) continue;
+            if (loadBatchBuilding && !tree.rebuild && this.deformingSlot(tree.slot)) continue;
             candidates.push(tree);
         }
         let stored = new Map<GpuArrivedTree, StoredAt>();
@@ -2089,7 +2097,7 @@ export class SceneTrees {
             if (trees.length !== usable || outputs.isDestroyed) continue;
             const slots = new Set(trees.map((tree) => tree.slot));
             if ([...this.placed.keys()].some((slot) => !slots.has(slot))) continue;
-            const deforming = trees.some((tree) => this.deforming?.has(tree.slot) ?? false);
+            const deforming = trees.some((tree) => this.deformingSlot(tree.slot));
             const triangles = trees.reduce((total, tree) => total + tree.built.tree.triangleCount, 0);
             if (!best || (best.deforming && !deforming) || (best.deforming === deforming && triangles > best.triangles)) best = { trees, deforming, triangles };
         }
@@ -2212,9 +2220,21 @@ export class SceneTrees {
     private writeCpuPoses(encoder: GPUCommandEncoder): void {
         for (const state of this.meshes.values()) {
             const pose = state.cpuPose;
-            if (!pose?.due || !pose.layout || !pose.positions) continue;
+            if (!pose?.due || !pose.positions) continue;
             const placed = this.placed.get(state.slot);
             if (!placed) continue;
+            if (!pose.layout) {
+                // The placed tree came without its layout (its readback failed, or a custom first-tree builder ignored readLayouts):
+                // the pose waits for the next tree that has one (tinybvh's refinement, or a drift rebuild).
+                if (!this.cpuPoseLayoutWarned) {
+                    this.cpuPoseLayoutWarned = true;
+                    this.warn(
+                        `@pmndrs/bvh: SceneTrees.setPoseCpu: mesh ${state.slot}'s placed tree (${placed.source}) has no layout on the CPU (the readback failed, or the first-tree builder ignored readLayouts), ` +
+                            "so its CPU pose waits for the next tree that has one (tinybvh's refinement: don't hold refinements forever)",
+                    );
+                }
+                continue;
+            }
             const posed = refitLayoutToPose(pose.layout, pose.positions, pose.indices);
             if (this.nodeFormat === 'quantized') {
                 const quantized = quantizeNodes({ ...pose.layout, nodes: posed.nodes, nodeFormat: 'f32' });

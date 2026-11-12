@@ -18,7 +18,9 @@ import {
     INDEXED_TRIANGLE_WORDS,
     MESH_HEADER_WORD,
     TRACE_STACK_SIZE,
+    MATERIAL_SHIFT,
     TRIANGLE_BYTES,
+    TRIANGLE_WORD,
     TRIANGLE_WORDS,
     checkInstanceMask,
     indexedLeadingUnits,
@@ -183,7 +185,11 @@ export interface TraceSceneAssemblyOptions {
     /**
      * Indexed scenes: each mesh's geometry, parallel to `meshes` (null where
      * the mesh is null), whose positions go into the scene's positions buffer.
-     * Merged groups take theirs from the plan.
+     * Merged groups take theirs from the plan. Per-triangle materials: a
+     * geometry's `triangleMaterials` when it has them, else the tree's
+     * records' (flags bits 16-31), which is what a records scene reports from
+     * the same tree; both present and different throws. A records scene
+     * always reports the tree's.
      */
     readonly geometries?: readonly (MeshGeometry | null)[];
     /**
@@ -235,10 +241,9 @@ export function assembleTraceScene(
     const nodeBytes = gpuLayoutNodeBytes(nodeFormat);
     let totalNodes = 0;
     let totalTriangles = 0;
-    // Indexed: an unmerged mesh's per-triangle material codes go into a table before its header.
-    const materialCodes = placed.map((mesh, index) =>
-        indexed && mesh && index < meshes.length ? triangleMaterialCodes(geometryOf(index).triangleMaterials, mesh.triangleCount, `assembleTraceScene: mesh ${index}`) : null,
-    );
+    // Indexed: an unmerged mesh's per-triangle material codes go into a table before its header
+    // (the geometry's triangleMaterials, else the tree's records' bits: the same materials a records scene reports).
+    const materialCodes = placed.map((mesh, index) => (indexed && mesh && index < meshes.length ? indexedMaterialCodes(mesh, geometryOf(index), index) : null));
     const allPlacements = placed.map((mesh, index): TraceSceneMeshPlacement => {
         const sources = index >= meshes.length ? merged!.plan.groups[index - meshes.length].sources.length : 0;
         const leading = indexed && mesh ? indexedLeadingUnits(mesh.triangleCount, sources, materialCodes[index] !== null) : 0;
@@ -366,6 +371,38 @@ export function assembleTraceScene(
         byteLength: nodes.byteLength + triangles.byteLength + topLevel.buffer.byteLength + positions.byteLength,
         mergedGroups,
     };
+}
+
+/**
+ * An indexed scene's material table for one mesh: `geometry.triangleMaterials`
+ * when it has them, else what the tree's records carry in flags bits 16-31
+ * (a records scene reads those, so both formats report the same materials).
+ * Throws when both are there and disagree (the tree was built from other
+ * materials). An indexed tree's leaves carry no materials: only the geometry's count.
+ */
+function indexedMaterialCodes(mesh: MeshBvh, geometry: MeshGeometry, index: number): Uint16Array | null {
+    const where = `assembleTraceScene: mesh ${index}`;
+    const own = triangleMaterialCodes(geometry.triangleMaterials, mesh.triangleCount, where);
+    if (mesh.triangleLeaves === 'indexed') return own;
+    const words = new Uint32Array(mesh.triangles, 0, mesh.triangleCount * TRIANGLE_WORDS);
+    let fromTree: Uint16Array | null = null;
+    for (let slot = 0; slot < mesh.triangleCount; slot++) {
+        const code = words[slot * TRIANGLE_WORDS + TRIANGLE_WORD.flags] >>> MATERIAL_SHIFT;
+        if (code === 0 && !fromTree) continue;
+        fromTree ??= new Uint16Array(mesh.triangleCount);
+        const triangle = words[slot * TRIANGLE_WORDS + TRIANGLE_WORD.originalIndex];
+        if (triangle < mesh.triangleCount) fromTree[triangle] = code;
+    }
+    if (!own || !fromTree) return own ?? fromTree;
+    for (let triangle = 0; triangle < own.length; triangle++) {
+        if (own[triangle] !== fromTree[triangle]) {
+            const name = (code: number) => (code === 0 ? 'none' : String(code - 1));
+            throw new RangeError(
+                `${where}: geometries[${index}].triangleMaterials gives triangle ${triangle} material ${name(own[triangle])}, the tree's records ${name(fromTree[triangle])}; build the tree from the same materials (or drop one of them)`,
+            );
+        }
+    }
+    return own;
 }
 
 /**
