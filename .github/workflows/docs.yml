@@ -2,8 +2,8 @@ name: Build documentation and deploy to GitHub Pages
 
 # The docs site (pmndrs/docs, the MDX in docs/) with the TypeDoc API reference at /api, on one
 # Pages site: https://bvh.docs.pmnd.rs once the custom domain is set (Settings > Pages) and
-# pmnd.rs has a CNAME for bvh.docs. Pull requests build it, to catch MDX errors, but deploy
-# nothing. tools/docs-site.ts is the build both here and locally (`pnpm docs:site`); it leaves
+# pmnd.rs has a CNAME for bvh.docs. Pushes and pull requests only build it, to catch MDX errors.
+# Deploying is manual (Actions > this workflow > Run workflow) until Dennis decides to publish. tools/docs-site.ts is the build both here and locally (`pnpm docs:site`); it leaves
 # out docs/internals (contributor notes, plain Markdown) and docs/snippets (the code samples,
 # checked by `pnpm test`).
 
@@ -59,13 +59,13 @@ jobs:
           SOURCECODE_BASEURL: https://github.com/${{ github.repository }}/tree/${{ github.event.pull_request.head.sha || github.sha }}
           EDIT_BASEURL: https://github.com/${{ github.repository }}/edit/${{ github.head_ref || 'main' }}/docs
           CONTRIBUTORS_PAT: ${{ secrets.GITHUB_TOKEN }}
-      - if: github.event_name != 'pull_request'
+      - if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-pages-artifact@v3
         with:
           path: _site
 
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     # Grant GITHUB_TOKEN the permissions a Pages deployment needs.
