@@ -94,23 +94,23 @@ export async function gpuSuite(tracers: readonly GpuTracer[], scene: string, inp
         }
         out.push({ page: 'gpu', scene, library: tracer.id, metric: 'gpu-bytes', value: tracer.bytes, unit: 'bytes', method: tracer.bytesMethod, ranked: true });
     }
-    // The paired ratios: ours over three-mesh-bvh within each round.
+    // The paired ratios: each of ours over three-mesh-bvh within each round.
     const other = tracers.find((tracer) => tracer.id === 'tmbvh');
-    if (other) {
+    for (const variant of other ? tracers.filter((tracer) => tracer.id !== 'tmbvh') : []) {
         for (const mode of modes) {
-            const a = rates.get(`ours/${mode}`)!;
+            const a = rates.get(`${variant.id}/${mode}`)!;
             const b = rates.get(`tmbvh/${mode}`)!;
             const perRound = a.map((rate, i) => rate / b[i]);
-            const agreement = out.find((m) => m.library === 'tmbvh' && m.metric === `${mode}/${input.set}`)!.agreement!;
+            const disagree = (library: string) => out.find((m) => m.library === library && m.metric === `${mode}/${input.set}`)!.agreement!.disagree;
             out.push({
                 page: 'gpu',
                 scene,
-                library: 'ours-over-tmbvh',
+                library: `${variant.id}-over-tmbvh`,
                 metric: `${mode}/${input.set}/ratio`,
                 value: median(perRound),
                 unit: 'ratio',
-                method: `ours' rate over three-mesh-bvh's within each round, median of ${rounds} rounds (min ${Math.min(...perRound).toFixed(2)}, max ${Math.max(...perRound).toFixed(2)})`,
-                ranked: agreement.disagree === 0,
+                method: `${variant.name}'s rate over three-mesh-bvh's within each round, median of ${rounds} rounds (min ${Math.min(...perRound).toFixed(2)}, max ${Math.max(...perRound).toFixed(2)})`,
+                ranked: disagree('tmbvh') === 0 && disagree(variant.id) === 0,
             });
         }
     }

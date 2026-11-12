@@ -237,9 +237,17 @@ const BVH_BOX_EXIT_PADDING: f32 = 1.0000004;
  * will do, so there is nothing to gain from finding the nearest one first.
  * On the bench scenes far-first made any-hit much faster than near-first, with
  * every answer unchanged (numbers: PROGRESS, T1.3, and bench/results/trace.csv).
+ * `anyHitOrder` compiles another order into the same walk (see {@link AnyHitOrder}).
  */
-function walkWgsl(kind: 'closest' | 'any', rayMasks: boolean): string {
+function walkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrder: AnyHitOrder = 'far'): string {
     const closest = kind === 'closest';
+    // Which child a walk enters first when both are hit (the other is pushed).
+    const leftFirst =
+        closest || anyHitOrder === 'near'
+            ? 'leftEntry <= rightEntry'
+            : anyHitOrder === 'larger'
+              ? 'bvhBoxHalfArea(node.leftMin, node.leftMax) >= bvhBoxHalfArea(node.rightMin, node.rightMax)'
+              : 'leftEntry > rightEntry';
     // With masks compiled out the walk has no mask parameter, no mask test, and
     // hands the filter all ones; it is otherwise the same code.
     const maskParameter = rayMasks ? ', rayMask: u32' : '';
@@ -319,8 +327,9 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
             let hitRight = rightEntry < BVH_BOX_MISS;
 
             if (hitLeft && hitRight) {
-                // Closest-hit visits the nearer child first, any-hit the farther one (see above).
-                if (${closest ? 'leftEntry <= rightEntry' : 'leftEntry > rightEntry'}) {
+                // Closest-hit visits the nearer child first; any-hit the farther one (anyHitOrder
+                // 'far', the default), the nearer ('near') or the larger ('larger'); see above.
+                if (${leftFirst}) {
                     stack[stackSize] = rightReference;
                     current = leftReference;
                 } else {
@@ -620,7 +629,36 @@ export interface TraceModuleOptions {
      * the same walk, with the same bindings.
      */
     readonly nodeFormat?: NodeFormat;
+    /**
+     * Which child any-hit enters first when the ray hits both, compiled in
+     * like `rayMasks` (see {@link AnyHitOrder}). Default `'far'`. Closest-hit
+     * always enters the nearer one. Answers are the same either way.
+     */
+    readonly anyHitOrder?: AnyHitOrder;
 }
+
+/**
+ * The any-hit walk's child order (`TraceModuleOptions.anyHitOrder`), when a
+ * ray hits both children of a node. Every order gives the same answers; only
+ * the work per ray changes.
+ *
+ * - `'far'` (the default): the farther child first. A shadow or probe ray
+ *   starts on a surface, so its nearer child mostly holds the geometry it
+ *   starts on, and its blocker lies ahead (T1.3: 1.1-2.8x faster than near
+ *   first on the surface-ray bench).
+ * - `'near'`: the nearer child first, as closest-hit does.
+ * - `'larger'`: the child with the larger box (surface area) first. A ray
+ *   that crosses the parent crosses a child with a chance in proportion to its
+ *   area (the SAH's own assumption), so the larger child is the likelier to
+ *   hold a blocker: a room's shell, a floor, a wall. It costs two box areas
+ *   per node where both children are hit. On compare/gpu's furnished room it
+ *   cut the slowest of 32 rays from outside from 78 box tests to about 24
+ *   (docs/internals/design/trace.md, "Any-hit child order").
+ *
+ * It is one comparison in the same walk; switching back is setting the
+ * option back (or leaving it out).
+ */
+export type AnyHitOrder = 'far' | 'near' | 'larger';
 
 const DEFAULT_TRACE_SLOT: BindingSlot = { group: 0, firstBinding: 0 };
 
@@ -648,6 +686,10 @@ export function traceModuleWgsl(options: TraceModuleOptions = {}): string {
     const nodeFormat = options.nodeFormat ?? 'f32';
     if (nodeFormat !== 'f32' && nodeFormat !== 'quantized') throw new RangeError(`traceModuleWgsl: nodeFormat must be 'f32' or 'quantized', got ${String(nodeFormat)}`);
     const quantized = nodeFormat === 'quantized';
+    const anyHitOrder = options.anyHitOrder ?? 'far';
+    if (anyHitOrder !== 'far' && anyHitOrder !== 'near' && anyHitOrder !== 'larger') {
+        throw new RangeError(`traceModuleWgsl: anyHitOrder must be 'far', 'near' or 'larger', got ${String(anyHitOrder)}`);
+    }
     return /* wgsl */ `${COMMON_WGSL}
 // Nodes and triangles are read as plain vec4s, so every load is one 16-byte
 // read whatever the backend makes of a struct with vec3 members. Quantized
@@ -936,12 +978,22 @@ fn bvhIntersectWatertight(triangle: BvhTriangle, setup: BvhRaySetup, tMin: f32, 
 }
 
 ${rayMasks ? INSTANCE_MASK_WGSL : ''}
+${anyHitOrder === 'larger' ? BOX_HALF_AREA_WGSL : ''}
 ${walkWgsl('closest', rayMasks)}
-${walkWgsl('any', rayMasks)}
+${walkWgsl('any', rayMasks, anyHitOrder)}
 ${rayMasks ? MASKED_TRACE_WGSL : UNMASKED_TRACE_WGSL}
 ${triangleFilter ?? '// bvhTrianglePasses is supplied by the kernel.'}
 `;
 }
+
+// Only in a module with anyHitOrder 'larger'.
+const BOX_HALF_AREA_WGSL = /* wgsl */ `
+// Half a box's surface area: any-hit's 'larger' order enters the child with the larger one first.
+fn bvhBoxHalfArea(boxMin: vec3f, boxMax: vec3f) -> f32 {
+    let size = boxMax - boxMin;
+    return size.x * size.y + size.y * size.z + size.z * size.x;
+}
+`;
 
 // Only in a module with ray masks.
 const INSTANCE_MASK_WGSL = /* wgsl */ `
@@ -1157,6 +1209,8 @@ export interface BatchKernelOptions {
     readonly positionLayout?: PositionLayout;
     /** The trace module's node format (`TraceModuleOptions.nodeFormat`). Default `'f32'`. */
     readonly nodeFormat?: NodeFormat;
+    /** The any-hit walk's child order (`TraceModuleOptions.anyHitOrder`). Default `'far'`. */
+    readonly anyHitOrder?: AnyHitOrder;
 }
 
 /** Bytes of the batch kernel's uniform (`BvhBatchParams`, group 1 binding 2, only with ray masks). Padded to 16. */
@@ -1178,6 +1232,6 @@ export function batchKernelWgsl(mode: 'closest' | 'any', options: BatchKernelOpt
     }
     rejectOldPositionalCall('batchKernelWgsl', options);
     const rayMasks = options.rayMasks ?? true;
-    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat })}
+    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat, anyHitOrder: options.anyHitOrder })}
 ${batchEntryWgsl(mode, 1, rayMasks, options.hitNormal ?? true)}`;
 }

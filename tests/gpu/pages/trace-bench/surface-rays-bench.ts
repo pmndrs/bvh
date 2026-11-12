@@ -195,6 +195,18 @@ export interface LeafLayoutResult {
  * same hit record unless another triangle lies at exactly that `t` (a tie,
  * where the walk's order picks and looser boxes can change it).
  */
+type AnyHitOrderName = 'far' | 'larger' | 'near';
+
+/** Section 7: the any-hit child orders against the default ('far'), any-hit on records. */
+export interface AnyHitOrderResult {
+    rounds: number;
+    entries: { tree: Tree; set: SetName; order: AnyHitOrderName; mraysPerRound: number[] }[];
+    ratios: PairedRatio[];
+    /** Rays blocked the same as with 'far' (must be all). */
+    agreement: { tree: Tree; set: SetName; order: AnyHitOrderName; rays: number; same: number }[];
+    counts: { tree: Tree; set: SetName; order: AnyHitOrderName; counts: CountSummary; countedAgreement: number }[];
+}
+
 export interface NodeFormatResult {
     rounds: number;
     entries: (Omit<LeafLayoutEntry, 'layout'> & { layout: NodeLayout })[];
@@ -256,7 +268,7 @@ class CountedKernel {
         private readonly pipelines: Record<'closest' | 'any', GPUComputePipeline>,
     ) {}
 
-    static async create(device: GPUDevice, format: { readonly nodeFormat?: 'f32' | 'quantized' } = {}): Promise<CountedKernel> {
+    static async create(device: GPUDevice, format: { readonly nodeFormat?: 'f32' | 'quantized'; readonly anyHitOrder?: 'far' | 'near' | 'larger' } = {}): Promise<CountedKernel> {
         const make = (mode: 'closest' | 'any') =>
             device.createComputePipelineAsync({
                 label: `counted walk ${mode}`,
@@ -358,7 +370,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
     try {
         const profileName = (new URLSearchParams(location.search).get('profile') ?? 'full') as SurfaceProfileName;
         const profile = SURFACE_PROFILES[profileName];
-        // `?skip=hit-record,leaves`: leave out sections 4 and 5 (for a run that only wants the others).
+        // `?skip=hit-record,leaves,any-order`: leave out sections 4, 5 and 7 (for a run that only wants the others).
         const skip = new Set((new URLSearchParams(location.search).get('skip') ?? '').split(',').filter((name) => name.length > 0));
         if (!profile) throw new Error(`unknown profile "${profileName}" (known: ${Object.keys(SURFACE_PROFILES).join(', ')})`);
         const { device } = await requestBenchDevice();
@@ -801,6 +813,66 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             }
             const nodeFormat: NodeFormatResult = { rounds: profile.rounds, entries: nodeEntries, ratios: nodeRatios, agreement: nodeAgreement, counts: nodeCounts, bytes: nodeBytes };
 
+            // 7: any-hit child order (TraceModuleOptions.anyHitOrder): 'larger' and 'near' against the default 'far', any-hit, records.
+            const runOrders = !skip.has('any-order');
+            const orders: AnyHitOrderName[] = ['far', 'larger', 'near'];
+            const orderKernels: Record<AnyHitOrderName, TraceBatchKernel> = {
+                far: fullKernel,
+                larger: await TraceBatchKernel.create(device, { label: 'surface any larger', anyHitOrder: 'larger' }),
+                near: await TraceBatchKernel.create(device, { label: 'surface any near', anyHitOrder: 'near' }),
+            };
+            extraKernels.push(orderKernels.larger, orderKernels.near);
+            const orderCases: LeafLayoutCase[] = runOrders ? (['instanced', 'merged'] as const).flatMap((tree) => sets.map((set) => ({ tree, set: set.name, mode: 'any' as const }))) : [];
+            const orderEntries: AnyHitOrderResult['entries'] = orderCases.flatMap((entry) => orders.map((order) => ({ tree: entry.tree, set: entry.set as SetName, order, mraysPerRound: [] as number[] })));
+            const orderEntryOf = (entry: LeafLayoutCase, order: AnyHitOrderName) => {
+                const found = orderEntries.find((candidate) => candidate.tree === entry.tree && candidate.set === entry.set && candidate.order === order);
+                if (!found) throw new Error(`no any-hit order entry ${entry.tree} ${entry.set} ${order}`);
+                return found;
+            };
+            const orderAgreement: AnyHitOrderResult['agreement'] = [];
+            const orderCounts: AnyHitOrderResult['counts'] = [];
+            const orderCounted: Record<AnyHitOrderName, CountedKernel> = { far: counted, larger: await CountedKernel.create(device, { anyHitOrder: 'larger' }), near: await CountedKernel.create(device, { anyHitOrder: 'near' }) };
+            for (const entry of orderCases) {
+                const set = sets.find((candidate) => candidate.name === entry.set) as RaySet;
+                const expected = new Uint32Array(await traceOnce(device, fullKernel, scenes[entry.tree], 'any', set.buffer, set.count));
+                for (const order of orders) {
+                    const answers = await traceOnce(device, orderKernels[order], scenes[entry.tree], 'any', set.buffer, set.count);
+                    const actual = new Uint32Array(answers);
+                    let same = 0;
+                    for (let ray = 0; ray < set.count; ray++) if (expected[ray] === actual[ray]) same++;
+                    orderAgreement.push({ tree: entry.tree, set: entry.set as SetName, order, rays: set.count, same });
+                    const counts = await orderCounted[order].count(scenes[entry.tree], 'any', set.buffer, set.count);
+                    orderCounts.push({ tree: entry.tree, set: entry.set as SetName, order, counts: summariseCounts(counts, set.count), countedAgreement: countedAgreement('any', answers, counts, set.count) });
+                    const last = orderCounts[orderCounts.length - 1];
+                    progress(`${sceneId}: any-hit order ${order} ${entry.tree} ${entry.set}: steps ${last.counts.meanSteps.toFixed(2)}, triangle tests ${last.counts.meanTriangleTests.toFixed(2)}; same as far on ${same} of ${set.count}`);
+                }
+                await yieldToBrowser();
+            }
+            const timeOrder = async (entry: LeafLayoutCase, order: AnyHitOrderName): Promise<number> => {
+                const set = sets.find((candidate) => candidate.name === entry.set) as RaySet;
+                const results = leafResults.get(`${set.name}/any`) as GPUBuffer;
+                const encode = (encoder: GPUCommandEncoder, timestampWrites?: GPUComputePassTimestampWrites): void =>
+                    orderKernels[order].encode(encoder, scenes[entry.tree], { mode: 'any', rays: set.buffer, results, count: set.count, timestampWrites });
+                const single = await measureDispatches(() => timer.time((encoder, timestampWrites) => encode(encoder, timestampWrites)), profile.warmups, profile.timed);
+                const loaded = await timeLoaded(device, encode, set.count, single.medianMs, profile.loadedMs);
+                await yieldToBrowser();
+                return loaded.mraysPerSecond;
+            };
+            for (let round = 0; round < (runOrders ? profile.rounds : 0); round++) {
+                for (const step of leafLayoutRoundOrder(orderCases, orders, round)) orderEntryOf(step.case, step.layout).mraysPerRound.push(await timeOrder(step.case, step.layout));
+                progress(
+                    `${sceneId}: any-hit order round ${round + 1} of ${profile.rounds}: ` +
+                        orderCases.map((entry) => `${entry.tree} ${entry.set} larger/far ${(orderEntryOf(entry, 'larger').mraysPerRound[round] / orderEntryOf(entry, 'far').mraysPerRound[round]).toFixed(3)}`).join(', '),
+                );
+            }
+            const orderRatios: PairedRatio[] = orderCases.flatMap((entry) =>
+                (['larger', 'near'] as const).map((order) => ratioOfRounds(`any_${order}_over_far/${entry.tree}/${entry.set}/any`, orderEntryOf(entry, order).mraysPerRound, orderEntryOf(entry, 'far').mraysPerRound)),
+            );
+            for (const ratio of orderRatios) {
+                progress(`${sceneId}: ${ratio.name}: median ${ratio.median.toFixed(3)} (${ratio.min.toFixed(3)}-${ratio.max.toFixed(3)} over ${profile.rounds} rounds)`);
+            }
+            const anyHitOrder: AnyHitOrderResult = { rounds: profile.rounds, entries: orderEntries, ratios: orderRatios, agreement: orderAgreement, counts: orderCounts };
+
             data = {
                 benchmark: 'surface-rays',
                 scene: sceneId,
@@ -821,6 +893,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                 ...(runRecords ? { hitRecord } : {}),
                 ...(runLeaves ? { triangleLeaves } : {}),
                 nodeFormat,
+                ...(runOrders ? { anyHitOrder } : {}),
             };
 
             // The verdict is correctness only.
@@ -845,6 +918,12 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             }
             for (const entry of nodeCounts) {
                 if (entry.countedAgreement < MIN_COUNTED_AGREEMENT) failures.push(`the quantized counted walk disagrees with its production kernel on ${entry.tree} ${entry.set} ${entry.mode}: ${percent(entry.countedAgreement)}`);
+            }
+            for (const entry of orderAgreement) {
+                if (entry.same !== entry.rays) failures.push(`any-hit order '${entry.order}' blocks differently from 'far' on ${entry.tree} ${entry.set}: ${entry.rays - entry.same} of ${entry.rays} rays`);
+            }
+            for (const entry of orderCounts) {
+                if (entry.countedAgreement < MIN_COUNTED_AGREEMENT) failures.push(`the '${entry.order}' counted walk disagrees with its production kernel on ${entry.tree} ${entry.set}: ${percent(entry.countedAgreement)}`);
             }
             for (const entry of agreement) {
                 if (entry.same / entry.rays < MIN_HIT_AGREEMENT) failures.push(`the compact-record kernel differs from the full one on ${entry.tree} ${entry.set}: ${percent(entry.same / entry.rays)} of rays the same`);

@@ -19,6 +19,9 @@
  *   `rayMasks: false`, the walk with its mask code compiled out;
  * - `watertight-tinybvh-compact`: tinybvh trees through a kernel built with
  *   `hitNormal: false`, whose 24-byte records carry no material or normal;
+ * - `watertight-tinybvh-larger`, `-near`: tinybvh trees through kernels built
+ *   with `anyHitOrder: 'larger'` and `'near'` (the any-hit walk's other child
+ *   orders; closest hit is the same walk, any hit must block the same rays);
  * - `merged-tinybvh`, `merged-hploc`: `mergeStaticInstances`. Each instance
  *   gets its own copy of its mesh and two of every three are marked static,
  *   so they merge into world-space meshes (one per flags-and-mask group)
@@ -132,6 +135,8 @@ interface OracleVariant {
     weldTolerance?: number;
     /** The trees', scene's and kernel's node format (docs/internals/design/compressed-nodes.md); default f32. */
     nodeFormat?: 'f32' | 'quantized';
+    /** The kernel's any-hit child order (`anyHitOrder`); default `'far'`. */
+    anyHitOrder?: 'far' | 'near' | 'larger';
 }
 
 /** The tolerance weld's distance in the `-weld` variant: far below the quads' 0.5 grid, far above an ulp at 2 (2.4e-7). */
@@ -144,6 +149,8 @@ const VARIANTS: OracleVariant[] = [
     { name: 'watertight-hploc', treeSource: 'gpu-hploc' },
     { name: 'watertight-tinybvh-nomasks', treeSource: 'tinybvh', rayMasks: false },
     { name: 'watertight-tinybvh-compact', treeSource: 'tinybvh', hitNormal: false },
+    { name: 'watertight-tinybvh-larger', treeSource: 'tinybvh', anyHitOrder: 'larger' },
+    { name: 'watertight-tinybvh-near', treeSource: 'tinybvh', anyHitOrder: 'near' },
     { name: 'merged-tinybvh', treeSource: 'tinybvh', merged: true },
     { name: 'merged-hploc', treeSource: 'gpu-hploc', merged: true },
     { name: 'indexed-tinybvh', treeSource: 'tinybvh', triangleLeaves: 'indexed' },
@@ -504,6 +511,7 @@ await runGpuTest(async ({ device, log }) => {
             triangleLeaves: variant.triangleLeaves,
             positionLayout: variant.positionLayout,
             nodeFormat: variant.nodeFormat,
+            anyHitOrder: variant.anyHitOrder,
         });
         const results = { cases: {} as Record<string, unknown>, sharedEdges: [] as SharedEdgeReport[] };
         byTest[variant.name] = results;

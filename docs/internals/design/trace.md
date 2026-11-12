@@ -46,7 +46,7 @@ A default device caps one storage binding at 128 MB. At 48 bytes per triangle th
 - **One loop, one small stack per thread** (`array<u32, 64>` in private memory; three-mesh-bvh uses 60), shared by both levels. Entering an instance pushes a marker, switches the ray to object space and continues with that mesh's root. Popping the marker switches back to the world-space ray.
 - **Child order:** both child boxes are tested (slab test with a precomputed inverse direction). When both are hit, one is pushed and the walk goes to the other. Boxes beyond the current closest hit are skipped.
   - **Closest hit** goes to the nearer child first.
-  - **Any hit** goes to the *farther* child first. A shadow ray starts on a surface, so the nearer child is mostly the geometry it starts on, and what blocks it lies ahead. Any blocker will do. This made any-hit 1.1-2.8x faster on the bench scenes, with the same answers.
+  - **Any hit** goes to the *farther* child first by default. A shadow ray starts on a surface, so the nearer child is mostly the geometry it starts on, and what blocks it lies ahead. Any blocker will do. This made any-hit 1.1-2.8x faster on the bench scenes, with the same answers. `anyHitOrder: 'larger' | 'near'` compiles another order into the same walk (below, "Any-hit child order").
 - **Closest hit** keeps the nearest `t`, instance, triangle and barycentrics, and whether the hit was on the front face. Back-face hits count as hits.
 - **Front face means the side the mesh was authored as front,** also through a mirrored transform. The triangle test runs in object space, where the winding is the authored one, so no flip is needed. The exception is a merged static mesh, which is tested in world space: its triangles from mirrored sources carry flags bit 1, which flips the result.
 - **Any hit** returns at the first triangle hit within `[tMin, tMax]`.
@@ -85,6 +85,32 @@ fn bvhTrianglePasses(candidate: BvhCandidate) -> bool         // supplied by the
 
   The 24-byte record has no padding, and a seventh word would round it up to 32 (the `vec2f` aligns it to 8), so the compact record carries no material: `instance`, which is the source instance on a merged hit too, names it in the caller's own table. `hitRecordBytes(hitNormal)` gives the size. Any-hit results are one u32 either way.
 - **CPU walk and reference.** `createCpuTracer(scene, { triangleFilter, rayMasks })` with `closest(ray, { mask, stats })` and `any(ray, { mask, stats })`; `buildReferenceScene(meshes, instances, { triangleFilter, rayMasks })` with `traceClosestReference(scene, ray, { mask })` and `traceAnyReference(scene, ray, { mask })`. Both report `material` and `normal` as the WGSL does (the reference from the world-space winding, reversed for a mirrored instance), and `compareClosest` compares them when the tracer gives them (material equal, normal cosine >= `NORMAL_COSINE_TOLERANCE`, 0.9999). The filter is a `TrianglePasses`, taking a `TriangleCandidate` with the WGSL struct's fields. The reference asks it about every triangle it really hits (it has no flags), so test filters should give one answer per triangle: f32 and f64 disagree right at a decision boundary inside a triangle.
+
+### Any-hit child order (`anyHitOrder`)
+
+`traceModuleWgsl`, `batchKernelWgsl`, `TraceBatchKernel.create` and `createCpuTracer` take `anyHitOrder`: which child any-hit enters first when the ray hits both. It changes one comparison in the walk (a unit test checks that only that line differs) and never an answer.
+
+| Order | Enters first | For |
+| --- | --- | --- |
+| `'far'` (default) | the child whose box the ray enters later | rays that start on a surface: shadow and probe rays (T1.3) |
+| `'larger'` | the child with the larger box (surface area; two areas per node where both are hit, `bvhBoxHalfArea`) | occlusion rays that start away from the geometry: from outside a model, line of sight between open points |
+| `'near'` | the nearer child, as closest-hit | measured for completeness; slower than one of the two above everywhere |
+
+**Why `'larger'`.** compare/gpu found three-mesh-bvh/webgpu's any-hit 3.2 times ours on the furnished room's outside rays (982 against 304 Mrays/s), while closest-hit and inside rays were level. The comparison was fair: the same rays and `tMax` (two diagonals), the same any-hit semantics (both stop at the first triangle in the interval; theirs in a fixed right-then-left order), every ray blocked by both, our leanest kernel. The counted walks (`?counts` on the page, `compare/gpu/gpu-counts.ts`) showed the mean work was close (19 box tests per ray against 12) but the tail was not: the slowest ray of each 32 (one SIMD group on the M5) needed 78 box tests in ours and 24 in theirs. Far-first sends a ray from outside the room past the walls into the far end of the furniture first, and its group waits for it. A ray that crosses a parent box crosses a child with a chance in proportion to the child's area (the SAH's own assumption), so the larger child, here the room's shell, is the likelier to hold a blocker. With `'larger'` the slowest of 32 needs 23 box tests, and the room's outside any-hit went from 0.31 to 1.73x theirs. The CPU walk's counts agreed before the GPU was run (`'larger'`: 7.0 nodes per ray against 9.6, slowest of 32: 11.7 against 39.5).
+
+**Why it is not the default.** On the surface-ray bench (Sponza, paired, `any_larger_over_far` rows), `'larger'` is 1.15x far-first on instanced surface rays and 1.42x on instanced air-grid rays, but **0.78x on merged surface rays**: a surface ray's own geometry is often in the larger child. Shadow rays are what the default serves, so the default stays `'far'`, and switching is the option (leaving it out undoes it). M5 only; the RTX 3060 run belongs to `docs/internals/WINDOWS-RUNBOOK.md`.
+
+| Measured (Apple M5, paired, indicative) | far | larger | near |
+| --- | ---: | ---: | ---: |
+| compare/gpu room, any outside, ours / three-mesh-bvh | 0.31-0.32 | **1.73-1.76** | 0.41 |
+| compare/gpu room, any inside | 1.01-1.05 | 1.13-1.14 | 0.68 |
+| compare/gpu, closest hit (same kernel either way) | 0.85-1.12 | 0.90-1.12 | |
+| compare/gpu knot, any outside / inside | 1.26 / 1.25 | 1.17 / 1.20 | 1.31 / 1.25 |
+| compare/gpu Sponza, any outside / inside | 1.28 / 1.28 | 1.48 / 1.39 | |
+| surface bench Sponza, over far: instanced surface / air-grid | 1 | 1.15 / 1.42 | 0.64 / 1.08 |
+| surface bench Sponza, over far: merged surface / air-grid | 1 | 0.78 / 1.02 | 0.61 / 1.00 |
+
+Every order blocked exactly the rays far-first blocked on every set (the surface bench's section 7 and compare/gpu fail on any difference).
 
 ## Merged static instances (`mergeStaticInstances`, off by default)
 

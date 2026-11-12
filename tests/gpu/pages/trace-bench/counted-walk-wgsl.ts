@@ -18,7 +18,7 @@
  * bench times the production kernel.
  */
 
-import { traceModuleWgsl } from '../../../../src/trace/wgsl.ts';
+import { traceModuleWgsl, type AnyHitOrder } from '../../../../src/trace/wgsl.ts';
 
 /** Words per ray the counted kernel writes, in the order of {@link COUNTED_WORD}. */
 export const COUNTED_WORDS = 9;
@@ -46,9 +46,9 @@ export const COUNTED_WORD = {
 } as const;
 
 /** The text of one of the production walk functions, as `traceModuleWgsl` writes it (masks on). */
-export function productionWalkWgsl(kind: 'closest' | 'any'): string {
+export function productionWalkWgsl(kind: 'closest' | 'any', anyHitOrder?: AnyHitOrder): string {
     const name = kind === 'closest' ? 'bvhWalkClosest' : 'bvhWalkAny';
-    const module = traceModuleWgsl({ rayMasks: true });
+    const module = traceModuleWgsl({ rayMasks: true, anyHitOrder });
     const start = module.indexOf(`fn ${name}(`);
     if (start < 0) throw new Error(`the trace module has no ${name}`);
     const end = module.indexOf('\n}\n', start);
@@ -69,6 +69,8 @@ export interface CountedWalkOptions {
     name: string;
     /** Add the counters (the function then returns `BenchCounts`). False: the production function, only renamed. */
     counters: boolean;
+    /** The production walk's any-hit child order (`TraceModuleOptions.anyHitOrder`). Default `'far'`. */
+    anyHitOrder?: AnyHitOrder;
 }
 
 /** The production walk with counters added (or, with `counters: false`, as it is). */
@@ -76,7 +78,7 @@ export function countedWalkWgsl(options: CountedWalkOptions): string {
     const { kind, name, counters } = options;
     const closest = kind === 'closest';
     const productionName = closest ? 'bvhWalkClosest' : 'bvhWalkAny';
-    let text = productionWalkWgsl(kind);
+    let text = productionWalkWgsl(kind, options.anyHitOrder);
     if (!counters) return replaceAnchor(text, `fn ${productionName}(`, `fn ${name}(`);
 
     const returnType = closest ? 'BvhHit' : 'bool';
@@ -140,11 +142,11 @@ fn benchFinishAny(countsIn: BenchCounts, blocked: bool) -> BenchCounts {
  * counters out, one {@link COUNTED_WORDS}-word record per ray. Dispatches are
  * 2D, as the production batch kernel's.
  */
-export function countedKernelWgsl(mode: 'closest' | 'any', format: { readonly nodeFormat?: 'f32' | 'quantized' } = {}): string {
+export function countedKernelWgsl(mode: 'closest' | 'any', format: { readonly nodeFormat?: 'f32' | 'quantized'; readonly anyHitOrder?: AnyHitOrder } = {}): string {
     // The walk's text is the same in every node format (wgsl.ts), so the counted copy applies to all.
-    return /* wgsl */ `${traceModuleWgsl({ rayMasks: true, nodeFormat: format.nodeFormat })}
+    return /* wgsl */ `${traceModuleWgsl({ rayMasks: true, nodeFormat: format.nodeFormat, anyHitOrder: format.anyHitOrder })}
 ${BENCH_HELPERS_WGSL}
-${countedWalkWgsl({ kind: mode, name: 'benchCountedWalk', counters: true })}
+${countedWalkWgsl({ kind: mode, name: 'benchCountedWalk', counters: true, anyHitOrder: format.anyHitOrder })}
 
 @group(1) @binding(0) var<storage, read> benchRays: array<BvhRay>;
 @group(1) @binding(1) var<storage, read_write> benchCounts: array<BenchCounts>;

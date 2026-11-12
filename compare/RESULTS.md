@@ -84,15 +84,17 @@ Agreement: three-mesh-bvh, bvh-tree and three agree with ours on every ray of ev
 
 ## compare/gpu: GPU rays, ours against three-mesh-bvh/webgpu
 
-1,048,576 seeded rays per dispatch on the M5's GPU, GPU timestamps, 7 paired rounds (ratio within each round; the rounds' spread was under 0.02 everywhere). Any hit: inside rays within a quarter of the diagonal, outside rays within two diagonals (occlusion).
+1,048,576 seeded rays per dispatch on the M5's GPU, GPU timestamps, 7 paired rounds (ratio within each round). Any hit: inside rays within a quarter of the diagonal, outside rays within two diagonals (occlusion). Ours runs twice: the default kernel, and with `anyHitOrder: 'larger'` (any-hit enters the larger child first; closest hit is the same kernel). Both are checked against each other on every ray (0 differ) and against three-mesh-bvh.
 
-| Scene | Closest, outside | Closest, inside | Any, outside | Any, inside | GPU bytes, ours / theirs |
+| Scene | Closest, outside | Closest, inside | Any, outside: default / `'larger'` | Any, inside: default / `'larger'` | GPU bytes, ours / theirs |
 | --- | --- | --- | --- | --- | --- |
-| Knot (100k) | 1.07x (183 / 171 Mrays/s), 2 of their rays disagree | 1.07x (186 / 174) | 1.26x (234 / 186) | 1.23x (257 / 208) | 8.2 / 3.8 MB |
-| Furnished room (270k) | **0.91x** (229 / 253) | **0.88x** (193 / 219), 1 disagrees | **0.31x** (304 / 982) | 0.99x (516 / 518) | 20.6 / 10.6 MB |
-| Sponza (5.74M) | **0.97x** (193 / 198), 7 disagree | 1.11x (171 / 154), 2 disagree | 1.28x (382 / 298) | 1.28x (298 / 232) | 470 / 225 MB |
+| Knot (100k) | 1.07x (163 / 155 Mrays/s), 2 of their rays disagree | 1.08x (137 / 127) | 1.26x / 1.17x (214, 198 / 171) | 1.25x / 1.20x | 8.2 / 3.8 MB |
+| Furnished room (270k) | **0.85-0.91x** (229 / 253) | **0.86-0.88x**, 1 disagrees | **0.32x / 1.73x** (304, 1,547 / 982) | 1.05x / 1.13x | 20.6 / 10.6 MB |
+| Sponza (5.74M) | **0.96x**, 7 disagree | 1.12x, 2 disagree | 1.28x / 1.48x (353, 406 / 276) | 1.28x / 1.39x | 470 / 225 MB |
 
-The ratio is ours over theirs. Where three-mesh-bvh disagrees on a ray (another distance; once a hit at t = 0) the ratio is shown but not ranked. GPU bytes are what each walk reads: ours, nodes, 48-byte triangle records and the top level; theirs, nodes, index, its vec4 copy of the positions and transforms.
+The ratio is ours over theirs. Where three-mesh-bvh disagrees on a ray (another distance; once a hit at t = 0) the ratio is shown but not ranked. GPU bytes are what each walk reads: ours, nodes, 48-byte triangle records and the top level; theirs, nodes, index, its vec4 copy of the positions and transforms. Absolute rates move by up to 30% between runs with the M5's heat and load; the paired ratios moved by under 0.05.
+
+**The room's any hit from outside (0.31x before).** Not a harness artefact: both walks get the same packed rays and `tMax`, both stop at the first triangle hit in the interval (three-mesh-bvh's `bvh_RaycastAnyHit` returns `STOP_TRAVERSAL` from its range callback; its order is fixed, right child first), every ray is blocked in both, and ours is the leanest kernel. The counted walks (`?counts` on the page, `compare/gpu/gpu-counts.ts`: a counted copy of each library's own loop, same rays) found the cause. Mean work was close (ours 19.1 box tests and 3.9 triangles per ray, theirs 11.9 and 3.9), but the slowest ray of each 32 consecutive rays (one SIMD group) needed **78.5 box tests in ours against 24.3 in theirs**, which is the 3.2x. Our default any-hit order goes to the farther child first (chosen for shadow rays that start on a surface, T1.3); a ray from outside the room then descends into the far side's furniture before it meets the shell it already crossed. Near-first helped a little (0.41x; slowest of 32: 66.5). Entering the child with the larger box first (`anyHitOrder: 'larger'`: the likelier blocker, by the SAH's own area argument) cut the slowest of 32 to 23.0 and gave 1.73x. It is a setting, not the default: on the surface-ray bench it is 1.15-1.42x far-first on instanced trees but 0.78x on merged surface rays (`docs/internals/design/trace.md`, "Any-hit child order"). Workgroup size (64 both), the triangle test and the top level were not the cause: closest-hit, which shares them, was within 0.85-1.12x.
 
 ## compare/build: build, refit, memory
 
@@ -160,7 +162,7 @@ After the motion, three-mesh-bvh agrees on every query (boundary ties only); bvh
 ## Where another library wins
 
 - **Rapier**: box queries 2.3 to 2.7 times our rate, closest point 1.7 to 2.4 times, and closest-hit rays on the knot (inside, 1.28x) and the room (1.02x outside, 1.16x inside); within 5% of ours on Sponza. It gives no triangle id, and holds 2.5 times our tree's memory (below).
-- **three-mesh-bvh**: CPU refit 6 to 7 times faster (32-byte one-box nodes over the app's positions; ours rewrites 48-byte records and two-box nodes); box queries 1.2 to 1.4 times ours; closest point up to 1.5 times on the knot and the room; CENTER builds as fast as tinybvh; `ObjectBVH` updates twice as fast as our CPU top-level rebuild. On the GPU its `/webgpu` walk beats ours on the furnished room (closest 0.88 to 0.91x, and **any hit from outside 0.31x**: 982 against 304 Mrays/s) and on Sponza's closest from outside (0.97x, though 7 of its rays disagree). Its worker build stalls frames a little less than ours.
+- **three-mesh-bvh**: CPU refit 6 to 7 times faster (32-byte one-box nodes over the app's positions; ours rewrites 48-byte records and two-box nodes); box queries 1.2 to 1.4 times ours; closest point up to 1.5 times on the knot and the room; CENTER builds as fast as tinybvh; `ObjectBVH` updates twice as fast as our CPU top-level rebuild. On the GPU its `/webgpu` walk beats ours on the furnished room's closest hits (0.85 to 0.91x) and on Sponza's closest from outside (0.96x, though 7 of its rays disagree). Its any hit from outside the room was 3.2 times our default kernel's (982 against 304 Mrays/s); with `anyHitOrder: 'larger'` ours is 1.73 times theirs there (above). Its worker build stalls frames a little less than ours.
 - **bvh.js**: builds a scene tree about 3 times faster than ours and culls boxes 1.2 times faster at 10,000 objects; its frustum culling is faster too, but disagrees on a few objects.
 - **Babylon**: builds fastest (it builds almost nothing); its picking is the floor it looks like.
 - Ours leads closest and all hits against every library on Sponza, against all but Rapier on the room, and sphere queries everywhere (up to 2.3 times three-mesh-bvh's).

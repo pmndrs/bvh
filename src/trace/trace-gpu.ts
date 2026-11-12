@@ -11,7 +11,7 @@
  */
 
 import type { TraceSceneData } from './scene-assembly.ts';
-import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl } from './wgsl.ts';
+import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl, type AnyHitOrder } from './wgsl.ts';
 import { RAY_MASK_ALL, type NodeFormat, type PositionLayout, type TriangleLeaves } from './layout.ts';
 import { RAY_BYTES } from './rays.ts';
 
@@ -111,6 +111,8 @@ export interface TraceBatchKernelOptions {
     readonly positionLayout?: PositionLayout;
     /** The scenes' node format, compiled in. Default `'f32'`. */
     readonly nodeFormat?: NodeFormat;
+    /** The any-hit walk's child order, compiled in (`AnyHitOrder`). Default `'far'`; `'near'` for rays that start away from the geometry. */
+    readonly anyHitOrder?: AnyHitOrder;
 }
 
 /**
@@ -134,13 +136,13 @@ export class TraceBatchKernel {
     ) {}
 
     static async create(device: GPUDevice, options: TraceBatchKernelOptions = {}): Promise<TraceBatchKernel> {
-        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = 'f32' } = options;
+        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = 'f32', anyHitOrder } = options;
         const pipelineFor = (mode: 'closest' | 'any') =>
             device.createComputePipelineAsync({
                 label: `${label} batch ${mode}`,
                 layout: 'auto',
                 compute: {
-                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks, hitNormal, triangleLeaves, positionLayout, nodeFormat }) }),
+                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks, hitNormal, triangleLeaves, positionLayout, nodeFormat, anyHitOrder }) }),
                     entryPoint: 'bvhBatch',
                 },
             });
