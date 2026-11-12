@@ -12,7 +12,7 @@
  *   undefined) and its `features` row says so. Nothing is emulated with our
  *   code or with brute force behind the library's back.
  * - `memory()` counts what the library holds beyond the app's own geometry
- *   (positions and indices the app keeps anyway), as docs/design/memory.md
+ *   (positions and indices the app keeps anyway), as docs/internals/design/memory.md
  *   does, and says how it was counted.
  */
 

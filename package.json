@@ -28,7 +28,7 @@
         "build": "node scripts/build.mjs && node scripts/verify-artifacts.mjs",
         "verify:dist": "node scripts/verify-artifacts.mjs",
         "lint": "eslint .",
-        "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json && tsc --noEmit -p tsconfig.examples.json",
+        "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json && tsc --noEmit -p tsconfig.examples.json && tsc --noEmit -p tsconfig.snippets.json",
         "test": "vitest run",
         "test:gpu": "node tests/gpu/run.ts",
         "test:gpu:page": "node tests/gpu/run.ts --filter",

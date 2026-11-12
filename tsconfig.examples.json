@@ -8,6 +8,6 @@
             "@pmndrs/bvh/worker": ["./src/worker/index.ts"]
         }
     },
-    "include": ["examples", "compare", "docs/snippets"],
+    "include": ["examples", "compare"],
     "exclude": ["node_modules", "dist", "examples/dist"]
 }

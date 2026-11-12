@@ -121,7 +121,7 @@ function makeAdapter(id: string, name: string, strategy: number, strategyName: s
                     bvh.refit();
                 },
                 memory() {
-                    return { bytes: tmbvhBytes(bvh), method: 'byteLength of every `_roots` node buffer (32 B per node) plus `_indirectBuffer` (none here); the index is the geometry\'s own, reordered in place, as docs/design/memory.md counts it' };
+                    return { bytes: tmbvhBytes(bvh), method: 'byteLength of every `_roots` node buffer (32 B per node) plus `_indirectBuffer` (none here); the index is the geometry\'s own, reordered in place, as docs/internals/design/memory.md counts it' };
                 },
                 quality: () => tmbvhQuality(bvh),
                 dispose() {

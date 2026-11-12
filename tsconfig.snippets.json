@@ -1,0 +1,15 @@
+{
+    "extends": "./tsconfig.json",
+    // Separate from tsconfig.examples.json: the comparison suite imports three-mesh-bvh, whose
+    // `declare module 'three'` augmentation clashes with ours (TS2717); the snippets must see ours.
+    "compilerOptions": {
+        "types": ["@webgpu/types", "node", "vite/client"],
+        "paths": {
+            "@pmndrs/bvh": ["./src/index.ts"],
+            "@pmndrs/bvh/three": ["./src/three/index.ts"],
+            "@pmndrs/bvh/worker": ["./src/worker/index.ts"]
+        }
+    },
+    "include": ["docs/snippets"],
+    "exclude": ["node_modules", "dist", "examples/dist"]
+}
