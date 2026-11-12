@@ -67,7 +67,7 @@
 import { GPU_LAYOUT_EMPTY_CHILD, GPU_LAYOUT_MAX_LEAF_PRIMITIVES, GPU_LAYOUT_NO_PARENT, GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_NODE_WORD, GPU_LAYOUT_NODE_WORDS, GPU_LAYOUT_TRIANGLE_BYTES, GPU_LAYOUT_TRIANGLE_WORD, type GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import type { MeshInput } from '../mesh-input.ts';
 import { dequantizeNodes } from '../quantized-nodes.ts';
-import { PRIMITIVE_BOX_FLOATS, refitOnCpu } from '../refit-cpu.ts';
+import { refitOrderOf, refitRecordsOnCpu } from '../refit-cpu.ts';
 import { deserializeLayout, serializeLayout } from '../serialize.ts';
 import { recordsFromIndexed } from '../indexed-leaves.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
@@ -104,6 +104,9 @@ const CLOSEST_QUERY = new BvhVector3();
 const CLOSEST_TEMP = new BvhVector3();
 const CLOSEST_BEST = new BvhVector3();
 const CORNER_WORDS = [GPU_LAYOUT_TRIANGLE_WORD.vertex0, GPU_LAYOUT_TRIANGLE_WORD.vertex1, GPU_LAYOUT_TRIANGLE_WORD.vertex2] as const;
+const VERTEX0 = GPU_LAYOUT_TRIANGLE_WORD.vertex0;
+const VERTEX1 = GPU_LAYOUT_TRIANGLE_WORD.vertex1;
+const VERTEX2 = GPU_LAYOUT_TRIANGLE_WORD.vertex2;
 
 /** Which faces a raycast hits. The values are three's `FrontSide`, `BackSide` and `DoubleSide`. */
 export const BVH_FRONT_SIDE = 0;
@@ -399,6 +402,8 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
     /** The current raycast's acceptance test and hit list (null: closest only). */
     private accept: BvhTriangleAccept | null = null;
     private collect: BvhRayIntersection[] | null = null;
+    /** {@link refit}'s node order (the shape's, fixed), kept between refits. */
+    private refitOrder: Uint32Array | null = null;
 
     constructor(input: GpuLayoutMeshBvh, options: CpuMeshBvhOptions = {}) {
         // Indexed trees are queried as records: the CPU queries, the depth-first reorder and the
@@ -1214,38 +1219,52 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
         if (sourceTriangles !== this.triangleCount) throw new RangeError(`CpuMeshBvh.refit: the source has ${sourceTriangles} triangles, the tree ${this.triangleCount}`);
         const vertexCount = Math.floor(positions.length / 3);
         const words = this.triangleWords;
-        // Check everything first, so a refit that throws leaves the tree as it was.
-        for (let position = 0; position < this.triangleCount; position++) {
+        const floats = this.triangleFloats;
+        const triangleCount = this.triangleCount;
+        // Pass 1 only reads: it checks every corner, so a refit that throws leaves the tree as it
+        // was. Pass 2 writes the corners into the records, and the boxes are refitted from the
+        // records in place (no per-triangle box array, nothing allocated but the node order,
+        // which depends on the shape only and is kept).
+        for (let position = 0; position < triangleCount; position++) {
             const triangle = words[position * TRIANGLE_WORDS + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
-            for (let corner = 0; corner < 3; corner++) {
-                const vertex = indices ? indices[triangle * 3 + corner] : triangle * 3 + corner;
-                if (vertex >= vertexCount) throw new RangeError(`CpuMeshBvh.refit: triangle ${triangle} uses vertex ${vertex}, past the ${vertexCount} positions`);
-                for (let axis = 0; axis < 3; axis++) {
-                    if (!Number.isFinite(positions[vertex * 3 + axis])) throw new RangeError(`CpuMeshBvh.refit: vertex ${vertex} has a non-finite position`);
-                }
+            const a = indices ? indices[triangle * 3] : triangle * 3;
+            const b = indices ? indices[triangle * 3 + 1] : triangle * 3 + 1;
+            const c = indices ? indices[triangle * 3 + 2] : triangle * 3 + 2;
+            if (a >= vertexCount || b >= vertexCount || c >= vertexCount) {
+                const vertex = a >= vertexCount ? a : b >= vertexCount ? b : c;
+                throw new RangeError(`CpuMeshBvh.refit: triangle ${triangle} uses vertex ${vertex}, past the ${vertexCount} positions`);
+            }
+            const a3 = a * 3;
+            const b3 = b * 3;
+            const c3 = c * 3;
+            const ax = positions[a3], ay = positions[a3 + 1], az = positions[a3 + 2];
+            const bx = positions[b3], by = positions[b3 + 1], bz = positions[b3 + 2];
+            const cx = positions[c3], cy = positions[c3 + 1], cz = positions[c3 + 2];
+            // v - v is NaN for NaN and both infinities, 0 otherwise: one test for the nine values.
+            if (ax - ax + (ay - ay) + (az - az) + (bx - bx) + (by - by) + (bz - bz) + (cx - cx) + (cy - cy) + (cz - cz) !== 0) {
+                const vertex = !(Number.isFinite(ax) && Number.isFinite(ay) && Number.isFinite(az)) ? a : !(Number.isFinite(bx) && Number.isFinite(by) && Number.isFinite(bz)) ? b : c;
+                throw new RangeError(`CpuMeshBvh.refit: vertex ${vertex} has a non-finite position`);
             }
         }
-        const boxes = new Float32Array(this.triangleCount * PRIMITIVE_BOX_FLOATS);
-        const floats = this.triangleFloats;
-        for (let position = 0; position < this.triangleCount; position++) {
+        for (let position = 0; position < triangleCount; position++) {
             const base = position * TRIANGLE_WORDS;
             const triangle = words[base + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
-            const at = position * PRIMITIVE_BOX_FLOATS;
-            boxes[at] = boxes[at + 1] = boxes[at + 2] = Infinity;
-            boxes[at + 4] = boxes[at + 5] = boxes[at + 6] = -Infinity;
-            for (let corner = 0; corner < 3; corner++) {
-                const vertex = indices ? indices[triangle * 3 + corner] : triangle * 3 + corner;
-                const word = base + CORNER_WORDS[corner];
-                for (let axis = 0; axis < 3; axis++) {
-                    floats[word + axis] = positions[vertex * 3 + axis];
-                    const stored = floats[word + axis];
-                    if (stored < boxes[at + axis]) boxes[at + axis] = stored;
-                    if (stored > boxes[at + 4 + axis]) boxes[at + 4 + axis] = stored;
-                }
-            }
+            const a3 = (indices ? indices[triangle * 3] : triangle * 3) * 3;
+            const b3 = (indices ? indices[triangle * 3 + 1] : triangle * 3 + 1) * 3;
+            const c3 = (indices ? indices[triangle * 3 + 2] : triangle * 3 + 2) * 3;
+            floats[base + VERTEX0] = positions[a3];
+            floats[base + VERTEX0 + 1] = positions[a3 + 1];
+            floats[base + VERTEX0 + 2] = positions[a3 + 2];
+            floats[base + VERTEX1] = positions[b3];
+            floats[base + VERTEX1 + 1] = positions[b3 + 1];
+            floats[base + VERTEX1 + 2] = positions[b3 + 2];
+            floats[base + VERTEX2] = positions[c3];
+            floats[base + VERTEX2 + 1] = positions[c3 + 1];
+            floats[base + VERTEX2 + 2] = positions[c3 + 2];
         }
         this.source = source;
-        const { rootBox } = refitOnCpu(this.nodeFloats, this.nodeWords, 0, this.nodeCount, this.layout.parents, boxes);
+        this.refitOrder ??= refitOrderOf(this.layout.parents, this.nodeCount);
+        const { rootBox } = refitRecordsOnCpu(this.nodeFloats, this.nodeWords, 0, this.nodeCount, this.layout.parents, floats, this.refitOrder);
         for (let i = 0; i < 6; i++) this.layout.bounds[i] = rootBox[i];
         this.topLevel = this.makeTopLevel();
         this.tracer = this.makeTracer(false);

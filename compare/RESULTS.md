@@ -102,14 +102,16 @@ Median of 3 builds on one thread, ms; ratio to ours.
 
 | Library | Knot build | Room build | Sponza build | Knot refit | Room refit | Sponza refit |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| @pmndrs/bvh (tinybvh) | 33 | 84 | 1,499 | 32 | 75 | 1,178 |
-| three-mesh-bvh, CENTER | 25 (0.75) | 82 (0.97) | 1,538 (1.03) | 4.9 (0.15) | 13 (0.18) | 170 (0.14) |
-| three-mesh-bvh, SAH | 110 (3.3) | 352 (4.2) | 7,011 (4.7) | 4.5 (0.14) | 13 (0.17) | 177 (0.15) |
+| @pmndrs/bvh (tinybvh) | 33 | 84 | 1,499 | **4.5** (was 32) | **13** (was 75) | **359** (was 1,178) |
+| three-mesh-bvh, CENTER | 25 (0.75) | 82 (0.97) | 1,538 (1.03) | 2.6 (0.58) | 8.1 (0.61) | 177 (0.49) |
+| three-mesh-bvh, SAH | 110 (3.3) | 352 (4.2) | 7,011 (4.7) | 4.5 (earlier run) | 13 | 177 |
 | bvh-tree | 92 (2.8) | 270 (3.2) | 11,301 (7.5) | n/a | n/a | n/a |
 | Babylon, submesh octree | 9.9 (0.30) | 17 (0.20) | 421 (0.28) | 2.2 (octree rebuilt) | 4.6 | 57 |
 | Rapier | 22 (0.65) | 70 (0.83) | 1,329 (0.89) | n/a (rebuilt) | n/a | n/a |
 | ours, H-PLOC (CPU twin) | 282 | 872 | 10,699 | | | |
 | ours, LBVH (CPU twin) | 113 | 335 | 9,170 | | | |
+
+**Refit, the 6-7x.** The refit columns are new for ours and three-mesh-bvh CENTER: medians of 21 refits interleaved between the two (order reversed every other round, alternating two moved copies), at a low load; the SAH row keeps the earlier run's times, without ratios. Before, the same paired run gave ours 16.1 / 37.3 / 1,001 ms against CENTER's 2.6 / 7.6 / 169 (0.16-0.20). The cost was ours, not the layout: `refitOnCpu` found its node order by walking every node's parent chain and sorting with a comparator, kept a JavaScript array per node box, and built a temporary array per primitive union; `CpuMeshBvh.refit` validated every corner in one pass, allocated a per-triangle box array, then rewrote the corners and the boxes. Now the order is a stable counting sort on depth (worked out once per tree and kept), node boxes are one `Float64Array`, and the refit reads the leaves' corners straight from the triangle records (`refitRecordsOnCpu`, bit for bit `refitOnCpu` over boxes of the same corners); validation is still a complete first pass that only reads, so a refit that throws leaves the tree untouched. Ours is now 1.6-2x three-mesh-bvh's: it still writes 48-byte records (nine corner floats per triangle) and two-box 64-byte nodes, where three-mesh-bvh reads the app's positions in place.
 
 The twins are TypeScript references for the GPU builders, which are much faster: on the furnished room, `compare/build`'s GPU H-PLOC tree was traceable 14.6 ms after the call (10.4 ms of GPU batches, submit to readback), against 84 ms for tinybvh on the CPU. After the refits, every library's closest hits on 512 rays agree with our refitted tree except Babylon's (1 ray on Sponza).
 
@@ -162,7 +164,7 @@ After the motion, three-mesh-bvh agrees on every query (boundary ties only); bvh
 ## Where another library wins
 
 - **Rapier**: box queries 2.3 to 2.7 times our rate, closest point 1.7 to 2.4 times, and closest-hit rays on the knot (inside, 1.28x) and the room (1.02x outside, 1.16x inside); within 5% of ours on Sponza. It gives no triangle id, and holds 2.5 times our tree's memory (below).
-- **three-mesh-bvh**: CPU refit 6 to 7 times faster (32-byte one-box nodes over the app's positions; ours rewrites 48-byte records and two-box nodes); box queries 1.2 to 1.4 times ours; closest point up to 1.5 times on the knot and the room; CENTER builds as fast as tinybvh; `ObjectBVH` updates twice as fast as our CPU top-level rebuild. On the GPU its `/webgpu` walk beats ours on the furnished room's closest hits (0.85 to 0.91x) and on Sponza's closest from outside (0.96x, though 7 of its rays disagree). Its any hit from outside the room was 3.2 times our default kernel's (982 against 304 Mrays/s); with `anyHitOrder: 'larger'` ours is 1.73 times theirs there (above). Its worker build stalls frames a little less than ours.
+- **three-mesh-bvh**: CPU refit 1.6 to 2 times faster (was 6 to 7 before the refit fix above; 32-byte one-box nodes over the app's positions, where ours rewrites 48-byte records and two-box nodes); box queries 1.2 to 1.4 times ours; closest point up to 1.5 times on the knot and the room; CENTER builds as fast as tinybvh; `ObjectBVH` updates twice as fast as our CPU top-level rebuild. On the GPU its `/webgpu` walk beats ours on the furnished room's closest hits (0.85 to 0.91x) and on Sponza's closest from outside (0.96x, though 7 of its rays disagree). Its any hit from outside the room was 3.2 times our default kernel's (982 against 304 Mrays/s); with `anyHitOrder: 'larger'` ours is 1.73 times theirs there (above). Its worker build stalls frames a little less than ours.
 - **bvh.js**: builds a scene tree about 3 times faster than ours and culls boxes 1.2 times faster at 10,000 objects; its frustum culling is faster too, but disagrees on a few objects.
 - **Babylon**: builds fastest (it builds almost nothing); its picking is the floor it looks like.
 - Ours leads closest and all hits against every library on Sponza, against all but Rapier on the room, and sphere queries everywhere (up to 2.3 times three-mesh-bvh's).
@@ -195,7 +197,7 @@ What three-mesh-bvh has and we don't (`docs/internals/PARITY.md`), and what the 
 - **GPU closest point, GPU shapecast, `sampleTrianglePoint`, `ClusteredBVH`, SDF generation**: missing (8.5 to 8.10). Only rays run on our GPU walk.
 - `ObjectBVH.shapecast` (5.3) and `getJSONStructure` (7.5): missing. Partial: `SkinnedMeshBVH` (3.4, GPU posing only), `maxDepth` (4.3, accepted, not honoured), per-index `computeBatchedBoundsTree` (5.5), `StaticGeometryGenerator` (6.3, GPU only), three-mesh-bvh's serialization format (7.1), `onProgress` (0 and 1 only). `ParallelMeshBVHWorker`: won't (cross-origin isolation; big meshes go to the GPU builder).
 - **Memory**: 9 to 10 times three-mesh-bvh's beyond the geometry, plus tinybvh's WASM heap after a huge single-mesh build (above).
-- **CPU refit speed** (6 to 7 times slower than three-mesh-bvh's), and years of use behind their shapecasts.
+- **CPU refit speed** (1.6 to 2 times slower than three-mesh-bvh's, from 6 to 7), and years of use behind their shapecasts.
 - Rapier is a physics engine (collisions, character controllers, joints) and answers box and point queries faster; Babylon is a whole engine; bvh.js inserts, deletes and moves single objects and has LOD frustum culling. We have none of that.
 
 What we have and they don't: GPU builds (H-PLOC, LBVH), GPU refits of mesh trees and the top level, one layout that every builder writes and every walk (CPU and WGSL) reads, a WGSL walk outside three's node system (a raw compute pass, another engine, a worker's device), and the oracle (the CPU port of the walk that checks the GPU's answers).

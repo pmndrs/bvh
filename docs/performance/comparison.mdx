@@ -38,7 +38,7 @@ gets no ratio on it: a faster wrong answer is not faster.** The full tables, the
 Measured on the same harness. These are open items, not footnotes:
 
 - **Rapier** answers box queries 2.3–2.7× faster and closest point 1.7–2.4× faster.
-- **three-mesh-bvh, CPU:** refits 6–7× faster, and answers box queries 1.2–1.4× faster.
+- **three-mesh-bvh, CPU:** refits 1.6–2× faster (it was 6–7× until our refit stopped sorting and allocating per node: ours went from 1,001 to 359 ms on Sponza; we still rewrite 48-byte records), and answers box queries 1.2–1.4× faster.
 - **three-mesh-bvh, GPU:** its closest-hit walk is 1.1–1.2× ours on the furnished room. Its any-hit from outside the room was 3.2× our default kernel's: our any-hit enters the farther child first (right for shadow rays from surfaces), and a few rays per SIMD group of 32 went deep into the far side's furniture. With `anyHitOrder: 'larger'` (enter the larger child first) ours is 1.73× theirs on those rays; it stays a setting because it costs 0.78× on merged surface rays ([trace design](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/trace.md)).
 - **bvh.js** builds its scene tree about 3× faster.
 - **Memory:** in the default layout we hold about 9–10× more bytes beyond the app's geometry than three-mesh-bvh, because our triangle records copy the corners. The [memory page](/performance/memory) shows the levers: indexed leaves and compressed nodes roughly halve it.

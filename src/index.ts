@@ -133,6 +133,8 @@ export {
     parentSlotsOf,
     PRIMITIVE_BOX_FLOATS,
     refitOnCpu,
+    refitOrderOf,
+    refitRecordsOnCpu,
     relativeSahCost,
     type CpuRefitResult,
 } from './refit-cpu.ts';
