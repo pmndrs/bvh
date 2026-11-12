@@ -120,5 +120,5 @@ panel.csv(app.device);
 const checked = expectAgreement(refits, ['tmbvh-center', 'tmbvh-sah'], log);
 let frames = 0;
 app.loop(async () => {
-    if (++frames === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, checkedAgainstOurs: checked, gpuBuiltBy: info.builtBy });
+    if (++frames === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, status: panel.statusText, checkedAgainstOurs: checked, gpuBuiltBy: info.builtBy });
 });

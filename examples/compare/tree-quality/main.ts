@@ -84,5 +84,5 @@ const sah = (library: string) => rows.find((m) => m.library === library && m.met
 if (sah('ours') === null || sah('tmbvh-sah') === null) throw new Error('no SAH cost for ours or three-mesh-bvh');
 let frames = 0;
 app.loop(async () => {
-    if (++frames === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, sahOurs: sah('ours'), sahTmbvh: sah('tmbvh-sah') });
+    if (++frames === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, status: panel.statusText, sahOurs: sah('ours'), sahTmbvh: sah('tmbvh-sah') });
 });

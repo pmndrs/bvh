@@ -17,6 +17,8 @@ import { features, type MeshAdapter } from './types.ts';
 
 let ready: Promise<void> | null = null;
 let wasmMemory: WebAssembly.Memory | null = null;
+/** Builds made in this process: only the first one's heap growth is its size. */
+let builds = 0;
 
 async function init(): Promise<void> {
     const original = WebAssembly.instantiate;
@@ -62,6 +64,7 @@ export const rapierAdapter: MeshAdapter = {
     },
     build(geometry) {
         if (!ready) throw new Error('rapierAdapter.prepare() first');
+        const first = builds++ === 0;
         const heapBefore = rapierHeapBytes();
         const world = new RAPIER.World({ x: 0, y: 0, z: 0 });
         const collider = world.createCollider(RAPIER.ColliderDesc.trimesh(geometry.positions, geometry.indices));
@@ -97,8 +100,8 @@ export const rapierAdapter: MeshAdapter = {
                 return { triangle: -1, distance: Math.hypot(hit.point.x - p[0], hit.point.y - p[1], hit.point.z - p[2]), point: [hit.point.x, hit.point.y, hit.point.z] };
             },
             memory() {
-                const grown = heapBefore !== null && heapAfter !== null ? heapAfter - heapBefore : null;
-                return { bytes: grown, method: 'growth of Rapier\'s WASM heap across the build (64 KiB pages; exact only for the first build in a process)' };
+                const grown = first && heapBefore !== null && heapAfter !== null ? heapAfter - heapBefore : null;
+                return { bytes: grown, method: first ? 'growth of Rapier\'s WASM heap across the first build in this process (64 KiB pages)' : 'not countable here: a later build reuses heap an earlier one freed (the Node runner counts it in a fresh process)' };
             },
             dispose() {
                 world.removeCollider(collider, false);

@@ -5,6 +5,7 @@
  * markdown tables.
  *
  *   BVH_ASSETS_DIR=... BVH_MANIFESTS_DIR=... pnpm compare:node [--scenes torus-knot,furnished-room,sponza] [--quick] [--no-memory] [--no-scene] [--append]
+ *   pnpm compare:node --features      (the capability table only)
  *
  * Per scene (merged into one world-space mesh): every library built three
  * times (median), then CPU raycasts (first and all hits, outside and inside
@@ -25,7 +26,7 @@ import { MESH_ADAPTERS } from '../adapters/index.ts';
 import { oursBuilders, oursQuality } from '../adapters/ours.ts';
 import { SCENE_ADAPTERS } from '../adapters/scene.ts';
 import { median } from '../core/measure.ts';
-import { csvRows, CSV_HEADER, formatValue, table, type RunContext } from '../core/report.ts';
+import { csvRows, CSV_HEADER, featureTable, formatValue, table, type RunContext } from '../core/report.ts';
 import { makeScene } from '../core/scene.ts';
 import { sceneSuite } from '../core/scene-suite.ts';
 import { buildAll, queriesSuite, raycastSuite, refitSuite, type Measurement } from '../core/suites.ts';
@@ -63,15 +64,20 @@ const print = (text: string) => {
     console.log(text);
 };
 
-function memoryInFreshProcess(adapterId: string, sceneId: string): { total: number; reported: number | null } | null {
+function memoryInFreshProcess(adapterId: string, sceneId: string): { total: number; wasmGrowth: number; reported: number | null } | null {
     try {
         const text = execFileSync(process.execPath, ['--expose-gc', '--max-old-space-size=24000', '--experimental-transform-types', '--no-warnings', '--import', './compare/node/register.mjs', 'compare/node/memory.ts', adapterId, sceneId], { cwd: ROOT, encoding: 'utf8', env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
         const line = text.split('\n').find((l) => l.startsWith('{'));
-        return line ? (JSON.parse(line) as { total: number; reported: number | null }) : null;
+        return line ? (JSON.parse(line) as { total: number; wasmGrowth: number; reported: number | null }) : null;
     } catch (error) {
         log(`memory ${adapterId} ${sceneId}: ${(error as Error).message.split('\n')[0]}`);
         return null;
     }
+}
+
+if (flag('features')) {
+    print(`\n## Capabilities\n\n${featureTable(MESH_ADAPTERS)}`);
+    process.exit(0);
 }
 
 for (const sceneId of scenes) {
@@ -106,12 +112,13 @@ for (const sceneId of scenes) {
         for (const adapter of MESH_ADAPTERS) {
             const memory = memoryInFreshProcess(adapter.id, sceneId);
             results.push({ page: 'build', scene: sceneId, library: adapter.id, metric: 'heap', value: memory?.total ?? null, unit: 'bytes', method: 'fresh Node process: growth of heapUsed + external (array buffers, WASM memory) across one build, after gc, the structure alive; geometry copies the adapter makes for the library taken off', ranked: memory !== null });
+            results.push({ page: 'build', scene: sceneId, library: adapter.id, metric: 'heap-wasm', value: memory?.wasmGrowth ?? null, unit: 'bytes', method: 'the part of the heap growth that is WASM memory the library grew (ours: tinybvh\'s working heap, kept by its WASM memory after the build; Rapier: the collider)', ranked: false });
             log(`${adapter.id}: heap growth ${memory ? formatValue(memory.total, 'bytes') : 'n/a'}`);
         }
     }
     all.push(...results);
     const scene = results.filter((m) => m.scene === sceneId);
-    print(`\n### Build, refit and memory\n\n${table(scene.filter((m) => m.page === 'build'), ['build', 'refit', 'memory', 'heap', 'refit-agreement'], NAMES)}`);
+    print(`\n### Build, refit and memory\n\n${table(scene.filter((m) => m.page === 'build'), ['build', 'refit', 'memory', 'heap', 'heap-wasm', 'refit-agreement'], NAMES)}`);
     print(`\n### Tree quality\n\n${table(scene.filter((m) => m.page === 'tree-quality'), ['sah', 'depth', 'nodes', 'leaves'], NAMES)}`);
     print(`\n### CPU raycasts (rays/s)\n\n${table(scene.filter((m) => m.page === 'raycast'), ['first/outside', 'first/inside', 'all/outside', 'all/inside'], NAMES)}`);
     print(`\n### Queries (queries/s)\n\n${table(scene.filter((m) => m.page === 'queries'), ['box', 'sphere', 'closest-point'], NAMES)}`);

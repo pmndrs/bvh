@@ -4,6 +4,7 @@
  * compare/RESULTS.md is written from them).
  */
 
+import { CAPABILITIES, type MeshAdapter } from '../adapters/types.ts';
 import { agreementText } from './agree.ts';
 import type { Measurement } from './suites.ts';
 
@@ -72,6 +73,18 @@ export function table(measurements: readonly Measurement[], metrics: readonly st
     for (const library of libraries) {
         if (!metrics.some((metric) => find(library, metric))) continue;
         lines.push(`| ${names[library] ?? library} | ${metrics.map((metric) => cell(find(library, metric), find('ours', metric))).join(' | ')} |`);
+    }
+    return lines.join('\n');
+}
+
+/** The capability table of the mesh-level libraries, from their adapters' `features`. */
+export function featureTable(adapters: readonly MeshAdapter[]): string {
+    const lines = [`| Capability | ${adapters.map((a) => a.name).join(' | ')} |`, `| --- | ${adapters.map(() => '---').join(' | ')} |`];
+    for (const capability of CAPABILITIES) {
+        lines.push(`| ${capability} | ${adapters.map((a) => {
+            const f = a.features[capability];
+            return `${f.status}${f.note ? `: ${f.note}` : ''}`;
+        }).join(' | ')} |`);
     }
     return lines.join('\n');
 }

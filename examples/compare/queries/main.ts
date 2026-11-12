@@ -72,5 +72,5 @@ app.loop(async (now) => {
     if (closest) line.geometry.setFromPoints([probe.position, new Vector3(...closest.point)]);
     line.visible = closest !== null;
     app.overlay.set('probe', `${touches === null ? 'no sphere query' : touches ? 'touches' : 'clear'}, closest ${closest ? closest.distance.toPrecision(4) : 'n/a'}, ${ms.toFixed(3)} ms`);
-    if (++frames === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, checkedAgainstOurs: checked, hplocAgrees: closestAgreement.disagree + rayAgreement.disagree === 0 });
+    if (++frames === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, status: panel.statusText, checkedAgainstOurs: checked, hplocAgrees: closestAgreement.disagree + rayAgreement.disagree === 0 });
 });

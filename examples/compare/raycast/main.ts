@@ -62,5 +62,5 @@ app.loop(async () => {
     marker.visible = hit !== null;
     if (hit) marker.position.copy(origin).addScaledVector(direction, hit.t);
     app.overlay.set('pick', hit ? `triangle ${hit.triangle}, ${ms.toFixed(3)} ms` : `miss, ${ms.toFixed(3)} ms`);
-    if (++frames === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, checkedAgainstOurs: checked, measurements: panel.measurements().length });
+    if (++frames === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, status: panel.statusText, checkedAgainstOurs: checked, measurements: panel.measurements().length });
 });

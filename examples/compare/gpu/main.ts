@@ -21,12 +21,13 @@ import { GpuRays } from '../../shared/gpu-rays.ts';
 import { createComparePage, expectAgreement, quick } from '../../shared/compare.ts';
 import { ready } from '../../shared/smoke.ts';
 
-const page = await createComparePage('compare/gpu', 'compare/gpu', 'GPU rays per second, ours against three-mesh-bvh/webgpu (SAH), on the same device: closest hit, and any hit within a quarter of the scene\'s diagonal. Timed in paired rounds (the M5 drifts with heat): the ratio is taken within each round.', { trackTimestamp: true });
+const page = await createComparePage('compare/gpu', 'compare/gpu', 'GPU rays per second, ours against three-mesh-bvh/webgpu (SAH), on the same device: closest hit, and any hit (inside rays: within a quarter of the scene\'s diagonal; outside rays: within two diagonals, an occlusion test). Timed in paired rounds (the M5 drifts with heat): the ratio is taken within each round.', { trackTimestamp: true });
 const { app, geometry, panel, sceneName } = page;
 const log = (line: string) => panel.status(line);
 const count = quick ? 16_384 : 1_048_576;
 const scale = diagonal(geometry);
-const anyTMax = scale * 0.25;
+// Any hit: inside rays as short shadow-like rays (a quarter of the diagonal); outside rays as long occlusion tests.
+const anyLength = (set: string) => (set === 'outside' ? scale * 2 : scale * 0.25);
 
 const tracers: GpuTracer[] = [await createOursGpu(app.device, geometry), await createTmbvhGpu(app.renderer, geometry)];
 const all: Measurement[] = [];
@@ -35,7 +36,7 @@ for (const set of RAY_SETS) {
     const rays = makeRays(geometry, set, count, 3);
     const closest = packRaysFor(rays, 1e30);
     packedBySet.set(set, closest);
-    const results = await gpuSuite(tracers, sceneName, { closest, any: packRaysFor(rays, anyTMax), count, anyTMax, scale, set }, quick ? { rounds: 2, dispatches: 3, warmups: 1 } : { rounds: 7 }, log);
+    const results = await gpuSuite(tracers, sceneName, { closest, any: packRaysFor(rays, anyLength(set)), count, anyTMax: anyLength(set), scale, set }, quick ? { rounds: 2, dispatches: 3, warmups: 1 } : { rounds: 7 }, log);
     all.push(...results);
 }
 const names = { ours: '@pmndrs/bvh (TraceBatchKernel)', tmbvh: 'three-mesh-bvh/webgpu', 'ours-over-tmbvh': 'ours / three-mesh-bvh, paired' };
@@ -104,5 +105,5 @@ const checked = expectAgreement(all, ['tmbvh'], log);
 if (agreement.disagree) throw new Error(`the GPU-built tree disagrees with the tinybvh tree on ${agreement.disagree} rays`);
 let frames = 0;
 app.loop(async () => {
-    if (++frames === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, checkedAgainstOurs: checked, gpuBuiltChecked: agreement.checked });
+    if (++frames === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, status: panel.statusText, checkedAgainstOurs: checked, gpuBuiltChecked: agreement.checked });
 });

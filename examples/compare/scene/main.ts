@@ -101,5 +101,5 @@ app.loop(async () => {
     const t0 = performance.now();
     const visible = entry.scene.intersectsFrustum?.(planes, new Float32Array(viewProjection.elements)) ?? [];
     app.overlay.set('in view', `${visible.length.toLocaleString('en-US')} of ${count.toLocaleString('en-US')}, ${(performance.now() - t0).toFixed(3)} ms`);
-    if (frame === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, checkedAgainstOurs: checked });
+    if (frame === 10) await ready(app.device, { ...app.overlay.snapshot(), csv: panel.csvText, status: panel.statusText, checkedAgainstOurs: checked });
 });

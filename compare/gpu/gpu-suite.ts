@@ -90,7 +90,7 @@ export async function gpuSuite(tracers: readonly GpuTracer[], scene: string, inp
                 agreement,
                 ranked: agreement.disagree === 0,
             });
-            log?.(`${tracer.id} ${mode}: ${(median(perRound) / 1e6).toFixed(1)} Mrays/s; ${agreement.disagree} disagree`);
+            log?.(`${tracer.id} ${mode}: ${(median(perRound) / 1e6).toFixed(1)} Mrays/s; ${agreement.disagree} disagree${agreement.examples.length ? ` (${agreement.examples.slice(0, 2).join('; ')})` : ''}`);
         }
         out.push({ page: 'gpu', scene, library: tracer.id, metric: 'gpu-bytes', value: tracer.bytes, unit: 'bytes', method: tracer.bytesMethod, ranked: true });
     }

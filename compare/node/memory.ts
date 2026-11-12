@@ -20,6 +20,17 @@ const [adapterId, sceneId] = process.argv.slice(2);
 const gc = (globalThis as { gc?: () => void }).gc;
 if (!gc) throw new Error('run with --expose-gc');
 
+// Every WASM memory the library instantiates (tinybvh's, Rapier's), so the heap growth can be split.
+const memories: WebAssembly.Memory[] = [];
+const instantiate = WebAssembly.instantiate;
+(WebAssembly as { instantiate: unknown }).instantiate = (...args: unknown[]) =>
+    (instantiate as (...a: unknown[]) => Promise<unknown>).apply(WebAssembly, args).then((result) => {
+        const instance = (result as { instance?: WebAssembly.Instance }).instance ?? (result as WebAssembly.Instance);
+        for (const value of Object.values(instance.exports ?? {})) if (value instanceof WebAssembly.Memory) memories.push(value);
+        return result;
+    });
+const wasmBytes = () => memories.reduce((sum, memory) => sum + memory.buffer.byteLength, 0);
+
 const adapter = adapterById(adapterId);
 const geometry = loadScene(sceneId);
 await adapter.prepare?.();
@@ -30,8 +41,10 @@ const used = () => {
     return { heap: usage.heapUsed, external: usage.external };
 };
 const before = used();
+const wasmBefore = wasmBytes();
 const built = adapter.build(geometry);
 const after = used();
+const wasmAfter = wasmBytes();
 const reported = built.memory();
 console.log(
     JSON.stringify({
@@ -40,6 +53,7 @@ console.log(
         triangles: geometry.triangleCount,
         heapDelta: after.heap - before.heap,
         externalDelta: after.external - before.external,
+        wasmGrowth: wasmAfter - wasmBefore,
         geometryCopy: adapter.geometryCopyBytes?.(geometry) ?? 0,
         total: after.heap + after.external - before.heap - before.external - (adapter.geometryCopyBytes?.(geometry) ?? 0),
         reported: reported.bytes,

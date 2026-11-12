@@ -64,6 +64,8 @@ export class ResultsPanel {
     private readonly all: Measurement[] = [];
     /** The CSV text {@link csv} wrote, for the smoke report. */
     csvText = '';
+    /** The status lines, for the smoke report. */
+    statusText = '';
 
     constructor(title: string, intro: string) {
         const style = document.createElement('style');
@@ -87,7 +89,7 @@ export class ResultsPanel {
 
     /** One row per library, one column per metric; each cell its value, ratio to ours, agreement. */
     table(title: string, measurements: readonly Measurement[], metrics: readonly string[], names: Record<string, string> = LIBRARY_NAMES): void {
-        this.all.push(...measurements);
+        for (const m of measurements) if (!this.all.includes(m)) this.all.push(m);
         const heading = document.createElement('h3');
         heading.textContent = title;
         const table = document.createElement('table');
@@ -139,6 +141,7 @@ export class ResultsPanel {
         area.value = text;
         this.body.append(heading, area);
         this.csvText = text;
+        this.statusText = this.statusLine.textContent ?? '';
         return text;
     }
 
