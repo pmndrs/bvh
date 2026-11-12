@@ -1,0 +1,80 @@
+---
+title: Scenes and the sync
+description: A three scene graph as SceneTrees meshes and instances, kept in step by SceneTreesObject3DSync.
+nav: 81
+sourcecode: src/three/scene-trees-sync.ts
+---
+
+`SceneTreesObject3DSync` reads a three scene into a `SceneTrees` and keeps it in step: only what changed is pushed.
+
+{/* snippet: sync */}
+```ts
+import { SceneTrees } from '@pmndrs/bvh';
+import { SceneTreesObject3DSync } from '@pmndrs/bvh/three';
+import type { Mesh, Object3D } from 'three';
+
+const trees = await SceneTrees.create(device, { mergeStaticInstances: true });
+scene.updateMatrixWorld(); // the world matrices are read as they are
+const sync = new SceneTreesObject3DSync(trees, scene, {
+    static: (object) => !object.userData.moves, // static instances can merge, and are never pushed again
+    material: (mesh) => materialIndexOf(mesh), // becomes hit.material (0-65534)
+    layers: true, // layers 0-7 become the instance mask (default)
+});
+
+// After adding or removing objects, or changing geometry, groups or materials:
+sync.sync();
+// Every frame: moved, shown, hidden or re-layered objects only.
+sync.update();
+```
+
+- **`sync()`** after objects are added or removed, or a geometry, draw range, group or material changes: only the
+  meshes and instances that changed are added or removed. It walks and plans before it changes anything, so a throwing
+  `material` callback leaves everything as it was.
+- **`update()`** each frame: it skips an object whose `matrixWorld`, effective visibility, layers and
+  `instanceMatrix.version` are unchanged, without allocating. Set `instanceMatrix.needsUpdate = true` after
+  `setMatrixAt`, as three needs anyway.
+- Then `trees.update(encoder)`, submit, and `bvh.update()` if you use [BvhTraceNodes](/three/trace-nodes).
+
+## What is read
+
+- `Mesh`, `InstancedMesh` (instances below its `count`), `BatchedMesh` (active, visible instances) and `SkinnedMesh`
+  (posed on the GPU with a `renderer`; [Skinned and morphed meshes](/three/skinned-and-morphed)).
+- The triangles three's `Mesh.raycast` tests: the draw range and, with an array of materials, the groups within it.
+  Each group is its own mesh, so it can carry its own material. Ranges are read as three steps through them, even off
+  a multiple of 3 or overlapping.
+- Indexed, non-indexed and interleaved positions. Interleaved, normalized or non-float positions are compacted once per
+  geometry.
+- One mesh per geometry and range, shared by every object and instance that uses it.
+- **Visibility:** an object counts as visible when it and every ancestor are. Hidden objects stay in as hidden instances.
+- **Layers:** layers 0-7 become instance mask bits 0-7; layers 8-31 are dropped. An object on none of layers 0-7 gets
+  mask 0, which no ray hits. A default object (layer 0) gets `0x01`. `layers: false` gives every instance `0xff`.
+- **Materials:** the `material(mesh, info)` callback is read at `sync()` only. After changing what it returns, call
+  `sync()`.
+
+Call `scene.updateMatrixWorld()` first: world matrices are read as they are.
+
+## Hits back to objects
+
+{/* snippet: source-of */}
+```ts
+const source = sync.sourceOf(hitInstance); // { object, instanceId, group, materialIndex, mesh, static }
+if (source) console.log(source.object.name, source.instanceId);
+```
+
+`hit.triangle` is the triangle within its mesh (a group, draw range or batch range). `threeFaceIndex(meshSource,
+triangle)` turns it into three's `faceIndex`; `sync.meshSourceOf(instance)` gives the mesh source.
+
+## Static objects
+
+`static: true`, or `(object, instanceId) => boolean`, marks instances for `mergeStaticInstances`
+([Merged static instances](/scenes/merged-static)). The sync never pushes changes to static instances.
+
+After `SceneTrees` merged an object's static instances, `sync()` skips removing that object or changing its geometry,
+draw range, groups or materials, and warns once per object (`skipped` in the counts). Mark objects that may go away
+`static: false`.
+
+## Without SceneTrees
+
+`bvhSceneFromObject3D(root, options)` reads the scene once and returns `meshes`, `instances` and their three
+`sources`. Build it with `buildTraceScene(scene.meshes, scene.instances, { build })`, upload it with
+`uploadTraceScene`, and `BvhTraceNodes` takes the result as `{ buffers }`.

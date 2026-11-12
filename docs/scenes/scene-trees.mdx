@@ -1,0 +1,130 @@
+---
+title: SceneTrees
+description: A scene's trees on one device, with GPU trees first and tinybvh's swapped in mesh by mesh.
+nav: 30
+sourcecode: src/scene/scene-trees.ts
+---
+
+`SceneTrees` keeps every mesh tree and the top level of a scene in three storage buffers on one `GPUDevice`: the
+buffers the walk binds. It works with any engine; [three's sync](/three/scenes-and-sync) drives it from a scene graph.
+
+{/* snippet: scene-trees */}
+```ts
+import { SceneTrees, type MeshGeometry } from '@pmndrs/bvh';
+
+const trees = await SceneTrees.create(device, {
+    onTree: (event) => console.log(`mesh ${event.mesh}: ${event.builtBy} tree after ${event.ms.toFixed(0)} ms`, event.replaced ? '(swap)' : ''),
+});
+const mesh = trees.addMesh(chair); // one tree per mesh, shared by its instances
+for (const objectToWorld of chairMatrices) trees.addInstance({ mesh, objectToWorld }); // column-major 4x4
+
+// Every frame (or whenever the scene changed):
+const encoder = device.createCommandEncoder();
+trees.update(encoder);
+device.queue.submit([encoder.finish()]);
+```
+
+- `addMesh(geometry)` returns a mesh handle. The geometry is read at the next `update` and copied into a worker
+  (`transferGeometry: true` moves it instead).
+- `addInstance({ mesh, objectToWorld, mask, material, visible, static, instanceIndex })` returns an instance handle.
+  `instanceIndex` (default: the handle) comes back as `hit.instance`.
+- `update(encoder)` does everything in the order the walk needs: starts builds, places finished trees, applies
+  changes, refits deforming meshes and refits the top level. Record it before anything traces in that encoder.
+
+## Fast first trees and swaps
+
+On a device with `subgroups`, every mesh an `update` brings is built twice:
+
+1. **On the GPU, with H-PLOC**, in batches (one for the whole scene unless the [build-peak cap](/builders/fallbacks-and-limits#the-build-peak-cap)
+   splits it). Rays see these trees a few frames later.
+2. **With tinybvh, in the worker pool**, biggest mesh first. Each tinybvh tree replaces the mesh's GPU tree as it
+   arrives. Only that mesh's range and its table entry change, so nothing recompiles and the top level keeps its shape.
+
+A mesh's first tree is whichever arrives first. Without `subgroups`, or with `gpuFirstTrees: false`, every mesh waits for
+tinybvh: the declared fallback.
+
+Sponza (132 meshes, 5.74 million triangles) on the Apple M5 (Chrome, `scene-trees-sponza` page, indicative): every
+mesh had a GPU tree 100-190 ms after the first update, depending on the run and the cap, and every tinybvh tree was in
+about 285-370 ms after it (`trees.timeline`). On the three
+[load-gltf example](/examples/examples) (405 meshes, 3.7 million triangles), first trees took about 150-230 ms and
+every tinybvh tree about 600 ms after the first update.
+
+{/* snippet: when-built */}
+```ts
+frame(); // an update starts the builds
+await trees.whenBuilt(); // every mesh with instances has a tree (GPU or tinybvh)
+frame(); // the next update places them
+await trees.whenRefined(); // every GPU tree has been replaced by tinybvh's
+frame();
+```
+
+`onTree` reports every placement: the mesh, `builtBy` (`'gpu'` or `'tinybvh'`), `replaced` (`'gpu'` for a swap),
+`fallbackReason` and the milliseconds since the update that started it.
+
+## Rebinding when a buffer grows
+
+The node and triangle buffers grow by doubling. A growth replaces the `GPUBuffer` and bumps `trees.version`. Make your
+bind groups again when it changes; nothing recompiles.
+
+{/* snippet: version */}
+```ts
+let boundVersion = -1;
+const afterUpdate = () => {
+    if (trees.version !== boundVersion) {
+        rebind(trees.buffers); // a buffer grew: make the bind groups again (nothing recompiles)
+        boundVersion = trees.version;
+    }
+};
+```
+
+`trees.traceBuffers` gives the buffers in the shape `TraceBatchKernel` and `BvhTraceNodes` take, with the scene's
+formats.
+
+## Options
+
+{/* snippet: options */}
+```ts
+const trees = await SceneTrees.create(device, {
+    gpuFirstTrees: true, // H-PLOC trees first on a device with subgroups (default)
+    gpuMaxBatchBytes: 256 * 1024 * 1024, // the build-peak cap (default); Infinity: one batch
+    workers: { size: 4 }, // the tinybvh worker pool, or a pool of your own
+    topLevel: 'auto', // the GPU top level with subgroups, the CPU one without (default)
+    triangleLeaves: 'records', // or 'indexed' (off by default)
+    nodeFormat: 'f32', // or 'quantized' (off by default)
+});
+```
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `gpuFirstTrees` | `true` | H-PLOC first trees on a device with subgroups. `false`: tinybvh only. |
+| `gpuTreeOutputs` | `'copy'` | `'adopt'` makes the load batch's output buffers the scene's own (no copy), for a lower load peak and more node memory after the swaps. |
+| `gpuMaxBatchBytes` | 256 MiB | [The build-peak cap](/builders/fallbacks-and-limits#the-build-peak-cap). `Infinity` turns it off. |
+| `workers` | a pool of its own | A `BvhWorkerPool` to share, or options for the one it makes (and disposes). |
+| `transferGeometry` | `false` | Move each mesh's arrays into the worker instead of copying them. |
+| `mergeStaticInstances` | `false` | [Merged static instances](/scenes/merged-static). |
+| `holdRefinements` | `false` | tinybvh trees wait until `releaseRefinements()`, for tools that check a scene mid-swap. |
+| `gpuMaxDepth` | `GPU_TREE_MAX_DEPTH` (47) | Deeper trees are refused, keeping every tree within the walk's stack. |
+| `topLevel` | `'auto'` | The GPU top level with subgroups, the CPU one without. `'cpu'`: always the CPU one. |
+| `triangleLeaves`, `positionLayout`, `nodeFormat`, `weld` | records, `vec4`, `f32`, `true` | [Layout variants](/concepts/gpu-layout#variants). Indexed and quantized need `gpuTreeOutputs: 'copy'`. |
+| `diagnostics` | `false` | Read the top level's refit stats back. |
+| `onTree`, `warn`, `label` | | Events, where problems are reported, GPU object labels. |
+
+## What it holds
+
+{/* snippet: scene-state */}
+```ts
+console.log(trees.gpuFirstTrees); // { enabled, reason }: why GPU first trees are off, if they are
+console.log(trees.counts.onGpuTrees, trees.counts.onTinybvhTrees, trees.counts.swaps);
+console.log(trees.timeline.firstTreesMs, trees.timeline.tinybvhTreesMs);
+console.log((trees.memory.resident / 2 ** 20).toFixed(1), 'MiB resident,', (trees.memory.peak / 2 ** 20).toFixed(1), 'MiB peak');
+```
+
+- `counts`: meshes, instances, trees on the GPU and from tinybvh, swaps, GPU batches and build times.
+- `memory`: bytes of every buffer, in use and allocated, resident and transient, and the `peak` since creation.
+- `meshStatus(mesh)`, `instanceStatus(instance)`, `groupStatus(group)` for one mesh, instance or merged group.
+- `timeline`: when every mesh first had a tree, and when every tinybvh tree was in.
+
+`SceneTrees` keeps no CPU copy of its trees. For CPU picking on the same scene, build a
+[CPU scene](/cpu-queries/helpers#a-whole-scene) too.
+
+`dispose()` frees its buffers and the worker pool it made.

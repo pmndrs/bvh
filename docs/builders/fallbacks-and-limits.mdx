@@ -1,0 +1,69 @@
+---
+title: Fallbacks and limits
+description: The one fallback chain, the device limits it covers, and the cap on a GPU build's peak memory.
+nav: 21
+sourcecode: src/gpu-lbvh.ts
+---
+
+## The fallback chain
+
+The package uses `subgroups` first, with **one** declared fallback: tinybvh on the CPU. There are no parallel GPU
+paths.
+
+| Situation | What happens | Where it says so |
+| --- | --- | --- |
+| No device, or no `subgroups` | Every tree is built by tinybvh; the top level is built on the CPU; refits and poses are skipped | `builder.fallbackReason`, `SceneTrees.gpuFirstTrees.reason`, `SceneTrees.deformingCounts.posesSkipped` |
+| A mesh too big for one batch's buffers (or for the builder) | That mesh goes to tinybvh | `planGpuHplocBatches(...).tooBig`, the result's `fallbackReason` |
+| A GPU tree refused (bad index, NaN boxes, a wait that ran out, too deep) | That mesh goes to tinybvh | `mesh.problem`, the result's `fallbackReason`, `SceneTreeEvent.fallbackReason` |
+| A tree deeper than `gpuMaxDepth` (default `GPU_TREE_MAX_DEPTH`) | `SceneTrees` refuses it: a GPU tree leaves the mesh to tinybvh, a tinybvh tree leaves the mesh on the tree it has | `SceneTreeEvent.fallbackReason` |
+| No `Worker` (Node, a host that blocks workers) | The pool builds on the calling thread, one mesh per turn | `pool.usesWorkers` |
+
+The `bvh-lbvh-fallback` GPU page covers the no-subgroups path.
+
+## The walk's stack
+
+The walk keeps one 64-entry stack per thread for both levels (`TRACE_STACK_SIZE`). A mesh tree under a top level gets
+47 levels (`GPU_TREE_MAX_DEPTH`); `SceneTrees` refuses deeper trees. tinybvh's trees on real scenes are about 28 deep
+(Sponza). A deeper tree takes a degenerate mesh, such as thousands of identical triangles, which H-PLOC's default
+`tieBreak: 'pairs'` keeps balanced.
+
+## Device limits
+
+- **One storage binding:** 128 MiB on a default device, about 2.7 million triangles at 48 bytes each. Ask for the
+  adapter's `maxStorageBufferBindingSize` and `maxBufferSize` ([Installation](/getting-started/installation#a-device-with-subgroups)).
+- **A GPU batch:** `planGpuHplocBatches` and `planGpuLbvhBatches` split meshes into batches the device can bind.
+- **Errors name the limit.** A buffer past the limit throws a `RangeError` with the limit and the size needed.
+
+## The build-peak cap
+
+A GPU build batch holds its inputs, its scratch and its outputs at once, so on a scene load the batch is the biggest
+memory number. One H-PLOC batch of all of Sponza (5.74 million triangles) is 1,482 MiB: about 270 bytes per triangle
+(inputs 18.5, scratch 136, outputs 116), against 470 MiB for the scene once settled.
+
+`SceneTrees` caps each batch at **256 MiB by default** (`gpuMaxBatchBytes`, `DEFAULT_GPU_MAX_BATCH_BYTES`):
+
+- the update's meshes are split into batches of at most that many bytes;
+- the batches build one after another on one scratch pool;
+- each batch's trees are copied into the scene's storage, and its outputs freed, before the next batch starts;
+- the storage reserves room for the rest at the first batch, so it grows once.
+
+So the peak is about the scene's storage plus one batch. `gpuMaxBatchBytes: Infinity` turns the cap off (one batch per
+update, as big as the device allows). A mesh bigger than the cap builds alone: the cap is a target, not a guarantee.
+
+The standalone builders keep no cap unless given one: `createMeshLayoutBuilder(device, { maxBatchBytes })`, and
+`planGpuHplocBatches(device, meshes, { maxBatchBytes })` with `builder.createScratchPool(batches)` and
+`createBatch(meshes, options, pool)`. `hplocBatchBytes` and `lbvhBatchBytes` give every buffer's bytes for a batch
+before you build it.
+
+Measured on Sponza, Apple M5, Chrome (`scene-trees-sponza` page, `copy` mode, one update per animation frame after a
+warm-up load; indicative):
+
+| Cap | Batches | Peak MiB | Settled MiB | First trees ms |
+| --- | ---: | ---: | ---: | ---: |
+| none | 1 | 1,482.7 | 470.0 | 171 |
+| 512 MiB | 3 | 963.0 | 460.7 | 147 |
+| 256 MiB (default) | 7 | 711.0 | 458.6 | 166 |
+| 128 MiB | 13 | 581.4 | 453.3 | 192 |
+
+The GPU walk gave the CPU reference's hits on 20,000 rays in every row. The RTX 3060 and the Intel UHD have not run
+these rows yet.

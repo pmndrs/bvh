@@ -36,6 +36,10 @@
         "examples:build": "vite build --config examples/vite.config.ts",
         "examples:smoke": "node tests/gpu/run.ts --examples",
         "bvh:wasm": "node native/build-wasm.ts",
+        "docs:api": "typedoc",
+        "docs:snippets": "node tools/docs-snippets.ts",
+        "docs:check": "node tools/docs-snippets.ts --check",
+        "docs:site": "node tools/docs-site.ts",
         "prepublishOnly": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
     },
     "devDependencies": {
@@ -47,6 +51,7 @@
         "globals": "^17.14.0",
         "three": "0.187.0",
         "three-mesh-bvh": "0.9.18",
+        "typedoc": "^0.28.20",
         "typescript": "^5.7.0",
         "typescript-eslint": "^8.72.2",
         "vite": "^6.1.0",

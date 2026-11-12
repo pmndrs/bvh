@@ -1,0 +1,80 @@
+name: Build documentation and deploy to GitHub Pages
+
+# The docs site (pmndrs/docs, the MDX in docs/) with the TypeDoc API reference at /api, on one
+# Pages site: https://bvh.docs.pmnd.rs once the custom domain is set (Settings > Pages) and
+# pmnd.rs has a CNAME for bvh.docs. Pull requests build it, to catch MDX errors, but deploy
+# nothing. tools/docs-site.ts is the build both here and locally (`pnpm docs:site`); it leaves
+# out docs/internals (contributor notes, plain Markdown) and docs/snippets (the code samples,
+# checked by `pnpm test`).
+
+on:
+  push:
+    branches: ['main']
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - 'typedoc.json'
+      - 'tools/docs-site.ts'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - 'typedoc.json'
+      - 'tools/docs-site.ts'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+# A pull request's ref is `refs/pull/<n>/merge`, so its runs never cancel a main deploy.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history and tags for the version label in the sidebar (`git describe --tags`), but
+      # blobless: past file contents are not fetched.
+      - uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+          filter: blob:none
+      - uses: pnpm/action-setup@v4.1.0
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Every code block is its type-checked sample in docs/snippets (pnpm test runs it too).
+      - run: pnpm docs:check
+      - run: pnpm docs:api
+      - run: pnpm docs:site _site
+        env:
+          NEXT_PUBLIC_URL: https://bvh.docs.pmnd.rs
+          MDX_BASEURL: https://github.com/${{ github.repository }}/raw/${{ github.event.pull_request.head.sha || github.sha }}/docs
+          SOURCECODE_BASEURL: https://github.com/${{ github.repository }}/tree/${{ github.event.pull_request.head.sha || github.sha }}
+          EDIT_BASEURL: https://github.com/${{ github.repository }}/edit/${{ github.head_ref || 'main' }}/docs
+          CONTRIBUTORS_PAT: ${{ secrets.GITHUB_TOKEN }}
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    # Grant GITHUB_TOKEN the permissions a Pages deployment needs.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

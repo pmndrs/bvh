@@ -1,0 +1,105 @@
+---
+title: CPU raycast in three
+description: computeBoundsTree and acceleratedRaycast as drop-ins, a ray against the whole scene, and builds in a worker.
+nav: 84
+sourcecode: src/three/raycast.ts
+---
+
+These are drop-ins for three-mesh-bvh's functions of the same names. They run the core's CPU walk over one tinybvh tree
+per geometry.
+
+{/* snippet: cpu-raycast */}
+```ts
+import { BufferGeometry, Mesh as ThreeMesh, Raycaster, SphereGeometry, MeshBasicMaterial, DoubleSide, Vector3 } from 'three';
+import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree, prepareBoundsTrees, SAH } from '@pmndrs/bvh/three';
+
+await prepareBoundsTrees(); // once: loads tinybvh
+BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+ThreeMesh.prototype.raycast = acceleratedRaycast;
+
+const mesh = new ThreeMesh(new SphereGeometry(1, 256, 128), new MeshBasicMaterial({ side: DoubleSide }));
+mesh.geometry.computeBoundsTree({ strategy: SAH, maxLeafSize: 8 }); // three-mesh-bvh's options are accepted
+
+const raycaster = new Raycaster(new Vector3(0, 0, 5), new Vector3(0, 0, -1));
+raycaster.firstHitOnly = true;
+const [hit] = raycaster.intersectObject(mesh); // distance, point, face, faceIndex, barycoord, uv, normal, ...
+```
+
+## What it returns
+
+The same intersections as three's `Mesh.raycast`:
+
+- the draw range and, with an array of materials, the groups; ranges off a multiple of 3 and overlapping groups too;
+- each material's `side` (front, back or double), read at every raycast;
+- `raycaster.near` and `far`;
+- the same fields: `distance`, `point`, `face` (`a`, `b`, `c`, `normal`, `materialIndex`), `faceIndex`, `barycoord`,
+  `uv`, `uv1` and `normal`;
+- `InstancedMesh` and `BatchedMesh` through `Mesh.raycast` (call `batchedMesh.geometry.computeBoundsTree()`).
+
+Without `firstHitOnly` every hit is returned, as three does. Tested against three on 8,000 random rays, and 5,000 more
+through ranges and groups off a multiple of 3. The one difference: three reports a triangle that reads past the end of
+the index at a `NaN` distance; we report nothing there.
+
+## When it falls back to three's raycast
+
+- The geometry has no tree.
+- A `SkinnedMesh`, or a mesh with morph targets (three poses each vertex on the CPU; that is exact).
+- The position attribute's version, or the index, changed since `computeBoundsTree`. It warns once and stays on three's
+  raycast until `geometry.boundsTree.refit()` (same index) or `computeBoundsTree` runs again.
+
+## A whole scene
+
+`BvhSceneRaycaster` is three-mesh-bvh's `ObjectBVH`: one walk over the scene's top level and its mesh trees, in place
+of a raycast per object.
+
+{/* snippet: scene-raycast */}
+```ts
+import { BvhSceneRaycaster, raycastScene } from '@pmndrs/bvh/three';
+import { Frustum, Matrix4, type Camera } from 'three';
+
+await prepareBoundsTrees();
+const picker = new BvhSceneRaycaster(scene); // a tree per geometry and range, and the top level
+const hits = raycastScene(picker, raycaster); // what raycaster.intersectObject(scene, true) returns
+
+// After objects move, show, hide, or come and go:
+scene.updateMatrixWorld();
+picker.update(); // the top level only, unless meshes changed
+
+const frustum = new Frustum().setFromProjectionMatrix(new Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+const seen = picker.intersectsFrustum(frustum, camera.layers); // [{ object, instanceId, group }]
+```
+
+- It returns three's `intersectObject(root, true)` with three's own `Mesh.raycast`: the same triangles, `side`,
+  `near`/`far`, `instanceId` and `batchId`, sorted. Hidden objects are hit too, as three's `Raycaster` hits them
+  (`includeHidden: false` skips them). `raycaster.firstHitOnly` returns the one closest hit over the scene.
+- **Differs from three:** layers 8-31 aren't seen, skinned and morphed meshes are read in their rest pose, and points,
+  lines and sprites aren't read.
+- Raycasts see the scene as of the last `update()`. Call `scene.updateMatrixWorld()` and `update()` after objects move,
+  show or hide, come or go, and after geometry edits. With the same meshes it rebuilds only the top level.
+- `intersectsFrustum(frustum, layers)` walks the top level with three's `Frustum.intersectsBox` and returns the objects
+  and instances whose world box meets it.
+
+Tested against three's `intersectObject` on 10,000 rays before and after moves, and 300 camera frustums against brute
+force.
+
+## Off the main thread
+
+{/* snippet: generate */}
+```ts
+import { GenerateMeshBvhWorker } from '@pmndrs/bvh/three';
+
+const generator = new GenerateMeshBvhWorker(); // on @pmndrs/bvh/worker's pool; inline in Node
+geometry.boundsTree = await generator.generate(geometry, { maxLeafSize: 8, onProgress: (p) => console.log(p) });
+generator.dispose(); // stops the pool and rejects unfinished builds
+```
+
+`GenerateMeshBvhWorker` builds on `@pmndrs/bvh/worker`'s pool ([Workers](/workers/workers)). The geometry's arrays are
+copied, not moved, so it stays usable, and several builds may run at once. Pass `{ pool }` to share a pool.
+
+## Speed
+
+On a 100,000-triangle torus knot, Node 22 on the Apple M5 (indicative): 692,630 `firstHitOnly` raycasts per second
+against three-mesh-bvh's 664,652 (CENTER) and three's 294; build 28 ms against 31 ms (CENTER) and 95 ms (SAH). How
+it was measured: [Raycast](/cpu-queries/raycast#speed). In the browser (`three/raycast` example, headless Chrome on
+the M5): 0.40 million raycasts per second against three's 306.

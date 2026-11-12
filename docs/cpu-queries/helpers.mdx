@@ -1,0 +1,71 @@
+---
+title: Refit, scenes and helpers
+description: CPU refits, a whole scene on the CPU, frustum culling, and three-mesh-bvh's debug functions.
+nav: 73
+sourcecode: src/query/debug.ts
+---
+
+## Refit
+
+{/* snippet: refit */}
+```ts
+input.positions[0] += 0.1; // the vertices moved, the triangles are the same
+tree.refit(); // rereads the source positions, keeps the shape; or tree.refit(input)
+```
+
+`refit(input?)` rewrites the triangle records from the source positions and refits every box (`refitOnCpu`), keeping
+the tree's shape. The index must not change. Every input is checked before anything is written, so a refit that throws
+leaves the tree as it was.
+
+Queries read the tree's own triangles, not the geometry's current positions: after editing positions, refit first.
+
+## A whole scene
+
+`CpuSceneBvh` is three-mesh-bvh's `ObjectBVH` without three: a top level over instances and the mesh trees under it, one
+walk for the whole scene.
+
+{/* snippet: scene */}
+```ts
+import { buildMeshBvhWithTinyBvh, CpuSceneBvh, createTinyBvhBuilder, type MeshGeometry, type TraceSceneInstance } from '@pmndrs/bvh';
+
+const tiny = await createTinyBvhBuilder();
+const picker = CpuSceneBvh.build(meshes, instances, (mesh) => buildMeshBvhWithTinyBvh(mesh, tiny));
+const hits = picker.raycast({ origin: [0, 1, 5], direction: [0, 0, -1], tMin: 0, tMax: 1e30 }, { firstHitOnly: true, mask: 0x1 });
+
+// Frustum culling over the top level: planes as [a, b, c, d] with a*x + b*y + c*z + d >= 0 inside.
+const visible = picker.intersectsFrustum([0, 0, -1, 10, 0, 0, 1, 10]);
+picker.setInstances(instances); // moved instances: rebuilds the top level only
+```
+
+- `raycast(ray, { firstHitOnly, mask, accept })` returns `{ instance, triangle, t, u, v, frontFace, ... }` per hit,
+  sorted. `accept(instance, triangle, frontFace)` decides whether a hit counts (side culling, groups).
+- `intersectsFrustum(planes, { mask })` and `intersectsBox(box, { mask })` walk the top level and return the instances
+  whose world box meets the shape. A subtree outside a plane is skipped; one inside every plane is taken whole.
+- `setInstances(instances)` takes new transforms, visibility, masks or materials, and rebuilds only the top level.
+
+`SceneTrees` keeps its trees on the GPU only, so a CPU scene is built from the same meshes separately. In three,
+`BvhSceneRaycaster` does it from the scene graph ([CPU raycast in three](/three/cpu-raycast#a-whole-scene)).
+
+## Debug helpers
+
+{/* snippet: helpers */}
+```ts
+import { bvhHelperIndices, bvhHelperPositions, estimateMemoryInBytes, getBVHExtremes, validateBounds } from '@pmndrs/bvh';
+
+console.log(getBVHExtremes(tree)); // [{ nodeCount, leafNodeCount, depth, primitives, splits, surfaceAreaScore }]
+console.log(validateBounds(tree)); // every box holds its triangles (reads the source geometry)
+console.log(estimateMemoryInBytes(tree)); // the tree's own bytes, not the geometry's
+
+// The boxes down to depth 10 as line segments, for any engine to draw.
+const positions = bvhHelperPositions(tree, 10, false);
+const indices = bvhHelperIndices(positions, true);
+```
+
+- `getBVHExtremes(tree)`: three-mesh-bvh's `ExtremeInfo`, one entry for our one root. The split axis isn't stored in
+  the layout, so `splits` counts the axis the children's centres lie furthest apart on.
+- `validateBounds(tree)`: three-mesh-bvh's checks and `console.assert` messages, reading the source geometry, so edits
+  without `refit()` fail.
+- `estimateMemoryInBytes(tree)`: the tree's layout, its lookups and top level, not the geometry.
+- `bvhHelperPositions(tree, depth, displayParents)` and `bvhHelperIndices(positions, edges)`: the boxes as line
+  segments (or faces), for any engine to draw. three's `MeshBVHHelper` uses them.
+- `checkGpuLayout` and `treeSahCost` check and score any tree ([The builder contract](/concepts/builder-contract#the-rule)).

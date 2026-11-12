@@ -1,3 +1,9 @@
+/**
+ * The engine-free core: builders, refits, the GPU layout, the WGSL walk and its CPU port, SceneTrees, CPU queries and serialization.
+ *
+ * @module @pmndrs/bvh
+ */
+
 // @pmndrs/bvh: engine-free BVH builders and refits for WebGPU, writing one
 // shared GPU layout (docs/internals/design/bvh-framework.md). This file is the public
 // API: everything a user needs, and nothing that is only there for a builder's

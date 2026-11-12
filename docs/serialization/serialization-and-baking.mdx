@@ -1,0 +1,86 @@
+---
+title: Serialization and baking
+description: Build trees once (in Node, at build time), save the bytes, and load them later with no build at all.
+nav: 100
+sourcecode: src/serialize.ts
+---
+
+`serializeLayout(layout)` writes one tree as one `ArrayBuffer`; `deserializeLayout(bytes)` reads it back. tinybvh's
+WebAssembly needs no GPU, so a Node script can bake every mesh's tree ahead of time.
+
+## Bake in Node
+
+{/* snippet: bake */}
+```ts
+// bake.ts: node bake.ts  (Node 22+; tinybvh's WebAssembly needs no GPU)
+import { writeFile } from 'node:fs/promises';
+import { createTinyBvhBuilder, serializeLayout, type MeshInput } from '@pmndrs/bvh';
+
+const tiny = await createTinyBvhBuilder();
+for (const [index, mesh] of meshes.entries()) {
+    const { layout } = tiny.buildLayout(mesh, { maxLeafPrimitives: 8 });
+    // One ArrayBuffer: a 64-byte header, then nodes, triangles and parents as the GPU reads them.
+    await writeFile(path(index), new Uint8Array(serializeLayout(layout)));
+}
+```
+
+## Load in the browser
+
+{/* snippet: load */}
+```ts
+import { assembleTraceScene, deserializeLayout, uploadTraceScene, type TraceSceneInstance } from '@pmndrs/bvh';
+
+// deserializeLayout refuses bytes from another GPU_LAYOUT_VERSION (or format version): rebuild those.
+const trees = await Promise.all(urls.map(async (url) => deserializeLayout(await (await fetch(url)).arrayBuffer())));
+const scene = assembleTraceScene(trees, instances); // instances name their tree by meshIndex
+const buffers = uploadTraceScene(device, scene); // nodes, triangles, topLevel: bind them to the walk
+```
+
+A loaded tree is a `GpuLayoutMeshBvh`, the same thing any builder returns. Use it wherever a tree goes:
+`assembleTraceScene` (above), a `build` function for `buildTraceScene`, `GpuMeshRefit.setTree`, or `new CpuMeshBvh(layout)`.
+`SceneTrees` builds its own trees and doesn't take baked ones.
+
+## The format
+
+```text
+header, 16 words (64 bytes, little-endian)
+    0      magic 'PBVH'
+    1      format version (SERIALIZED_FORMAT_VERSION, now 1)
+    2      GPU layout version (GPU_LAYOUT_VERSION, now 2)
+    3      nodeCount
+    4      triangleCount
+    5      maxDepth
+    6      leafCount
+    7      formats: bits 0-7 triangles (0 records, 1 indexed), bits 8-15 nodes (0 f32, 1 quantized)
+    8-13   bounds: minX, minY, minZ, maxX, maxY, maxZ (f32)
+    14-15  0
+nodes      nodeCount x 64 bytes (f32), or (nodeCount + 1) x 32 (quantized: the frame slot, then the nodes)
+triangles  triangleCount x 48 bytes (records) or x 16 (indexed)
+parents    nodeCount x 4 bytes
+```
+
+`serializedLayoutBytes(layout)` gives the size before writing. The arrays are copied byte for byte, as the GPU reads
+them. WebGPU buffers are little-endian, as is every machine that runs WebGPU.
+
+**Bytes from another layout version are refused, not converted.** A tree is cheap to rebuild, and a wrong word position
+would only show up as wrong rays. Bake again when `GPU_LAYOUT_VERSION` changes, which is a breaking release.
+
+## CPU trees
+
+{/* snippet: cpu-tree */}
+```ts
+import { CpuMeshBvh } from '@pmndrs/bvh';
+
+const tree = await CpuMeshBvh.create(input);
+const bytes = tree.serialize();
+// The layout is checked when it is loaded (children in range, every node reached once),
+// so corrupt bytes throw instead of hanging a walk.
+const loaded = CpuMeshBvh.deserialize(bytes, { source: input });
+```
+
+In three, `geometry.boundsTree.serialize()` and `deserializeBoundsTree(bytes, geometry)` do the same
+([The tree object](/three/bounds-tree#save-and-load)). These are our layout's bytes, not three-mesh-bvh's format.
+
+## An example
+
+A Node bake example (`node/bake`) is planned for the examples site.

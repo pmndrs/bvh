@@ -1,5 +1,7 @@
 # `@pmndrs/bvh/three`
 
+> The user docs for this subpath are the pages in `docs/three/` (the docs site). This file keeps the full contributor notes: how each part matches three, what is tested, and the open questions.
+
 The three.js side of the package. It's the only part that imports three, which is an optional peer dependency pinned to `>=0.187.0 <0.188.0`: `BvhTraceNodes` relies on three's WebGPU backend internals, so each three release is checked before the range widens. The core stays engine-free, and lint enforces that.
 
 ## Coming from three-mesh-bvh's WebGPU path

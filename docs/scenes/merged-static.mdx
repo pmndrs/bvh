@@ -1,0 +1,72 @@
+---
+title: Merged static instances
+description: One world-space tree over the instances that never move, for faster rays from surfaces. Off by default.
+nav: 32
+sourcecode: src/trace/static-merge.ts
+---
+
+Every instance box a ray enters costs a transform, a stack marker and a descent into that mesh's tree. In scenes made
+of one instance per mesh (architecture, Sponza, Bistro) the boxes overlap heavily, and rays that start on surfaces pay
+for it: on Sponza a surface point sits inside 5.8 instance boxes, and a ray enters 9.8 instances, 8.1 of them without a
+hit. Merging puts the instances that never move into one world-space tree.
+
+{/* snippet: merged-static */}
+```ts
+const trees = await SceneTrees.create(device, { mergeStaticInstances: true });
+room.forEach((geometry, index) => {
+    const mesh = trees.addMesh(geometry);
+    // static: never moves. Merged at the first update when its mesh has no other instance.
+    trees.addInstance({ mesh, objectToWorld: matrices[index], static: true });
+});
+```
+
+## What merges
+
+An instance with `static: true`, whose mesh no other instance uses, with an invertible transform, visible and
+contributing to GI, added before the first update. Merged instances are grouped by mask; each group becomes one mesh
+with one identity-transform instance. Everything else stays a normal instance in the same top level.
+
+Meshes used more than once never merge: copying them would cost memory per copy.
+
+## Hits stay exact
+
+`hit.instance` is the source instance, `hit.triangle` the triangle's index in its source mesh, `hit.frontFace` the
+source's authored side (mirrored sources included), and `hit.material` the source's material. The ids use words the
+layout already had, so merging adds no memory to the resident scene.
+
+## Static means static
+
+The source transforms are baked into the merged geometry. In `SceneTrees`, moving, hiding, re-masking or removing a
+merged instance throws. With `buildTraceScene`, only assembling again notices that a merged source moved; nothing
+checks between assemblies. Never refit a merged range: its corners are in world space.
+
+## Measured
+
+Merged over instanced, Apple M5 Pro, Chrome 157, 3 runs of 5 paired rounds each (median over runs of each run's paired
+median; pages `trace-bench-surface-sponza` and `trace-bench-surface-bistro-interior`, rows in
+`bench/results/trace.csv`; indicative):
+
+| Scene | Surface rays, closest | Surface rays, any | Air grid, closest | Air grid, any |
+| --- | --- | --- | --- | --- |
+| Sponza | 1.85x (1.83-1.93) | 1.36x (1.33-1.44) | 1.49x | 1.20x |
+| Bistro interior | 1.22x (1.21-1.24) | 1.11x (1.10-1.11) | 1.19x | 1.31x |
+
+On Sponza, steps per surface ray drop from 113.8 to 70.3, and instance entries from 9.8 to 1.0. The RTX 3060 hasn't
+been measured, so the option stays off by default.
+
+## Costs
+
+- **Build time.** One big build replaces many small ones, and one build can't spread over the worker pool. tinybvh took
+  1.53 s for merged Sponza (Node, M5 Pro), against 1.25 s for the per-mesh builds summed (54 ms for the largest).
+  `SceneTrees` builds the merged mesh on the GPU first, like any mesh, and tinybvh's in a worker.
+- **CPU memory while it builds.** The merge plan holds world-space positions and indices plus 11 bytes per triangle of
+  source ids: 161.6 MiB on Sponza, until the tree is built.
+- **One batch.** A merged Sponza is one GPU batch of 5.7 million triangles, whatever the [build-peak cap](/builders/fallbacks-and-limits#the-build-peak-cap).
+- **Precision.** Merged triangles are stored in world space as f32. At 10 km from the origin the f32 step is about
+  1 mm. Merge only what sits near the origin, or re-centre the world first.
+
+## Without SceneTrees
+
+`buildTraceScene(meshes, instances, { build, mergeStaticInstances: true })` builds and assembles in one call. The lower
+level is `mergeStaticGeometry(meshes, instances)`, which returns a plan whose groups you build with any builder and pass
+to `assembleTraceScene(..., { merged: { plan, meshes } })`.

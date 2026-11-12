@@ -1,3 +1,9 @@
+/**
+ * three.js in, the core's inputs out: scenes from Object3D, the sync, BvhTraceNodes for TSL and WGSL, and three-mesh-bvh-style CPU raycasts and queries. three is an optional peer dependency.
+ *
+ * @module @pmndrs/bvh/three
+ */
+
 // @pmndrs/bvh/three: three.js in, the engine-free core's inputs out. The only
 // part of the package that imports three (a peer dependency); see docs/internals/three.md.
 

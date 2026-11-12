@@ -1,0 +1,77 @@
+---
+title: Installation
+description: The package, its subpaths, and a WebGPU device with subgroups.
+nav: 1
+---
+
+```bash
+npm install @pmndrs/bvh
+```
+
+> [!NOTE]
+> `@pmndrs/bvh` is not published yet. Until it is, build it from [the repository](https://github.com/pmndrs/bvh)
+> (`pnpm install && pnpm build`) and link it.
+
+For the three.js subpath, also install three. It is an optional peer dependency, pinned to `>=0.187.0 <0.188.0`
+because `BvhTraceNodes` reads three's WebGPU backend internals, and each three release is checked before the range widens.
+
+```bash
+npm install three@0.187
+```
+
+## Entry points
+
+| Import | What it holds |
+| --- | --- |
+| `@pmndrs/bvh` | The core: builders, refits, the layout, the WGSL walk and its CPU port, `SceneTrees`, CPU queries, serialization. No engine. |
+| `@pmndrs/bvh/three` | three.js in, the core's inputs out; three-mesh-bvh's CPU API; `BvhTraceNodes` for TSL and WGSL. |
+| `@pmndrs/bvh/worker` | The tinybvh worker pool and the worker builders. |
+
+The package is ES modules only, with `sideEffects: false`. The worker files are loaded with
+`new Worker(new URL(..., import.meta.url))`, which Vite, webpack 5 and esbuild follow without configuration.
+
+## Requirements
+
+- **WebGPU** for anything on the GPU. The CPU queries and the tinybvh builder need only WebAssembly SIMD, which every
+  current browser and Node have.
+- **The `subgroups` feature** for the GPU builders (H-PLOC, LBVH) and both GPU refits. Without it there is one
+  fallback: tinybvh builds every tree on the CPU, and the top level is rebuilt on the CPU. Chrome exposes subgroups on
+  the GPUs the package is tested on (Apple M5, RTX 3060, Intel UHD). Safari and Firefox don't expose them yet.
+- **Limits for big scenes.** A default device allows 128 MiB per storage binding, about 2.7 million triangles in the
+  default layout. Ask for the adapter's limits when you need more.
+
+## A device with subgroups
+
+Ask for `subgroups` when the adapter has it, and for the adapter's buffer limits:
+
+{/* snippet: device */}
+```ts
+export async function requestBvhDevice(): Promise<GPUDevice> {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) throw new Error('WebGPU is not available');
+    const device = await adapter.requestDevice({
+        // The GPU builders and refits need subgroups. Without them, tinybvh builds every tree on the CPU.
+        requiredFeatures: adapter.features.has('subgroups') ? ['subgroups'] : [],
+        // A big scene needs more than the default 128 MiB per storage binding.
+        requiredLimits: {
+            maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+            maxBufferSize: adapter.limits.maxBufferSize,
+        },
+    });
+    return device;
+}
+```
+
+The GPU code never assumes a subgroup size. It reads it from the device, and builds the same trees at 8, 16 or 32 lanes.
+
+With three.js, the renderer makes the device. See [Sharing a device with an engine](/engines/sharing-a-device).
+
+## Checking what you got
+
+Every builder result says which builder made it and why the GPU wasn't used, if it wasn't:
+
+- `createMeshLayoutBuilder(device).fallbackReason`, for example `the device has no "subgroups" feature`;
+- `SceneTrees.gpuFirstTrees`, `{ enabled, reason }`;
+- each `SceneTreeEvent.fallbackReason`, per mesh.
+
+Show it in your app. A slow load on a device without subgroups is the CPU fallback, not a slow library.
