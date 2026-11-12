@@ -7,7 +7,7 @@
 import type { BuiltScene, CompareScene, SceneAdapter } from '../adapters/types.ts';
 import { checkFirst, checkSet, emptyAgreement } from './agree.ts';
 import { timeBuilds, timeQueries, timingOf, yieldNow, type QueryPlan } from './measure.ts';
-import { makeFrusta, makeSceneBoxes, makeSceneRays, moveObjects } from './scene.ts';
+import { makeFrusta, makeSceneBoxes, makeSceneRays, moveObjects, worldBox } from './scene.ts';
 import type { Measurement } from './suites.ts';
 
 export interface SceneSuiteOptions {
@@ -40,14 +40,32 @@ export async function sceneSuite(adapters: readonly SceneAdapter[], scene: Compa
     const rays = makeSceneRays(n);
     const scale = 200;
 
+    // Boundary cases: an object whose box lies within this of a frustum plane or a box face, in doubles.
+    const epsilon = 1e-5 * scale;
+    const boxOf = (id: number) => worldBox(scene.mesh, scene.objects[id].matrix, new Array<number>(6));
+    const nearFrustum = (planes: Float32Array) => (id: number) => {
+        const b = boxOf(id);
+        for (let p = 0; p < planes.length; p += 4) {
+            const [x, y, z, d] = [planes[p], planes[p + 1], planes[p + 2], planes[p + 3]];
+            const far = x * (x > 0 ? b[3] : b[0]) + y * (y > 0 ? b[4] : b[1]) + z * (z > 0 ? b[5] : b[2]) + d;
+            if (Math.abs(far) <= epsilon * Math.hypot(x, y, z)) return true;
+        }
+        return false;
+    };
+    const nearBox = (box: readonly number[]) => (id: number) => {
+        const b = boxOf(id);
+        for (let k = 0; k < 3; k++) if (Math.abs(b[k + 3] - box[k]) <= epsilon || Math.abs(b[k] - box[k + 3]) <= epsilon) return true;
+        return false;
+    };
+
     const queryRound = async (suffix: string, timed: boolean) => {
         const oursFrusta = frusta.map((f) => ours.scene.intersectsFrustum!(f.planes, f.viewProjection));
         const oursBoxes = boxes.map((box) => ours.scene.intersectsBox!(box));
         const oursRays = rays.map((ray) => ours.scene.raycastFirst!(ray));
         for (const { adapter, scene: tree } of built) {
             const kinds: { metric: string; run: ((i: number) => unknown) | undefined; check: (a: ReturnType<typeof emptyAgreement>, i: number, answer: unknown) => void; feature: SceneAdapter['features']['frustum']; what: string }[] = [
-                { metric: 'frustum', run: tree.intersectsFrustum ? (i: number) => tree.intersectsFrustum!(frusta[i].planes, frusta[i].viewProjection) : undefined, check: (a: ReturnType<typeof emptyAgreement>, i: number, answer: unknown) => checkSet(a, i, oursFrusta[i], answer as number[]), feature: adapter.features.frustum, what: 'objects whose world box meets a camera frustum (60 degrees, far plane at half the scene)' },
-                { metric: 'box', run: tree.intersectsBox ? (i: number) => tree.intersectsBox!(boxes[i]) : undefined, check: (a: ReturnType<typeof emptyAgreement>, i: number, answer: unknown) => checkSet(a, i, oursBoxes[i], answer as number[]), feature: adapter.features.box, what: 'objects whose world box meets a box (edges of 5-15% of the scene)' },
+                { metric: 'frustum', run: tree.intersectsFrustum ? (i: number) => tree.intersectsFrustum!(frusta[i].planes, frusta[i].viewProjection) : undefined, check: (a: ReturnType<typeof emptyAgreement>, i: number, answer: unknown) => checkSet(a, i, oursFrusta[i], answer as number[], nearFrustum(frusta[i].planes)), feature: adapter.features.frustum, what: 'objects whose world box meets a camera frustum (60 degrees, far plane at half the scene)' },
+                { metric: 'box', run: tree.intersectsBox ? (i: number) => tree.intersectsBox!(boxes[i]) : undefined, check: (a: ReturnType<typeof emptyAgreement>, i: number, answer: unknown) => checkSet(a, i, oursBoxes[i], answer as number[], nearBox(boxes[i])), feature: adapter.features.box, what: 'objects whose world box meets a box (edges of 5-15% of the scene)' },
                 {
                     metric: 'raycast',
                     run: tree.raycastFirst ? (i: number) => tree.raycastFirst!(rays[i]) : undefined,

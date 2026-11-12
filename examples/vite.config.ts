@@ -69,13 +69,16 @@ export default defineConfig({
         ],
     },
     cacheDir: resolve(repoRoot, 'node_modules/.vite-examples'),
+    // bvh-tree (compare/) is CommonJS: pre-bundled so the dev server can import it (the smoke run skips discovery).
+    optimizeDeps: { include: ['bvh-tree'] },
     // The worker pool's entry is an ES module (`new Worker(url, { type: 'module' })`).
     worker: { format: 'es' },
     build: {
         target: 'esnext',
         outDir: resolve(root, 'dist'),
         emptyOutDir: true,
-        chunkSizeWarningLimit: 4000,
+        // Rapier (compare/ only) inlines its WASM: a 4.4 MB chunk of its own.
+        chunkSizeWarningLimit: 5000,
         rollupOptions: {
             input: {
                 index: resolve(root, 'index.html'),
@@ -84,6 +87,8 @@ export default defineConfig({
             output: {
                 manualChunks(id) {
                     if (id.includes('/node_modules/three/')) return 'three';
+                    if (id.includes('/node_modules/@dimforge/')) return 'rapier';
+                    if (id.includes('/node_modules/@babylonjs/')) return 'babylon';
                     if (id.includes('/src/three/')) return 'bvh-three';
                     if (id.startsWith(resolve(repoRoot, 'src') + sep)) return 'bvh';
                     return undefined;

@@ -5,7 +5,8 @@
  * - **same**: the same triangle (and the same distance within tolerance);
  * - **tie**: another triangle at the same distance (shared edges, coincident
  *   faces), or, for all hits, a list that differs only by a repeat at a
- *   distance already in it (a hit on a shared edge counted on both sides);
+ *   distance already in it (a hit on a shared edge counted on both sides), or,
+ *   for culling, an object whose box touches the query's boundary;
  * - **disagree**: anything else: a hit against a miss, another distance, a
  *   different count of distinct hits, another yes or no.
  *
@@ -86,17 +87,33 @@ export function checkBoolean(agreement: Agreement, query: number, ours: boolean,
     else note(agreement, `query ${query}: ours ${ours}, theirs ${theirs}`);
 }
 
-/** The same ids, in any order. */
-export function checkSet(agreement: Agreement, query: number, ours: readonly number[], theirs: readonly number[]): void {
+/**
+ * The same ids, in any order. An id only one side has counts as a tie when
+ * `onBoundary(id)` says its box touches the query's boundary within float
+ * tolerance (the libraries box and test in different precisions).
+ */
+export function checkSet(agreement: Agreement, query: number, ours: readonly number[], theirs: readonly number[], onBoundary?: (id: number) => boolean): void {
     agreement.checked++;
     const a = new Set(ours);
     const b = new Set(theirs);
     let missing = 0;
     let extra = 0;
-    for (const id of a) if (!b.has(id)) missing++;
-    for (const id of b) if (!a.has(id)) extra++;
-    if (missing === 0 && extra === 0 && a.size === ours.length && b.size === theirs.length) agreement.same++;
-    else note(agreement, `query ${query}: ours ${a.size} ids, theirs ${b.size} (${missing} of ours missing, ${extra} extra${b.size !== theirs.length ? ', repeats' : ''})`);
+    let boundary = 0;
+    for (const id of a) {
+        if (b.has(id)) continue;
+        if (onBoundary?.(id)) boundary++;
+        else missing++;
+    }
+    for (const id of b) {
+        if (a.has(id)) continue;
+        if (onBoundary?.(id)) boundary++;
+        else extra++;
+    }
+    const repeats = a.size !== ours.length || b.size !== theirs.length;
+    if (missing === 0 && extra === 0 && !repeats) {
+        if (boundary === 0) agreement.same++;
+        else agreement.ties++;
+    } else note(agreement, `query ${query}: ours ${a.size} ids, theirs ${b.size} (${missing} of ours missing, ${extra} extra${repeats ? ', repeats' : ''})`);
 }
 
 export function agreementText(a: Agreement): string {
