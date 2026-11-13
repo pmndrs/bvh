@@ -24,6 +24,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         timeoutMs: 60_000,
     },
     {
+        name: 'vanilla-raytrace',
+        path: 'vanilla/raytrace',
+        title: 'Ray-cast view',
+        description: 'One ray per pixel through the WGSL walk in the page\'s own compute kernel, shown by normal, material, instance or distance, any-hit shadows; switch tinybvh, H-PLOC and LBVH live and watch build ms, SAH and Mrays/s.',
+        timeoutMs: 120_000,
+    },
+    {
         name: 'three-raycast',
         path: 'three/raycast',
         title: 'Raycast',

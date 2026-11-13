@@ -43,10 +43,12 @@ Raw WebGPU and `@pmndrs/bvh` only: no three, no engine. They prove the "not a th
 
 - `shared/vanilla/app.ts`: a `GPUDevice` asked for `subgroups` and `timestamp-query` when the adapter has them, plus the adapter's storage limits; a WebGPU canvas; an orbit camera (`camera.ts`: a view-projection matrix for raster passes, the ray basis for compute passes, packed camera rays); the shared overlay; a frame loop of `update` (may await a readback) then `render` (records into the frame's encoder; the loop submits).
 - `shared/vanilla/geometry.ts`: procedural meshes (torus knot, sphere, box, torus, ground) as plain `positions` and `indices`, scenes of meshes and column-major instances with a material number, `mergeToWorld`. `gltf.ts`: a minimal glTF reader (positions, indices, node transforms; `.glb` or `.gltf` with its `.bin`; no Draco, meshopt or quantized positions) for `?model=` and drag and drop.
+- `shared/vanilla/raycast-view.ts`: the ray-cast kernel the pages share: `traceModuleWgsl` in the page's own compute shader, one closest-hit ray per pixel, a colour from the hit alone (normal, material, instance, triangle, distance), optional any-hit hard shadows, each pixel's hit record kept for picking, and a blit pass. A demo of the walk, not a renderer: no sampling, BSDFs or accumulation (the scope rule in HANDOFF.md).
 
 | Page | Shows | Smoke check |
 | --- | --- | --- |
 | `vanilla/hello` | The smallest use: `createMeshLayoutBuilder(device)` picks the builder and says why, `assembleTraceScene` + `uploadTraceScene`, the tree's boxes at a depth in a line pass (`bvhHelperPositions`), the pointer's ray picks a triangle (`TraceBatchKernel`, read back), and a batch of 1k-262k rays every frame whose hit points a render pass draws straight from the hit buffer | 1,024 batch rays agree with the CPU port of the walk (`createCpuTracer`) on the same scene; the centre ray hits |
+| `vanilla/raytrace` | The WGSL walk in the page's own kernel over a scene of meshes and instances; switch tinybvh, H-PLOC and LBVH live (build ms, SAH, Mrays/s from timestamps, scene bytes); shadows through `bvhTraceAny`; the hovered pixel's hit record | with each builder, 1,024 pixels of the view agree with the CPU walk |
 
 ## three.js examples
 
