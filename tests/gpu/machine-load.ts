@@ -34,7 +34,12 @@ export function machineLoad(cpus: number): MachineLoad {
     return { loadAverage: [one, five, fifteen], chromeGpuProcesses, cpus, at: new Date().toISOString() };
 }
 
+/**
+ * Quiet: the 1-minute load below {@link QUIET_LOAD_PER_CORE} per core. Windows reports no load
+ * average (0), so there a run is quiet only when the operator says so with `BVH_MACHINE_QUIET=1`.
+ */
 export function isQuiet(load: MachineLoad): boolean {
+    if (process.platform === 'win32') return process.env.BVH_MACHINE_QUIET === '1';
     return load.loadAverage[0] < QUIET_LOAD_PER_CORE * load.cpus;
 }
 

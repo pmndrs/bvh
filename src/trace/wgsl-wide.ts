@@ -173,6 +173,9 @@ fn bvhWideEntry(
 /** BVH4: tinybvh's BVH4_GPU walk. */
 function bvh4MeshWalkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrder: 'far' | 'near'): string {
     const closest = kind === 'closest';
+    // The mesh stack is a module-scope private array (meshStackWgsl): a function-scope one would be
+    // zero-filled at every instance entry.
+    const stackName = closest ? 'bvhMeshStackClosest' : 'bvhMeshStackAny';
     const maskParameter = rayMasks ? ', rayMask: u32' : '';
     const maskArgument = rayMasks ? ', rayMask' : '';
     // After the sort, child 0 is the farthest and child 3 the nearest. Inner children are
@@ -191,7 +194,7 @@ function bvh4MeshWalkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrde
             if ((info${k} & BVH4_CHILD_LEAF) != 0u) {
                 ${leafCall(`info${k}`)}
             } else {
-                stack[stackSize] = info${k};
+                ${stackName}[stackSize] = info${k};
                 stackSize += 1u;
             }
         }`,
@@ -200,7 +203,6 @@ function bvh4MeshWalkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrde
     return /* wgsl */ `
 fn ${closest ? 'bvhMeshClosest' : 'bvhMeshAny'}(instance: BvhInstance, setup: BvhRaySetup, tMin: f32, tMax: f32, meshVertexBase: u32${maskParameter}) -> ${closest ? 'BvhMeshHit' : 'bool'} {
     ${closest ? 'var best = BvhMeshHit(false, tMax, 0u, vec2f(0.0), true, 0u, 0u);' : ''}
-    var stack: array<u32, BVH_WIDE_STACK_SIZE>;
     var stackSize = 0u;
     var node = 0u;
     loop {
@@ -238,7 +240,7 @@ fn ${closest ? 'bvhMeshClosest' : 'bvhMeshAny'}(instance: BvhInstance, setup: Bv
             break;
         }
         stackSize -= 1u;
-        node = stack[stackSize];
+        node = ${stackName}[stackSize];
     }
     return ${closest ? 'best' : 'false'};
 }
@@ -255,9 +257,10 @@ function cwbvhMeshWalkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrd
     const nearFirst = closest || anyHitOrder === 'near';
     const octantInverse = nearFirst ? '7u - octant' : 'octant';
     const shared = stack === 'workgroup';
-    const push = shared ? 'bvhWidePush(&spill, stackSize, ngroup);' : 'stack[stackSize] = ngroup;';
-    const pop = shared ? 'ngroup = bvhWidePop(&spill, stackSize);' : 'ngroup = stack[stackSize];';
-    const stackDeclaration = shared ? 'var spill: array<vec2u, BVH_WIDE_SPILL_SIZE>;' : 'var stack: array<vec2u, BVH_WIDE_STACK_SIZE>;';
+    // Module-scope stacks (meshStackWgsl), one per query: a function-scope array would be zero-filled at every instance entry.
+    const suffix = closest ? 'Closest' : 'Any';
+    const push = shared ? `bvhWidePush${suffix}(stackSize, ngroup);` : `bvhMeshStack${suffix}[stackSize] = ngroup;`;
+    const pop = shared ? `ngroup = bvhWidePop${suffix}(stackSize);` : `ngroup = bvhMeshStack${suffix}[stackSize];`;
     const triangles = closest
         ? `bvhTrianglesClosest(instance, setup, tMin, &best, meshVertexBase, instance.triangleOffset + triangleBase, triangleBits${maskArgument});`
         : `if (bvhTrianglesAny(instance, setup, tMin, tMax, meshVertexBase, instance.triangleOffset + triangleBase, triangleBits${maskArgument})) {
@@ -266,7 +269,6 @@ function cwbvhMeshWalkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrd
     return /* wgsl */ `
 fn ${closest ? 'bvhMeshClosest' : 'bvhMeshAny'}(instance: BvhInstance, setup: BvhRaySetup, tMin: f32, tMax: f32, meshVertexBase: u32${maskParameter}) -> ${closest ? 'BvhMeshHit' : 'bool'} {
     ${closest ? 'var best = BvhMeshHit(false, tMax, 0u, vec2f(0.0), true, 0u, 0u);' : ''}
-    ${stackDeclaration}
     var stackSize = 0u;
     let negative = setup.inverseDirection < vec3f(0.0);
     let octant = select(0u, 4u, negative.x) | select(0u, 2u, negative.y) | select(0u, 1u, negative.z);
@@ -348,37 +350,55 @@ fn bvhCwbvhHitBits(meta4: u32, octantInverse4: u32, entry: vec4f) -> u32 {
 }
 `;
 
-/** The workgroup short stack: the first entries per lane in workgroup memory, the rest in a private spill array. */
-const SHARED_STACK_WGSL = /* wgsl */ `
-const BVH_WIDE_SHARED_ENTRIES: u32 = ${WIDE_SHARED_STACK_ENTRIES}u;
-const BVH_WIDE_SHARED_LANES: u32 = ${WIDE_SHARED_STACK_LANES}u;
-const BVH_WIDE_SPILL_SIZE: u32 = BVH_WIDE_STACK_SIZE - BVH_WIDE_SHARED_ENTRIES;
+/**
+ * The mesh walks' stacks, at module scope: `var<private>` is zero-initialised once per invocation,
+ * where a function-scope array would be cleared at every instance entry. One per query, so a
+ * triangle filter in a closest-hit walk may itself call `bvhTraceAny`.
+ */
+function meshStackWgsl(format: WideNodeFormat, stack: WideStack): string {
+    if (format === 'bvh4') {
+        return `var<private> bvhMeshStackClosest: array<u32, BVH_WIDE_STACK_SIZE>;
+var<private> bvhMeshStackAny: array<u32, BVH_WIDE_STACK_SIZE>;`;
+    }
+    if (stack === 'private') {
+        return `var<private> bvhMeshStackClosest: array<vec2u, BVH_WIDE_STACK_SIZE>;
+var<private> bvhMeshStackAny: array<vec2u, BVH_WIDE_STACK_SIZE>;`;
+    }
+    const lanes = WIDE_SHARED_STACK_LANES;
+    const entries = WIDE_SHARED_STACK_ENTRIES;
+    const region = (suffix: string) => `
+var<workgroup> bvhWideShared${suffix}: array<vec2u, ${entries * lanes}>;
+var<private> bvhWideSpill${suffix}: array<vec2u, BVH_WIDE_SPILL_SIZE>;
 
-// Entry i of lane l at i * lanes + l, so a warp at the same depth touches consecutive words.
-var<workgroup> bvhWideSharedStack: array<vec2u, ${WIDE_SHARED_STACK_ENTRIES * WIDE_SHARED_STACK_LANES}>;
+fn bvhWidePush${suffix}(at: u32, entry: vec2u) {
+    if (at < BVH_WIDE_SHARED_ENTRIES) {
+        bvhWideShared${suffix}[at * BVH_WIDE_SHARED_LANES + bvhWideStackLane] = entry;
+    } else {
+        bvhWideSpill${suffix}[at - BVH_WIDE_SHARED_ENTRIES] = entry;
+    }
+}
+
+fn bvhWidePop${suffix}(at: u32) -> vec2u {
+    if (at < BVH_WIDE_SHARED_ENTRIES) {
+        return bvhWideShared${suffix}[at * BVH_WIDE_SHARED_LANES + bvhWideStackLane];
+    }
+    return bvhWideSpill${suffix}[at - BVH_WIDE_SHARED_ENTRIES];
+}
+`;
+    return `// The workgroup short stack: the first entries per lane in workgroup memory, the rest in a private spill array.
+const BVH_WIDE_SHARED_ENTRIES: u32 = ${entries}u;
+const BVH_WIDE_SHARED_LANES: u32 = ${lanes}u;
+const BVH_WIDE_SPILL_SIZE: u32 = BVH_WIDE_STACK_SIZE - BVH_WIDE_SHARED_ENTRIES;
 var<private> bvhWideStackLane: u32;
 
 // A kernel that traces with the workgroup stack calls this first, with its local_invocation_index
-// (below ${WIDE_SHARED_STACK_LANES}): the trace functions cannot see the builtin themselves.
+// (below ${lanes}): the trace functions cannot see the builtin themselves. Entry i of lane l sits at
+// i * lanes + l, so a warp at the same depth touches consecutive words.
 fn bvhSetStackLane(localIndex: u32) {
     bvhWideStackLane = localIndex;
 }
-
-fn bvhWidePush(spill: ptr<function, array<vec2u, BVH_WIDE_SPILL_SIZE>>, at: u32, entry: vec2u) {
-    if (at < BVH_WIDE_SHARED_ENTRIES) {
-        bvhWideSharedStack[at * BVH_WIDE_SHARED_LANES + bvhWideStackLane] = entry;
-    } else {
-        (*spill)[at - BVH_WIDE_SHARED_ENTRIES] = entry;
-    }
+${region('Closest')}${region('Any')}`;
 }
-
-fn bvhWidePop(spill: ptr<function, array<vec2u, BVH_WIDE_SPILL_SIZE>>, at: u32) -> vec2u {
-    if (at < BVH_WIDE_SHARED_ENTRIES) {
-        return bvhWideSharedStack[at * BVH_WIDE_SHARED_LANES + bvhWideStackLane];
-    }
-    return (*spill)[at - BVH_WIDE_SHARED_ENTRIES];
-}
-`;
 
 /** The top-level walk of a wide scene: the binary walk's top level, with the mesh walk at each instance. */
 function topLevelWalkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrder: 'far' | 'near'): string {
@@ -502,7 +522,7 @@ struct BvhMeshHit {
 }
 ${WIDE_BOX_WGSL}
 ${cwbvh ? CWBVH_HIT_BITS_WGSL : ''}
-${cwbvh && stack === 'workgroup' ? SHARED_STACK_WGSL : ''}
+${meshStackWgsl(format, stack)}
 ${triangleGroupWgsl('closest', rayMasks)}
 ${triangleGroupWgsl('any', rayMasks)}
 ${walks}

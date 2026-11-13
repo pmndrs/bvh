@@ -93,7 +93,7 @@ describe('a wide scene', () => {
         expect(() => assembleTraceScene(trees, instances, {}, { nodeFormat: 'cwbvh16' as never })).toThrow(RangeError);
         expect(() => traceModuleWgsl({ nodeFormat: 'bvh4', anyHitOrder: 'larger' })).toThrow(/larger/);
         expect(() => traceModuleWgsl({ nodeFormat: 'bvh4', wideStack: 'workgroup' })).toThrow(/cwbvh8/);
-        expect(traceModuleWgsl({ nodeFormat: 'cwbvh8', wideStack: 'workgroup' })).toContain('var<workgroup> bvhWideSharedStack');
+        expect(traceModuleWgsl({ nodeFormat: 'cwbvh8', wideStack: 'workgroup' })).toContain('var<workgroup> bvhWideSharedClosest');
         expect(traceModuleWgsl({ nodeFormat: 'cwbvh8' })).toContain('var<storage, read> bvhTraceNodes: array<vec4u>;');
         // The f32 walk is untouched by the wide formats.
         expect(traceModuleWgsl()).not.toContain('bvhMeshClosest');

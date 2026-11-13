@@ -73,6 +73,20 @@ Everything below is on `main` and pushed to origin. No release, tag or npm publi
 - **CI:** `profile=ci` for `trace-oracle` and `trace-inline` on the SwiftShader job (all variants and cases, about a tenth of the rays; pass rules unchanged; per-phase timings in the report).
 - **reflections** now runs on bvh `main` and reads `dist/`: run `pnpm build` after any source change it needs.
 
+**Wide-node experiment** (branch `claude/wide-bvh-684631`, not merged; `docs/internals/design/wide-nodes.md`)
+- **What:** `nodeFormat: 'bvh4' | 'cwbvh8'`, experimental, scenes only, off by default.
+  - tinybvh's collapse (Ylitie 2017 §4.2), `BVH4_GPU` and `BVH8_CWBVH` layouts and walks, ported to TypeScript and WGSL (`src/wide-nodes.ts`, `src/trace/wgsl-wide.ts`).
+  - Each `f32` tree is collapsed when a scene is assembled or a `SceneTrees` tree arrives.
+  - Planes are decoded exactly, so hits equal the binary walk's (ties apart).
+  - `wideStack: 'private' | 'workgroup'` for CWBVH.
+- **Works with:** `SceneTrees` (tinybvh trees only, no GPU first trees), merged groups, indexed leaves, CPU poses (`refitWide`), `/three`, and the CPU walk.
+- **Not built:** the GPU collapse and the GPU wide refit (`setPose` is skipped with a warning).
+- **Gates on the M5:** `trace-oracle` full (17 wide variants: 0 of 2M shared-edge slips; seams equal records); `trace-wide-compile` (largest kernel 42.3 KB); `scene-trees-mid-swap` (44 wide states, 0 disagreements).
+- **Memory, Sponza:** nodes 185.1 → 74.5 MiB (BVH4) → 40.5 MiB (CWBVH).
+- **Collapse time, Sponza, one core:** 1.35 s (BVH4), 1.83 s (CWBVH).
+- **Speed:** only provisional M5 runs so far (loaded machine; design note section 8). The gate is ≥1.3x closest-hit on incoherent rays on both the M5 and the RTX 3060, measured under the GPU lock on a quiet machine. Runbook section 2d has the commands.
+- **Timed pages** now hold the shared GPU lock (`/tmp/rt-gpu.lock`) and record the machine's load (`tests/gpu/README.md`, "Timed pages").
+
 **Consumers** (survey of ~/Developer, 2026-11-11)
 - **ddgi and its rc-\* copies:** on the frozen copy; they switch at P3.
 - **reflections:** now on bvh `main`, reading `dist/` (see the build note above).
@@ -88,7 +102,7 @@ Everything below is on `main` and pushed to origin. No release, tag or npm publi
   - `'larger'` 1.11-1.48x on instanced trees, 0.80-0.87x on merged surface rays.
 
   The defaults wait for Dennis's call. After it, one pass flips the code and updates the user docs that say "until the RTX 3060 is measured".
-- **Windows still to run:** the section 1 correctness pages (not reported in the push), section 3 `scene-trees-sponza` (memory and the cap on D3D12), compile times, the Intel UHD, and quantized and indexed together.
+- **Windows still to run:** the section 1 correctness pages (not reported in the push), section 3 `scene-trees-sponza` (memory and the cap on D3D12), compile times, the Intel UHD, quantized and indexed together, and the wide-node experiment (runbook 2d).
 - **Publishing the docs** (Dennis): Pages settings and DNS.
 - **Old worktree** `~/Developer/bvh-worktrees/reflections-integration`: reflections no longer uses it; Dennis removes it (a session couldn't delete it).
 - **Compare pages left:** `skinned`, `pathtracer`, `sdf`.

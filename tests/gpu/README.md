@@ -34,7 +34,7 @@ node tests/gpu/pages/trace-bench/surface-to-csv.ts out.json [more.json ...] [--a
 
 Manual pages (the `trace-bench-*` timings) run under the machine-wide GPU lock that the other GPU jobs on Dennis's machines take: a ticket queue in `/tmp/rt-gpu.queue` (`RT_GPU_QUEUE`) and the lock directory `/tmp/rt-gpu.lock` (`RT_GPU_LOCK`), first in first out (`gpu-lock.ts`, copied from the pathtracer's bench runner; `~/Developer/Denoiser/tools/gpu-lock.sh` is the shell version, and the two exclude each other). The runner waits for its turn, records the load average and the number of Chrome GPU processes before and after the page (`machine-load.ts`, in the page's `machineLoad` in `--json`), and releases the lock after the page. `BVH_GPU_LOCK=0` skips the lock (CI). Correctness pages don't take it.
 
-A run counts as quiet when the 1-minute load average stays below half the core count before and after the page. Timings from a loaded machine are provisional: `surface-to-csv.ts` writes `machine/quiet` 0 next to them, and they are never a gate result. Take timings as paired ratios (the pages alternate the order every other round) and repeat each page three times.
+A run counts as quiet when the 1-minute load average stays below half the core count before and after the page (Windows has no load average: there `BVH_MACHINE_QUIET=1` declares a quiet machine). Timings from a loaded machine are provisional: `surface-to-csv.ts` writes `machine/quiet` 0 next to them, and they are never a gate result. Take timings as paired ratios (the pages alternate the order every other round) and repeat each page three times.
 
 ## Not here
 
