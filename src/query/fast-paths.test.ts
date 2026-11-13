@@ -177,6 +177,11 @@ function rotation(random: Random): number[] {
     return [c * scale, s * scale, 0, 0, -s * scale, c * scale, 0, 0, 0, 0, scale, 0, random() - 0.5, random() - 0.5, random() - 0.5, 1];
 }
 
+/** Each mesh as a tinybvh tree and as the LBVH twin's tree. */
+function withLbvhTwins(meshes: readonly (readonly [string, MeshInput])[]): (readonly [string, MeshInput, CpuMeshBvh])[] {
+    return meshes.flatMap(([name, mesh]) => [[name, mesh, CpuMeshBvh.build(mesh, builder)] as const, [`${name}, LBVH`, mesh, new CpuMeshBvh(buildLbvhOnCpu(mesh), { source: mesh })] as const]);
+}
+
 /** Whether every inner child's index is above its parent's (the reverse-order refit's condition). */
 function childrenFollowParents(layout: GpuLayoutMeshBvh): boolean {
     const words = new Uint32Array(layout.nodes);
@@ -202,8 +207,8 @@ describe('intersectsBox, flat', () => {
         ];
         let hits = 0;
         let total = 0;
-        for (const [name, mesh] of meshes) {
-            const tree = CpuMeshBvh.build(mesh, builder);
+        // Each mesh as a tinybvh tree and as an LBVH twin's tree (children before parents, another shape).
+        for (const [name, mesh, tree] of withLbvhTwins(meshes)) {
             for (const [i, query] of queryBoxes(random, mesh, 900).entries()) {
                 const matrix = i % 5 === 4 ? rotation(random) : i % 5 === 3 ? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] : null;
                 const expected = intersectsBoxReference(tree, query, matrix);
@@ -283,8 +288,7 @@ describe('closestPointToPoint, flat', () => {
             ['degenerates', soupWithDegenerates(random, 300)],
             ['soup', randomTriangleSoup(random, 500, 5, 1)],
         ];
-        for (const [name, mesh] of meshes) {
-            const tree = CpuMeshBvh.build(mesh, builder);
+        for (const [name, mesh, tree] of withLbvhTwins(meshes)) {
             const p = mesh.positions;
             for (let i = 0; i < 600; i++) {
                 // Points on vertices and edge midpoints (shared by several triangles: ties), above them, and anywhere.
@@ -420,6 +424,14 @@ describe('refit, one pass', () => {
         used[4] = Infinity;
         const before = new Uint8Array(tree.serialize());
         expect(() => tree.refit({ positions: used, indices: grid.indices })).toThrow(/vertex 1 has a non-finite position/);
+        expect(new Uint8Array(tree.serialize())).toEqual(before);
+        // An index past the positions (the extra vertex's positions finite, so only the index scan fails).
+        const indices = grid.indices!.slice();
+        indices[5] = extra.length / 3 + 7;
+        const finite = extra.slice();
+        finite.fill(0, grid.positions.length);
+        const triangle = Math.floor(5 / 3);
+        expect(() => tree.refit({ positions: finite, indices })).toThrow(new RegExp(`triangle ${triangle} uses vertex ${indices[5]}, past the ${finite.length / 3} positions`));
         expect(new Uint8Array(tree.serialize())).toEqual(before);
     });
 });

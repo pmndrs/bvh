@@ -947,6 +947,8 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
                 if (this.packedBoxMeetsRange(packed, index, count)) return true;
                 continue;
             }
+            // A typed array drops a write past its end without a word: never on a checked tree, but say so if it happens.
+            if (top + 2 > stack.length) throw walkStackError(stack.length);
             if (words[index * GPU_LAYOUT_NODE_WORDS + GPU_LAYOUT_NODE_WORD.rightIndex] !== GPU_LAYOUT_EMPTY_CHILD) stack[top++] = index * 2 + 1;
             stack[top++] = index * 2;
         }
@@ -1099,6 +1101,11 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
      *
      * As in three-mesh-bvh, `maxThreshold` culls boxes, not triangles: a
      * triangle in a box nearer than it may still be returned past it.
+     *
+     * One departure: on a sliver (the squared sine of its angle at `a` at
+     * most 1e-7) the nearer of three's point and the nearest point of its
+     * three edges is kept, as the GPU's `bvhClosestPointToTriangle` does,
+     * because three's regions cancel there (see `closestOnTriangle`).
      */
     closestPointToPoint(point: BvhVec3Like, target: BvhClosestPointTarget = {}, minThreshold = 0, maxThreshold = Infinity): BvhClosestPoint | null {
         let px: number, py: number, pz: number;
@@ -1177,6 +1184,7 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
             } else if (next >= 0) {
                 // traverse's pushChildren with boundsTraverseOrder: both scored, the lower visited first (ties: left).
                 const nodeWord = next * GPU_LAYOUT_NODE_WORDS;
+                if (top + 2 > slots.length) throw walkStackError(slots.length);
                 let first = next * 2;
                 let firstScore = boxDistanceSq(floats, nodeWord, px, py, pz);
                 if (words[nodeWord + GPU_LAYOUT_NODE_WORD.rightIndex] !== GPU_LAYOUT_EMPTY_CHILD) {
@@ -1714,6 +1722,11 @@ function unionOfChild(floats: Float32Array, words: Uint32Array, child: number, t
     target[slot + 4] = d0;
     target[slot + 5] = d1;
     target[slot + 6] = d2;
+}
+
+/** The flat walks' guard: a stack (sized from the checked tree's depth) about to overflow means the layout isn't the tree it was. */
+function walkStackError(length: number): RangeError {
+    return new RangeError(`CpuMeshBvh: the walk stack passed ${length} entries; the layout is not a tree (was it changed after the check?)`);
 }
 
 /** Whether a matrix is absent or exactly the identity (an axis-aligned query box). */

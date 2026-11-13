@@ -199,8 +199,9 @@ function degenerateCase(): OracleCase {
     }
     // The second instance's transform is exact in f32 (a quarter turn, a mirror, a scale of 2, a dyadic translation),
     // so its degenerate triangles stay exactly degenerate in world space on both sides. Under a general transform
-    // they become slivers degenerate only up to rounding, where the CPU reference (three's algorithm, in doubles)
-    // can pick a wrong region; the GPU treats slivers as their edges (bvhClosestPointToTriangle).
+    // they become slivers degenerate only up to rounding: the GPU treats slivers as their edges
+    // (bvhClosestPointToTriangle), and the CPU reference keeps the nearer of three's point and the edges', so the
+    // two agree to within the sliver's height rather than exactly.
     return pageCase('degenerate-triangles', 'A soup in which every third triangle is a segment or a point, plain and under an exact mirrored quarter turn.', [{ positions }], [
         { meshIndex: 0, instanceIndex: 0, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
         { meshIndex: 0, instanceIndex: 1, objectToWorld: [0, 2, 0, 0, -1, 0, 0, 0, 0, 0, -1, 0, 4, 1, -2.5, 1] },
