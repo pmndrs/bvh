@@ -5,13 +5,13 @@ Dennis's rule: ports stay faithful to their source. Any change is a measured lev
 How to read it:
 
 - Each row is one difference. Columns: what differs, what the source does, what we do, why (with the measurement, if one is written down), how to get the source's behaviour back, and where it lives.
-- "Reason not recorded" means no doc or comment says why. Those rows are listed again under [Open: needs Dennis](#open-needs-dennis).
+- "Reason not recorded" means no doc or comment says why. Those rows are listed again under [Open](#open).
 - "Not switchable" means the source's behaviour is not available. Getting it back means changing code.
 - Paths without a prefix are in this repo. **ddgi** means `~/Developer/webgpu-ddgi`, the repo this code was split out of. Its docs are cited by file and entry, not by line, because they keep moving: `NOTES` is `docs/NOTES.md`, `DECISIONS` is `docs/DECISIONS.md`, `PROGRESS` is `PROGRESS.md`.
 - Numbers are as written in those docs. Hardware is the RTX 3060 Laptop unless a row says otherwise. Scenes are Sponza (5.74 M triangles, 132 meshes) unless said.
 - Checked: this file was written from the docs and the code comments in this repo and in ddgi. No source repo (tinybvh, HIPRT) was available locally, so "source does" cells repeat what our comments and notes say about the source. Nothing was checked against the source's code.
 
-Contents: [tinybvh](#1-tinybvh) · [HIPRT's LBVH](#2-hiprts-lbvh) · [Woop, Benthin and Wald](#3-woop-benthin-and-wald-watertight-raytriangle-test) · [H-PLOC paper and NexusBVH](#4-h-ploc-the-paper-and-nexusbvh) · [Sort, scan, refit](#5-radix-sort-scans-refit-and-instance-boxes) · [Not ported / dropped](#deliberately-not-ported--dropped) · [Not divergences](#intentional-design-choices-that-arent-divergences) · [Open](#open-needs-dennis)
+Contents: [tinybvh](#1-tinybvh) · [HIPRT's LBVH](#2-hiprts-lbvh) · [Woop, Benthin and Wald](#3-woop-benthin-and-wald-watertight-raytriangle-test) · [H-PLOC paper and NexusBVH](#4-h-ploc-the-paper-and-nexusbvh) · [Sort, scan, refit](#5-radix-sort-scans-refit-and-instance-boxes) · [Not ported / dropped](#deliberately-not-ported--dropped) · [Not divergences](#intentional-design-choices-that-arent-divergences) · [Open](#open)
 
 ---
 
@@ -126,23 +126,32 @@ Benthin et al., HPG 2024, "H-PLOC: Hierarchical Parallel Locally-Ordered Cluster
 
 These look like differences but have no source to differ from, or they match it.
 
-- **The tracer's walk is ours, not a port.** One loop with one 64-entry stack for both levels. Closest-hit visits the nearer child first; any-hit visits the **farther** child first by default (1.1-2.8x faster on the bench scenes with the same answers; T1.3), or the larger child with `anyHitOrder: 'larger'` (for occlusion rays from outside or across open space; trace.md, "Any-hit child order"). Back-face hits count (DDGI uses them). Rays in object space are not renormalized, so `t` stays in world units. Front face is the authored side, also under mirrored transforms. See `docs/internals/design/trace.md` and `src/trace/wgsl.ts:152-160`. The plan said to cross-check the walk against tinybvh's `traverse_bvh2.cl`; whether that was done is not recorded (see Open).
+- **The tracer's walk is ours, not a port.** One loop with one 64-entry stack for both levels. Closest-hit visits the nearer child first; any-hit visits the **farther** child first by default (1.1-2.8x faster on the bench scenes with the same answers; T1.3), or the larger child with `anyHitOrder: 'larger'` (for occlusion rays from outside or across open space; trace.md, "Any-hit child order"). On the RTX 3060 (2026-11-13), `'larger'` was 1.11-1.48x far-first on instanced trees and 0.80-0.87x on merged surface rays, the same pattern as the M5 (`WINDOWS-RUNBOOK.md`, section 7). Back-face hits count (DDGI uses them). Rays in object space are not renormalized, so `t` stays in world units. Front face is the authored side, also under mirrored transforms. See `docs/internals/design/trace.md` and `src/trace/wgsl.ts:152-160`. The plan said to cross-check the walk against tinybvh's `traverse_bvh2.cl`; whether that was done is not recorded (see Open).
 - **The node layout** (64 bytes, two child boxes, Aila-Laine) is tinybvh's `BVH_GPU` layout, "byte for byte ours" (`docs/internals/design/bvh-framework.md`). The triangle record is ours (W4).
 - **Kept as published:** H-PLOC's merge threshold 16 and search radius 8 (tinybvh and NexusBVH use 8; 16 is "half the 32-wide wave of the paper", `src/hploc-cpu.ts:62-66`); Apetrei's index tie-break in the LBVH (HIPRT's rule); the Arvo box formula (S4).
 - **The WASM is tinybvh's headers, unchanged.** Only the flags and the wrapper differ (W1-W6). The licences travel inside the `.wasm` file's TypeScript wrapper (`THIRD_PARTY.md`).
 
 ---
 
-## Open: needs Dennis
+## Open
 
-Rows where a reason, a measurement or the source's behaviour is not written down anywhere I looked.
+Rows where a reason, a measurement or the source's behaviour is not written down anywhere I looked. Triaged 2026-11-13:
+- **A GPU run** answers item 1.
+- **A read of the pinned sources** (tinybvh, HIPRT, the paper) answers items 2, 3, 4, 7 and 9.
+- **A bench** answers item 5, against a look-back sort.
+- **A read of our own code** answers item 6, or one constant changes so the CPU and GPU pad the same.
+- **Item 8** needs a pinned-emsdk machine.
 
-1. **T1 needs GPU re-runs on NVIDIA and Intel.** The fix is ported (`7d62375`), but NVIDIA and Intel were not re-run with it (ddgi PROGRESS says so). On Metal it holds from this repo: on an Apple M5 (2026-11-11, branch `bx-walk-api`) the `trace-oracle` page let 0 of 2M shared-edge rays slip in each of its five variants.
-2. **T3: what the paper does for an edge function of exactly 0.** Our comment says zero counts as inside for both triangles. No doc says whether the paper does the same, or whether we dropped a fallback (for example a double-precision retry). Not recorded.
-3. **L5 and L6: what HIPRT's LBVH does** about leaf collapse and about subgroup or warp pairing. Our comments list the collapse as a difference but do not say what HIPRT does. Also the measured effect of each on the LBVH alone is not recorded. Whether `maxLeafPrimitives: 1` really gives no collapse in the LBVH has not been tested in any doc.
-4. **P6: what tinybvh's `BuildHPLOC` does for node numbering.** Our comment names a per-mesh counter as the alternative. Also two notes disagree on the gain: the WGSL comment implies a large cost (hundreds of thousands of queued atomics), NOTES measured about 5%.
-5. **S1: the speed cost of having no look-back.** The choice is justified by forward progress, but no comparison against a look-back sort is recorded.
-6. **S4: why the CPU top level pads by 2^-21 of the result while the GPU pads by 2^-20 of the summed term magnitudes.** The comment says "for the same reason". The different sizes are not explained.
-7. **Walk against tinybvh's `traverse_bvh2.cl`:** the framework planned a cross-check. No doc records that it was done or what it found.
-8. **W1: the toolchain choice has no measurement of a scalar build in this repo.** The 3x and 5.3 s to 2.2-2.7 s figures are from ddgi docs. A Linux or macOS `.wasm` rebuild has not been compared with the committed one (`docs/internals/design/bvh-builders.md`).
-9. **Checked against nothing:** no source repo was available locally. If you want any "source does" cell verified against the source's code, it needs a read of tinybvh at the pinned commit and of HIPRT at its pinned commit.
+No item needs a decision from Dennis, only the work.
+
+None of them asks Dennis to choose anything. Once a read or run gives an answer, the row becomes a normal divergence row or is dropped.
+
+1. **T1 needs GPU re-runs on NVIDIA and Intel** *(GPU run)*. The fix is ported (`7d62375`). On 2026-11-13 the RTX 3060 ran the surface-ray benches at `63af716`, which include the fix, and every paired answer agreed (`WINDOWS-RUNBOOK.md`, section 7). The `trace-oracle` page's shared-edge count on NVIDIA was not reported, and Intel has not run. On Metal it holds from this repo: on an Apple M5 (2026-11-11, branch `bx-walk-api`) the `trace-oracle` page let 0 of 2M shared-edge rays slip in each of its five variants.
+2. **T3: what the paper does for an edge function of exactly 0.** *(source read)* Our comment says zero counts as inside for both triangles. No doc says whether the paper does the same, or whether we dropped a fallback (for example a double-precision retry). Not recorded.
+3. **L5 and L6: what HIPRT's LBVH does** *(source read)* about leaf collapse and about subgroup or warp pairing. Our comments list the collapse as a difference but do not say what HIPRT does. Also the measured effect of each on the LBVH alone is not recorded. Whether `maxLeafPrimitives: 1` really gives no collapse in the LBVH has not been tested in any doc.
+4. **P6: what tinybvh's `BuildHPLOC` does for node numbering.** *(source read)* Our comment names a per-mesh counter as the alternative. Also two notes disagree on the gain: the WGSL comment implies a large cost (hundreds of thousands of queued atomics), NOTES measured about 5%.
+5. **S1: the speed cost of having no look-back.** *(bench)* The choice is justified by forward progress, but no comparison against a look-back sort is recorded.
+6. **S4: why the CPU top level pads by 2^-21 of the result while the GPU pads by 2^-20 of the summed term magnitudes.** *(our code)* The comment says "for the same reason". The different sizes are not explained.
+7. **Walk against tinybvh's `traverse_bvh2.cl`:** *(source read)* the framework planned a cross-check. No doc records that it was done or what it found.
+8. **W1: the toolchain choice has no measurement of a scalar build in this repo.** *(pinned emsdk)* The 3x and 5.3 s to 2.2-2.7 s figures are from ddgi docs. A Linux or macOS `.wasm` rebuild has not been compared with the committed one (`docs/internals/design/bvh-builders.md`).
+9. **Checked against nothing:** *(source read)* no source repo was available locally. If you want any "source does" cell verified against the source's code, it needs a read of tinybvh at the pinned commit and of HIPRT at its pinned commit.

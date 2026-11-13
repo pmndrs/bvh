@@ -26,18 +26,18 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
   - Check every consumer request against this rule. Per-triangle materials passed because the material is only a number.
   - `examples/three/pathtracer` is a demo of the walk. It and its pending compare page may move to the new repo.
 
-## Current state (end of 2026-11-12). Read this first.
+## Current state (2026-11-13). Read this first.
 
-Everything below is on `main` and local only (nothing has been pushed).
+Everything below is on `main` and pushed to origin. No release, tag or npm publish.
 
 **Dennis's decisions**
 - **Source of truth:** this repo, for BVH and walk code. webgpu-ddgi's copy is frozen until P3 (split point `d288adf`).
-- **Commits:** local only, never pushed. Opus writes the code and does the reviews; Sonnet or Haiku take the mechanical tasks.
+- **Commits:** local; pushing `main` is fine; no releases. Opus writes the code and does the reviews; Sonnet or Haiku take the mechanical tasks.
 - **Walk API:** WGSL names `bvh*`; filter hook `bvhTrianglePasses(BvhCandidate)` (the candidate has `query` and `rayMask`; ddgi's materials stay in ddgi); 8-bit instance masks, compiled out with `rayMasks: false`.
 - **Package scope:** every project that needs a BVH, not just ddgi (see Consumers).
 - **Licence:** MIT, Dennis Smolek (`LICENSE`).
 - **Build-peak cap:** `SceneTrees` `gpuMaxBatchBytes` defaults to 256 MiB; `Infinity` turns it off.
-- **Off by default until the RTX 3060 is measured:** `mergeStaticInstances`, `triangleLeaves: 'indexed'`, `nodeFormat: 'quantized'`. The 40-byte hit record is on by default; `hitNormal: false` gives 24 bytes.
+- **Off by default, now measured on the RTX 3060 (2026-11-13), defaults await Dennis:** `mergeStaticInstances`, `triangleLeaves: 'indexed'`, `nodeFormat: 'quantized'`. The 40-byte hit record is on by default; `hitNormal: false` gives 24 bytes. `anyHitOrder` defaults to `'far'`. The numbers are in `docs/internals/WINDOWS-RUNBOOK.md`, section 7.
 - **Wasm reference:** the Linux build; a Windows build differs in 2 `__FILE__` separator bytes (`docs/internals/design/bvh-builders.md`).
 
 **On `main`** (lint, typecheck, build and the licence check pass; every correctness page passes on the Apple M5)
@@ -80,7 +80,15 @@ Everything below is on `main` and local only (nothing has been pushed).
 - **three-bvh-csg, homefig, drei, three-gpu-pathtracer:** the CPU features they use exist (shapecast, `bvhcast`, `ExtendedTriangle`, closest point); none has switched.
 
 **Open**
-- **RTX 3060 and Intel runs** (`docs/internals/WINDOWS-RUNBOOK.md`): none of the recent work has run there. They decide the defaults for `mergeStaticInstances`, `triangleLeaves`, `nodeFormat`, the 40-byte hit record (M5 only so far: ratios 0.96-1.15) and `anyHitOrder`, and the cap's effect (`docs/internals/design/memory.md`).
+- **RTX 3060 surface-ray benches done** (2026-11-13, `bd8ba54`, runbook section 7):
+  - merged 1.17-1.67x;
+  - quantized 0.98-1.22x, faster for closest hits on NVIDIA (the M5 was 0.93-0.97);
+  - indexed `vec4` 0.92-0.97x, packed 0.82-0.95x;
+  - 40-byte record 0.88-0.94x (the M5 was 0.96-1.15);
+  - `'larger'` 1.11-1.48x on instanced trees, 0.80-0.87x on merged surface rays.
+
+  The defaults wait for Dennis's call. After it, one pass flips the code and updates the user docs that say "until the RTX 3060 is measured".
+- **Windows still to run:** the section 1 correctness pages (not reported in the push), section 3 `scene-trees-sponza` (memory and the cap on D3D12), compile times, the Intel UHD, and quantized and indexed together.
 - **Publishing the docs** (Dennis): Pages settings and DNS.
 - **Old worktree** `~/Developer/bvh-worktrees/reflections-integration`: reflections no longer uses it; Dennis removes it (a session couldn't delete it).
 - **Compare pages left:** `skinned`, `pathtracer`, `sdf`.
