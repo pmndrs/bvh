@@ -45,7 +45,33 @@ function intersectsBoxReference(tree: CpuMeshBvh, box: BvhBox3Like, matrix?: Arr
     return tree.shapecast({ intersectsBounds: (bounds) => obb.intersectsBox(bounds), intersectsTriangle: (triangle) => obb.intersectsTriangle(triangle) });
 }
 
-/** The closestPointToPoint this replaced: three-mesh-bvh's shapecast, step for step. */
+/**
+ * The sliver rule, written plainly: on a triangle whose squared sine at `a`
+ * is at most 1e-7, the nearest point of its edges (a-b, a-c, b-c) replaces
+ * `point` when strictly nearer to `p` (or when `point` is NaN).
+ */
+function nearerOnSliverEdges(a: BvhVector3, b: BvhVector3, c: BvhVector3, p: BvhVector3, point: BvhVector3): void {
+    const ab = [b.x - a.x, b.y - a.y, b.z - a.z];
+    const ac = [c.x - a.x, c.y - a.y, c.z - a.z];
+    const n = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]];
+    const dot = (u: number[], v: number[]) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+    if (!(dot(n, n) <= 1e-7 * dot(ab, ab) * dot(ac, ac))) return;
+    const distanceSq = (q: number[]) => (q[0] - p.x) ** 2 + (q[1] - p.y) ** 2 + (q[2] - p.z) ** 2;
+    let best = distanceSq([point.x, point.y, point.z]);
+    if (Number.isNaN(best)) best = Infinity;
+    for (const [s, e] of [[a, b], [a, c], [b, c]]) {
+        const edge = [e.x - s.x, e.y - s.y, e.z - s.z];
+        const lengthSq = dot(edge, edge);
+        const t = lengthSq > 0 ? Math.min(1, Math.max(0, ((p.x - s.x) * edge[0] + (p.y - s.y) * edge[1] + (p.z - s.z) * edge[2]) / lengthSq)) : 0;
+        const q = [s.x + edge[0] * t, s.y + edge[1] * t, s.z + edge[2] * t];
+        if (distanceSq(q) < best) {
+            best = distanceSq(q);
+            point.set(q[0], q[1], q[2]);
+        }
+    }
+}
+
+/** The closestPointToPoint this replaced: three-mesh-bvh's shapecast, step for step, with the sliver rule added. */
 function closestReference(tree: CpuMeshBvh, p: readonly number[], minThreshold = 0, maxThreshold = Infinity): BvhClosestPoint | null {
     const [px, py, pz] = p;
     const query = new BvhVector3(px, py, pz);
@@ -63,6 +89,7 @@ function closestReference(tree: CpuMeshBvh, p: readonly number[], minThreshold =
         intersectsBounds: (_box, _isLeaf, score) => score! < closestSq && score! < maxThreshold * maxThreshold,
         intersectsTriangle: (triangle, index) => {
             triangleClosestPointToPoint(triangle.a, triangle.b, triangle.c, query, temp);
+            nearerOnSliverEdges(triangle.a, triangle.b, triangle.c, query, temp);
             const dx = px - temp.x;
             const dy = py - temp.y;
             const dz = pz - temp.z;
@@ -302,6 +329,33 @@ describe('closestPointToPoint, flat', () => {
             const expected = closestReference(tree, point)!;
             const result = tree.closestPointToPoint(point)!;
             expect([result.faceIndex, result.distance, result.point.x, result.point.y, result.point.z], String(point)).toEqual([expected.faceIndex, expected.distance, expected.point.x, expected.point.y, expected.point.z]);
+        }
+    });
+
+    it("finds a point lying on a sliver on it, where three's regions put it 0.014 away; segments and points too", () => {
+        // An f32 sliver (sine at a about 1e-5) and a point on it: three's Triangle.closestPointToPoint picks a
+        // wrong region and answers 0.0141; the edges give 1.5e-10.
+        const sliver = [-0.0048814634792506695, -0.12525907158851624, 0.1028691977262497, -0.4439702332019806, 0.34214118123054504, -0.9760182499885559, -0.20825335383415222, 0.09122579544782639, -0.3968370258808136];
+        const point = [-0.2939024307407032, 0.182397336599706, -0.6072858374554473];
+        const corner = (k: number) => new BvhVector3(sliver[k * 3], sliver[k * 3 + 1], sliver[k * 3 + 2]);
+        const three = triangleClosestPointToPoint(corner(0), corner(1), corner(2), new BvhVector3(point[0], point[1], point[2]), new BvhVector3());
+        expect(Math.hypot(three.x - point[0], three.y - point[1], three.z - point[2])).toBeGreaterThan(0.01);
+        // Far triangles around it, so the sliver sits in a tree with boxes to walk.
+        const positions = new Float32Array(9 * 9);
+        positions.set(sliver);
+        for (let k = 1; k < 9; k++) positions.set([k, 5, 0, k + 1, 5, 0, k, 6, 0], k * 9);
+        const tree = CpuMeshBvh.build({ positions }, builder, { maxLeafPrimitives: 1 });
+        const result = tree.closestPointToPoint(point)!;
+        expect(result.faceIndex).toBe(0);
+        expect(result.distance).toBeLessThan(1e-6);
+        expect(result).toEqual(closestReference(tree, point));
+        // A segment (c on the line a-b) and a point: the nearest point of the segment, and the point itself.
+        const segment = new Float32Array([0, 0, 0, 2, 0, 0, 1, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5]);
+        const segmentTree = CpuMeshBvh.build({ positions: segment }, builder, { maxLeafPrimitives: 1 });
+        for (const [p, distance, face] of [[[0.5, 0, 0], 0, 0], [[1.5, 1, 0], 1, 0], [[3, 0, 0], 1, 0], [[5, 5, 6], 1, 1]] as const) {
+            const hit = segmentTree.closestPointToPoint([...p])!;
+            expect([hit.faceIndex, hit.distance], String(p)).toEqual([face, distance]);
+            expect(hit).toEqual(closestReference(segmentTree, [...p]));
         }
     });
 

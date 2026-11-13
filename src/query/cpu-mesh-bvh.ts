@@ -1733,13 +1733,71 @@ function boxDistanceSq(floats: Float32Array, minWord: number, px: number, py: nu
 }
 
 /**
- * The point of the record at `base` closest to `io[0..2]`, into `io[3..5]`:
- * three's `Triangle.closestPointToPoint` (`triangleClosestPointToPoint`) on
- * plain numbers, the same operations in the same order, so the same bits.
+ * Below this squared sine of a triangle's angle at `a` (about 3e-4, 1:3000) it is a
+ * sliver: the GPU's `BVH_SLIVER_SINE_SQ` (src/trace/wgsl.ts, `bvhClosestPointToTriangle`).
+ */
+const SLIVER_SINE_SQ = 1e-7;
+
+/**
+ * The point of the record at `base` closest to `io[0..2]`, into `io[3..5]`.
  * Numbers go through `io`, not arguments: V8 doesn't inline a function this
  * size, and every number argument of a call that isn't inlined is boxed.
+ *
+ * Three's `Triangle.closestPointToPoint` ({@link closestByRegions}), bit for
+ * bit, except on slivers (squared sine below {@link SLIVER_SINE_SQ}: a
+ * segment, a point, or nearly one), where its regions' differences of
+ * products cancel and can pick a wrong region even in doubles: measured on
+ * f32 slivers, up to 1.7 units too far on a unit triangle (the GPU query
+ * oracle found a point lying on one reported 2.2e-3 away). There the nearer
+ * of three's point and the nearest point of the three edges is kept. Three's
+ * point is on the triangle to rounding (never measured nearer than the true
+ * distance), so the nearer one is never worse; on the same test the error
+ * falls to 2e-6 at most. Ties keep three's point. The GPU takes the edges
+ * alone on slivers; the two agree to within the sliver's height.
  */
 function closestOnTriangle(records: Float32Array, base: number, out: Float64Array): void {
+    closestByRegions(records, base, out);
+    const ax = records[base + VERTEX0], ay = records[base + VERTEX0 + 1], az = records[base + VERTEX0 + 2];
+    const abx = records[base + VERTEX1] - ax, aby = records[base + VERTEX1 + 1] - ay, abz = records[base + VERTEX1 + 2] - az;
+    const acx = records[base + VERTEX2] - ax, acy = records[base + VERTEX2 + 1] - ay, acz = records[base + VERTEX2 + 2] - az;
+    const nx = aby * acz - abz * acy, ny = abz * acx - abx * acz, nz = abx * acy - aby * acx;
+    if (nx * nx + ny * ny + nz * nz <= SLIVER_SINE_SQ * (abx * abx + aby * aby + abz * abz) * (acx * acx + acy * acy + acz * acz)) closestOnEdges(records, base, out);
+}
+
+/**
+ * Replaces `io[3..5]` with the nearest point of the triangle's three edges
+ * (`a-b`, `a-c`, `b-c`, the first strictly nearest) when that is strictly
+ * nearer to `io[0..2]`, or when `io[3..5]` isn't a number.
+ */
+function closestOnEdges(records: Float32Array, base: number, out: Float64Array): void {
+    const px = out[0], py = out[1], pz = out[2];
+    let dx = out[3] - px, dy = out[4] - py, dz = out[5] - pz;
+    let best = dx * dx + dy * dy + dz * dz;
+    if (best !== best) best = Infinity;
+    for (let side = 0; side < 3; side++) {
+        const s = base + (side === 2 ? VERTEX1 : VERTEX0);
+        const e = base + (side === 0 ? VERTEX1 : VERTEX2);
+        const sx = records[s], sy = records[s + 1], sz = records[s + 2];
+        const ex = records[e] - sx, ey = records[e + 1] - sy, ez = records[e + 2] - sz;
+        const lengthSq = ex * ex + ey * ey + ez * ez;
+        let t = lengthSq > 0 ? ((px - sx) * ex + (py - sy) * ey + (pz - sz) * ez) / lengthSq : 0;
+        t = t > 0 ? (t < 1 ? t : 1) : 0;
+        const qx = sx + ex * t, qy = sy + ey * t, qz = sz + ez * t;
+        dx = qx - px;
+        dy = qy - py;
+        dz = qz - pz;
+        const distanceSq = dx * dx + dy * dy + dz * dz;
+        if (distanceSq < best) {
+            best = distanceSq;
+            out[3] = qx;
+            out[4] = qy;
+            out[5] = qz;
+        }
+    }
+}
+
+/** Three's `Triangle.closestPointToPoint` (`triangleClosestPointToPoint`) on the record at `base`, plain numbers, the same operations in the same order: the same bits. */
+function closestByRegions(records: Float32Array, base: number, out: Float64Array): void {
     const ax = records[base + VERTEX0], ay = records[base + VERTEX0 + 1], az = records[base + VERTEX0 + 2];
     const bx = records[base + VERTEX1], by = records[base + VERTEX1 + 1], bz = records[base + VERTEX1 + 2];
     const cx = records[base + VERTEX2], cy = records[base + VERTEX2 + 1], cz = records[base + VERTEX2 + 2];
