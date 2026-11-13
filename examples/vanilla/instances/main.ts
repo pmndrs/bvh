@@ -240,13 +240,15 @@ function showStats(): void {
 }
 
 /**
- * Smoke: first trees from the GPU (with subgroups); then 500 instances
+ * Smoke: the GPU built first trees (with subgroups); then 500 instances
  * removed, a mesh added with 300, every tinybvh tree swapped in; then, frozen, 64 rays at
  * instances' current centres must hit a live instance close to where it is.
  */
 async function smokeRun(): Promise<void> {
+    // Whichever tree arrives first is placed: on a busy machine tinybvh's can beat the GPU's for small meshes
+    // (the overlay then says so). What must hold is that the GPU built first trees at all.
     const gpuFirst = log.events.filter((event) => event.builtBy === 'gpu').length;
-    if (trees.gpuFirstTrees.enabled && gpuFirst === 0) throw new Error('first trees were expected from the GPU');
+    if (trees.gpuFirstTrees.enabled && trees.counts.gpuTreesBuilt === 0) throw new Error('GPU first trees are on, but the GPU built none');
     removeInstances(500);
     const mesh = addRandomMesh();
     await nextFrames(5);
