@@ -38,9 +38,14 @@ const cpuTree = await generateCpuMeshBvh(pool, meshes[0]);
 - **Size:** one less than the logical cores, at least 1 and at most 4 (`defaultWorkerPoolSize()`). Workers start when
   builds need them, so an idle pool costs nothing.
 - **Order:** first in, first out. Ask for your biggest meshes first to finish sooner (`SceneTrees` does).
-- **Without `Worker`** (Node, a host that blocks workers), or when the first worker fails before answering, the pool
-  builds on the calling thread, one mesh per turn, so callers see the same asynchronous behaviour. `worker: 'never'`
-  always builds inline; `'always'` throws instead of falling back.
+- **A worker gets a build only once it has loaded.** Each worker posts a ready message when its module has run, and
+  the pool sends nothing to it before that. A worker that can't load therefore holds no input, moved or copied.
+- **Without `Worker`** (Node, a host that blocks workers), or when a worker can't start or load, the pool builds on
+  the calling thread, one mesh per turn, so callers see the same asynchronous behaviour. Every build still completes,
+  including those with `transferInput` (`SceneTrees` moves its merged groups' geometry). `pool.inlineReason` says why
+  builds run inline. `worker: 'never'` always builds inline; `'always'` throws where there is no `Worker`, and rejects
+  the builds when a worker can't start or load.
+- **A worker that dies while building** fails that build only; the next build starts a fresh worker.
 
 {/* snippet: cancel */}
 ```ts
@@ -72,8 +77,28 @@ pool.dispose(); // stops the workers; unfinished builds reject
 
 - `generateCpuMeshBvh(pool, input, options)` builds a [CPU query tree](/cpu-queries/raycast) on the pool.
   In three, `GenerateMeshBvhWorker` does the same for a `BufferGeometry` ([CPU raycast in three](/three/cpu-raycast#off-the-main-thread)).
-- `createMeshBvhBuilder({ worker, transferInput })` is the one-worker builder the pool grew from.
-- `createTopLevelBuilder()` builds and checks top-level shapes in a worker. `SceneTrees`' GPU top level uses it.
+- `createMeshBvhBuilder({ worker, transferInput })` is a pool of one worker, with the pool's rules.
+- `createTopLevelBuilder()` builds and checks top-level shapes in a worker. `SceneTrees`' GPU top level uses it. It
+  waits for its worker to load in the same way, and works on the calling thread (reported once through `warn`) if the
+  worker can't load.
+
+## Bundlers and dev servers
+
+Production builds of Vite, webpack 5 and esbuild find the worker files from `new Worker(new URL(..., import.meta.url))`
+and emit them. Vite's dev server needs two settings:
+
+- **`optimizeDeps: { exclude: ['@pmndrs/bvh'] }`.** In dev, Vite pre-bundles installed dependencies into
+  `node_modules/.vite/deps`, and a pre-bundled copy looks for its workers next to itself, where they don't exist
+  (`node_modules/.vite/trace/mesh-bvh-worker.js`, a 404). Excluding the package serves it as it is. It has no
+  dependencies to pre-bundle.
+- **`server.fs.allow`, for a checkout linked from outside the project** (`link:` or `pnpm link`). Vite doesn't
+  pre-bundle a linked package, but it serves files outside the project only when a module imports them. The workers
+  are loaded by URL, not imported, so Vite refuses them (`403 Restricted: outside of Vite serving allow list`). Add the
+  checkout's folder to `server.fs.allow`, next to `searchForWorkspaceRoot(process.cwd())`.
+
+Without them, `worker: 'auto'` builds on the main thread: everything still works, but slower, and
+`pool.inlineReason` (and `SceneTrees.usesWorkers`, false) shows it. Browsers give no reason for a worker that failed to
+load, so the message lists these causes.
 
 ## GPU builds and workers
 
