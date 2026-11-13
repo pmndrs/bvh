@@ -45,6 +45,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         timeoutMs: 120_000,
     },
     {
+        name: 'vanilla-refit',
+        path: 'vanilla/refit',
+        title: 'Refit',
+        description: 'A deforming mesh posed by a compute pass every frame and refit on the GPU with GpuMeshRefit in the scene\'s own buffers (meshRefitPlacement): refit ms, SAH drift against the built tree and against a fresh build of the same pose, "rebuild now" and an automatic rebuild past a drift limit.',
+        timeoutMs: 120_000,
+    },
+    {
         name: 'three-raycast',
         path: 'three/raycast',
         title: 'Raycast',
