@@ -223,6 +223,8 @@ function assemble(layout: GpuLayoutMeshBvh): TraceSceneData {
 
 /** When the drift first went past the limit (auto rebuild), or null. */
 let driftSince: number | null = null;
+/** The current tree's refit cost over its built cost, from its latest stats; NaN until the tree's first sample. */
+let drift = NaN;
 const stats = { rebuilds: 0, automatic: 0, swaps: 0, destroyed: 0 };
 let rebuilds: Promise<void> = Promise.resolve();
 let rebuildsAsked = 0;
@@ -293,7 +295,6 @@ const frameTimer = GpuTimer.create(device, 2);
 let measuring = false;
 let time = 0;
 let frame = 0;
-let drift = NaN;
 let compareCost = NaN;
 let comparing = false;
 let lastCompare = 0;
