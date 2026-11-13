@@ -20,6 +20,11 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
 - **Models:** Opus for code and review, Sonnet or Haiku for small tasks, docs and tests.
 - **Git:** commit locally; pushing `main` is fine; no npm publish, tags or releases.
 - **Levers:** a flexible setting with a measured win may become the default (the 256 MiB cap).
+- **The package ends at the hit** (2026-11-13). The library covers building, refitting, scene trees, the walk and spatial queries. A hit carries the triangle, instance, barycentrics, face normal and an opaque material number.
+  - Anything that decides what a hit *looks like* goes in Dennis's separate path tracer repo, or in the shared tracing layer above us: sampling, random numbers, BSDFs, lights, accumulation, textures, and shading-normal or UV interpolation.
+  - Physics-style queries (shapecast, closest point, boxes) stay here.
+  - Check every consumer request against this rule. Per-triangle materials passed because the material is only a number.
+  - `examples/three/pathtracer` is a demo of the walk. It and its pending compare page may move to the new repo.
 
 ## Current state (end of 2026-11-12). Read this first.
 

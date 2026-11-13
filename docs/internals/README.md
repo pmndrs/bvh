@@ -17,3 +17,16 @@ These are the internal design notes, kept beside the docs site but not part of i
 | `three.md` | `@pmndrs/bvh/three` in full detail (the user pages are `docs/three/*.mdx`) |
 | `WINDOWS-RUNBOOK.md` | The next pass on the RTX 3060 and the Intel UHD |
 | `MIGRATING-FROM-DDGI.md`, `MIGRATING-FROM-REFLECTIONS-BRANCH.md` | Switching the known consumers to this package |
+
+## Scope: the package ends at the hit
+
+`@pmndrs/bvh` answers *what does this ray hit* and *what is near this shape*. It covers:
+- building and refitting;
+- scene trees and the walk, with masks, the triangle filter hook and the any-hit order;
+- spatial queries.
+
+A hit is the triangle, instance, barycentrics, face normal and a material number that the library carries but never reads.
+
+What a hit *looks like* belongs to renderers built on top: Dennis's path tracer, and a shared tracing layer for it, reflections, shadows and ddgi's GI. That covers sampling, random numbers, BSDFs, lights, accumulation, texture lookups, and interpolating shading normals and UVs.
+
+Physics uses shapecast, closest point and box queries, which stay here. When a consumer asks for something, check it against this line first. `examples/three/pathtracer` is a demo of the walk, not a feature.
