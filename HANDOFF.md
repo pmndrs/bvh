@@ -94,7 +94,8 @@ Everything below is on `main` and pushed to origin. No release, tag or npm publi
 - **Old worktree** `~/Developer/bvh-worktrees/reflections-integration`: reflections no longer uses it; Dennis removes it (a session couldn't delete it).
 - **Compare pages left:** `skinned`, `pathtracer`, `sdf`.
 - **Where others still win:** Rapier's box queries (2.3-2.7x) and closest point (1.7-2.4x); three-mesh-bvh's refit (1.6-2x) and memory (our CPU trees hold 9-10x more; GPU scenes about 7x on Sponza with quantized nodes, 355.5 against 51.2 MiB); also its CPU box queries (1.2-1.4x), furnished-room GPU closest-hit (1.1-1.2x) and bvh.js's scene build (3x).
-- **Not started:** `three/sdf`, Babylon (P6), the vanilla examples, ddgi P3 (Dennis tells that session when the core is done).
+- **Vanilla examples:** `hello`, `raytrace`, `instances` and `builders` are done (`examples/vanilla`, a three-free shell in `examples/shared/vanilla`). The plan's `workers-cpu`, `workers-gpu`, fast-first's per-mesh timeline and `refit`'s deforming mesh are not built. `raytrace` has no AO, because sampling is out of scope.
+- **Not started:** `three/sdf` (needs GPU closest point), Babylon (P6). ddgi P3 is off the list until Dennis says otherwise.
 - **Quantize jobs:** `SceneTrees` runs one per copied GPU tree (`copyGpuTree`); batching an update's jobs into one dispatch would cut per-tree buffers and passes.
 - **`scene-trees-mid-swap`:** one unexplained failure after 405 s under a parallel `pnpm build` (message not captured; page limit 900 s); passed 3 times since. If it fails again, keep the full log.
 - **Indexed leaves, not built:** WASM writer for tinybvh, indexed output from the GPU LBVH, `CpuMeshBvh` reading through positions, adopt lever with indexed scenes, binding the app's positions.
