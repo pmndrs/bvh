@@ -31,6 +31,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         timeoutMs: 120_000,
     },
     {
+        name: 'vanilla-instances',
+        path: 'vanilla/instances',
+        title: 'Instances',
+        description: 'SceneTrees with thousands of moving instances, a top-level refit in every frame\'s encoder, runtime adds and removals of instances and meshes, GPU H-PLOC first trees swapped for tinybvh\'s, and picking from the ray-cast view.',
+        timeoutMs: 120_000,
+    },
+    {
         name: 'three-raycast',
         path: 'three/raycast',
         title: 'Raycast',
