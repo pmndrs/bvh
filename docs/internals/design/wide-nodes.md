@@ -13,7 +13,7 @@ Two experimental scene node formats sit next to `'f32' | 'quantized'`: `nodeForm
 - `src/wide-nodes.ts`: the collapse and both packers, ported from tinybvh 1.9.1 (`c9be3103`, MIT; THIRD_PARTY.md), a refit that keeps the collapse (`refitWide`), and a decoder for the checks and the CPU walk.
 - `src/trace/wgsl-wide.ts`: the wide walks, compiled by `traceModuleWgsl({ nodeFormat: 'bvh4' | 'cwbvh8', wideStack })`. `TraceBatchKernel` and `batchKernelWgsl` take the same options.
 - `assembleTraceScene` / `buildTraceScene({ nodeFormat })`: every builder still writes the binary `f32` tree; the scene collapses each tree as it places it. CWBVH reorders each mesh's triangles in the scene.
-- `SceneTrees({ nodeFormat })`: tinybvh's trees from the workers, collapsed on the main thread when they arrive. There is no GPU collapse yet, so GPU first trees are off. Merged groups, runtime adds and removals, the GPU top level and indexed leaves work. Deforming meshes take CPU poses (`setPoseCpu`: the binary tree refit, then the same wide nodes repacked in place). `setPose` (the GPU refit) is skipped with a warning. `gpuTreeOutputs: 'adopt'` is refused.
+- `SceneTrees({ nodeFormat })`: tinybvh's trees from the workers, collapsed in the workers too (`MeshBvhBuildOptions.wideNodes`: the worker sends the wide tree with the binary one, its buffers transferred). There is no GPU collapse yet, so GPU first trees are off. Merged groups, runtime adds and removals, the GPU top level and indexed leaves work. Deforming meshes take CPU poses (`setPoseCpu`: the binary tree refit, then the same wide nodes repacked in place). `setPose` (the GPU refit) is skipped with a warning. `gpuTreeOutputs: 'adopt'` is refused.
 - `createCpuTracer` walks wide scenes (decoding each node as the WGSL does), so every scene check in Node and in the GPU pages reads wide buffers.
 - `/three`'s `BvhTraceNodes` binds a wide source (nodes as `uvec4`; private stack only).
 - Pages and tools: 17 `trace-oracle` variants and 5 hook passes; `trace-wide-compile` (every wide kernel compiles, sizes and compile times); `scene-trees-mid-swap` `wide-*` variants; section 8 of `trace-bench-surface-*`; `tools/wide-nodes.ts` (collapse time, bytes and CPU-walk work per ray, no GPU).
@@ -68,7 +68,7 @@ The planes decode as in BVH4. A leaf slot's triangles must follow each other, an
 
 CWBVH's Sponza figures equal those B3 recorded from tinybvh's own CWBVH build (5.94 children per node, 2.19 triangles per leaf, ddgi `bench/results/trace.csv` `ours-cwbvh/*`), so the port collapses as tinybvh does.
 
-**Time** (one M5 core, warm, every Sponza tree): BVH4 1.35 s, CWBVH 1.83 s, about 0.5 µs per binary node. The first version, with an object per node, took 11.8 s and 19.6 s. `SceneTrees` runs the collapse on the main thread as each tinybvh tree arrives (the largest Sponza mesh is a few percent of that). Moving it into the workers is the first follow-up. Bistro interior: 0.42 s and 0.44 s.
+**Time** (one M5 core, warm, every Sponza tree): BVH4 1.35 s, CWBVH 1.83 s, about 0.5 µs per binary node. The first version, with an object per node, took 11.8 s and 19.6 s. `SceneTrees` asks the tinybvh workers for it (`wideNodes`), so it runs beside the build, off the main thread; a tree that arrives without it (a custom pool) is collapsed on arrival. Bistro interior: 0.42 s and 0.44 s.
 
 **The GPU collapse is not built.** H-PLOC and LBVH trees are collapsed on the CPU like tinybvh's (`buildTraceScene` with any builder works, and the oracle runs them). `SceneTrees` skips GPU first trees for wide formats, so a wide scene waits for tinybvh (Sponza's trees take about 370 ms in the workers, plus the collapse). The follow-up is the dynamic program as a bottom-up pass after H-PLOC, the decode as a top-down pass per level, and the pack per node.
 
@@ -199,7 +199,7 @@ Run it three times per scene (`trace-bench-surface-sponza`, `trace-bench-surface
 - **L2, triangle-group postponing** (Ylitie §3.3): push the triangle group when few lanes of the warp want to test triangles. It needs subgroup ballots in uniform control flow.
 - **L3, compressed triangles** (`CWBVH_COMPRESSED_TRIS`, Baldwin-Weber): not compatible with the watertight test, so ruled out by the hit contract.
 - **L4, exact boxes for split leaves:** tinybvh's `SplitLeafs` copies the parent leaf's box; boxes from the triangles would cut CWBVH's extra triangle tests on Sponza.
-- **L5, the collapse in the workers, and on the GPU** (section 2).
+- **L5, the collapse on the GPU** (section 2). The collapse in the workers is built.
 - **L6, BVH4's workgroup stack**, if the private stack turns out to be what CWBVH's workgroup stack fixes.
 - **L7, a single-loop wide walk: built for BVH4** as `wideWalk: 'single'` (`TraceModuleOptions`, `TraceBatchKernel`; default `'nested'`). One loop and one 136-entry stack for both levels with the instance marker, as the binary walk has, so a lane that finishes an instance's tree steps the top level in the same iteration as lanes still inside theirs. Top-level entries are the binary walk's references, mesh entries BVH4's inner child words (node indices, never the marker); the node step is the nested walk's text (`bvh4NodeStepWgsl`). The closest hit keeps the record of the instance that last changed it. CWBVH would need the top level's references packed into its two-word entries; not built until BVH4's A/B says the shape matters. Checked like the nested walk: `trace-oracle` variants `wide-bvh4-single-*` (records, masks off with any-hit near, merged indexed H-PLOC, materials; the BVH4 hook passes run single), `trace-wide-compile`, and section 8's `bvh4-single` layout (BVH4's scene through the single-loop kernel).
 
@@ -208,5 +208,4 @@ Run it three times per scene (`trace-bench-surface-sponza`, `trace-bench-surface
 1. The quiet-machine M5 runs and the RTX 3060 runs (section 8, runbook 2d), then the gate.
 2. L1 (folded decode) as an A/B setting, measured the same way; L7 for CWBVH if BVH4's single loop wins on instanced trees.
 3. GPU collapse after H-PLOC (so wide scenes get first trees without the worker), and a GPU wide refit (binary refit plus a repack pass).
-4. Collapse in the workers.
-5. If the gate passes: the folded decode (L1) and triangle postponing (L2) as measured levers, `serialize` for wide scenes, and `/three`'s `wideStack`.
+4. If the gate passes: the folded decode (L1) and triangle postponing (L2) as measured levers, `serialize` for wide scenes, and `/three`'s `wideStack`.

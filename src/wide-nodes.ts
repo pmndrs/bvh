@@ -195,6 +195,15 @@ export interface WideTopology {
     readonly slots: Int32Array | null;
 }
 
+/** Buffers to hand to `postMessage` with a wide tree (a worker's collapse), so it moves without a copy. */
+export function wideMeshTreeTransferables(tree: WideMeshTree): ArrayBuffer[] {
+    const { nodes, addressNode, slots } = tree.topology;
+    const views: ArrayBufferView[] = [nodes.box, nodes.src, nodes.first, nodes.triCount, nodes.childStart, nodes.childCount, addressNode];
+    if (slots) views.push(slots);
+    if (tree.triangleOrder) views.push(tree.triangleOrder);
+    return [tree.nodes, ...new Set(views.map((view) => view.buffer as ArrayBuffer))];
+}
+
 /** Bytes per node of a wide format. */
 export function wideNodeBytes(format: WideNodeFormat): number {
     return format === 'cwbvh8' ? CWBVH_NODE_BYTES : BVH4_NODE_BYTES;

@@ -79,7 +79,7 @@ Everything below is on `main` and pushed to origin. No release, tag or npm publi
   - Each `f32` tree is collapsed when a scene is assembled or a `SceneTrees` tree arrives.
   - Planes are decoded exactly, so hits equal the binary walk's (ties apart).
   - `wideStack: 'private' | 'workgroup'` for CWBVH.
-- **Works with:** `SceneTrees` (tinybvh trees only, no GPU first trees), merged groups, indexed leaves, CPU poses (`refitWide`), `/three`, and the CPU walk.
+- **Works with:** `SceneTrees` (tinybvh trees only, collapsed in the workers; no GPU first trees), merged groups, indexed leaves, CPU poses (`refitWide`), `/three`, and the CPU walk.
 - **Not built:** the GPU collapse and the GPU wide refit (`setPose` is skipped with a warning).
 - **Gates on the M5:** `trace-oracle` full (17 wide variants: 0 of 2M shared-edge slips; seams equal records); `trace-wide-compile` (largest kernel 42.3 KB); `scene-trees-mid-swap` (44 wide states, 0 disagreements).
 - **Memory, Sponza:** nodes 185.1 → 74.5 MiB (BVH4) → 40.5 MiB (CWBVH).
@@ -89,7 +89,7 @@ Everything below is on `main` and pushed to origin. No release, tag or npm publi
   - instanced trees: 0.56-0.86x for both formats;
   - every answer equals f32's, ties apart.
 - **The gate** (≥1.3x on both the M5 and the RTX 3060) is met on the M5 only per scene, on merged trees.
-- **L7** (`wideWalk: 'single'`, a single-loop BVH4 walk for the instanced-tree hypothesis) is built and in the oracle; it has not been timed.
+- **L7** (`wideWalk: 'single'`, a single-loop BVH4 walk for the instanced-tree hypothesis) is built and passes the full oracle; it has not been timed.
 - **Precision timing:** the "Quiet pass" section below; the RTX 3060 runs are in runbook section 2d.
 - **Timed pages** now hold the shared GPU lock (`/tmp/rt-gpu.lock`) and record the machine's load (`tests/gpu/README.md`, "Timed pages").
 

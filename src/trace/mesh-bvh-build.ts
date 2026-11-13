@@ -7,6 +7,7 @@
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
 import type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
+import { convertToWide } from '../wide-nodes.ts';
 
 let tinyBvh: Promise<TinyBvhBuilder> | null = null;
 let started: TinyBvhBuilder | null = null;
@@ -23,5 +24,9 @@ export function tinyBvhHeapBytes(): number {
 
 export async function buildMeshBvhAsync(geometry: MeshGeometry, options: MeshBvhBuildOptions = {}): Promise<MeshBvh> {
     tinyBvh ??= createTinyBvhBuilder().then((builder) => (started = builder));
-    return buildMeshBvhWithTinyBvh(geometry, await tinyBvh, { maxLeafPrimitives: options.maxLeafPrimitives, triangleLeaves: options.triangleLeaves, nodeFormat: options.nodeFormat });
+    const bvh = buildMeshBvhWithTinyBvh(geometry, await tinyBvh, { maxLeafPrimitives: options.maxLeafPrimitives, triangleLeaves: options.triangleLeaves, nodeFormat: options.nodeFormat });
+    if (!options.wideNodes) return bvh;
+    // The collapse runs here, where the tree was built (a worker, for the pool), not on the main thread.
+    if (bvh.nodeFormat === 'quantized') throw new RangeError('buildMeshBvhAsync: wideNodes collapses f32 trees; leave nodeFormat at f32');
+    return { ...bvh, wide: convertToWide(bvh, options.wideNodes) };
 }

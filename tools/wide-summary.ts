@@ -44,7 +44,7 @@ for (const file of files) {
             console.error(`skipping ${page.name} in ${file}: ${page.outcome}`);
             continue;
         }
-        const scene = scenes.get(data.scene) ?? { ratios: new Map(), loads: [], quiet: [], different: 0, ties: 0, runs: 0 };
+        const scene: SceneRuns = scenes.get(data.scene) ?? { ratios: new Map<string, number[]>(), loads: [], quiet: [], different: 0, ties: 0, runs: 0 };
         scenes.set(data.scene, scene);
         scene.runs++;
         const wide = data.wideNodes;

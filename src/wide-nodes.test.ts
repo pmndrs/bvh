@@ -12,6 +12,8 @@ import { createRandom, randomTriangleSoup, tessellatedQuad } from './trace/oracl
 import { buildLbvhOnCpu } from './lbvh-cpu.ts';
 import { convertToWide, decodeWideNode, refitWide, reorderTriangles, type WideMeshTree, type WideNodeFormat } from './wide-nodes.ts';
 import { refitLayoutToPose } from './refit-cpu.ts';
+import { buildMeshBvhAsync } from './trace/mesh-bvh-build.ts';
+import { meshBvhTransferables } from './trace/mesh-bvh.ts';
 
 const tinyBvh = await createTinyBvhBuilder();
 const build = (geometry: MeshGeometry): MeshBvh => buildMeshBvhWithTinyBvh(geometry, tinyBvh);
@@ -147,4 +149,24 @@ describe('wide nodes', () => {
             expect(reached.every((count) => count === 1)).toBe(true);
         });
     }
+
+    it('builds with wideNodes: the collapse where the tree is built, and its buffers transfer with the tree', async () => {
+        const geometry = randomTriangleSoup(createRandom(12), 900, 4, 0.5);
+        const plain = await buildMeshBvhAsync(geometry);
+        expect(plain.wide).toBeUndefined();
+        for (const format of ['bvh4', 'cwbvh8'] as const) {
+            const built = await buildMeshBvhAsync(geometry, { wideNodes: format });
+            expect(new Uint8Array(built.nodes)).toEqual(new Uint8Array(plain.nodes));
+            const expected = convertToWide(plain, format);
+            expect(built.wide?.nodeFormat).toBe(format);
+            expect(new Uint8Array(built.wide!.nodes)).toEqual(new Uint8Array(expected.nodes));
+            const transfer = meshBvhTransferables(built);
+            expect(transfer).toContain(built.wide!.nodes);
+            expect(transfer).toContain(built.wide!.topology.nodes.box.buffer);
+            // A structured clone (as postMessage makes) keeps everything refitWide needs.
+            const cloned = structuredClone(built.wide!);
+            expect(new Uint8Array(refitWide(cloned, plain))).toEqual(new Uint8Array(expected.nodes));
+        }
+        await expect(buildMeshBvhAsync(geometry, { wideNodes: 'cwbvh8', nodeFormat: 'quantized' })).rejects.toThrow(/f32/);
+    });
 });

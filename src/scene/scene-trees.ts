@@ -1593,8 +1593,10 @@ export class SceneTrees {
                 current.abort = null;
                 let wide: { binary: MeshBvh; tree: WideMeshTree } | undefined;
                 if (bvh && this.wideFormat) {
-                    // Collapsed here, on arrival (docs/internals/design/wide-nodes.md); placed like any tinybvh tree.
-                    const tree = convertToWide(bvh, this.wideFormat);
+                    // Collapsed in the worker (MeshBvhBuildOptions.wideNodes); here only if it came without (a custom pool).
+                    const { wide: collapsed, ...binary } = bvh;
+                    bvh = binary;
+                    const tree = collapsed?.nodeFormat === this.wideFormat ? collapsed : convertToWide(binary, this.wideFormat);
                     if (tree.stackNeed > WIDE_MESH_STACK_SIZE[this.wideFormat]) {
                         const reason = `the ${this.wideFormat} tree needs ${tree.stackNeed} stack entries, more than the mesh walk has (${WIDE_MESH_STACK_SIZE[this.wideFormat]})`;
                         current.fallbackReason = current.fallbackReason ? `${current.fallbackReason}; ${reason}` : reason;
@@ -2175,6 +2177,8 @@ export class SceneTrees {
      */
     private tinybvhOptions(slot: number): MeshBvhBuildOptions {
         const indexed = this.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const } : {};
+        // Wide: f32 trees, collapsed in the worker too (docs/internals/design/wide-nodes.md).
+        if (this.wideFormat) return { ...indexed, wideNodes: this.wideFormat };
         // Deforming meshes' trees stay f32 (the refits work on f32 nodes; they are quantized on the way in).
         return this.nodeFormat === 'quantized' && !this.meshes.get(slot)?.deforming ? { ...indexed, nodeFormat: 'quantized' } : indexed;
     }
