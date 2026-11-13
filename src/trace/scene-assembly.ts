@@ -32,7 +32,7 @@ import {
 } from './layout.ts';
 import { checkNodeFormat, quantizeNodes } from '../quantized-nodes.ts';
 import { convertToWide, isWideNodeFormat, reorderTriangles, wideNodeBytes, type WideMeshTree } from '../wide-nodes.ts';
-import { WIDE_MESH_STACK_SIZE } from './wgsl-wide.ts';
+import { WIDE_MESH_STACK_SIZE, WIDE_SINGLE_STACK_SIZE } from './wgsl-wide.ts';
 import type { NodeFormat } from './layout.ts';
 import { gpuLayoutNodeBytes, gpuLayoutNodeSlots, type GpuLayoutNodeFormat } from '../gpu-layout.ts';
 import { checkTriangleLeaves, indexedFromRecords, weldExactBits, weldPositions } from '../indexed-leaves.ts';
@@ -390,6 +390,8 @@ export function assembleTraceScene(
         if (maxMeshDepth > WIDE_MESH_STACK_SIZE[wideFormat]) {
             throw new RangeError(`the ${wideFormat} mesh stack holds ${WIDE_MESH_STACK_SIZE[wideFormat]} entries but a mesh in this scene can need ${maxMeshDepth}`);
         }
+        // The single-loop BVH4 walk (wideWalk 'single') holds both levels in one stack; it always fits (64 + 1 + 64 <= 136).
+        if (topLevel.maxDepth + 1 + maxMeshDepth > WIDE_SINGLE_STACK_SIZE) throw new RangeError('the single-loop wide walk\'s stack is too small for this scene');
     }
     const requiredStackSize = wideFormat ? Math.max(topLevel.maxDepth, maxMeshDepth) : topLevel.maxDepth + 1 + maxMeshDepth;
     if (!wideFormat && requiredStackSize > TRACE_STACK_SIZE) {

@@ -88,7 +88,15 @@ export interface WideWalkOptions {
     readonly anyHitOrder: 'far' | 'near';
     /** CWBVH only. */
     readonly stack: WideStack;
+    /** BVH4 only: `'nested'` (a mesh loop per instance) or `'single'` (one loop, lever L7). */
+    readonly walk: WideWalk;
 }
+
+/** How a BVH4 scene is walked (`TraceModuleOptions.wideWalk`): a mesh loop per instance, or one loop for both levels. */
+export type WideWalk = 'nested' | 'single';
+
+/** The single-loop walk's stack: the top level's (the binary walk's) and the deepest BVH4 mesh's together. */
+export const WIDE_SINGLE_STACK_SIZE = 136;
 
 /**
  * The per-triangle part of a leaf, shared by both formats: test, filter, and
@@ -170,23 +178,14 @@ fn bvhWideEntry(
 }
 `;
 
-/** BVH4: tinybvh's BVH4_GPU walk. */
-function bvh4MeshWalkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrder: 'far' | 'near'): string {
-    const closest = kind === 'closest';
-    // The mesh stack is a module-scope private array (meshStackWgsl): a function-scope one would be
-    // zero-filled at every instance entry.
-    const stackName = closest ? 'bvhMeshStackClosest' : 'bvhMeshStackAny';
-    const maskParameter = rayMasks ? ', rayMask: u32' : '';
-    const maskArgument = rayMasks ? ', rayMask' : '';
-    // After the sort, child 0 is the farthest and child 3 the nearest. Inner children are
-    // pushed in this order, so the last pushed is entered first: near first for closest-hit
-    // (tinybvh), far first for any-hit 'far'.
+/**
+ * One BVH4 node (tinybvh's `BVH4_GPU::Intersect` step) as text: decode and test the four
+ * children of the node at mesh node `node`, sort them, test the leaf children's triangles
+ * (`leafCall`) and push the inner ones (`push`), far to near (so the nearest is popped first)
+ * for closest-hit, the other way for any-hit 'far'. `tFar` is the box test's far limit.
+ */
+function bvh4NodeStepWgsl(closest: boolean, anyHitOrder: 'far' | 'near', tFar: string, leafCall: (info: string) => string, push: (info: string) => string): string {
     const order = closest || anyHitOrder === 'near' ? [0, 1, 2, 3] : [3, 2, 1, 0];
-    const leafCall = closest
-        ? (info: string) => `bvhTrianglesClosest(instance, setup, tMin, &best, meshVertexBase, instance.triangleOffset + (${info} & BVH4_CHILD_INDEX_MASK), (2u << ((${info} >> BVH4_CHILD_COUNT_SHIFT) & 7u)) - 1u${maskArgument});`
-        : (info: string) => `if (bvhTrianglesAny(instance, setup, tMin, tMax, meshVertexBase, instance.triangleOffset + (${info} & BVH4_CHILD_INDEX_MASK), (2u << ((${info} >> BVH4_CHILD_COUNT_SHIFT) & 7u)) - 1u${maskArgument})) {
-                    return true;
-                }`;
     const children = order
         .map(
             (k) => `
@@ -194,19 +193,12 @@ function bvh4MeshWalkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrde
             if ((info${k} & BVH4_CHILD_LEAF) != 0u) {
                 ${leafCall(`info${k}`)}
             } else {
-                ${stackName}[stackSize] = info${k};
-                stackSize += 1u;
+                ${push(`info${k}`)}
             }
         }`,
         )
         .join('');
-    return /* wgsl */ `
-fn ${closest ? 'bvhMeshClosest' : 'bvhMeshAny'}(instance: BvhInstance, setup: BvhRaySetup, tMin: f32, tMax: f32, meshVertexBase: u32${maskParameter}) -> ${closest ? 'BvhMeshHit' : 'bool'} {
-    ${closest ? 'var best = BvhMeshHit(false, tMax, 0u, vec2f(0.0), true, 0u, 0u);' : ''}
-    var stackSize = 0u;
-    var node = 0u;
-    loop {
-        let base = (instance.rootNodeOffset + node) * BVH4_VEC4_PER_NODE;
+    return `let base = (instance.rootNodeOffset + node) * BVH4_VEC4_PER_NODE;
         let d0 = bvhTraceNodes[base];
         let d1 = bvhTraceNodes[base + 1u];
         let d2 = bvhTraceNodes[base + 2u];
@@ -217,7 +209,7 @@ fn ${closest ? 'bvhMeshClosest' : 'bvhMeshAny'}(instance: BvhInstance, setup: Bv
             bvhWidePlanes(p.x, scale.x, d0.w), bvhWidePlanes(p.x, scale.x, d1.w),
             bvhWidePlanes(p.y, scale.y, d2.x), bvhWidePlanes(p.y, scale.y, d2.y),
             bvhWidePlanes(p.z, scale.z, d2.z), bvhWidePlanes(p.z, scale.z, d2.w),
-            setup, tMin, ${closest ? 'best.t' : 'tMax'},
+            setup, tMin, ${tFar},
         );
         // A missing child (word 0) is never entered.
         let dist = select(entry, vec4f(BVH_BOX_MISS), d3 == vec4u(0u));
@@ -235,7 +227,37 @@ fn ${closest ? 'bvhMeshClosest' : 'bvhMeshAny'}(instance: BvhInstance, setup: Bv
         if (dist0 < dist1) { let t = dist0; dist0 = dist1; dist1 = t; let i = info0; info0 = info1; info1 = i; }
         if (dist2 < dist3) { let t = dist2; dist2 = dist3; dist3 = t; let i = info2; info2 = info3; info3 = i; }
         if (dist1 < dist2) { let t = dist1; dist1 = dist2; dist2 = t; let i = info1; info1 = info2; info2 = i; }
-        ${children}
+        ${children}`;
+}
+
+/** A BVH4 leaf child's call into the triangle test: closest keeps `best`, any returns at the first blocker. */
+function bvh4LeafCall(closest: boolean, maskArgument: string, tMax: string): (info: string) => string {
+    const first = (info: string) => `instance.triangleOffset + (${info} & BVH4_CHILD_INDEX_MASK)`;
+    const bits = (info: string) => `(2u << ((${info} >> BVH4_CHILD_COUNT_SHIFT) & 7u)) - 1u`;
+    return closest
+        ? (info) => `bvhTrianglesClosest(instance, setup, tMin, &best, meshVertexBase, ${first(info)}, ${bits(info)}${maskArgument});`
+        : (info) => `if (bvhTrianglesAny(instance, setup, tMin, ${tMax}, meshVertexBase, ${first(info)}, ${bits(info)}${maskArgument})) {
+                    return true;
+                }`;
+}
+
+/** BVH4: tinybvh's BVH4_GPU walk, one instance's tree to the end (`wideWalk: 'nested'`). */
+function bvh4MeshWalkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrder: 'far' | 'near'): string {
+    const closest = kind === 'closest';
+    // The mesh stack is a module-scope private array (meshStackWgsl): a function-scope one would be
+    // zero-filled at every instance entry.
+    const stackName = closest ? 'bvhMeshStackClosest' : 'bvhMeshStackAny';
+    const maskParameter = rayMasks ? ', rayMask: u32' : '';
+    const maskArgument = rayMasks ? ', rayMask' : '';
+    const step = bvh4NodeStepWgsl(closest, anyHitOrder, closest ? 'best.t' : 'tMax', bvh4LeafCall(closest, maskArgument, 'tMax'), (info) => `${stackName}[stackSize] = ${info};
+                stackSize += 1u;`);
+    return /* wgsl */ `
+fn ${closest ? 'bvhMeshClosest' : 'bvhMeshAny'}(instance: BvhInstance, setup: BvhRaySetup, tMin: f32, tMax: f32, meshVertexBase: u32${maskParameter}) -> ${closest ? 'BvhMeshHit' : 'bool'} {
+    ${closest ? 'var best = BvhMeshHit(false, tMax, 0u, vec2f(0.0), true, 0u, 0u);' : ''}
+    var stackSize = 0u;
+    var node = 0u;
+    loop {
+        ${step}
         if (stackSize == 0u) {
             break;
         }
@@ -243,6 +265,131 @@ fn ${closest ? 'bvhMeshClosest' : 'bvhMeshAny'}(instance: BvhInstance, setup: Bv
         node = ${stackName}[stackSize];
     }
     return ${closest ? 'best' : 'false'};
+}
+`;
+}
+
+/**
+ * BVH4 in one loop (`wideWalk: 'single'`, lever L7): the binary walk's shape, one loop and one
+ * stack for both levels with the instance marker, so a lane that finishes an instance's tree
+ * goes on with the top level in the same iteration as lanes still in theirs. Top-level entries
+ * are the binary walk's references; mesh entries are BVH4 inner child words (node indices, never
+ * the marker). The node step is the nested walk's.
+ */
+function bvh4SingleWalkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrder: 'far' | 'near'): string {
+    const closest = kind === 'closest';
+    const maskParameter = rayMasks ? ', rayMask: u32' : '';
+    const maskArgument = rayMasks ? ', rayMask' : '';
+    const name = closest ? 'bvhWalkClosest' : 'bvhWalkAny';
+    const tMin = 'ray.tMin';
+    const leaf = bvh4LeafCall(closest, maskArgument, 'farthest');
+    // Closest: a leaf that changes the best hit names this instance's record.
+    const leafCall = closest
+        ? (info: string) => `{
+                    let before = best;
+                    ${leaf(info)}
+                    if (best.found && (!before.found || best.t != before.t || best.slot != before.slot || best.instance != before.instance)) {
+                        bestRecord = instanceRecord;
+                    }
+                }`
+        : leaf;
+    const step = bvh4NodeStepWgsl(closest, anyHitOrder, closest ? 'best.t' : 'farthest', leafCall, (info) => `stack[stackSize] = ${info};
+                stackSize += 1u;`);
+    return /* wgsl */ `
+fn ${name}(ray: BvhRay${maskParameter}) -> ${closest ? 'BvhHit' : 'bool'} {
+    let header = bvhTraceTopLevel[0];
+    let instanceCount = header.x;
+    let topLevelNodeCount = header.y;
+    ${closest ? `var best = BvhMeshHit(false, ray.tMax, 0u, vec2f(0.0), true, 0u, 0u);
+    var bestRecord = 0u;
+    var instanceRecord = 0u;` : 'let farthest = ray.tMax;'}
+    if (topLevelNodeCount == 0u) {
+        return ${closest ? 'BvhHit(-1.0, 0u, 0u, vec2f(0.0), true, BVH_NO_MATERIAL, vec3f(0.0))' : 'false'};
+    }
+    let firstTopLevelNode = BVH_TOP_HEADER_VEC4S + instanceCount * BVH_TOP_VEC4_PER_RECORD;
+    let worldSetup = bvhMakeRaySetup(ray.origin, ray.direction);
+    var setup = worldSetup;
+    let tMin = ${tMin};
+    var insideInstance = false;
+    var instance: BvhInstance;
+    var meshVertexBase = 0u;
+
+    var stack: array<u32, BVH_SINGLE_STACK_SIZE>;
+    var stackSize = 0u;
+    var current = bvhMakeReference(0u, 0u);   // the top level's root; inside an instance, a mesh node
+
+    loop {
+        if (insideInstance) {
+            let node = current;
+            ${step}
+        } else {
+            let count = current >> BVH_REF_COUNT_SHIFT;
+            let index = current & BVH_REF_INDEX_MASK;
+            if (count == 0u) {
+                let topNode = bvhLoadTopLevelNode(firstTopLevelNode, index);
+                let tTop = ${closest ? 'best.t' : 'farthest'};
+                let leftEntry = bvhBoxEntry(topNode.leftMin, topNode.leftMax, setup, tMin, tTop);
+                var rightEntry = BVH_BOX_MISS;
+                if (topNode.rightIndex != BVH_EMPTY_CHILD) {
+                    rightEntry = bvhBoxEntry(topNode.rightMin, topNode.rightMax, setup, tMin, tTop);
+                }
+                let leftReference = bvhMakeReference(topNode.leftIndex, topNode.leftCount);
+                let rightReference = bvhMakeReference(topNode.rightIndex, topNode.rightCount);
+                let hitLeft = leftEntry < BVH_BOX_MISS;
+                let hitRight = rightEntry < BVH_BOX_MISS;
+                if (hitLeft && hitRight) {
+                    if (${closest || anyHitOrder === 'near' ? 'leftEntry <= rightEntry' : 'leftEntry > rightEntry'}) {
+                        stack[stackSize] = rightReference;
+                        current = leftReference;
+                    } else {
+                        stack[stackSize] = leftReference;
+                        current = rightReference;
+                    }
+                    stackSize += 1u;
+                    continue;
+                }
+                if (hitLeft) {
+                    current = leftReference;
+                    continue;
+                }
+                if (hitRight) {
+                    current = rightReference;
+                    continue;
+                }
+            } else {
+                // A top-level leaf is one instance: into its object space, and on at its tree's root.
+                instance = bvhLoadInstance(index);
+                ${closest ? 'instanceRecord = index;' : ''}
+                ${rayMasks ? 'if ((bvhInstanceMask(instance) & rayMask) != 0u) {' : '{'}
+                    setup = bvhMakeRaySetup(bvhTransformPoint(instance, ray.origin), bvhTransformDirection(instance, ray.direction));
+                    meshVertexBase = bvhMeshVertexBase(instance.triangleOffset);
+                    stack[stackSize] = BVH_REF_INSTANCE_MARKER;
+                    stackSize += 1u;
+                    insideInstance = true;
+                    current = 0u;
+                    continue;
+                }
+            }
+        }
+        // Take the next entry off the stack; the marker ends an instance's tree.
+        loop {
+            if (stackSize == 0u) {
+                ${closest ? `if (!best.found) {
+                    return BvhHit(-1.0, 0u, 0u, vec2f(0.0), true, BVH_NO_MATERIAL, vec3f(0.0));
+                }
+                return bvhFinishClosest(BvhHit(best.t, best.instance, best.originalIndex, best.barycentrics, best.frontFace, BVH_NO_MATERIAL, vec3f(0.0)), bestRecord, best.slot);` : 'return false;'}
+            }
+            stackSize -= 1u;
+            let entry = stack[stackSize];
+            if (entry == BVH_REF_INSTANCE_MARKER) {
+                insideInstance = false;
+                setup = worldSetup;
+                continue;
+            }
+            current = entry;
+            break;
+        }
+    }
 }
 `;
 }
@@ -496,15 +643,20 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${closest ? 'BvhHit' : 'bool'} {
  * Any-hit's top level goes far first unless `anyHitOrder` is `'near'`.
  */
 export function wideWalkWgsl(options: WideWalkOptions): string {
-    const { format, rayMasks, anyHitOrder, stack } = options;
+    const { format, rayMasks, anyHitOrder, stack, walk } = options;
     const cwbvh = format === 'cwbvh8';
-    const walks = cwbvh
+    const single = walk === 'single';
+    if (single && cwbvh) throw new RangeError("wideWalk 'single' is for nodeFormat 'bvh4'");
+    const walks = single
+        ? `${bvh4SingleWalkWgsl('closest', rayMasks, anyHitOrder)}${bvh4SingleWalkWgsl('any', rayMasks, anyHitOrder)}`
+        : cwbvh
         ? `${cwbvhMeshWalkWgsl('closest', rayMasks, anyHitOrder, stack)}${cwbvhMeshWalkWgsl('any', rayMasks, anyHitOrder, stack)}`
         : `${bvh4MeshWalkWgsl('closest', rayMasks, anyHitOrder)}${bvh4MeshWalkWgsl('any', rayMasks, anyHitOrder)}`;
     return /* wgsl */ `
 // ---- Wide mesh nodes (${format}, docs/internals/design/wide-nodes.md) ----------------------
 
-const BVH_WIDE_STACK_SIZE: u32 = ${WIDE_MESH_STACK_SIZE[format]}u;
+const BVH_WIDE_STACK_SIZE: u32 = ${WIDE_MESH_STACK_SIZE[format]}u;${single ? `
+const BVH_SINGLE_STACK_SIZE: u32 = ${WIDE_SINGLE_STACK_SIZE}u;` : ''}
 ${cwbvh ? `const CWBVH_VEC4_PER_NODE: u32 = ${CWBVH_NODE_WORDS / 4}u;` : `const BVH4_VEC4_PER_NODE: u32 = ${BVH4_NODE_WORDS / 4}u;
 const BVH4_CHILD_LEAF: u32 = ${hex(BVH4_CHILD.leafBit)};
 const BVH4_CHILD_COUNT_SHIFT: u32 = ${BVH4_CHILD.countShift}u;
@@ -522,10 +674,10 @@ struct BvhMeshHit {
 }
 ${WIDE_BOX_WGSL}
 ${cwbvh ? CWBVH_HIT_BITS_WGSL : ''}
-${meshStackWgsl(format, stack)}
+${single ? '' : meshStackWgsl(format, stack)}
 ${triangleGroupWgsl('closest', rayMasks)}
 ${triangleGroupWgsl('any', rayMasks)}
 ${walks}
-${topLevelWalkWgsl('closest', rayMasks, anyHitOrder)}
-${topLevelWalkWgsl('any', rayMasks, anyHitOrder)}`;
+${single ? '' : `${topLevelWalkWgsl('closest', rayMasks, anyHitOrder)}
+${topLevelWalkWgsl('any', rayMasks, anyHitOrder)}`}`;
 }

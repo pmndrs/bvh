@@ -28,8 +28,9 @@ import { readBuffer, yieldToBrowser } from './ours-bench.ts';
 import { leafLayoutRoundOrder, ratioOfRounds, type LeafLayoutCase, type PairedRatio, type Tree } from './paired-ratio.ts';
 
 /** The formats timed: f32 is the baseline; cwbvh8-workgroup is cwbvh8's scene through the workgroup-stack kernel. */
-export type WideLayout = 'f32' | 'bvh4' | 'cwbvh8' | 'cwbvh8-workgroup';
-export const WIDE_LAYOUTS: readonly WideLayout[] = ['f32', 'bvh4', 'cwbvh8', 'cwbvh8-workgroup'];
+export type WideLayout = 'f32' | 'bvh4' | 'bvh4-single' | 'cwbvh8' | 'cwbvh8-workgroup';
+/** `bvh4-single` is bvh4's scene through the single-loop kernel (`wideWalk: 'single'`, lever L7). */
+export const WIDE_LAYOUTS: readonly WideLayout[] = ['f32', 'bvh4', 'bvh4-single', 'cwbvh8', 'cwbvh8-workgroup'];
 
 export interface WideRaySet {
     readonly name: string;
@@ -146,6 +147,7 @@ export async function runWideNodesSection(context: WideNodesContext): Promise<Wi
     const scenes: Record<WideLayout, Record<Tree, TraceSceneBuffers>> = {
         f32: context.f32Scenes,
         bvh4: {} as Record<Tree, TraceSceneBuffers>,
+        'bvh4-single': {} as Record<Tree, TraceSceneBuffers>,
         cwbvh8: {} as Record<Tree, TraceSceneBuffers>,
         'cwbvh8-workgroup': {} as Record<Tree, TraceSceneBuffers>,
     };
@@ -162,6 +164,7 @@ export async function runWideNodesSection(context: WideNodesContext): Promise<Wi
             context.sceneBuffers.push(buffers);
             scenes[format][tree] = buffers;
             if (format === 'cwbvh8') scenes['cwbvh8-workgroup'][tree] = buffers;
+            if (format === 'bvh4') scenes['bvh4-single'][tree] = buffers;
             await yieldToBrowser();
         }
     }
@@ -175,10 +178,11 @@ export async function runWideNodesSection(context: WideNodesContext): Promise<Wi
     const kernels: Record<WideLayout, TraceBatchKernel> = {
         f32: context.f32Kernel,
         bvh4: await TraceBatchKernel.create(device, { label: 'wide bvh4', nodeFormat: 'bvh4' }),
+        'bvh4-single': await TraceBatchKernel.create(device, { label: 'wide bvh4 single loop', nodeFormat: 'bvh4', wideWalk: 'single' }),
         cwbvh8: await TraceBatchKernel.create(device, { label: 'wide cwbvh8', nodeFormat: 'cwbvh8' }),
         'cwbvh8-workgroup': await TraceBatchKernel.create(device, { label: 'wide cwbvh8 workgroup', nodeFormat: 'cwbvh8', wideStack: 'workgroup' }),
     };
-    context.extraKernels.push(kernels.bvh4, kernels.cwbvh8, kernels['cwbvh8-workgroup']);
+    context.extraKernels.push(kernels.bvh4, kernels['bvh4-single'], kernels.cwbvh8, kernels['cwbvh8-workgroup']);
 
     const cases: LeafLayoutCase[] = (['instanced', 'merged'] as const).flatMap((tree) => context.sets.flatMap((set) => MODES.map((mode) => ({ tree, set: set.name, mode }))));
     const setOf = (name: string): WideRaySet => context.sets.find((set) => set.name === name)!;

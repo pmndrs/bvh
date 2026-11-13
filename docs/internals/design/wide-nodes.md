@@ -194,12 +194,12 @@ Run it three times per scene (`trace-bench-surface-sponza`, `trace-bench-surface
 - **L4, exact boxes for split leaves:** tinybvh's `SplitLeafs` copies the parent leaf's box; boxes from the triangles would cut CWBVH's extra triangle tests on Sponza.
 - **L5, the collapse in the workers, and on the GPU** (section 2).
 - **L6, BVH4's workgroup stack**, if the private stack turns out to be what CWBVH's workgroup stack fixes.
-- **L7, a single-loop wide walk:** one loop and one stack for both levels with an instance marker, as the binary walk has, so lanes in different instances keep stepping. Straightforward for BVH4 (its stack entries are words, as the binary walk's are); CWBVH needs the top level's references packed into its two-word entries. The provisional instanced-tree numbers (section 8) point at this first.
+- **L7, a single-loop wide walk: built for BVH4** as `wideWalk: 'single'` (`TraceModuleOptions`, `TraceBatchKernel`; default `'nested'`). One loop and one 136-entry stack for both levels with the instance marker, as the binary walk has, so a lane that finishes an instance's tree steps the top level in the same iteration as lanes still inside theirs. Top-level entries are the binary walk's references, mesh entries BVH4's inner child words (node indices, never the marker); the node step is the nested walk's text (`bvh4NodeStepWgsl`). The closest hit keeps the record of the instance that last changed it. CWBVH would need the top level's references packed into its two-word entries; not built until BVH4's A/B says the shape matters. Checked like the nested walk: `trace-oracle` variants `wide-bvh4-single-*` (records, masks off with any-hit near, merged indexed H-PLOC, materials; the BVH4 hook passes run single), `trace-wide-compile`, and section 8's `bvh4-single` layout (BVH4's scene through the single-loop kernel).
 
 ## 10. Follow-ups
 
 1. The quiet-machine M5 runs and the RTX 3060 runs (section 8, runbook 2d), then the gate.
-2. L7 (single-loop BVH4 walk) and L1 (folded decode) as A/B settings, measured the same way.
+2. L1 (folded decode) as an A/B setting, measured the same way; L7 for CWBVH if BVH4's single loop wins on instanced trees.
 3. GPU collapse after H-PLOC (so wide scenes get first trees without the worker), and a GPU wide refit (binary refit plus a repack pass).
 4. Collapse in the workers.
 5. If the gate passes: the folded decode (L1) and triangle postponing (L2) as measured levers, `serialize` for wide scenes, and `/three`'s `wideStack`.
