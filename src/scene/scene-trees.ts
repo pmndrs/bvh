@@ -117,6 +117,8 @@ import {
 import type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from '../trace/mesh-bvh.ts';
 import { nodeQuantizerFor, type QuantizeJob } from '../gpu-quantize.ts';
 import { quantizeNodes } from '../quantized-nodes.ts';
+import { convertToWide, isWideNodeFormat, refitWide, reorderTriangles, wideNodeBytes, type WideMeshTree, type WideNodeFormat } from '../wide-nodes.ts';
+import { WIDE_MESH_STACK_SIZE } from '../trace/wgsl-wide.ts';
 import { weldPositions } from '../indexed-leaves.ts';
 import { meshRefitPlacement, type TraceSceneMeshPlacement } from '../trace/scene-assembly.ts';
 import type { MeshRefitVertices } from '../gpu-mesh-refit.ts';
@@ -241,6 +243,14 @@ export interface SceneTreesOptions {
      * Quantized needs `gpuTreeOutputs: 'copy'` (an adopted batch's nodes are
      * `f32`). Independent of `triangleLeaves`.
      * A coordinate of magnitude 2^100 or more, or a non-finite one, makes a quantized box empty on that axis (hits there are lost).
+     *
+     * Experimental (docs/internals/design/wide-nodes.md): `'bvh4'` and
+     * `'cwbvh8'`. Every tree comes from tinybvh in the workers and is
+     * collapsed on this thread when it arrives (there is no GPU collapse
+     * yet, so GPU first trees are off). Deforming meshes take CPU poses
+     * ({@link SceneTrees.setPoseCpu}: the binary tree refit, the wide nodes
+     * repacked in place); {@link SceneTrees.setPose} (the GPU refit) is
+     * skipped with a warning. Needs `gpuTreeOutputs: 'copy'`.
      */
     readonly nodeFormat?: NodeFormat;
     /**
@@ -421,8 +431,10 @@ interface CpuPose {
     /** The mesh's own indices (a copy: the geometry may move into a worker), or null for a triangle list. */
     readonly indices: Uint16Array | Uint32Array | null;
     readonly vertexCount: number;
-    /** The placed tree's layout on the CPU (tinybvh's, or a GPU tree's read back), or null before one arrives. */
+    /** The placed tree's layout on the CPU (tinybvh's, or a GPU tree's read back), or null before one arrives. Wide scenes: the binary tree. */
     layout: GpuLayoutMeshBvh | null;
+    /** Wide scenes: the placed tree's wide form, which a pose repacks ({@link refitWide}). */
+    wide: WideMeshTree | null;
     /** The latest CPU pose, or null. */
     positions: Float32Array | null;
     /** The pose still has to be written into the placed tree. */
@@ -452,7 +464,15 @@ interface MergedGroup {
 }
 
 type ArrivedTree =
-    | { readonly source: 'tinybvh'; readonly slot: number; readonly generation: number; readonly bvh: MeshBvh }
+    | {
+          readonly source: 'tinybvh';
+          readonly slot: number;
+          readonly generation: number;
+          /** The tree as it is placed (wide scenes: its wide nodes, and CWBVH's triangle order). */
+          readonly bvh: MeshBvh;
+          /** Wide scenes: the binary tree it was collapsed from, and the wide tree. */
+          readonly wide?: { readonly binary: MeshBvh; readonly tree: WideMeshTree };
+      }
     | {
           readonly source: 'gpu';
           readonly slot: number;
@@ -595,6 +615,8 @@ export class SceneTrees {
     /** The scene's node format, its nodes' unit, and the slots before each root (the frame slot when quantized). */
     readonly nodeFormat: NodeFormat;
     private readonly nodeBytes: number;
+    /** `nodeFormat` when it is a wide format (trees collapsed on arrival), else null. */
+    private readonly wideFormat: WideNodeFormat | null;
     private readonly nodeLeading: number;
     /** Quantize passes recorded into the caller's encoder (GPU trees placed), freed at the next update. */
     private quantizeJobsToRelease: QuantizeJob[] = [];
@@ -692,7 +714,11 @@ export class SceneTrees {
             this.pool = createBvhWorkerPool(workers ?? {});
             this.ownsPool = true;
         }
-        if (options.gpuFirstTrees === false) {
+        const wideFormat = isWideNodeFormat(options.nodeFormat) ? options.nodeFormat : null;
+        if (wideFormat) {
+            this.firstTrees = null;
+            this.noGpuReason = `nodeFormat '${wideFormat}' collapses tinybvh's trees on the CPU (there is no GPU collapse yet), so GPU first trees are off`;
+        } else if (options.gpuFirstTrees === false) {
             this.firstTrees = null;
             this.noGpuReason = 'GPU first trees are off (gpuFirstTrees: false)';
         } else if (options.firstTreeBuilder) {
@@ -713,9 +739,10 @@ export class SceneTrees {
         if (indexed && this.gpuTreeOutputs === 'adopt') throw new RangeError("SceneTrees: triangleLeaves: 'indexed' needs gpuTreeOutputs: 'copy' (an adopted batch's buffers have no mesh headers)");
         this.triangleBytes = indexed ? INDEXED_TRIANGLE_BYTES : TRIANGLE_BYTES;
         this.nodeFormat = options.nodeFormat ?? 'f32';
-        if (this.nodeFormat !== 'f32' && this.nodeFormat !== 'quantized') throw new RangeError(`nodeFormat must be 'f32' or 'quantized', got ${String(this.nodeFormat)}`);
-        if (this.nodeFormat === 'quantized' && this.gpuTreeOutputs === 'adopt') throw new RangeError("SceneTrees: nodeFormat: 'quantized' needs gpuTreeOutputs: 'copy' (an adopted batch's nodes are f32)");
-        this.nodeBytes = this.nodeFormat === 'quantized' ? QUANTIZED_NODE_BYTES : BVH_NODE_BYTES;
+        this.wideFormat = wideFormat;
+        if (this.nodeFormat !== 'f32' && this.nodeFormat !== 'quantized' && !wideFormat) throw new RangeError(`nodeFormat must be 'f32', 'quantized', 'bvh4' or 'cwbvh8', got ${String(this.nodeFormat)}`);
+        if (this.nodeFormat !== 'f32' && this.gpuTreeOutputs === 'adopt') throw new RangeError(`SceneTrees: nodeFormat: '${this.nodeFormat}' needs gpuTreeOutputs: 'copy' (an adopted batch's nodes are f32)`);
+        this.nodeBytes = wideFormat ? wideNodeBytes(wideFormat) : this.nodeFormat === 'quantized' ? QUANTIZED_NODE_BYTES : BVH_NODE_BYTES;
         this.nodeLeading = this.nodeFormat === 'quantized' ? 1 : 0;
         this.nodes = new GrowableStorage(device, `${this.label} trace nodes`, this.nodeBytes, INITIAL_NODES);
         this.triangles = new GrowableStorage(device, `${this.label} trace triangles`, this.triangleBytes, indexed ? INITIAL_TRIANGLES * 3 : INITIAL_TRIANGLES);
@@ -729,7 +756,8 @@ export class SceneTrees {
         this.cpuTopLevel = this.createTopLevelBuffer(TOP_LEVEL_HEADER_BYTES);
         device.queue.writeBuffer(this.cpuTopLevel, 0, new Uint32Array(TOP_LEVEL_HEADER_WORDS));
         this.identity = new GpuMergedIdentity(device, this.label);
-        this.deforming = DeformingTrees.isSupported(device) ? new DeformingTrees(device, { label: this.label }) : null;
+        // Wide scenes have no GPU refit: deforming meshes take CPU poses (setPoseCpu).
+        this.deforming = !wideFormat && DeformingTrees.isSupported(device) ? new DeformingTrees(device, { label: this.label }) : null;
     }
 
     /** Compiles the GPU builder, the top level and the merged-identity pass, all at once. */
@@ -848,7 +876,9 @@ export class SceneTrees {
             if (!this.posesSkippedWarned) {
                 this.posesSkippedWarned = true;
                 this.warn(
-                    '@pmndrs/bvh: SceneTrees.setPose was skipped: the device has no subgroups, so there is no GPU refit and the mesh is traced in the pose its tree was built in. ' +
+                    (this.wideFormat
+                        ? `@pmndrs/bvh: SceneTrees.setPose was skipped: nodeFormat '${this.wideFormat}' has no GPU refit, so the mesh is traced in the pose its tree was built in. `
+                        : '@pmndrs/bvh: SceneTrees.setPose was skipped: the device has no subgroups, so there is no GPU refit and the mesh is traced in the pose its tree was built in. ') +
                         'Give the pose on the CPU with SceneTrees.setPoseCpu(mesh, positions) instead (deformingCounts.posesSkipped counts the skipped poses).',
                 );
             }
@@ -950,7 +980,7 @@ export class SceneTrees {
             triangleCount,
             bounds: geometryBounds(geometry.positions),
             materialCodes: this.triangleLeaves === 'indexed' ? materialCodes : null,
-            cpuPose: deforming ? { indices: geometry.indices ? geometry.indices.slice() : null, vertexCount: geometry.positions.length / 3, layout: null, positions: null, due: false, moved: false } : null,
+            cpuPose: deforming ? { indices: geometry.indices ? geometry.indices.slice() : null, vertexCount: geometry.positions.length / 3, layout: null, wide: null, positions: null, due: false, moved: false } : null,
             gpu: 'none',
             tinybvh: 'none',
             fallbackReason: null,
@@ -1561,7 +1591,20 @@ export class SceneTrees {
             const current = this.disposed ? undefined : this.currentState(state.slot, generation);
             if (current) {
                 current.abort = null;
-                if (bvh && bvh.maxDepth > this.gpuMaxDepth) {
+                let wide: { binary: MeshBvh; tree: WideMeshTree } | undefined;
+                if (bvh && this.wideFormat) {
+                    // Collapsed here, on arrival (docs/internals/design/wide-nodes.md); placed like any tinybvh tree.
+                    const tree = convertToWide(bvh, this.wideFormat);
+                    if (tree.stackNeed > WIDE_MESH_STACK_SIZE[this.wideFormat]) {
+                        const reason = `the ${this.wideFormat} tree needs ${tree.stackNeed} stack entries, more than the mesh walk has (${WIDE_MESH_STACK_SIZE[this.wideFormat]})`;
+                        current.fallbackReason = current.fallbackReason ? `${current.fallbackReason}; ${reason}` : reason;
+                        this.warn(`@pmndrs/bvh: ${reason}, so it is not used`);
+                        bvh = null;
+                    } else {
+                        wide = { binary: bvh, tree };
+                        bvh = { ...bvh, nodes: tree.nodes, nodeCount: tree.nodeCount, triangles: reorderTriangles(bvh.triangles, this.triangleBytes, tree.triangleOrder), maxDepth: tree.stackNeed };
+                    }
+                } else if (bvh && bvh.maxDepth > this.gpuMaxDepth) {
                     // Refused like a too-deep GPU tree: the mesh keeps the tree it has (or gets none), and the trace stack stays safe.
                     const reason = `tinybvh's tree is ${bvh.maxDepth} levels deep, more than gpuMaxDepth (${this.gpuMaxDepth})`;
                     current.fallbackReason = current.fallbackReason ? `${current.fallbackReason}; ${reason}` : reason;
@@ -1569,7 +1612,7 @@ export class SceneTrees {
                     bvh = null;
                 }
                 current.tinybvh = bvh ? 'built' : 'failed';
-                if (bvh) this.arrived.push({ source: 'tinybvh', slot: state.slot, generation, bvh });
+                if (bvh) this.arrived.push({ source: 'tinybvh', slot: state.slot, generation, bvh, ...(wide ? { wide } : {}) });
             }
             this.notifyWaiters();
         };
@@ -2139,7 +2182,8 @@ export class SceneTrees {
     /** A tinybvh tree's nodes into the storage at its root `nodeOffset` (quantized: its frame slot first; packed here if the worker sent f32). */
     private writeTinybvhNodes(bvh: MeshBvh, nodeOffset: number): void {
         if (this.nodeFormat !== 'quantized') {
-            this.nodes.write(nodeOffset, bvh.nodes, bvh.nodeCount * BVH_NODE_BYTES);
+            // f32, or wide nodes collapsed on arrival.
+            this.nodes.write(nodeOffset, bvh.nodes, bvh.nodeCount * this.nodeBytes);
             return;
         }
         const quantized = quantizeNodes(bvh);
@@ -2236,14 +2280,18 @@ export class SceneTrees {
                 continue;
             }
             const posed = refitLayoutToPose(pose.layout, pose.positions, pose.indices);
-            if (this.nodeFormat === 'quantized') {
+            if (pose.wide) {
+                // Wide: the binary tree refit, then the same wide nodes repacked in place (refitWide).
+                this.stagedCopy(encoder, this.nodes, placed.nodeOffset, refitWide(pose.wide, { ...pose.layout, nodes: posed.nodes }));
+            } else if (this.nodeFormat === 'quantized') {
                 const quantized = quantizeNodes({ ...pose.layout, nodes: posed.nodes, nodeFormat: 'f32' });
                 this.stagedCopy(encoder, this.nodes, placed.nodeOffset - 1, quantized.nodes);
             } else {
                 this.stagedCopy(encoder, this.nodes, placed.nodeOffset, posed.nodes);
             }
             if (posed.triangles) {
-                this.stagedCopy(encoder, this.triangles, placed.triangleOffset, posed.triangles);
+                // Records: the posed corners, in the placed tree's order (CWBVH reorders them).
+                this.stagedCopy(encoder, this.triangles, placed.triangleOffset, reorderTriangles(posed.triangles, TRIANGLE_BYTES, pose.wide?.triangleOrder ?? null));
             } else if (this.positions && state.vertices) {
                 // Indexed: deforming meshes are never welded, so pose vertex v is scene vertex base + v.
                 const stride = positionStrideFloats(this.positionLayout);
@@ -2328,7 +2376,8 @@ export class SceneTrees {
         }
         if (state.cpuPose) {
             // A CPU pose given before is written into the new tree too, at this update.
-            state.cpuPose.layout = tree.source === 'tinybvh' ? tree.bvh : tree.built.layout;
+            state.cpuPose.layout = tree.source === 'tinybvh' ? (tree.wide?.binary ?? tree.bvh) : tree.built.layout;
+            state.cpuPose.wide = tree.source === 'tinybvh' ? (tree.wide?.tree ?? null) : null;
             state.cpuPose.moved = false;
             state.cpuPose.due = state.cpuPose.positions !== null;
         }

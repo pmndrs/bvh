@@ -14,7 +14,7 @@ const HIT_RECORD_WORDS = HIT_RECORD_BYTES / 4;
 import { packRays, RAY_BYTES, type TraceRay } from '../../src/trace/rays.ts';
 import type { TraceSceneData } from '../../src/trace/scene-assembly.ts';
 import type { TopLevelBvh } from '../../src/trace/top-level.ts';
-import { TOP_HEADER_WORD, type PositionLayout, type TriangleLeaves } from '../../src/trace/layout.ts';
+import { TOP_HEADER_WORD, type NodeFormat, type PositionLayout, type TriangleLeaves } from '../../src/trace/layout.ts';
 import type { TraceBatchKernel, TraceSceneBuffers } from '../../src/trace/trace-gpu.ts';
 
 export async function readBuffer(device: GPUDevice, source: GPUBuffer, byteLength = source.size): Promise<ArrayBuffer> {
@@ -38,7 +38,7 @@ export async function readBuffer(device: GPUDevice, source: GPUBuffer, byteLengt
 export async function readScene(
     device: GPUDevice,
     buffers: { nodes: GPUBuffer; triangles: GPUBuffer; topLevel: GPUBuffer; positions?: GPUBuffer | null },
-    format: { triangleLeaves?: TriangleLeaves; positionLayout?: PositionLayout; nodeFormat?: 'f32' | 'quantized' } = {},
+    format: { triangleLeaves?: TriangleLeaves; positionLayout?: PositionLayout; nodeFormat?: NodeFormat } = {},
 ): Promise<TraceSceneData> {
     const [nodes, triangles, topLevelBytes, positions] = await Promise.all([
         readBuffer(device, buffers.nodes),

@@ -77,6 +77,7 @@ import { makePlacementRays, rayProblems, tileGrid } from './rc-rays.ts';
 import { makeProbeGrid, makeProbeRays as makeGridRays, makeSphereDirections } from './rays.ts';
 import { fullBrowserVersion, requestBenchDevice } from './run.ts';
 import { findManifest, loadBenchScene } from './scene-source.ts';
+import { runWideNodesSection, type WideNodesResult } from './wide-nodes-bench.ts';
 import { compareBlocked, compareHitRecords, makeVariantProbeRays, probeOrigins, summariseCounts, surfaceProbes, type CountSummary, type HitAgreement } from './surface-ray-variants.ts';
 
 /**
@@ -249,6 +250,7 @@ export interface SurfaceRaysData {
     triangleLeaves?: LeafLayoutResult;
     nodeFormat?: NodeFormatResult;
     anyHitOrder?: AnyHitOrderResult;
+    wideNodes?: WideNodesResult;
 }
 
 function summarizeTree(data: TraceSceneData, buildMs: number): TreeSummary {
@@ -371,7 +373,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
     try {
         const profileName = (new URLSearchParams(location.search).get('profile') ?? 'full') as SurfaceProfileName;
         const profile = SURFACE_PROFILES[profileName];
-        // `?skip=hit-record,leaves,any-order`: leave out sections 4, 5 and 7 (for a run that only wants the others).
+        // `?skip=hit-record,leaves,nodes,any-order,wide`: leave out sections 4, 5, 6, 7 and 8 (for a run that only wants the others).
         const skip = new Set((new URLSearchParams(location.search).get('skip') ?? '').split(',').filter((name) => name.length > 0));
         if (!profile) throw new Error(`unknown profile "${profileName}" (known: ${Object.keys(SURFACE_PROFILES).join(', ')})`);
         const { device } = await requestBenchDevice();
@@ -725,10 +727,12 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             const triangleLeaves: LeafLayoutResult = { rounds: profile.rounds, entries: leafEntries, ratios: leafRatios, agreement: leafAgreement, bytes: leafBytes };
 
             // 6: quantized nodes against f32 nodes (docs/internals/design/compressed-nodes.md): the same trees, records.
+            const runNodes = !skip.has('nodes');
+            const nodeCases = runNodes ? leafCases : [];
             const nodeLayouts: NodeLayout[] = ['f32', 'quantized'];
             const nodeScenes: Record<NodeLayout, Record<Tree, TraceSceneBuffers>> = { f32: scenes, quantized: {} as Record<Tree, TraceSceneBuffers> };
             const nodeBytes: Record<string, number> = {};
-            for (const tree of ['instanced', 'merged'] as const) {
+            for (const tree of runNodes ? (['instanced', 'merged'] as const) : []) {
                 nodeBytes[`f32/${tree}`] = (tree === 'instanced' ? instancedData : mergedData).nodes.byteLength;
                 const quantized = await buildTraceScene(geometries, instances, { build, mergeStaticInstances: tree === 'merged', nodeFormat: 'quantized' });
                 nodeBytes[`quantized/${tree}`] = quantized.nodes.byteLength;
@@ -740,7 +744,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             const nodeKernels: Record<NodeLayout, TraceBatchKernel> = { f32: fullKernel, quantized: await TraceBatchKernel.create(device, { label: 'surface quantized', nodeFormat: 'quantized' }) };
             extraKernels.push(nodeKernels.quantized);
             const quantizedCounted = await CountedKernel.create(device, { nodeFormat: 'quantized' });
-            const nodeEntries: NodeFormatResult['entries'] = leafCases.flatMap((entry) =>
+            const nodeEntries: NodeFormatResult['entries'] = nodeCases.flatMap((entry) =>
                 nodeLayouts.map((layout) => ({ tree: entry.tree, set: entry.set as SetName, mode: entry.mode, layout, mraysPerRound: [] as number[], singleMraysPerRound: [] as number[] })),
             );
             const nodeEntryOf = (entry: LeafLayoutCase, layout: NodeLayout) => {
@@ -750,7 +754,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             };
             const nodeAgreement: NodeFormatResult['agreement'] = [];
             const nodeCounts: NodeFormatResult['counts'] = [];
-            for (const entry of leafCases) {
+            for (const entry of nodeCases) {
                 const set = sets.find((candidate) => candidate.name === entry.set) as RaySet;
                 const expected = new Uint32Array(await traceOnce(device, fullKernel, scenes[entry.tree], entry.mode, set.buffer, set.count));
                 const answers = await traceOnce(device, nodeKernels.quantized, nodeScenes.quantized[entry.tree], entry.mode, set.buffer, set.count);
@@ -793,9 +797,9 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                 await yieldToBrowser();
                 return { loaded: loaded.mraysPerSecond, single: set.count / (single.medianMs * 1e3) };
             };
-            progress(`${sceneId}: quantized nodes against f32, ${profile.rounds} rounds of ${leafCases.length} cases, the order reversed every other round; node bytes ${Object.entries(nodeBytes).map(([name, bytes]) => `${name} ${(bytes / 2 ** 20).toFixed(1)} MiB`).join(', ')}`);
+            progress(`${sceneId}: quantized nodes against f32, ${profile.rounds} rounds of ${nodeCases.length} cases, the order reversed every other round; node bytes ${Object.entries(nodeBytes).map(([name, bytes]) => `${name} ${(bytes / 2 ** 20).toFixed(1)} MiB`).join(', ')}`);
             for (let round = 0; round < profile.rounds; round++) {
-                for (const step of leafLayoutRoundOrder(leafCases, nodeLayouts, round)) {
+                for (const step of leafLayoutRoundOrder(nodeCases, nodeLayouts, round)) {
                     const entry = nodeEntryOf(step.case, step.layout);
                     const timed = await timeNode(step.case, step.layout);
                     entry.mraysPerRound.push(timed.loaded);
@@ -803,10 +807,10 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                 }
                 progress(
                     `${sceneId}: node round ${round + 1} of ${profile.rounds}: ` +
-                        leafCases.map((entry) => `${entry.tree} ${entry.set} ${entry.mode} quantized/f32 ${(nodeEntryOf(entry, 'quantized').mraysPerRound[round] / nodeEntryOf(entry, 'f32').mraysPerRound[round]).toFixed(3)}`).join(', '),
+                        nodeCases.map((entry) => `${entry.tree} ${entry.set} ${entry.mode} quantized/f32 ${(nodeEntryOf(entry, 'quantized').mraysPerRound[round] / nodeEntryOf(entry, 'f32').mraysPerRound[round]).toFixed(3)}`).join(', '),
                 );
             }
-            const nodeRatios: PairedRatio[] = leafCases.map((entry) =>
+            const nodeRatios: PairedRatio[] = nodeCases.map((entry) =>
                 ratioOfRounds(`quantized_over_f32/${entry.tree}/${entry.set}/${entry.mode}`, nodeEntryOf(entry, 'quantized').mraysPerRound, nodeEntryOf(entry, 'f32').mraysPerRound),
             );
             for (const ratio of nodeRatios) {
@@ -874,6 +878,31 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             }
             const anyHitOrder: AnyHitOrderResult = { rounds: profile.rounds, entries: orderEntries, ratios: orderRatios, agreement: orderAgreement, counts: orderCounts };
 
+            // 8: wide nodes against f32 (docs/internals/design/wide-nodes.md; wide-nodes-bench.ts), with primary rays besides the two sets.
+            let wideNodes: WideNodesResult | null = null;
+            if (!skip.has('wide')) {
+                const primaryRays = makePlacementRays({ position: camera.position, target: camera.target, fovYDeg: camera.fovYDeg }, { width: RC_VIEW.width, height: RC_VIEW.height, tileSize: 1 }, RC_HALTON_FIRST_INDEX);
+                const primary = { name: 'primary', buffer: uploadRays(device, 'primary rays', primaryRays), count: primaryRays.length / RAY_FLOATS };
+                gpuBuffers.push(primary.buffer);
+                wideNodes = await runWideNodesSection({
+                    device,
+                    sceneId,
+                    geometries,
+                    instances,
+                    build,
+                    f32Scenes: scenes,
+                    f32Data: { instanced: instancedData, merged: mergedData },
+                    f32Kernel: fullKernel,
+                    sets: [primary, ...sets],
+                    timer,
+                    profile,
+                    progress,
+                    sceneBuffers,
+                    extraKernels,
+                    gpuBuffers,
+                });
+            }
+
             data = {
                 benchmark: 'surface-rays',
                 scene: sceneId,
@@ -895,6 +924,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                 ...(runLeaves ? { triangleLeaves } : {}),
                 nodeFormat,
                 ...(runOrders ? { anyHitOrder } : {}),
+                ...(wideNodes ? { wideNodes } : {}),
             };
 
             // The verdict is correctness only.
@@ -919,6 +949,9 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             }
             for (const entry of nodeCounts) {
                 if (entry.countedAgreement < MIN_COUNTED_AGREEMENT) failures.push(`the quantized counted walk disagrees with its production kernel on ${entry.tree} ${entry.set} ${entry.mode}: ${percent(entry.countedAgreement)}`);
+            }
+            for (const entry of wideNodes?.agreement ?? []) {
+                if (entry.different > 0) failures.push(`${entry.layout} nodes change ${entry.different} of ${entry.rays} answers (not ties) on ${entry.tree} ${entry.set} ${entry.mode}`);
             }
             for (const entry of orderAgreement) {
                 if (entry.same !== entry.rays) failures.push(`any-hit order '${entry.order}' blocks differently from 'far' on ${entry.tree} ${entry.set}: ${entry.rays - entry.same} of ${entry.rays} rays`);

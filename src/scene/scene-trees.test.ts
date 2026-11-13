@@ -923,6 +923,61 @@ describe('SceneTrees with quantized nodes', () => {
     });
 });
 
+describe('SceneTrees with wide nodes', () => {
+    for (const nodeFormat of ['bvh4', 'cwbvh8'] as const) {
+        for (const triangleLeaves of ['records', 'indexed'] as const) {
+            it(`${nodeFormat}: tinybvh's trees collapsed on arrival, merged groups, runtime adds and removals: the same hits as f32 (${triangleLeaves})`, async () => {
+                const { scene, stand, frame } = await setUp({ mergeStaticInstances: true, triangleLeaves, nodeFormat });
+                expect(scene.nodeFormat).toBe(nodeFormat);
+                expect(scene.traceBuffers.nodeFormat).toBe(nodeFormat);
+                const { geometries, instances, rays } = sceneOf(5);
+                const twin: Instance = { mesh: -1, meshIndex: 4, instanceIndex: 200, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1] };
+                const all = [...instances, twin];
+                const { meshes } = addAll(scene, geometries, all);
+                frame();
+                await scene.whenRefined();
+                frame();
+                // No GPU collapse yet: every tree is tinybvh's, collapsed on this thread.
+                expect(stand!.requests).toHaveLength(0);
+                expect(scene.meshStatus(meshes[4]).fallbackReason).toMatch(/GPU first trees are off/);
+                expect(scene.counts).toMatchObject({ onGpuTrees: 0, onTinybvhTrees: 2 });
+                const expected = await reference(geometries, all);
+                expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+
+                const late = tessellatedQuad(4, 0.5);
+                const lateInstance: Instance = { mesh: scene.addMesh(late), meshIndex: 5, instanceIndex: 300, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, -3, 1] };
+                const lateHandle = scene.addInstance(lateInstance);
+                frame();
+                await scene.whenRefined();
+                frame();
+                expect(disagreements(readScene(scene), await reference([...geometries, late], [...all, lateInstance]), rays)).toEqual([]);
+                scene.removeInstance(lateHandle);
+                scene.removeMesh(lateInstance.mesh);
+                frame();
+                expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+                scene.dispose();
+            });
+        }
+    }
+
+    it('takes fewer node bytes than f32, and refuses the adopt lever', async () => {
+        const sizes: Record<string, number> = {};
+        for (const nodeFormat of ['f32', 'bvh4', 'cwbvh8'] as const) {
+            const { scene, frame } = await setUp({ stand: false, nodeFormat });
+            const { geometries, instances } = sceneOf(4);
+            addAll(scene, geometries, instances);
+            frame();
+            await scene.whenRefined();
+            frame();
+            sizes[nodeFormat] = scene.memory.nodesInUse;
+            scene.dispose();
+        }
+        expect(sizes.bvh4).toBeLessThan(sizes.f32);
+        expect(sizes.cwbvh8).toBeLessThan(sizes.bvh4);
+        await expect(setUp({ stand: false, nodeFormat: 'cwbvh8', gpuTreeOutputs: 'adopt' })).rejects.toThrow(/gpuTreeOutputs: 'copy'/);
+    });
+});
+
 describe('SceneTrees with gpuMaxBatchBytes (the real queue, a stand-in H-PLOC)', () => {
     for (const variant of [
         { name: 'copy, holdRefinements', options: { holdRefinements: true }, allGpu: true },
@@ -1307,7 +1362,7 @@ describe('SceneTrees.setPoseCpu', () => {
     const down = (x: number, y: number) => ({ origin: [x, y, 3] as const, direction: [0, 0, -1] as const, tMin: 0, tMax: 100 });
 
     for (const triangleLeaves of ['records', 'indexed'] as const) {
-        for (const nodeFormat of ['f32', 'quantized'] as const) {
+        for (const nodeFormat of ['f32', 'quantized', 'bvh4', 'cwbvh8'] as const) {
             it(`without subgroups (${triangleLeaves}, ${nodeFormat}): the CPU walk over the uploaded buffers hits the posed geometry, and a skipped GPU pose warns once`, async () => {
                 const warnings: string[] = [];
                 const { gpu, scene, frame } = await setUp({ stand: false, triangleLeaves, nodeFormat, warn: (message) => warnings.push(message) });
