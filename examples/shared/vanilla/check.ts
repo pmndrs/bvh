@@ -14,6 +14,8 @@
  */
 
 import { RAY_FLOATS, type CpuHit, type CpuTracer, type TraceRay } from '@pmndrs/bvh';
+import type { CameraBasis } from './camera.ts';
+import type { RayCastView } from './raycast-view.ts';
 
 export interface HitLike {
     readonly t: number;
@@ -76,4 +78,34 @@ function nudged(ray: TraceRay, amount: number): TraceRay[] {
         }
     }
     return out;
+}
+
+/** The rays of a `columns` x `rows` grid of pixels of a `width` x `height` ray-cast view, as its kernel makes them, and where each lands. */
+export function viewCheckRays(basis: CameraBasis, width: number, height: number, columns = 32, rows = 32): { readonly packed: Float32Array; readonly at: readonly (readonly [number, number])[] } {
+    const packed = new Float32Array(columns * rows * RAY_FLOATS);
+    const at: [number, number][] = [];
+    for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < columns; i++) {
+            const x = Math.floor(((i + 0.5) / columns) * width);
+            const y = Math.floor(((j + 0.5) / rows) * height);
+            const ndc = [((x + 0.5) / width) * 2 - 1, 1 - ((y + 0.5) / height) * 2];
+            const d = [0, 1, 2].map((k) => basis.forward[k] + basis.right[k] * ndc[0] + basis.up[k] * ndc[1]);
+            const length = Math.hypot(d[0], d[1], d[2]);
+            packed.set([...basis.origin, 0, d[0] / length, d[1] / length, d[2] / length, 1e30], at.length * RAY_FLOATS);
+            at.push([x, y]);
+        }
+    }
+    return { packed, at };
+}
+
+/**
+ * The last traced frame of `view` against the CPU walk over `cpu`'s scene:
+ * 1,024 pixels (the kernel's own camera rays, so ulp-level grazes along
+ * silhouettes are allowed, as in `vanilla/raytrace`). `basis` must be the
+ * camera of that frame (hold the camera still while checking).
+ */
+export async function checkViewAgainstCpu(view: RayCastView, basis: (aspect: number) => CameraBasis, cpu: CpuTracer): Promise<Agreement> {
+    const pixels = await view.readPixels();
+    const { packed, at } = viewCheckRays(basis(pixels.width / pixels.height), pixels.width, pixels.height);
+    return checkAgainstCpu(packed, (index) => pixels.hit(at[index][0], at[index][1]), cpu, { perturb: 1e-6 });
 }
