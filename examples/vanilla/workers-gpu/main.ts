@@ -178,8 +178,8 @@ async function runSceneTrees(id: number, way: Way, started: number): Promise<Run
         return null;
     }
     swapIn({ kind: 'trees', id, trees, pool, log });
-    // Polled each frame; a run replaced meanwhile stops polling its (disposed) scene.
-    const first = new Promise<number>((resolve) => watch(() => id !== runId || (trees.counts.meshes > 0 && trees.counts.waitingForFirstTree === 0), resolve));
+    // Polled each frame (first: every mesh has a placed tree); a run replaced meanwhile stops polling its (disposed) scene.
+    const first = new Promise<number>((resolve) => watch(() => id !== runId || (trees.counts.meshes > 0 && trees.counts.onGpuTrees + trees.counts.onTinybvhTrees === trees.counts.meshes), resolve));
     const best = new Promise<number>((resolve) => watch(() => id !== runId || (trees.counts.meshes > 0 && trees.counts.onTinybvhTrees === trees.counts.meshes), resolve));
     const firstAt = await first;
     const bestAt = await best;

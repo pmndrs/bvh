@@ -177,7 +177,7 @@ async function frame(state: Renderer): Promise<void> {
     gpu.queue.submit([encoder.finish()]);
     state.frames++;
     const counts = state.trees.counts;
-    if (!state.sentFirst && counts.meshes > 0 && counts.waitingForFirstTree === 0) {
+    if (!state.sentFirst && counts.meshes > 0 && counts.onGpuTrees + counts.onTinybvhTrees === counts.meshes) {
         state.sentFirst = true;
         post({ type: 'trees', id: state.id, stage: 'first', counts });
     }
