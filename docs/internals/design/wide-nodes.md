@@ -1,6 +1,6 @@
 # Wide nodes: BVH4 and CWBVH (the traversal experiment)
 
-## Status (2026-11-13): built, off by default, correctness gates pass on the Apple M5; speed: see section 8
+## Status (2026-11-13): built, off by default; correctness gates pass on the Apple M5; speed so far only provisional (a loaded machine), and the gate is not met there
 
 Two experimental scene node formats sit next to `'f32' | 'quantized'`: `nodeFormat: 'bvh4'` (4-wide, tinybvh's `BVH4_GPU` node) and `nodeFormat: 'cwbvh8'` (Ylitie, Karras and Laine 2017, the compressed 8-wide BVH, tinybvh's `BVH8_CWBVH` node). Both are off by default. The hit contract does not change: `BvhHit`, the 40- and 24-byte records, `GPU_LAYOUT_VERSION` 2, the `bvh*` names, the `bvhTrianglePasses` filter hook, ray masks and the watertight `bvhEdgeFunction` triangle test.
 
@@ -125,7 +125,8 @@ No NVIDIA RTX SDK code. The paper was read; tinybvh's MIT code is what was porte
 
 - **`trace-oracle`, full profile** (665.9 s, passes). 17 wide variants: BVH4 and CWBVH on tinybvh, GPU LBVH and H-PLOC trees, and three-mesh-bvh trees (CWBVH); masks compiled out; any-hit near; indexed (vec4, packed); merged groups (tinybvh, H-PLOC, indexed); per-triangle materials; the CWBVH workgroup stack. Results: 0 mismatches against the CPU reference; **0 of 2M shared-edge rays slipped** in every variant; one-ulp seams leak exactly as `watertight-tinybvh` does (11,287 and 9,913 of 200k; merged, transformed: 25,923, the same as every binary merged variant). The 5 wide hook passes (filters, the query, instance masks against ray masks; BVH4 and CWBVH; masks on and off; merged; indexed): 33 cases, 0 mismatches.
 - **`trace-wide-compile`:** 64 kernels compile; the largest is 42.3 KB.
-- **`scene-trees-mid-swap`** `wide-*` variants: see section 8's run notes.
+- **`scene-trees-mid-swap`** `wide-*` variants (BVH4 and CWBVH, merged, indexed packed with the workgroup stack; tinybvh trees collapsed on arrival, the GPU top level): 44 states, 0 disagreements, every must-hit ray hits (573 s for the whole page).
+- **`trace-bench-surface-sponza`** (section 8): every wide answer equals `f32`'s on 7.8M rays per run, ties apart.
 - **Unit tests:** `src/wide-nodes.test.ts` (every triangle reached exactly once; every decoded box holds every corner below it; CWBVH's leaf rules; the refit repacks to the same bytes in the same pose and holds a new pose). `src/trace/wide-scene.test.ts` (instanced and merged, records and indexed, masks and a filter, any-hit far and near: every closest hit has the `f32` hit's `t`, ties counted, any-hit identical). `src/scene/scene-trees.test.ts` (`SceneTrees with wide nodes`; `setPoseCpu` for `bvh4` and `cwbvh8`).
 - **`tools/wide-nodes.ts`** (CPU walk, about 20k air-grid and 10-16k secondary rays per scene): 0 hits differ from `f32`; 6-15 ties on Bistro interior merged (none elsewhere).
 
@@ -152,7 +153,31 @@ CWBVH's 40.5 MiB on Sponza is B3's measured 42,488,000 bytes. Quantized binary n
 
 The wide trees take a third to two thirds of the node visits, as width should. CWBVH tests up to 36% more triangles on Sponza, where `CombineLeafs(3)` and the leaf limit of 3 give up boxes that the binary tree's smaller leaves had. Many-mesh Bistro interior gains least on its instanced tree: each instance entry costs a whole wide root (B3's 0.82x).
 
-**GPU speed** (`trace-bench-surface-*` section 8; paired rounds, wide over `f32`): see the table below. *[pending: filled from the M5 run]*
+**GPU speed, provisional** (Apple M5 Pro, Chrome 157, `trace-bench-surface-sponza` section 8 at commit `00d3054`, `profile=quick`: 3 paired rounds; held the GPU lock, but **the machine was loaded**: 1-minute load 31.7 before and 239.8 after on 18 cores, 27-35 Chrome GPU processes of other jobs; rows in `bench/results/trace.csv` with `machine/quiet` 0). Wide over `f32`, median of rounds (min-max). **Not a gate result.**
+
+| Sponza, closest hit | primary (coherent) | surface (incoherent) | air grid (incoherent) |
+| --- | --- | --- | --- |
+| BVH4, instanced | **1.40** (1.36-1.42) | 0.70 (0.69-0.71) | 0.86 (0.86-0.86) |
+| CWBVH, instanced | 1.19 (1.11-1.23) | 0.57 (0.55-0.59) | 0.75 (0.74-0.76) |
+| CWBVH workgroup stack, instanced | 1.14 (1.02-1.21) | 0.57 (0.55-0.59) | 0.73 (0.71-0.75) |
+| BVH4, merged | 1.28 (1.27-1.29) | **1.32** (1.31-1.33) | 1.29 (1.28-1.29) |
+| CWBVH, merged | 0.97 (0.95-1.00) | 1.00 (0.99-1.00) | 1.02 (1.02-1.04) |
+| CWBVH workgroup stack, merged | 0.91 (0.89-0.96) | 0.98 (0.96-0.98) | 1.00 (0.99-1.02) |
+
+Any hit: BVH4 0.66-0.94 instanced and 0.94-1.22 merged; CWBVH 0.68-0.84 instanced and 0.58-1.27 merged (`wide_*_over_f32/*/any` rows). Rates, `f32`: instanced 46-125 Mrays/s on incoherent closest hits, merged 85-171 (the binary walk's merged tree is already 1.8x its instanced one, HANDOFF).
+
+Hits: 0 of 7.8M answers differ from `f32` in any format; 0-8 ties per set of about 230k.
+
+What the provisional run says, to be confirmed on a quiet machine:
+
+- **On one big tree (merged), width pays, but only BVH4's:** 1.28-1.32x closest-hit, which is about the 1.2x the literature gives BVH4 in software Vulkan. CWBVH is even (0.97-1.02x) despite 0.38x the node visits on the CPU walk: on the M5 its 8-child decode (two halves of four, exact planes) and the meta and hit-mask arithmetic cost what the visits save. The folded decode (L1) is the obvious next measurement.
+- **On the instanced tree (132 meshes), both are slower on incoherent rays** (BVH4 0.70-0.86x, CWBVH 0.57-0.75x) though they visit 0.56-0.68x the nodes. The suspect is the walk's shape, not the nodes: the wide walk nests a mesh loop inside the top-level loop (section 3), so in a warp whose rays enter different instances the lanes wait for each other at the inner loop's end, where the binary walk's single loop keeps them all busy. Coherent primary rays, which enter the same instances, gain (1.40x). Lever L7 (a single loop for BVH4) tests it.
+- **The CWBVH workgroup stack is no faster** than the private stack on the M5 (0.98-1.0x of it); it is kept for the RTX 3060, where private arrays live in local memory.
+- **Against the gate:** BVH4 merged is at 1.28-1.32x, just under and over 1.3x on a loaded machine; the instanced tree fails it. Nothing here passes the gate as measured; the quiet rerun and the RTX 3060 decide.
+
+The first provisional run, before the mesh stacks moved to module scope (each mesh walk call zero-filled a 256-byte stack), was 0.68 / 0.57 instanced surface and 1.27 / 0.95 merged surface: the fix moved those by 2-4%.
+
+**Still to measure on a quiet M5 (under the GPU lock, load below half the cores), three full-profile runs per scene:** `trace-bench-surface-sponza` and `trace-bench-surface-bistro-interior` with `BVH_PAGE_QUERY='skip=hit-record,leaves,nodes,any-order'`. Bistro interior has not been timed at all.
 
 **Windows (RTX 3060 Laptop): what to run**
 
@@ -169,10 +194,12 @@ Run it three times per scene (`trace-bench-surface-sponza`, `trace-bench-surface
 - **L4, exact boxes for split leaves:** tinybvh's `SplitLeafs` copies the parent leaf's box; boxes from the triangles would cut CWBVH's extra triangle tests on Sponza.
 - **L5, the collapse in the workers, and on the GPU** (section 2).
 - **L6, BVH4's workgroup stack**, if the private stack turns out to be what CWBVH's workgroup stack fixes.
+- **L7, a single-loop wide walk:** one loop and one stack for both levels with an instance marker, as the binary walk has, so lanes in different instances keep stepping. Straightforward for BVH4 (its stack entries are words, as the binary walk's are); CWBVH needs the top level's references packed into its two-word entries. The provisional instanced-tree numbers (section 8) point at this first.
 
 ## 10. Follow-ups
 
-1. RTX 3060 runs (section 8), then the gate.
-2. GPU collapse after H-PLOC (so wide scenes get first trees without the worker), and a GPU wide refit (binary refit plus a repack pass).
-3. Collapse in the workers.
-4. If the gate passes: the folded decode (L1) and triangle postponing (L2) as measured levers, `serialize` for wide scenes, and `/three`'s `wideStack`.
+1. The quiet-machine M5 runs and the RTX 3060 runs (section 8, runbook 2d), then the gate.
+2. L7 (single-loop BVH4 walk) and L1 (folded decode) as A/B settings, measured the same way.
+3. GPU collapse after H-PLOC (so wide scenes get first trees without the worker), and a GPU wide refit (binary refit plus a repack pass).
+4. Collapse in the workers.
+5. If the gate passes: the folded decode (L1) and triangle postponing (L2) as measured levers, `serialize` for wide scenes, and `/three`'s `wideStack`.

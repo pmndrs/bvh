@@ -84,7 +84,11 @@ Everything below is on `main` and pushed to origin. No release, tag or npm publi
 - **Gates on the M5:** `trace-oracle` full (17 wide variants: 0 of 2M shared-edge slips; seams equal records); `trace-wide-compile` (largest kernel 42.3 KB); `scene-trees-mid-swap` (44 wide states, 0 disagreements).
 - **Memory, Sponza:** nodes 185.1 → 74.5 MiB (BVH4) → 40.5 MiB (CWBVH).
 - **Collapse time, Sponza, one core:** 1.35 s (BVH4), 1.83 s (CWBVH).
-- **Speed:** only provisional M5 runs so far (loaded machine; design note section 8). The gate is ≥1.3x closest-hit on incoherent rays on both the M5 and the RTX 3060, measured under the GPU lock on a quiet machine. Runbook section 2d has the commands.
+- **Speed:** only provisional M5 runs so far, on a loaded machine (design note section 8). Sponza, closest hit on incoherent rays:
+  - merged tree: BVH4 1.29-1.32x, CWBVH 1.00-1.02x;
+  - instanced tree: BVH4 0.70-0.86x, CWBVH 0.57-0.75x. The suspect is the nested per-instance mesh loop; lever L7, a single-loop walk, tests it;
+  - primary rays, instanced: BVH4 1.40x.
+- **The gate** (≥1.3x closest-hit on incoherent rays on both the M5 and the RTX 3060, under the GPU lock on a quiet machine) is not met as measured. Still to run: quiet-M5 full runs of Sponza and Bistro interior, and the RTX 3060 (runbook section 2d).
 - **Timed pages** now hold the shared GPU lock (`/tmp/rt-gpu.lock`) and record the machine's load (`tests/gpu/README.md`, "Timed pages").
 
 **Consumers** (survey of ~/Developer, 2026-11-11)
