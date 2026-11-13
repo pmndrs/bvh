@@ -45,6 +45,11 @@
  * workers, merged groups one frame each, capped batches stored between
  * updates; one also with indexed leaves (packed positions).
  *
+ * The `wide-*` variants run with `nodeFormat: 'bvh4'` or `'cwbvh8'`
+ * (docs/internals/design/wide-nodes.md): no GPU collapse yet, so every tree
+ * is tinybvh's, collapsed on arrival; the GPU top level, merged groups and
+ * indexed leaves around it. One state each (there is no swap).
+ *
  * URL option: `?sharedRays=100000` shrinks the seam cases.
  */
 
@@ -71,6 +76,8 @@ interface Variant {
     readonly indexed?: 'vec4' | 'packed';
     /** Quantized nodes (docs/internals/design/compressed-nodes.md); absent: f32. */
     readonly quantized?: boolean;
+    /** Wide nodes (docs/internals/design/wide-nodes.md); absent: f32. */
+    readonly wide?: 'bvh4' | 'cwbvh8';
 }
 
 /** Smaller than any one-mesh batch (its uniforms alone are 2.8 kB), so every mesh is a batch of its own. */
@@ -98,6 +105,11 @@ const VARIANTS: readonly Variant[] = [
     { name: 'quantized-copy-merged', gpuTreeOutputs: 'copy', merged: true, quantized: true },
     { name: 'quantized-copy-capped', gpuTreeOutputs: 'copy', merged: false, maxBatchBytes: SMALL_CAP, quantized: true },
     { name: 'quantized-indexed-copy-merged-capped', gpuTreeOutputs: 'copy', merged: true, maxBatchBytes: SMALL_CAP, indexed: 'packed', quantized: true },
+    // Wide nodes: tinybvh's trees collapsed on arrival (no GPU collapse yet).
+    { name: 'wide-bvh4', gpuTreeOutputs: 'copy', merged: false, wide: 'bvh4' },
+    { name: 'wide-bvh4-merged', gpuTreeOutputs: 'copy', merged: true, wide: 'bvh4' },
+    { name: 'wide-cwbvh8', gpuTreeOutputs: 'copy', merged: false, wide: 'cwbvh8' },
+    { name: 'wide-cwbvh8-indexed-merged', gpuTreeOutputs: 'copy', merged: true, indexed: 'packed', wide: 'cwbvh8' },
 ];
 
 /** Each instance its own mesh copy, two of every three static (the trace-oracle's merged variants). */
@@ -121,6 +133,9 @@ await runGpuTest(
             'quantized-records': await TraceBatchKernel.create(device, { nodeFormat: 'quantized' }),
             'quantized-vec4': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4', nodeFormat: 'quantized' }),
             'quantized-packed': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'quantized' }),
+            'bvh4-records': await TraceBatchKernel.create(device, { nodeFormat: 'bvh4' }),
+            'cwbvh8-records': await TraceBatchKernel.create(device, { nodeFormat: 'cwbvh8' }),
+            'cwbvh8-packed': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'cwbvh8', wideStack: 'workgroup' }),
         };
         const firstTrees = new GpuFirstTrees(device, { label: 'mid-swap' });
         const indexedFirstTrees = new GpuFirstTrees(device, { label: 'mid-swap indexed', triangleLeaves: 'indexed' });
@@ -151,8 +166,9 @@ await runGpuTest(
                     firstTreeBuilder: variant.indexed ? indexedFirstTrees : firstTrees,
                     ...(variant.indexed ? { triangleLeaves: 'indexed' as const, positionLayout: variant.indexed } : {}),
                     ...(variant.quantized ? { nodeFormat: 'quantized' as const } : {}),
+                    ...(variant.wide ? { nodeFormat: variant.wide } : {}),
                 });
-                const kernel = kernels[`${variant.quantized ? 'quantized-' : ''}${variant.indexed ?? 'records'}` as keyof typeof kernels];
+                const kernel = kernels[`${variant.quantized ? 'quantized-' : variant.wide ? `${variant.wide}-` : ''}${variant.indexed ?? 'records'}` as keyof typeof kernels];
                 const handles = meshes.map((mesh) => scene.addMesh(mesh));
                 for (const instance of instances) scene.addInstance({ ...instance, mesh: handles[instance.meshIndex] });
                 const frame = () => {
@@ -176,6 +192,18 @@ await runGpuTest(
                     return counts;
                 };
 
+                if (variant.wide) {
+                    // No GPU trees: every mesh waits for tinybvh's tree, collapsed when it arrives.
+                    frame();
+                    await scene.whenRefined();
+                    frame();
+                    const only = await check('tinybvh');
+                    if (only.onGpuTrees > 0 || only.onTinybvhTrees === 0) failures.push(`${oracleCase.name} ${variant.name}: ${only.onGpuTrees} GPU and ${only.onTinybvhTrees} tinybvh trees`);
+                    if (variant.merged && only.mergedGroups === 0) failures.push(`${oracleCase.name} ${variant.name}: nothing merged`);
+                    log(`${oracleCase.name} ${variant.name}: tinybvh ${only.onTinybvhTrees}, groups ${only.mergedGroups}`);
+                    scene.dispose();
+                    continue;
+                }
                 // The same with a cap: the batches go on between updates (each stored in its own submit), so no update is needed until whenBuilt.
                 frame();
                 await scene.whenBuilt();

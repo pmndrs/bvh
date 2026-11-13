@@ -1,3 +1,31 @@
+/*!
+ * The collapse and the BVH4 and CWBVH packers below are ported from tinybvh's
+ * MBVH<M>::ConvertFrom, BVH4_GPU::ConvertFrom and BVH8_CWBVH::ConvertFrom (tiny_bvh_base.h);
+ * its licence (licenses/tinybvh.txt):
+ *
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2024-2026, Jacco Bikker / Breda University of Applied Sciences.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
 /**
  * Wide nodes (docs/internals/design/wide-nodes.md): a mesh's binary tree
  * collapsed into a 4-wide (`'bvh4'`) or a compressed 8-wide (`'cwbvh8'`)
@@ -160,7 +188,7 @@ export interface WideMeshTree {
  * slot assignment. Opaque outside this file.
  */
 export interface WideTopology {
-    readonly nodes: readonly WideNode[];
+    readonly nodes: WideNodes;
     /** Packed node -> its wide node. */
     readonly addressNode: Int32Array;
     /** CWBVH: packed node -> slot -> wide child (-1: empty), 8 per node. BVH4: child k is slot k. */
@@ -214,12 +242,16 @@ function readBinary(layout: GpuLayoutMeshBvh, extraCapacity: number): BinaryTree
     // Every node and every leaf child becomes a node: at most 2 * nodeCount + 1.
     const tree = allocateBinary(2 * layout.nodeCount + 1 + extraCapacity);
     const W = GPU_LAYOUT_NODE_WORD;
+    const box = tree.box;
     const childBox = (node: number, side: number, out: number): void => {
         const at = node * GPU_LAYOUT_NODE_WORDS + side * GPU_LAYOUT_CHILD_STRIDE_WORDS;
-        for (let axis = 0; axis < 3; axis++) {
-            tree.box[out * 6 + axis] = floats[at + W.leftMin + axis];
-            tree.box[out * 6 + 3 + axis] = floats[at + W.leftMax + axis];
-        }
+        const o = out * 6;
+        box[o] = floats[at + W.leftMin];
+        box[o + 1] = floats[at + W.leftMin + 1];
+        box[o + 2] = floats[at + W.leftMin + 2];
+        box[o + 3] = floats[at + W.leftMax];
+        box[o + 4] = floats[at + W.leftMax + 1];
+        box[o + 5] = floats[at + W.leftMax + 2];
     };
     const rootRight = words[W.rightIndex];
     // A single-triangle tree: its root holds one leaf. tinybvh's root is that leaf.
@@ -242,25 +274,26 @@ function readBinary(layout: GpuLayoutMeshBvh, extraCapacity: number): BinaryTree
         const id = stack.pop()!;
         const node = stack.pop()!;
         const base = node * GPU_LAYOUT_NODE_WORDS;
-        const ids = [0, 0];
-        for (let side = 0; side < 2; side++) {
-            const child = tree.size++;
-            ids[side] = child;
-            childBox(node, side, child);
-            const index = words[base + (side === 0 ? W.leftIndex : W.rightIndex)];
-            const count = words[base + (side === 0 ? W.leftCount : W.rightCount)];
-            if (count > 0) {
-                tree.first[child] = index;
-                tree.count[child] = count;
-            }
+        const left = tree.size;
+        const right = left + 1;
+        tree.size += 2;
+        childBox(node, 0, left);
+        childBox(node, 1, right);
+        const leftCount = words[base + W.leftCount];
+        const rightCount = words[base + W.rightCount];
+        if (leftCount > 0) {
+            tree.first[left] = words[base + W.leftIndex];
+            tree.count[left] = leftCount;
         }
-        tree.left[id] = ids[0];
-        tree.right[id] = ids[1];
+        if (rightCount > 0) {
+            tree.first[right] = words[base + W.rightIndex];
+            tree.count[right] = rightCount;
+        }
+        tree.left[id] = left;
+        tree.right[id] = right;
         // Push right then left so the left subtree gets the lower numbers.
-        for (let side = 1; side >= 0; side--) {
-            const count = words[base + (side === 0 ? W.leftCount : W.rightCount)];
-            if (count === 0) stack.push(words[base + (side === 0 ? W.leftIndex : W.rightIndex)], ids[side]);
-        }
+        if (rightCount === 0) stack.push(words[base + W.rightIndex], right);
+        if (leftCount === 0) stack.push(words[base + W.leftIndex], left);
     }
     return tree;
 }
@@ -341,17 +374,45 @@ function surfaceArea(box: Float64Array, n: number): number {
 
 // ---- The collapse: MBVH<M>::ConvertFrom ---------------------------------------------
 
-/** One node of the collapsed M-wide tree (tinybvh's `MBVHNode`). */
-interface WideNode {
-    /** The binary node it stands for (its box comes from there). */
-    readonly src: number;
-    /** Box: min x, y, z, max x, y, z. */
+/**
+ * The collapsed M-wide tree (tinybvh's `MBVHNode` list), as arrays: node `i`
+ * stands for binary node `src[i]` (its box comes from there), and is a leaf
+ * of `triCount[i]` triangles from `first[i]` when `childCount[i]` is 0, else
+ * an inner node whose children are nodes `childStart[i]` onwards (the
+ * breadth-first decode puts a node's children next to each other).
+ */
+interface WideNodes {
+    count: number;
     box: Float64Array;
-    /** Leaves: the triangle range. */
-    readonly firstTri: number;
-    readonly triCount: number;
-    /** Inner nodes: the children's positions in the node list. */
-    readonly children: number[];
+    src: Int32Array;
+    first: Uint32Array;
+    triCount: Uint32Array;
+    childStart: Int32Array;
+    childCount: Uint8Array;
+}
+
+function allocateWide(capacity: number): WideNodes {
+    return {
+        count: 0,
+        box: new Float64Array(capacity * 6),
+        src: new Int32Array(capacity),
+        first: new Uint32Array(capacity),
+        triCount: new Uint32Array(capacity),
+        childStart: new Int32Array(capacity),
+        childCount: new Uint8Array(capacity),
+    };
+}
+
+/** Appends a node standing for binary node `src`, its box copied from there. */
+function pushWide(nodes: WideNodes, tree: BinaryTree, src: number, first: number, triCount: number): number {
+    const i = nodes.count++;
+    nodes.src[i] = src;
+    const from = src * 6;
+    const to = i * 6;
+    for (let k = 0; k < 6; k++) nodes.box[to + k] = tree.box[from + k];
+    nodes.first[i] = first;
+    nodes.triCount[i] = triCount;
+    return i;
 }
 
 const C_TRAV = 1;
@@ -365,17 +426,17 @@ const ASLEAF = 4;
 /**
  * Collapses the binary tree into an M-wide one (`MBVH<M>::ConvertFrom`),
  * merging subtrees of at most `leafPrimLimit` contiguous triangles into one
- * leaf (0: never). Returns the nodes breadth-first: a node's children are
- * consecutive entries.
+ * leaf (0: never). The nodes come out breadth-first.
  */
-function collapse(tree: BinaryTree, M: number, leafPrimLimit: number): WideNode[] {
-    const boxOf = (n: number): Float64Array => tree.box.slice(n * 6, n * 6 + 6);
+function collapse(tree: BinaryTree, M: number, leafPrimLimit: number): WideNodes {
     // The root is a leaf: add a level, as tinybvh does (CWBVH needs an inner root).
     if (isLeaf(tree, 0)) {
-        return [
-            { src: 0, box: boxOf(0), firstTri: 0, triCount: 0, children: [1] },
-            { src: 0, box: boxOf(0), firstTri: tree.first[0], triCount: tree.count[0], children: [] },
-        ];
+        const nodes = allocateWide(2);
+        pushWide(nodes, tree, 0, 0, 0);
+        pushWide(nodes, tree, 0, tree.first[0], tree.count[0]);
+        nodes.childStart[0] = 1;
+        nodes.childCount[0] = 1;
+        return nodes;
     }
     const N = tree.size;
     const cost = new Float64Array(N * M);
@@ -442,46 +503,49 @@ function collapse(tree: BinaryTree, M: number, leafPrimLimit: number): WideNode[
             }
         }
     }
-    // Pass 3: decode breadth-first, so a node's children are consecutive.
-    const decodeWalk = (src: number): number[] => {
-        const task: number[] = [src];
-        const taskSlots: number[] = [M];
-        const term: number[] = [];
-        while (task.length > 0) {
-            const c = task.pop()!;
-            const slots = taskSlots.pop()!;
+    // Pass 3: decode breadth-first, so a node's children are consecutive (DecodeWalk + DecodeEmit).
+    const task = new Int32Array(M + 2);
+    const taskSlots = new Int32Array(M + 2);
+    const term = new Int32Array(M);
+    const decodeWalk = (src: number): number => {
+        let tasks = 1;
+        let n = 0;
+        task[0] = src;
+        taskSlots[0] = M;
+        while (tasks > 0) {
+            tasks--;
+            const c = task[tasks];
+            const slots = taskSlots[tasks];
             if (slots > 1 && !isLeaf(tree, c) && dist[c * M + slots - 1] !== 0) {
                 const k = dist[c * M + slots - 1];
                 // Right first, so that left pops first.
-                task.push(tree.right[c]);
-                taskSlots.push(slots - k);
-                task.push(tree.left[c]);
-                taskSlots.push(k);
+                task[tasks] = tree.right[c];
+                taskSlots[tasks++] = slots - k;
+                task[tasks] = tree.left[c];
+                taskSlots[tasks++] = k;
                 continue;
             }
-            term.push(c);
+            term[n++] = c;
         }
-        return term;
+        return n;
     };
-    const out: WideNode[] = [];
-    const srcNode: number[] = [0];
-    out.push({ src: 0, box: boxOf(0), firstTri: 0, triCount: 0, children: [] });
-    for (let i = 0; i < out.length; i++) {
-        const src = srcNode[i];
-        if (src < 0) continue; // a leaf
-        const term = decodeWalk(src);
-        for (const c of term) {
-            out[i].children.push(out.length);
-            if (flag[c] & ASLEAF) {
-                out.push({ src: c, box: boxOf(c), firstTri: subFirst[c], triCount: subCount[c], children: [] });
-                srcNode.push(-1);
-            } else {
-                out.push({ src: c, box: boxOf(c), firstTri: 0, triCount: 0, children: [] });
-                srcNode.push(c);
-            }
+    // The collapse emits at most one node per binary node (tinybvh's bound), plus the root.
+    const nodes = allocateWide(N + 2);
+    const expand = new Uint8Array(N + 2);
+    pushWide(nodes, tree, 0, 0, 0);
+    expand[0] = 1;
+    for (let i = 0; i < nodes.count; i++) {
+        if (!expand[i]) continue;
+        const n = decodeWalk(nodes.src[i]);
+        nodes.childStart[i] = nodes.count;
+        nodes.childCount[i] = n;
+        for (let j = 0; j < n; j++) {
+            const c = term[j];
+            if (flag[c] & ASLEAF) pushWide(nodes, tree, c, subFirst[c], subCount[c]);
+            else expand[pushWide(nodes, tree, c, 0, 0)] = 1;
         }
     }
-    return out;
+    return nodes;
 }
 
 // ---- Quantization ------------------------------------------------------------------
@@ -515,26 +579,35 @@ function quantizeMax(value: number, p: number, scale: number): number {
     return q;
 }
 
-/** A box no ray can reach: inverted, or not finite. */
-function isEmptyBox(box: Float64Array): boolean {
+/** Node `i`'s box holds nothing a ray can reach: inverted, or not finite. */
+function isEmptyBox(box: Float64Array, i: number): boolean {
     for (let axis = 0; axis < 3; axis++) {
-        const lo = box[axis];
-        const hi = box[axis + 3];
+        const lo = box[i * 6 + axis];
+        const hi = box[i * 6 + 3 + axis];
         if (!(lo <= hi) || !Number.isFinite(lo) || !Number.isFinite(hi)) return true;
     }
     return false;
 }
 
-/** The node's own box for quantization: its `f32` box (the union of its children's, as the builders write). */
-function nodeCorner(nodes: readonly WideNode[], node: WideNode): { lo: number[]; hi: number[] } {
-    const lo = [Infinity, Infinity, Infinity];
-    const hi = [-Infinity, -Infinity, -Infinity];
-    for (const c of node.children) {
-        const box = nodes[c].box;
-        if (isEmptyBox(box)) continue;
+/** Scratch for one node's quantization: its corner, scale and exponents, and one child's planes. */
+const corner = { lo: new Float64Array(3), hi: new Float64Array(3), scale: new Float64Array(3), exponent: new Int32Array(3) };
+const planes = new Int32Array(6);
+
+/**
+ * Node `i`'s corner (into `corner`): the union of its children's boxes (as
+ * the builders write a parent's box), as `f32`, with each axis's exponent and
+ * scale. An axis with no finite child is 0.
+ */
+function nodeCorner(nodes: WideNodes, i: number): void {
+    const { lo, hi } = corner;
+    lo.fill(Infinity);
+    hi.fill(-Infinity);
+    const start = nodes.childStart[i];
+    for (let c = start; c < start + nodes.childCount[i]; c++) {
+        if (isEmptyBox(nodes.box, c)) continue;
         for (let axis = 0; axis < 3; axis++) {
-            lo[axis] = Math.min(lo[axis], box[axis]);
-            hi[axis] = Math.max(hi[axis], box[axis + 3]);
+            lo[axis] = Math.min(lo[axis], nodes.box[c * 6 + axis]);
+            hi[axis] = Math.max(hi[axis], nodes.box[c * 6 + 3 + axis]);
         }
     }
     for (let axis = 0; axis < 3; axis++) {
@@ -542,52 +615,65 @@ function nodeCorner(nodes: readonly WideNode[], node: WideNode): { lo: number[];
             lo[axis] = 0;
             hi[axis] = 0;
         }
-        // The corner is stored as f32; the box values are f32 already.
+        // The boxes are f32 already; the corner is stored as f32.
         lo[axis] = Math.fround(lo[axis]);
         hi[axis] = Math.fround(hi[axis]);
+        corner.exponent[axis] = planeExponent(lo[axis], hi[axis]);
+        corner.scale[axis] = 2 ** corner.exponent[axis];
     }
-    return { lo, hi };
 }
 
-/** Quantized planes of one child: [loX, loY, loZ, hiX, hiY, hiZ]; an empty box gets lo 255, hi 0 (never entered). */
-function childPlanes(box: Float64Array, lo: number[], scale: number[]): number[] {
-    if (isEmptyBox(box)) return [255, 255, 255, 0, 0, 0];
-    const planes = [0, 0, 0, 0, 0, 0];
-    for (let axis = 0; axis < 3; axis++) {
-        planes[axis] = quantizeMin(box[axis], lo[axis], scale[axis]);
-        planes[axis + 3] = quantizeMax(box[axis + 3], lo[axis], scale[axis]);
+/** Child `c`'s quantized planes (into `planes`: lo x, y, z, hi x, y, z) on `corner`; an empty box gets lo 255, hi 0 (never entered). */
+function childPlanes(nodes: WideNodes, c: number): void {
+    if (isEmptyBox(nodes.box, c)) {
+        planes.set([255, 255, 255, 0, 0, 0]);
+        return;
     }
-    return planes;
+    for (let axis = 0; axis < 3; axis++) {
+        planes[axis] = quantizeMin(nodes.box[c * 6 + axis], corner.lo[axis], corner.scale[axis]);
+        planes[axis + 3] = quantizeMax(nodes.box[c * 6 + 3 + axis], corner.lo[axis], corner.scale[axis]);
+    }
 }
 
 // ---- BVH4: BVH4_GPU::ConvertFrom --------------------------------------------------
 
 /** Writes a BVH4 node's corner, scale and planes (not its child words) at `address`. */
-function writeBvh4Boxes(nodes: readonly WideNode[], node: WideNode, words: Uint32Array, floats: Float32Array, address: number): void {
+function writeBvh4Boxes(nodes: WideNodes, i: number, words: Uint32Array, floats: Float32Array, address: number): void {
     const W = BVH4_NODE_WORD;
     const base = address * BVH4_NODE_WORDS;
-    const { lo, hi } = nodeCorner(nodes, node);
-    const scale = [0, 1, 2].map((axis) => 2 ** planeExponent(lo[axis], hi[axis]));
+    nodeCorner(nodes, i);
     for (let axis = 0; axis < 3; axis++) {
-        floats[base + W.min + axis] = lo[axis];
-        floats[base + W.scale + axis] = scale[axis];
+        floats[base + W.min + axis] = corner.lo[axis];
+        floats[base + W.scale + axis] = corner.scale[axis];
     }
-    const planeWords = [0, 0, 0, 0, 0, 0];
-    node.children.forEach((c, slot) => {
-        const planes = childPlanes(nodes[c].box, lo, scale);
-        for (let k = 0; k < 6; k++) planeWords[k] |= planes[k] << (8 * slot);
-    });
-    words[base + W.xMin] = planeWords[0] >>> 0;
-    words[base + W.yMin] = planeWords[1] >>> 0;
-    words[base + W.zMin] = planeWords[2] >>> 0;
-    words[base + W.xMax] = planeWords[3] >>> 0;
-    words[base + W.yMax] = planeWords[4] >>> 0;
-    words[base + W.zMax] = planeWords[5] >>> 0;
+    let xMin = 0;
+    let yMin = 0;
+    let zMin = 0;
+    let xMax = 0;
+    let yMax = 0;
+    let zMax = 0;
+    const start = nodes.childStart[i];
+    for (let slot = 0; slot < nodes.childCount[i]; slot++) {
+        childPlanes(nodes, start + slot);
+        const shift = 8 * slot;
+        xMin |= planes[0] << shift;
+        yMin |= planes[1] << shift;
+        zMin |= planes[2] << shift;
+        xMax |= planes[3] << shift;
+        yMax |= planes[4] << shift;
+        zMax |= planes[5] << shift;
+    }
+    words[base + W.xMin] = xMin >>> 0;
+    words[base + W.yMin] = yMin >>> 0;
+    words[base + W.zMin] = zMin >>> 0;
+    words[base + W.xMax] = xMax >>> 0;
+    words[base + W.yMax] = yMax >>> 0;
+    words[base + W.zMax] = zMax >>> 0;
 }
 
-function packBvh4(nodes: WideNode[]): { buffer: ArrayBuffer; count: number; stackNeed: number; depth: number; addressNode: Int32Array } {
+function packBvh4(nodes: WideNodes): { buffer: ArrayBuffer; count: number; stackNeed: number; depth: number; addressNode: Int32Array } {
     let inner = 0;
-    for (const node of nodes) if (node.children.length > 0) inner++;
+    for (let i = 0; i < nodes.count; i++) if (nodes.childCount[i] > 0) inner++;
     const buffer = new ArrayBuffer(Math.max(1, inner) * BVH4_NODE_BYTES);
     const words = new Uint32Array(buffer);
     const floats = new Float32Array(buffer);
@@ -597,50 +683,69 @@ function packBvh4(nodes: WideNode[]): { buffer: ArrayBuffer; count: number; stac
     let next = 0;
     let stackNeed = 0;
     let depth = 0;
-    const stack: { node: number; parentWord: number; need: number; level: number }[] = [{ node: 0, parentWord: -1, need: 0, level: 1 }];
+    // Stack entries: node, the parent's child word (-1 for the root), the stack need above it, its level.
+    const stack: number[] = [0, -1, 0, 1];
     while (stack.length > 0) {
-        const { node: index, parentWord, need, level } = stack.pop()!;
-        const node = nodes[index];
+        const level = stack.pop()!;
+        const need = stack.pop()!;
+        const parentWord = stack.pop()!;
+        const i = stack.pop()!;
         const address = next++;
-        addressNode[address] = index;
+        addressNode[address] = i;
         if (parentWord >= 0) words[parentWord] = address;
         const base = address * BVH4_NODE_WORDS;
-        if (node.children.length > 4) throw new Error('wide nodes: a BVH4 node with more than 4 children');
-        writeBvh4Boxes(nodes, node, words, floats, address);
+        const count = nodes.childCount[i];
+        if (count > 4) throw new Error('wide nodes: a BVH4 node with more than 4 children');
+        writeBvh4Boxes(nodes, i, words, floats, address);
         let innerChildren = 0;
-        node.children.forEach((c, slot) => {
-            const child = nodes[c];
-            if (child.children.length === 0) {
-                if (child.triCount < 1 || child.triCount > 8) throw new RangeError(`wide nodes: a BVH4 leaf of ${child.triCount} triangles`);
-                if (child.firstTri > BVH4_CHILD.indexMask) throw new RangeError('wide nodes: too many triangles for a BVH4 leaf word');
-                words[base + W.child + slot] = (BVH4_CHILD.leafBit | ((child.triCount - 1) << BVH4_CHILD.countShift) | child.firstTri) >>> 0;
-            } else innerChildren++;
-        });
+        const start = nodes.childStart[i];
+        for (let slot = 0; slot < count; slot++) {
+            const c = start + slot;
+            if (nodes.childCount[c] > 0) {
+                innerChildren++;
+                continue;
+            }
+            const triCount = nodes.triCount[c];
+            if (triCount < 1 || triCount > 8) throw new RangeError(`wide nodes: a BVH4 leaf of ${triCount} triangles`);
+            if (nodes.first[c] > BVH4_CHILD.indexMask) throw new RangeError('wide nodes: too many triangles for a BVH4 leaf word');
+            words[base + W.child + slot] = (BVH4_CHILD.leafBit | ((triCount - 1) << BVH4_CHILD.countShift) | nodes.first[c]) >>> 0;
+        }
         // The walk pushes every inner child it enters and pops the nearest; one entry stays per pushed sibling.
         const here = need + innerChildren;
         stackNeed = Math.max(stackNeed, here);
         depth = Math.max(depth, level);
-        node.children.forEach((c, slot) => {
-            if (nodes[c].children.length > 0) stack.push({ node: c, parentWord: base + W.child + slot, need: here - 1, level: level + 1 });
-        });
+        for (let slot = 0; slot < count; slot++) {
+            const c = start + slot;
+            if (nodes.childCount[c] > 0) stack.push(c, base + W.child + slot, here - 1, level + 1);
+        }
     }
     return { buffer, count: next, stackNeed, depth, addressNode };
 }
 
 // ---- CWBVH: BVH8_CWBVH::ConvertFrom ------------------------------------------------
 
-/** tinybvh's greedy slot assignment: child i goes to slot s, by its centroid's direction from the node's. */
-function octantSlots(nodes: WideNode[], node: WideNode): number[] {
-    const box = node.box;
-    const centroid = [0, 1, 2].map((axis) => (box[axis] + box[axis + 3]) * 0.5);
-    const cost: number[][] = Array.from({ length: 8 }, () => new Array<number>(8).fill(Infinity));
-    const assignment = new Array<number>(8).fill(-1);
-    const slotEmpty = new Array<boolean>(8).fill(true);
-    const childCount = node.children.length;
-    for (let i = 0; i < childCount; i++) {
-        const c = nodes[node.children[i]].box;
-        const d = [0, 1, 2].map((axis) => (c[axis] + c[axis + 3]) * 0.5 - centroid[axis]);
-        for (let s = 0; s < 8; s++) cost[s][i] = (s & 4 ? -d[0] : d[0]) + (s & 2 ? -d[1] : d[1]) + (s & 1 ? -d[2] : d[2]);
+/** Scratch for the slot assignment. */
+const slotCost = new Float64Array(64);
+const slotAssignment = new Int32Array(8);
+const slotEmpty = new Uint8Array(8);
+const centroidOffset = new Float64Array(3);
+
+/**
+ * tinybvh's greedy slot assignment: child k of node `i` goes to slot s by its
+ * centroid's direction from the node's. Writes slot -> node (-1 for empty) into `out`.
+ */
+function octantSlots(nodes: WideNodes, i: number, out: Int32Array, at: number): void {
+    const box = nodes.box;
+    const start = nodes.childStart[i];
+    const childCount = nodes.childCount[i];
+    slotAssignment.fill(-1);
+    slotEmpty.fill(1);
+    for (let k = 0; k < childCount; k++) {
+        const c = start + k;
+        for (let axis = 0; axis < 3; axis++) centroidOffset[axis] = (box[c * 6 + axis] + box[c * 6 + 3 + axis]) * 0.5 - (box[i * 6 + axis] + box[i * 6 + 3 + axis]) * 0.5;
+        for (let s = 0; s < 8; s++) {
+            slotCost[s * 8 + k] = (s & 4 ? -centroidOffset[0] : centroidOffset[0]) + (s & 2 ? -centroidOffset[1] : centroidOffset[1]) + (s & 1 ? -centroidOffset[2] : centroidOffset[2]);
+        }
     }
     for (;;) {
         let minCost = Infinity;
@@ -648,57 +753,56 @@ function octantSlots(nodes: WideNode[], node: WideNode): number[] {
         let minChild = -1;
         for (let s = 0; s < 8; s++) {
             if (!slotEmpty[s]) continue;
-            for (let i = 0; i < 8; i++) {
-                if (assignment[i] === -1 && cost[s][i] < minCost) {
-                    minCost = cost[s][i];
+            for (let k = 0; k < childCount; k++) {
+                if (slotAssignment[k] === -1 && slotCost[s * 8 + k] < minCost) {
+                    minCost = slotCost[s * 8 + k];
                     minSlot = s;
-                    minChild = i;
+                    minChild = k;
                 }
             }
         }
         if (minSlot === -1) break;
-        slotEmpty[minSlot] = false;
-        assignment[minChild] = minSlot;
+        slotEmpty[minSlot] = 0;
+        slotAssignment[minChild] = minSlot;
     }
     // Children left over (none with finite costs) take the first free slots.
-    for (let i = 0; i < childCount; i++) {
-        if (assignment[i] !== -1) continue;
+    for (let k = 0; k < childCount; k++) {
+        if (slotAssignment[k] !== -1) continue;
         for (let s = 0; s < 8; s++) {
             if (slotEmpty[s]) {
-                slotEmpty[s] = false;
-                assignment[i] = s;
+                slotEmpty[s] = 0;
+                slotAssignment[k] = s;
                 break;
             }
         }
     }
-    // slot -> child position in the node list, -1 for an empty slot.
-    const slotChild = new Array<number>(8).fill(-1);
-    for (let i = 0; i < childCount; i++) slotChild[assignment[i]] = node.children[i];
-    return slotChild;
+    for (let s = 0; s < 8; s++) out[at + s] = -1;
+    for (let k = 0; k < childCount; k++) out[at + slotAssignment[k]] = start + k;
 }
 
+/** Plane word of each of the six planes: lo x at word 8, lo y 10, lo z 12, hi x 14, hi y 16, hi z 18. */
+const CWBVH_PLANE_WORDS = [CWBVH_NODE_WORD.xMin, CWBVH_NODE_WORD.yMin, CWBVH_NODE_WORD.zMin, CWBVH_NODE_WORD.xMax, CWBVH_NODE_WORD.yMax, CWBVH_NODE_WORD.zMax];
+
 /** Writes a CWBVH node's corner, exponents and planes at `address` (keeping its imask byte and the rest). */
-function writeCwbvhBoxes(nodes: readonly WideNode[], node: WideNode, slotChild: ArrayLike<number>, words: Uint32Array, floats: Float32Array, bytes: Uint8Array, address: number): void {
+function writeCwbvhBoxes(nodes: WideNodes, i: number, slots: Int32Array, slotsAt: number, words: Uint32Array, floats: Float32Array, bytes: Uint8Array, address: number): void {
     const W = CWBVH_NODE_WORD;
     const base = address * CWBVH_NODE_WORDS;
     const byteBase = address * CWBVH_NODE_BYTES;
-    const { lo, hi } = nodeCorner(nodes, node);
-    const exponents = [0, 1, 2].map((axis) => planeExponent(lo[axis], hi[axis]));
-    const scale = exponents.map((e) => 2 ** e);
-    const planeWords = [W.xMin, W.yMin, W.zMin, W.xMax, W.yMax, W.zMax];
+    nodeCorner(nodes, i);
     for (let slot = 0; slot < 8; slot++) {
-        const c = slotChild[slot];
+        const c = slots[slotsAt + slot];
         if (c < 0) continue;
-        // Plane bytes: lo x at word 8, lo y 10, lo z 12, hi x 14, hi y 16, hi z 18; slot = byte within the pair.
-        const planes = childPlanes(nodes[c].box, lo, scale);
-        for (let k = 0; k < 6; k++) bytes[byteBase + planeWords[k] * 4 + slot] = planes[k];
+        // Slot = byte within each plane's pair of words.
+        childPlanes(nodes, c);
+        for (let k = 0; k < 6; k++) bytes[byteBase + CWBVH_PLANE_WORDS[k] * 4 + slot] = planes[k];
     }
-    for (let axis = 0; axis < 3; axis++) floats[base + W.p + axis] = lo[axis];
+    for (let axis = 0; axis < 3; axis++) floats[base + W.p + axis] = corner.lo[axis];
     const imask = words[base + W.exponentsAndImask] >>> 24;
-    words[base + W.exponentsAndImask] = ((exponents[0] + 127) | ((exponents[1] + 127) << 8) | ((exponents[2] + 127) << 16) | (imask << 24)) >>> 0;
+    const e = corner.exponent;
+    words[base + W.exponentsAndImask] = ((e[0] + 127) | ((e[1] + 127) << 8) | ((e[2] + 127) << 16) | (imask << 24)) >>> 0;
 }
 
-function packCwbvh(nodes: WideNode[], triangleCount: number): {
+function packCwbvh(nodes: WideNodes, triangleCount: number): {
     buffer: ArrayBuffer;
     count: number;
     triangleOrder: Uint32Array;
@@ -709,7 +813,7 @@ function packCwbvh(nodes: WideNode[], triangleCount: number): {
     slots: Int32Array;
 } {
     let inner = 0;
-    for (const node of nodes) if (node.children.length > 0) inner++;
+    for (let i = 0; i < nodes.count; i++) if (nodes.childCount[i] > 0) inner++;
     const buffer = new ArrayBuffer(Math.max(1, inner) * CWBVH_NODE_BYTES);
     const words = new Uint32Array(buffer);
     const floats = new Float32Array(buffer);
@@ -723,45 +827,45 @@ function packCwbvh(nodes: WideNode[], triangleCount: number): {
     let depth = 0;
     let slotsUsed = 0;
     let leafSlots = 0;
-    const stack: { node: number; address: number; level: number }[] = [{ node: 0, address: 0, level: 1 }];
+    // Stack entries: node, its address, its level.
+    const stack: number[] = [0, 0, 1];
     while (stack.length > 0) {
-        const { node: index, address, level } = stack.pop()!;
+        const level = stack.pop()!;
+        const address = stack.pop()!;
+        const i = stack.pop()!;
         depth = Math.max(depth, level);
-        const node = nodes[index];
         const base = address * CWBVH_NODE_WORDS;
         const byteBase = address * CWBVH_NODE_BYTES;
-        const slotChild = octantSlots(nodes, node);
-        addressNode[address] = index;
-        slots.set(slotChild, address * 8);
+        octantSlots(nodes, i, slots, address * 8);
+        addressNode[address] = i;
         let imask = 0;
         let internalChildCount = 0;
         let leafTriangles = 0;
         let childBase = 0;
         let triangleBase = 0;
         for (let slot = 0; slot < 8; slot++) {
-            const c = slotChild[slot];
+            const c = slots[address * 8 + slot];
             if (c < 0) continue;
             slotsUsed++;
-            const child = nodes[c];
-            if (child.children.length > 0) {
+            if (nodes.childCount[c] > 0) {
                 const childAddress = nodePtr++;
                 if (internalChildCount++ === 0) childBase = childAddress;
                 imask |= 1 << slot;
                 bytes[byteBase + W.meta * 4 + slot] = (1 << 5) | (24 + slot);
-                stack.push({ node: c, address: childAddress, level: level + 1 });
+                stack.push(c, childAddress, level + 1);
                 continue;
             }
-            const count = child.triCount;
+            const count = nodes.triCount[c];
             if (count < 1 || count > CWBVH_MAX_LEAF_TRIANGLES) throw new RangeError(`wide nodes: a CWBVH leaf of ${count} triangles`);
             if (leafTriangles === 0) triangleBase = triPtr;
             const unary = count === 1 ? 0b001 : count === 2 ? 0b011 : 0b111;
             bytes[byteBase + W.meta * 4 + slot] = (unary << 5) | leafTriangles;
             leafTriangles += count;
             leafSlots++;
-            for (let j = 0; j < count; j++) triangleOrder[triPtr++] = child.firstTri + j;
+            for (let j = 0; j < count; j++) triangleOrder[triPtr++] = nodes.first[c] + j;
         }
         words[base + W.exponentsAndImask] = (imask << 24) >>> 0;
-        writeCwbvhBoxes(nodes, node, slotChild, words, floats, bytes, address);
+        writeCwbvhBoxes(nodes, i, slots, address * 8, words, floats, bytes, address);
         words[base + W.childBase] = childBase;
         words[base + W.triangleBase] = triangleBase;
     }
@@ -787,11 +891,11 @@ export function convertToWide(layout: GpuLayoutMeshBvh, format: WideNodeFormat):
         let slots = 0;
         let leaves = 0;
         let leafTriangles = 0;
-        for (const node of nodes) {
-            slots += node.children.length;
-            for (const c of node.children) if (nodes[c].children.length === 0) {
+        for (let i = 0; i < nodes.count; i++) {
+            slots += nodes.childCount[i];
+            if (nodes.childCount[i] === 0) {
                 leaves++;
-                leafTriangles += nodes[c].triCount;
+                leafTriangles += nodes.triCount[i];
             }
         }
         return {
@@ -841,16 +945,16 @@ function cwbvhBinary(layout: GpuLayoutMeshBvh): BinaryTree {
  */
 export function refitWide(tree: WideMeshTree, refitted: GpuLayoutMeshBvh): ArrayBuffer {
     const binary = tree.nodeFormat === 'cwbvh8' ? cwbvhBinary(refitted) : readBinary(refitted, 0);
-    const { nodes, addressNode, slots } = tree.topology;
-    const fresh: WideNode[] = nodes.map((node) => ({ ...node, box: binary.box.slice(node.src * 6, node.src * 6 + 6) }));
+    const { nodes: kept, addressNode, slots } = tree.topology;
+    const nodes: WideNodes = { ...kept, box: new Float64Array(kept.box.length) };
+    for (let i = 0; i < nodes.count; i++) nodes.box.set(binary.box.subarray(nodes.src[i] * 6, nodes.src[i] * 6 + 6), i * 6);
     const buffer = tree.nodes.slice(0);
     const words = new Uint32Array(buffer);
     const floats = new Float32Array(buffer);
     const bytes = new Uint8Array(buffer);
     for (let address = 0; address < tree.nodeCount; address++) {
-        const node = fresh[addressNode[address]];
-        if (tree.nodeFormat === 'cwbvh8') writeCwbvhBoxes(fresh, node, slots!.subarray(address * 8, address * 8 + 8), words, floats, bytes, address);
-        else writeBvh4Boxes(fresh, node, words, floats, address);
+        if (tree.nodeFormat === 'cwbvh8') writeCwbvhBoxes(nodes, addressNode[address], slots!, address * 8, words, floats, bytes, address);
+        else writeBvh4Boxes(nodes, addressNode[address], words, floats, address);
     }
     return buffer;
 }

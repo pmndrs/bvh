@@ -40,7 +40,7 @@ function rays(seed: number, count: number): TraceRay[] {
     return [...randomRays(random, count / 2, [-10, -10, -10, 10, 10, 10], 2, { randomInterval: true }), ...randomRays(random, count / 2, [-8, -8, -8, 8, 8, 8], 0)];
 }
 
-function trace(scene: TraceSceneData, traced: readonly TraceRay[], anyHitOrder: 'far' | 'near' = 'far'): { closest: (CpuHit | null)[]; any: (CpuHit | null)[] } {
+function trace(scene: TraceSceneData, traced: readonly TraceRay[], anyHitOrder: 'far' | 'near' = 'far'): { closest: (CpuHit | null)[]; any: boolean[] } {
     const tracer = createCpuTracer(scene, { triangleFilter: filter, anyHitOrder });
     const masks = [undefined, 0x0f, 0xf0];
     return {
@@ -73,7 +73,7 @@ describe('a wide scene', () => {
                             else expect(got).toEqual(hit);
                         });
                         expect(ties).toBeLessThan(traced.length / 200);
-                        expect(actual.any.map((hit) => hit !== null)).toEqual(expected.any.map((hit) => hit !== null));
+                        expect(actual.any).toEqual(expected.any);
                     }
                 });
             }
