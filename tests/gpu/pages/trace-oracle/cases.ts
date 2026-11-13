@@ -25,6 +25,8 @@ import {
     randomAffine,
     randomRays,
     randomTriangleSoup,
+    sharedEdgeRays,
+    SHARED_EDGE_RAY_CATEGORIES,
     tessellatedQuad,
     toFloat32Ray,
     type Random,
@@ -481,12 +483,8 @@ function deepMeshCase(rayCount: number): OracleCase {
 // Shared edges
 // ---------------------------------------------------------------------------
 
-export const SHARED_EDGE_CATEGORIES = [
-    'exact vertical ray on a grid line',
-    'oblique ray at a grid-line edge',
-    'oblique ray at a diagonal edge',
-    'oblique ray at an interior vertex',
-] as const;
+/** What each shared-edge ray is aimed at (`sharedEdgeRays`, exported from the library). */
+export const SHARED_EDGE_CATEGORIES = SHARED_EDGE_RAY_CATEGORIES;
 
 export interface SharedEdgeCase extends OracleCase {
     /** Index into {@link SHARED_EDGE_CATEGORIES} for each ray. */
@@ -536,45 +534,9 @@ export function seamQuad(cells: number, half: number, seam: SeamKind): MeshGeome
 export function sharedEdgeCase(rayCount: number, transformed: boolean, seam: SeamKind = 'shared'): SharedEdgeCase {
     const cells = 8;
     const half = 2;
-    const step = (2 * half) / cells;
-    const random = createRandom(transformed ? 777 : 555);
     const objectToWorld = transformed ? tiltAboutX(compose([0.3, -0.2, 0.1], 0.6, [-1.3, 0.9, 1.1])) : IDENTITY;
-
-    const rays: TraceRay[] = [];
-    const categories = new Uint8Array(rayCount);
-    const interiorGridLine = (): number => -half + step * (1 + Math.floor(random() * (cells - 1)));
-    const insideCoordinate = (): number => (random() * 2 - 1) * (half - 0.2);
-
-    for (let i = 0; i < rayCount; i++) {
-        // The plain quad spends a tenth of its rays on exact vertical rays; the transformed one has none.
-        const category = transformed ? 1 + (i % 3) : i % 10 === 0 ? 0 : 1 + (i % 3);
-        categories[i] = category;
-
-        let target: Vector3;
-        if (category === 0 || category === 1) {
-            // On a grid line: x or y is a multiple of the cell size, the other is anywhere along the line.
-            target = random() < 0.5 ? [interiorGridLine(), insideCoordinate(), 0] : [insideCoordinate(), interiorGridLine(), 0];
-        } else if (category === 2) {
-            // Along the diagonal of a random cell.
-            const column = Math.floor(random() * cells);
-            const row = Math.floor(random() * cells);
-            const along = 0.05 + random() * 0.9;
-            target = [-half + step * (column + along), -half + step * (row + along), 0];
-        } else {
-            target = [interiorGridLine(), interiorGridLine(), 0];
-        }
-
-        const height = 0.5 + random() * 3;
-        const above = random() < 0.5 ? 1 : -1;
-        const origin: Vector3 =
-            category === 0
-                ? [target[0], target[1], above * height]
-                : [target[0] + (random() * 2 - 1) * height * 2, target[1] + (random() * 2 - 1) * height * 2, above * height];
-
-        const worldOrigin = transformPoint(objectToWorld, origin);
-        const worldTarget = transformPoint(objectToWorld, target);
-        rays.push(ray(worldOrigin, sub(worldTarget, worldOrigin)));
-    }
+    // The library's generator (oracle-fixtures.ts); the plain quad spends a tenth of its rays on exact vertical rays.
+    const { rays, categories } = sharedEdgeRays(rayCount, { cells, half, objectToWorld, seed: transformed ? 777 : 555, verticalEvery: transformed ? 0 : 10 });
 
     return {
         name: `${seam === 'shared' ? 'shared-edges' : `${seam}-seams`}${transformed ? '-transformed' : ''}`,

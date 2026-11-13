@@ -117,3 +117,13 @@ Not in this push, and not seen in this session:
 **Decided from this run (Dennis, 2026-11-13):** `mergeStaticInstances` on by default (it merges only instances marked `static`); `nodeFormat: 'quantized'` the default for every scene and walk; `triangleLeaves` stays `'records'` until a run of quantized nodes and indexed leaves together; the 40-byte hit record stays the default (shadow-only users pass `hitNormal: false`); `anyHitOrder` stays `'far'`. The bench pages keep their baselines by name (instanced, `f32` nodes, records), so their rows mean what they meant before the defaults changed.
 
 Next pass: the section 1 correctness pages on the new defaults, section 3 (`scene-trees-sponza`, now quantized by default), D3D12 compile times, the Intel UHD, and quantized nodes with indexed leaves together. The surface-ray pages time each variant alone today; the combined comparison needs a section added to `tests/gpu/pages/trace-bench/surface-rays-bench.ts` first.
+
+## 8. pmndrs/bvh#1 branch: RTX 3060 Laptop, 2026-11-14 (branch `x2-pathtracer-requests`, `376adbd`)
+
+Headless Chrome on D3D12; correctness only, no timings. Assets: `BVH_ASSETS_DIR=C:\Users\denni\Documents\dev\webgpu-ddgi\assets`, `BVH_MANIFESTS_DIR=...\webgpu-ddgi\scenes\manifests` (the default relative paths don't resolve from this checkout).
+
+- `trace-oracle` PASS (338 s), `trace-inline` PASS (60 s), on the new defaults (quantized nodes, merged static instances). Section 1's other pages were not run.
+- `trace-cpu-agreement` PASS: the doubles CPU walk gives the GPU's instance and triangle on all 98,304 Sponza primary rays (merged quantized and instanced `f32` scenes); any hits agree on every ray of every set; `t` within 41 f32 steps on primary rays; seam rays name the other neighbour on about 29% (ties at an edge).
+- `wgsl-f32-arithmetic` (reports only): `dot()` is `fma(z, fma(y, x * x))`; `1.0 / x` correctly rounded on 86.9% of inputs, else 1 ulp off; `a / b` about `a * (1 / b)`; `sqrt`, `inverseSqrt` 1 ulp off at times; written products and sums not fused.
+- `scene-trees-runtime` and the 20 example smoke pages passed with the worker handshake (item 2).
+- GPU idle between runs: P8, 255 MHz graphics, 49 °C.

@@ -1,0 +1,5 @@
+{
+    "description": "How this GPU rounds WGSL f32 arithmetic the walk uses: 1/x, a/b, a*b+c, dot, a*b-c*d, sums, sqrt, inverseSqrt, length, normalize, each against CPU models (correct rounding, fused or not, multiply by the reciprocal). Reports only; tells whether a CPU port could match the GPU bit for bit.",
+    "timeoutMs": 300000,
+    "manual": true
+}

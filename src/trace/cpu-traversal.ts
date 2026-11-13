@@ -6,6 +6,9 @@
  * against the brute-force reference, with no GPU. It also reports the deepest
  * stack the walk used, which the GPU cannot tell us without a debug counter.
  * It runs in doubles, so it matches the GPU's decisions but not its rounding.
+ * An f32 copy would not match it either: GPUs may round division and `sqrt`
+ * within a few ulp and fuse `dot()`, and the ray setup divides (DIVERGENCES T4,
+ * the `wgsl-f32-arithmetic` and `trace-cpu-agreement` GPU pages).
  *
  * The triangle filter, as in the WGSL walk: a triangle whose flag bit 0 is set
  * asks `options.triangleFilter`, and a ray it lets through goes on without

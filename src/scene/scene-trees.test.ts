@@ -280,6 +280,28 @@ function addAll(scene: SceneTrees, geometries: readonly MeshGeometry[], instance
 }
 
 describe('SceneTrees', () => {
+    it('whenBuilt and whenRefined wait for the first update (builds start there), then need no other', async () => {
+        for (const stand of [true, false]) {
+            const { scene, frame } = await setUp({ stand });
+            const { geometries, instances } = sceneOf(3);
+            addAll(scene, geometries, instances);
+            let built = false;
+            let refined = false;
+            const whenBuilt = scene.whenBuilt().then(() => (built = true));
+            const whenRefined = scene.whenRefined().then(() => (refined = true));
+            // No update: nothing starts, so neither resolves however long it waits.
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            expect([built, refined, scene.building]).toEqual([false, false, true]);
+            frame();
+            await withinTime(whenBuilt, 'whenBuilt after one update');
+            await withinTime(whenRefined, 'whenRefined after one update');
+            frame();
+            expect(scene.building).toBe(false);
+            expect(scene.counts.meshes).toBe(3);
+            scene.dispose();
+        }
+    });
+
     it('without a GPU builder: tinybvh trees, the CPU top level, and runtime adds and removals that trace like the CPU-assembled scene', async () => {
         const { scene, frame, events } = await setUp({ ...UNMERGED, stand: false });
         expect(scene.gpuFirstTrees.enabled).toBe(false);

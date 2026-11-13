@@ -1,0 +1,5 @@
+{
+    "description": "The CPU walk against this GPU's walk, ray for ray: Sponza primary and air rays (default merged quantized scene and instanced f32), shared-edge rays plain and transformed, the oracle's random cases. Any hits must agree everywhere, closest hits never disagree on hit or miss, primary rays name the same triangle; bits are reported. Needs the scene assets unless ?scene=none.",
+    "timeoutMs": 900000,
+    "manual": true
+}
