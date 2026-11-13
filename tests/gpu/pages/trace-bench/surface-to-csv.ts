@@ -52,7 +52,9 @@
  * - `surface-rays/<tree>/<set>/<mode>/{steps,instances_entered,instances_entered_without_hit,...}`:
  *   the counted walk's mean work per ray;
  * - `surface-rays/<tree>/<set>/<mode>/agreement_with_instanced`: merged tree only;
- * - `surface-rays/<tree>/top_level_instances` and the tree's sizes.
+ * - `surface-rays/<tree>/top_level_instances` and the tree's sizes;
+ * - `machine/{load_1m_before,load_1m_after,chrome_gpu_processes_before,quiet}`: how loaded the machine was
+ *   around the page (tests/gpu/run.ts holds the GPU lock and records it); `quiet` 0 marks the run's timings provisional.
  *
  * Without --append or --out the rows are printed.
  */
@@ -323,6 +325,19 @@ async function main(): Promise<void> {
             const prefix = [summary.startedAt.slice(0, 10), commit, device, browserFromUserAgent(data.userAgent, data.browserVersion)];
             const key = `${device}|${data.scene}`;
             const rows = surfaceRaysRows(data);
+            // How loaded the machine was (run.ts, under the GPU lock): timings from a loaded machine are provisional.
+            const load = page.machineLoad;
+            if (load) {
+                const scene = data.scene;
+                rows.timed.push(
+                    { scene, metric: 'machine/load_1m_before', value: load.before.loadAverage[0] },
+                    { scene, metric: 'machine/load_1m_after', value: load.after.loadAverage[0] },
+                    { scene, metric: 'machine/chrome_gpu_processes_before', value: load.before.chromeGpuProcesses },
+                    { scene, metric: 'machine/quiet', value: load.quiet ? 1 : 0 },
+                );
+            } else {
+                console.error(`${page.name} in ${file}: no machine load recorded (a run from before the GPU lock); its timings count as provisional`);
+            }
             const group = groups.get(key) ?? { prefix, runs: [], counted: rows.counted };
             group.runs.push(rows.timed);
             groups.set(key, group);

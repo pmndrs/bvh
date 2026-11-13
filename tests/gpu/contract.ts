@@ -81,6 +81,11 @@ export interface RunSummary {
 
 export interface PageSummary {
     name: string;
+    /**
+     * Timed (manual) pages: the machine's load before and after the page, taken while holding the GPU lock
+     * (run.ts, machine-load.ts). `quiet` false means the timings are provisional.
+     */
+    machineLoad?: { before: import('./machine-load.ts').MachineLoad; after: import('./machine-load.ts').MachineLoad; quiet: boolean };
     /** pass | fail | caught-expected-failure | missed-expected-failure | wrong-failure */
     outcome: string;
     /** True when this page did not make the run fail. */
