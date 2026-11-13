@@ -25,13 +25,13 @@ const between = tree.closestPointToGeometry(other, otherToTree, onTree, onOther)
   `faceIndex`es are original triangles. A scaling `geometryToBvh` skews the culling, as in three-mesh-bvh.
 
 Against three-mesh-bvh 0.9.18 (`bench/closest-point.ts --rounds 10`, Node 22 on the Apple M5, the 269,764-triangle
-room, 2,000 points per row, 200 placements; indicative):
+room, 2,000 points per row, 200 placements; 2026-11-13, after the CPU query pass, under load; indicative):
 
 | Query | Agreement | Ours | three-mesh-bvh |
 | --- | --- | ---: | ---: |
-| Random points in the room's box | 2,000 of 2,000 the same distance (241 on another, equally near triangle) | 5.1 µs | 5.5 µs |
-| Points just off random surfaces | 2,000 of 2,000 (245 tied) | 8.1-8.6 µs | 7.5 µs |
-| `closestPointToGeometry`, a 180-triangle sphere with its own tree | 200 of 200 the same distance | 30.8 ms | 28.7 ms |
+| Random points in the room's box | 2,000 of 2,000 the same distance (241 on another, equally near triangle) | 1.6 µs | 4.9 µs |
+| Points just off random surfaces | 2,000 of 2,000 (245 tied) | 2.4 µs | 6.6 µs |
+| `closestPointToGeometry`, a 180-triangle sphere with its own tree | 200 of 200 the same distance | 28.4 ms | 27.7 ms |
 
 ## What lies at a hit
 
