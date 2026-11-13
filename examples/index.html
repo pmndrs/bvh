@@ -97,6 +97,8 @@
                 which builder ran and why, build times, tree stats, ray rates and a frame-time graph. Drop a glTF on any page, or pass
                 <code>?model=downloads/…/scene.gltf</code> to load one from <code>BVH_ASSETS_DIR</code>.
             </p>
+            <h2>Vanilla WebGPU (no engine, <code>@pmndrs/bvh</code> only)</h2>
+            <div class="grid" id="vanilla"></div>
             <h2>three.js (WebGPURenderer, <code>@pmndrs/bvh/three</code>)</h2>
             <div class="grid" id="three"></div>
             <h2>Comparison suite (<code>compare/</code>: three-mesh-bvh, three, bvh-tree, Babylon.js, bvh.js, Rapier)</h2>
@@ -108,8 +110,8 @@
                     <div class="description">GPU SDF generation from the trees. The library has no SDF generation yet.</div>
                 </div>
                 <div class="card gap">
-                    <span class="title">vanilla/*, babylon/*</span>
-                    <div class="description">The engine-free examples and Babylon come next (docs/internals/design/bvh-package-split.md).</div>
+                    <span class="title">vanilla/workers-*, vanilla/fast-first, vanilla/refit, babylon/*</span>
+                    <div class="description">The worker and refit pages of the plan, and Babylon, come next (docs/internals/design/bvh-package-split.md).</div>
                 </div>
             </div>
         </div>

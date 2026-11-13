@@ -13,19 +13,10 @@
 import { Box3, LoadingManager, type Mesh, type Object3D, Vector3, type PerspectiveCamera } from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import type { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { assetUrl } from './assets.ts';
 
-const params = new URLSearchParams(location.search);
-
-/** Where `?model=` paths are read from. */
-export function assetsBase(): string {
-    const base = params.get('assets') ?? `${import.meta.env.BASE_URL}assets/`;
-    return base.endsWith('/') ? base : `${base}/`;
-}
-
-/** The `?model=` path, or null. */
-export function requestedModel(): string | null {
-    return params.get('model');
-}
+// The asset base and `?model=` live in assets.ts, shared with the three-free glTF reader (vanilla/gltf.ts).
+export { assetsBase, requestedModel } from './assets.ts';
 
 export interface LoadedModel {
     readonly root: Object3D;
@@ -34,9 +25,9 @@ export interface LoadedModel {
     readonly loadMs: number;
 }
 
-/** Loads a glTF from a URL (`?model=` paths resolve against {@link assetsBase}). */
+/** Loads a glTF from a URL (`?model=` paths resolve against the assets base). */
 export async function loadGltf(path: string, manager?: LoadingManager): Promise<LoadedModel> {
-    const url = /^(https?:|blob:|\/)/.test(path) ? path : assetsBase() + path;
+    const url = assetUrl(path);
     const start = performance.now();
     const gltf = await new GLTFLoader(manager).loadAsync(url);
     return { root: gltf.scene, name: path.split('/').pop() ?? path, loadMs: performance.now() - start };

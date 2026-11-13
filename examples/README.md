@@ -19,6 +19,8 @@ The library is read from source through its public names only: `@pmndrs/bvh`, `@
 - `shared/loader.ts`: defaults from three's built-in geometries; `?model=<path>` loads a glTF from the assets base; drag and drop of a `.glb` (or a `.gltf` dropped together with its `.bin` and textures).
 - `shared/gpu-rays.ts`: picking and batch rays over a `SceneTrees` scene with `TraceBatchKernel`; `shared/gpu-timer.ts`: timestamp queries; `shared/stats.ts`: overlay numbers from a layout (`treeSahCost`) or a `SceneTrees` (`onTree` events, `counts`, `meshStatus`, `memory`).
 - `shared/smoke.ts`: smoke mode (below).
+- `shared/builders.ts`: one mesh's tree from a chosen builder, timed (CPU wall time, GPU timestamps), with the chooser's fallback; the inspector and the vanilla pages share it.
+- `shared/vanilla/`: the three-free shell of the vanilla pages (below). `overlay.ts`, `smoke.ts`, `stats.ts`, `gpu-rays.ts`, `gpu-timer.ts`, `builders.ts` and `assets.ts` are three-free too; `app.ts`, `loader.ts` and `compare.ts` are the three shell. ESLint refuses three, `@pmndrs/bvh/three` and the three shell in `vanilla/` and `shared/vanilla/`.
 
 ### Assets
 
@@ -34,6 +36,17 @@ BVH_ASSETS_DIR=../webgpu-ddgi/assets pnpm examples:dev
 ### Smoke runs
 
 `pnpm examples:smoke` is `node tests/gpu/run.ts --examples`: the runner serves this site with its own Vite config (plus the runner's preflight page), opens each example with `?token=`, and judges it like a test page. An example in smoke mode runs as it would for a person and, once it has shown what it is about, calls `ready()` (`shared/smoke.ts`), which leaves the report on `window.__gpuTestReport` with the overlay's numbers as `data`. Uncaught errors, unhandled rejections, WebGPU `uncapturederror`s, console errors and timeouts fail it. Each example also checks one thing it shows (for example, `acceleratedRaycast` agreeing with three's raycast, the GPU batch hitting).
+
+## Vanilla WebGPU examples (P4 item 1)
+
+Raw WebGPU and `@pmndrs/bvh` only: no three, no engine. They prove the "not a three library" claim.
+
+- `shared/vanilla/app.ts`: a `GPUDevice` asked for `subgroups` and `timestamp-query` when the adapter has them, plus the adapter's storage limits; a WebGPU canvas; an orbit camera (`camera.ts`: a view-projection matrix for raster passes, the ray basis for compute passes, packed camera rays); the shared overlay; a frame loop of `update` (may await a readback) then `render` (records into the frame's encoder; the loop submits).
+- `shared/vanilla/geometry.ts`: procedural meshes (torus knot, sphere, box, torus, ground) as plain `positions` and `indices`, scenes of meshes and column-major instances with a material number, `mergeToWorld`. `gltf.ts`: a minimal glTF reader (positions, indices, node transforms; `.glb` or `.gltf` with its `.bin`; no Draco, meshopt or quantized positions) for `?model=` and drag and drop.
+
+| Page | Shows | Smoke check |
+| --- | --- | --- |
+| `vanilla/hello` | The smallest use: `createMeshLayoutBuilder(device)` picks the builder and says why, `assembleTraceScene` + `uploadTraceScene`, the tree's boxes at a depth in a line pass (`bvhHelperPositions`), the pointer's ray picks a triangle (`TraceBatchKernel`, read back), and a batch of 1k-262k rays every frame whose hit points a render pass draws straight from the hit buffer | 1,024 batch rays agree with the CPU port of the walk (`createCpuTracer`) on the same scene; the centre ray hits |
 
 ## three.js examples
 

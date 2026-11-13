@@ -17,6 +17,13 @@ export interface ExampleEntry {
 
 export const EXAMPLES: readonly ExampleEntry[] = [
     {
+        name: 'vanilla-hello',
+        path: 'vanilla/hello',
+        title: 'Hello',
+        description: 'The smallest use, raw WebGPU and no engine: createMeshLayoutBuilder picks the builder and says why, the tree\'s boxes in a line pass, a picking ray and a batch of thousands whose hits are drawn straight from the GPU buffer.',
+        timeoutMs: 60_000,
+    },
+    {
         name: 'three-raycast',
         path: 'three/raycast',
         title: 'Raycast',

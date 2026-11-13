@@ -2,7 +2,7 @@
 import { EXAMPLES, SOURCE_TREE } from './examples.ts';
 
 for (const example of EXAMPLES) {
-    const grid = document.getElementById(example.path.startsWith('compare/') ? 'compare' : 'three')!;
+    const grid = document.getElementById(example.path.split('/')[0])!;
     const card = document.createElement('div');
     card.className = 'card';
     const title = document.createElement('a');

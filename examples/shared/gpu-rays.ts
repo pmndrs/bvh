@@ -1,14 +1,37 @@
 /**
- * Rays traced on the GPU over a `SceneTrees` scene with the package's own
- * batch kernel (`TraceBatchKernel`): one dispatch for any number of rays, the
- * hits read back. The examples use it for picking (one ray) and for batch
- * raycasts (thousands), timed with timestamp queries where the device has them.
+ * Rays traced on the GPU over a scene with the package's own batch kernel
+ * (`TraceBatchKernel`): one dispatch for any number of rays, the hits read
+ * back. The examples use it for picking (one ray) and for batch raycasts
+ * (thousands), timed with timestamp queries where the device has them.
+ *
+ * Engine-free: the scene is a `SceneTrees`, or any {@link TraceSource} (an
+ * uploaded scene, `traceSourceOf`). The three pages make their camera rays
+ * with `cameraRay` (app.ts), the vanilla ones with `OrbitCamera.ray`.
  */
 
-import { HIT_RECORD_BYTES, HIT_RECORD_WORD, RAY_BYTES, RAY_FLOATS, TraceBatchKernel, type SceneTrees } from '@pmndrs/bvh';
-import type { Camera, Vector2 } from 'three';
-import { Raycaster } from 'three';
+import { HIT_RECORD_BYTES, HIT_RECORD_WORD, RAY_BYTES, RAY_FLOATS, TraceBatchKernel, type NodeFormat, type PositionLayout, type TraceSceneBuffers, type TriangleLeaves } from '@pmndrs/bvh';
 import { GpuTimer } from './gpu-timer.ts';
+
+/** What rays are traced over: a `SceneTrees`, or an uploaded scene through {@link traceSourceOf}. */
+export interface TraceSource {
+    readonly device: GPUDevice;
+    /** Read at every trace (a `SceneTrees`' buffers can be replaced as they grow). */
+    readonly traceBuffers: TraceSceneBuffers;
+    readonly triangleLeaves: TriangleLeaves;
+    readonly positionLayout: PositionLayout;
+    readonly nodeFormat: NodeFormat;
+}
+
+/** An uploaded scene (`uploadTraceScene`) as a {@link TraceSource}, its formats read from the buffers. */
+export function traceSourceOf(device: GPUDevice, buffers: TraceSceneBuffers): TraceSource {
+    return {
+        device,
+        traceBuffers: buffers,
+        triangleLeaves: buffers.triangleLeaves ?? 'records',
+        positionLayout: buffers.positionLayout ?? 'vec4',
+        nodeFormat: buffers.nodeFormat ?? 'f32',
+    };
+}
 
 export interface GpuHit {
     readonly t: number;
@@ -41,14 +64,14 @@ export class GpuRays {
 
     private constructor(
         private readonly device: GPUDevice,
-        private readonly trees: SceneTrees,
+        private readonly trees: TraceSource,
         private readonly kernel: TraceBatchKernel,
     ) {
         this.timer = GpuTimer.create(device, 1);
     }
 
-    /** A kernel compiled for `trees`' triangle and node formats. */
-    static async create(trees: SceneTrees): Promise<GpuRays> {
+    /** A kernel compiled for the source's triangle and node formats. */
+    static async create(trees: TraceSource): Promise<GpuRays> {
         const kernel = await TraceBatchKernel.create(trees.device, { label: 'example rays', triangleLeaves: trees.triangleLeaves, positionLayout: trees.positionLayout, nodeFormat: trees.nodeFormat });
         return new GpuRays(trees.device, trees, kernel);
     }
@@ -71,7 +94,7 @@ export class GpuRays {
 
     /**
      * Traces `packed` rays (`RAY_FLOATS` per ray: origin, tMin, direction, tMax)
-     * for their closest hits, over the trees as of the last `SceneTrees.update`.
+     * for their closest hits, over the source as it is now (a `SceneTrees`: as of its last `update`).
      */
     async traceClosest(packed: Float32Array, mask?: number): Promise<GpuTraceResult> {
         const count = packed.length / RAY_FLOATS;
@@ -128,14 +151,4 @@ export class GpuRays {
         this.timer?.destroy();
         this.kernel.destroy();
     }
-}
-
-const raycaster = new Raycaster();
-
-/** The camera ray through `ndc` (-1..1), packed for {@link GpuRays.traceClosest}. */
-export function cameraRay(camera: Camera, ndc: Vector2, out = new Float32Array(RAY_FLOATS), at = 0): Float32Array {
-    raycaster.setFromCamera(ndc, camera);
-    const { origin, direction } = raycaster.ray;
-    out.set([origin.x, origin.y, origin.z, 0, direction.x, direction.y, direction.z, 1e30], at * RAY_FLOATS);
-    return out;
 }

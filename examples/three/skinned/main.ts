@@ -17,8 +17,8 @@
 import { Bone, Float32BufferAttribute, Group, Mesh, MeshBasicMaterial, MeshStandardMaterial, Raycaster, Skeleton, SkinnedMesh, SphereGeometry, Uint16BufferAttribute, Vector2, Vector3, type BufferGeometry, type Intersection } from 'three';
 import { SceneTrees } from '@pmndrs/bvh';
 import { SceneTreesObject3DSync } from '@pmndrs/bvh/three';
-import { createApp } from '../../shared/app.ts';
-import { cameraRay, GpuRays } from '../../shared/gpu-rays.ts';
+import { cameraRay, createApp } from '../../shared/app.ts';
+import { GpuRays } from '../../shared/gpu-rays.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 
