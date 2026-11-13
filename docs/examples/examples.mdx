@@ -24,6 +24,7 @@ Raw WebGPU and `@pmndrs/bvh` only: no three, no engine.
 | [`vanilla/raytrace`](https://github.com/pmndrs/bvh/tree/main/examples/vanilla/raytrace) | The WGSL walk in the page's own compute kernel: one ray per pixel, shown by normal, material, instance or distance, any-hit shadows; switch tinybvh, H-PLOC and LBVH live. |
 | [`vanilla/instances`](https://github.com/pmndrs/bvh/tree/main/examples/vanilla/instances) | `SceneTrees` with thousands of moving instances, runtime adds and removals, GPU first trees swapped for tinybvh's, and picking. |
 | [`vanilla/builders`](https://github.com/pmndrs/bvh/tree/main/examples/vanilla/builders) | tinybvh, H-PLOC and LBVH side by side on one mesh: build ms, SAH, depth, bytes, Mrays/s on the same rays. |
+| [`vanilla/fast-first`](https://github.com/pmndrs/bvh/tree/main/examples/vanilla/fast-first) | ddgi's load pattern as a recipe: `SceneTrees` places a GPU H-PLOC tree for every mesh at once, then swaps in tinybvh's from the worker pool mesh by mesh, with a timeline row per mesh while the walk traces every frame. |
 | [`vanilla/refit`](https://github.com/pmndrs/bvh/tree/main/examples/vanilla/refit) | A deforming mesh: a compute pass poses the vertices every frame and `GpuMeshRefit` refits its tree in the scene's buffers (`meshRefitPlacement`); refit ms, SAH drift against the built tree and a fresh build, "rebuild now" and an automatic rebuild. |
 
 ## three.js

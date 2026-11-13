@@ -52,6 +52,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         timeoutMs: 120_000,
     },
     {
+        name: 'vanilla-fast-first',
+        path: 'vanilla/fast-first',
+        title: 'Fast first',
+        description: 'ddgi\'s load pattern as a recipe: GPU H-PLOC trees placed for every mesh at once, tinybvh trees from the worker pool swapped in mesh by mesh, a timeline row per mesh, and the walk tracing every frame throughout. Hold and release the swaps, add and remove meshes mid-load, drop a glTF.',
+        timeoutMs: 180_000,
+    },
+    {
         name: 'three-raycast',
         path: 'three/raycast',
         title: 'Raycast',
