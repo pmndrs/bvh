@@ -581,6 +581,6 @@ describe('merged meshes are never refit targets', () => {
         );
         const mergedMesh = scene.meshes.findIndex((range) => range.mergedInto !== undefined);
         expect(() => meshRefitPlacement(scene, mergedMesh)).toThrow(new RegExp(`mesh ${mergedMesh} was merged into static group \\d+.*must not be refit`));
-        expect(meshRefitPlacement(scene, 18)).toEqual({ nodeWordOffset: scene.meshes[18].nodeOffset * 16, triangleWordOffset: scene.meshes[18].triangleOffset * TRIANGLE_WORDS });
+        expect(meshRefitPlacement(scene, 18)).toEqual({ nodeWordOffset: scene.meshes[18].nodeOffset * 16, nodeFormat: 'f32', triangleWordOffset: scene.meshes[18].triangleOffset * TRIANGLE_WORDS });
     });
 });

@@ -61,7 +61,9 @@ trees with rays from surfaces. The Apple M5 showed the same pattern (1.15-1.42x 
 Merged trees are the default, so `'far'` stays the default.
 
 The walk is compiled for the source's formats (`triangleLeaves`, `positionLayout`, `nodeFormat`); with indexed leaves
-a fourth storage node, `bvh.storage.positions`, is bound. Nothing changes for the caller.
+a fourth storage node, `bvh.storage.positions`, is bound. A `SceneTrees` names them; so does an upload
+(`new BvhTraceNodes(renderer, { buffers: uploadTraceScene(device, scene) })` reads them from the buffers). A source of
+your own must name all three: the formats are never guessed, and a source without them is refused.
 
 ## Each frame
 

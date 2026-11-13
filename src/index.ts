@@ -127,7 +127,7 @@ export {
     type BvhRefitStats,
     type GpuBvhRefitOptions,
 } from './gpu-refit.ts';
-export { GpuMeshRefit, GpuMeshRefitKernels, type GpuMeshRefitOptions, type MeshRefitTarget, type MeshRefitVertices } from './gpu-mesh-refit.ts';
+export { GpuMeshRefit, GpuMeshRefitKernels, type GpuMeshRefitOptions, type GpuMeshRefitPlacement, type MeshRefitTarget, type MeshRefitVertices } from './gpu-mesh-refit.ts';
 export { BVH_INSTANCE_BOX_PADDING, BVH_INSTANCE_BOX_WGSL } from './gpu-instance-box.ts';
 export {
     BVH_FLOAT_MAX,

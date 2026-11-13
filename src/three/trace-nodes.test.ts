@@ -67,10 +67,13 @@ const buffer = (label: string) => {
     return made as unknown as GPUBuffer & { destroyed: boolean };
 };
 
+
+/** The formats every plain test source names (data says what it is). */
+const F32_RECORDS = { nodeFormat: 'f32', triangleLeaves: 'records', positionLayout: 'vec4' } as const;
 describe('BvhTraceNodes', () => {
     it('binds the source buffers, rebinds on a new version, and never destroys them', () => {
         const { renderer, backend } = fakeRenderer();
-        const source = { version: 1, buffers: { nodes: buffer('n1'), triangles: buffer('t1'), topLevel: buffer('l1') } };
+        const source = { version: 1, ...F32_RECORDS, buffers: { nodes: buffer('n1'), triangles: buffer('t1'), topLevel: buffer('l1') } };
         const bvh = new BvhTraceNodes(renderer, source);
         const bound = () => [bvh.storage.nodes, bvh.storage.triangles, bvh.storage.topLevel].map((node) => backend.get(node.value as object).buffer);
         expect(bound()).toEqual([source.buffers.nodes, source.buffers.triangles, source.buffers.topLevel]);
@@ -96,6 +99,7 @@ describe('BvhTraceNodes', () => {
         for (const positionLayout of ['vec4', 'packed'] as const) {
             const source = {
                 version: 1,
+                nodeFormat: 'f32' as const,
                 triangleLeaves: 'indexed' as const,
                 positionLayout,
                 buffers: { nodes: buffer('n1'), triangles: buffer('t1'), topLevel: buffer('l1'), positions: buffer('p1') as GPUBuffer | null },
@@ -111,28 +115,33 @@ describe('BvhTraceNodes', () => {
             bvh.dispose();
             expect(() => new BvhTraceNodes(renderer, { ...source, buffers: { ...source.buffers, positions: null } })).toThrow(/positions buffer/);
         }
-        const records = new BvhTraceNodes(renderer, { buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } });
+        const records = new BvhTraceNodes(renderer, { ...F32_RECORDS, buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } });
         expect(records.storage.positions).toBeNull();
     });
 
     it('compiles a quantized source in: the nodes read as vec4u, the frame read on instance entry', () => {
         const { renderer, backend } = fakeRenderer();
         for (const triangleLeaves of ['records', 'indexed'] as const) {
-            const source = { nodeFormat: 'quantized' as const, triangleLeaves, buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l'), positions: buffer('p') as GPUBuffer | null } };
+            const source = { nodeFormat: 'quantized' as const, triangleLeaves, positionLayout: 'vec4' as const, buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l'), positions: buffer('p') as GPUBuffer | null } };
             const bvh = new BvhTraceNodes(renderer, source);
             expect(bvh.nodeFormat).toBe('quantized');
             expect((bvh.storage.nodes as unknown as { bufferType?: string; nodeType?: string }).nodeType ?? (bvh.storage.nodes as unknown as { bufferType?: string }).bufferType).toMatch(/uvec4/);
             expect(backend.get(bvh.storage.nodes.value as object).buffer).toBe(source.buffers.nodes);
             bvh.dispose();
         }
-        // A source that names no format is the default, quantized (as SceneTrees and assembled scenes are by default).
-        expect(new BvhTraceNodes(renderer, { buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } }).nodeFormat).toBe('quantized');
-        expect(new BvhTraceNodes(renderer, { nodeFormat: 'f32', buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } }).nodeFormat).toBe('f32');
+        // Data says what it is: a source that names no format is refused, never given the default.
+        const bare = { buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } };
+        expect(() => new BvhTraceNodes(renderer, bare as never)).toThrow(/must name their nodeFormat/);
+        expect(() => new BvhTraceNodes(renderer, { nodeFormat: 'f32', ...bare } as never)).toThrow(/must name their triangleLeaves/);
+        // An upload carries its formats in its buffers: an f32 scene binds as f32.
+        const uploaded = { ...bare.buffers, nodeFormat: 'f32' as const, triangleLeaves: 'records' as const, positionLayout: 'vec4' as const, byteLength: 0, destroy() {} };
+        expect(new BvhTraceNodes(renderer, { buffers: uploaded }).nodeFormat).toBe('f32');
+        expect(new BvhTraceNodes(renderer, { buffers: { ...uploaded, nodeFormat: 'quantized' } }).nodeFormat).toBe('quantized');
     });
 
     it("survives three's disposal: renderer.dispose() (Attributes.dispose) and a stand-in's dispose()", () => {
         const { renderer, backend, created, attributes, use } = fakeRenderer();
-        const source = { version: 1, buffers: { nodes: buffer('n1'), triangles: buffer('t1'), topLevel: buffer('l1') } };
+        const source = { version: 1, ...F32_RECORDS, buffers: { nodes: buffer('n1'), triangles: buffer('t1'), topLevel: buffer('l1') } };
         const bvh = new BvhTraceNodes(renderer, source);
         const standIns = () => [bvh.storage.nodes, bvh.storage.triangles, bvh.storage.topLevel].map((node) => node.value as { dispose(): void });
         for (const attribute of standIns()) use(attribute);
@@ -155,7 +164,7 @@ describe('BvhTraceNodes', () => {
 
     it('throws a clear error when three bound something else to a stand-in it used', () => {
         const { renderer, backend, use } = fakeRenderer();
-        const source = { version: 1, buffers: { nodes: buffer('n1'), triangles: buffer('t1'), topLevel: buffer('l1') } };
+        const source = { version: 1, ...F32_RECORDS, buffers: { nodes: buffer('n1'), triangles: buffer('t1'), topLevel: buffer('l1') } };
         const bvh = new BvhTraceNodes(renderer, source);
         // Not used by three yet: nothing to check.
         backend.get(bvh.storage.nodes.value as object).buffer = undefined;
@@ -174,7 +183,7 @@ describe('BvhTraceNodes', () => {
 
     it('passes anyHitOrder to the compiled walk', () => {
         const { renderer } = fakeRenderer();
-        const source = { buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } };
+        const source = { ...F32_RECORDS, buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } };
         const codeOf = (options?: { anyHitOrder?: 'far' | 'near' | 'larger' }) => (new BvhTraceNodes(renderer, source, options).module as unknown as { text: string }).text;
         expect(codeOf()).not.toContain('fn bvhBoxHalfArea(');
         expect(codeOf({ anyHitOrder: 'far' })).toBe(codeOf());
@@ -183,9 +192,9 @@ describe('BvhTraceNodes', () => {
     });
 
     it('needs a WebGPU backend, and refuses masked helpers without ray masks', () => {
-        expect(() => new BvhTraceNodes({ backend: { isWebGPUBackend: false } }, { buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } })).toThrow(/WebGPURenderer/);
+        expect(() => new BvhTraceNodes({ backend: { isWebGPUBackend: false } }, { ...F32_RECORDS, buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } })).toThrow(/WebGPURenderer/);
         const { renderer } = fakeRenderer();
-        const bvh = new BvhTraceNodes(renderer, { buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } }, { rayMasks: false });
+        const bvh = new BvhTraceNodes(renderer, { ...F32_RECORDS, buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } }, { rayMasks: false });
         expect(() => bvh.traceClosestMasked(null, null, 0, 1, null)).toThrow(/rayMasks/);
     });
 });

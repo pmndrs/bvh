@@ -355,6 +355,7 @@ describe('refitting a mesh of an indexed static scene', () => {
         const unwelded = assembleTraceScene(meshes.map(indexed), instances, {}, { triangleLeaves: 'indexed', geometries: meshes, weld: false, positionLayout: 'packed', nodeFormat: 'f32' });
         expect(meshRefitPlacement(unwelded, 4)).toEqual({
             nodeWordOffset: unwelded.meshes[4].nodeOffset * 16,
+            nodeFormat: 'f32',
             triangleWordOffset: unwelded.meshes[4].triangleOffset * INDEXED_TRIANGLE_WORDS,
             vertexBase: unwelded.meshes[4].vertexBase,
             vertexCount: meshes[4].positions.length / 3,

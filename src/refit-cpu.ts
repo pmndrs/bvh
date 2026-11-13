@@ -18,6 +18,7 @@ import {
     GPU_LAYOUT_INDEXED_ID_MASK,
     GPU_LAYOUT_INDEXED_TRIANGLE_BYTES,
     GPU_LAYOUT_INDEXED_TRIANGLE_WORD,
+    GPU_LAYOUT_MAX_LEAF_PRIMITIVES,
     GPU_LAYOUT_NO_PARENT,
     GPU_LAYOUT_NODE_BYTES,
     GPU_LAYOUT_NODE_WORD,
@@ -190,6 +191,12 @@ export interface CpuRefitResult {
  * `order` is {@link refitOrderOf}`(parents, nodeCount)`, for a caller that
  * refits the same tree again and again (it depends on the shape only);
  * without it, it is worked out here.
+ *
+ * The nodes must be 64-byte `f32` nodes. Quantized nodes (32 bytes, the
+ * scene default) are refit through an `f32` copy: `dequantizeNodes`, refit,
+ * then `quantizeNodeWords` back. A node whose child counts or indices can't be
+ * an `f32` node's (as quantized words read with the 64-byte stride) throws a
+ * RangeError before anything is written.
  */
 export function refitOnCpu(
     floats: Float32Array,
@@ -229,6 +236,12 @@ const CORNER_1 = 4;
 const CORNER_2 = 8;
 
 /** The refit of both entry points: `primitives` are boxes ({@link PRIMITIVE_BOX_FLOATS} each) or triangle records. */
+/** Each child's index and count words in a 64-byte node. */
+const F32_CHILD_WORDS = [
+    [GPU_LAYOUT_NODE_WORD.leftIndex, GPU_LAYOUT_NODE_WORD.leftCount],
+    [GPU_LAYOUT_NODE_WORD.rightIndex, GPU_LAYOUT_NODE_WORD.rightCount],
+] as const;
+
 function refitInOrder(
     floats: Float32Array,
     words: Uint32Array,
@@ -241,6 +254,21 @@ function refitInOrder(
 ): CpuRefitResult {
     if (nodeCount === 0) return { rootBox: new Float64Array(emptyBox()), summedHalfArea: 0 };
     if (order.length !== nodeCount) throw new RangeError(`${caller}: the order has ${order.length} nodes, the tree ${nodeCount}`);
+    // Every node must read as a 64-byte f32 node before anything is written: quantized words read with that stride are refused whole.
+    for (let node = 0; node < nodeCount; node++) {
+        const base = nodeWordOffset + node * GPU_LAYOUT_NODE_WORDS;
+        for (const [indexWord, countWord] of F32_CHILD_WORDS) {
+            const index = words[base + indexWord];
+            if (index === GPU_LAYOUT_EMPTY_CHILD) continue;
+            const count = words[base + countWord];
+            if (count > GPU_LAYOUT_MAX_LEAF_PRIMITIVES || (count === 0 && index >= nodeCount)) {
+                throw new RangeError(
+                    `${caller}: node ${node} is not a 64-byte f32 node (child count ${count}, index ${index} of ${nodeCount} nodes). ` +
+                        'Quantized nodes are refit through an f32 copy: dequantizeNodes, refit, quantizeNodeWords',
+                );
+            }
+        }
+    }
     const primitiveBoxes = primitives;
     // Each node's box, six doubles: `[minX, minY, minZ, maxX, maxY, maxZ]`. One array, no box objects.
     const nodeBoxes = new Float64Array(nodeCount * 6);

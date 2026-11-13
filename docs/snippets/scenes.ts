@@ -161,9 +161,10 @@ export async function refitMesh(
     // #region refit-mesh
     const meshRefit = new GpuMeshRefit(device, { diagnostics: true });
     await meshRefit.prepare();
-    // Once, from a CPU copy of the tree (any builder's). For a tree inside shared buffers,
-    // say where it sits: setTree(layout, { nodeWordOffset, triangleWordOffset }).
+    // Once, from a CPU copy of the tree (any builder's), in its own buffers:
     meshRefit.setTree(layout);
+    // For a mesh inside a scene's buffers, the placement says where, and in what node format:
+    // meshRefit.setTree(layout, meshRefitPlacement(scene, meshIndex));
 
     // Every frame, after the pass that writes the moved vertices:
     meshRefit.pollStats(); // maps an earlier frame's stats copy, without waiting

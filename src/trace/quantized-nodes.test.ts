@@ -306,7 +306,7 @@ describe('a quantized scene', () => {
         expect(assembleTraceScene(meshes.map(f32), instances, {}, { nodeFormat: 'f32' }).nodeFormat).toBe('f32');
     });
 
-    it('builds with defaults and assembles with defaults: the formats agree, and only a real mix throws', () => {
+    it('builds with defaults and assembles with defaults: the formats agree, and only a real mix throws', async () => {
         const { meshes, instances } = mixedScene(9);
         const few = traced.slice(0, 400);
         const bytes = (buffer: ArrayBuffer) => new Uint8Array(buffer);
@@ -332,6 +332,11 @@ describe('a quantized scene', () => {
         expect(() => assembleTraceScene(mixed, instances, {}, { geometries: meshes })).toThrow(/pass triangleLeaves: 'indexed'/);
         expect(assembleTraceScene(mixed, instances, {}, { triangleLeaves: 'indexed', geometries: meshes }).triangleLeaves).toBe('indexed');
         expect(() => assembleTraceScene(quantized, instances, {}, { nodeFormat: 'f32' })).toThrow(/nodeFormat: 'quantized'/);
+        // Indexed trees without their geometries, or from buildTraceScene's build without triangleLeaves: the error names the way out.
+        expect(() => assembleTraceScene(indexed, instances)).toThrow(/the trees are indexed.*pass geometries/);
+        await expect(buildTraceScene(meshes, instances, { build: (mesh) => buildMeshBvhWithTinyBvh(mesh, tinyBvh, { triangleLeaves: 'indexed' }) })).rejects.toThrow(
+            /returned an indexed tree.*pass triangleLeaves: 'indexed'/,
+        );
     });
 
     it('reads a hand-built scene without nodeFormat as f32', async () => {

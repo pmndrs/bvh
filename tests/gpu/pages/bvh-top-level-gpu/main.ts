@@ -124,7 +124,7 @@ await runGpuTest(
                     if (!ok && recordProblems++ < 4) failures.push(`${stage}: instance ${instanceIndex}'s record differs: GPU ${gpu ? Array.from(gpu).join(',') : 'none'} CPU ${Array.from(cpu).join(',')}`);
                 }
             }
-            const buffers: TraceSceneBuffers = { nodes, triangles, topLevel: top.buffer, byteLength: 0, destroy() {} };
+            const buffers: TraceSceneBuffers = { nodes, triangles, topLevel: top.buffer, nodeFormat: 'f32', triangleLeaves: 'records', positionLayout: 'vec4', byteLength: 0, destroy() {} };
             for (const mask of [undefined, 0x0e]) {
                 const gpu = await traceOnGpu(device, kernel, buffers, rays, mask);
                 const comparison = compareWithReference(rays, gpu, gpuScene, expected, { mask });

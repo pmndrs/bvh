@@ -154,7 +154,7 @@ async function refitAcrossFrames(device: GPUDevice, name: string, geometry: Mesh
     }
     const refit = new GpuMeshRefit(device, { label: `${name} refit`, diagnostics: true });
     await refit.prepare();
-    refit.setTree(layout, { nodeWordOffset: nodeOffsetBytes / 4, triangleWordOffset: triangleOffsetBytes / 4 });
+    refit.setTree(layout, { nodeWordOffset: nodeOffsetBytes / 4, triangleWordOffset: triangleOffsetBytes / 4, nodeFormat: 'f32' });
     let vertexBuffer: GPUBuffer | null = null;
     try {
         for (let frame = 1; frame <= 5; frame++) {
@@ -334,7 +334,7 @@ async function refitIndexedAcrossFrames(
     const positions = storage(device, `${name} positions`, placed(new ArrayBuffer(positionBytes), positionOffsetBytes));
     const refit = new GpuMeshRefit(device, { label: `${name} refit`, diagnostics: true });
     await refit.prepare();
-    refit.setTree(layout, { nodeWordOffset: nodeOffsetBytes / 4, triangleWordOffset: triangleOffsetBytes / 4, vertexBase: VERTICES_BEFORE, positionLayout });
+    refit.setTree(layout, { nodeWordOffset: nodeOffsetBytes / 4, triangleWordOffset: triangleOffsetBytes / 4, vertexBase: VERTICES_BEFORE, positionLayout, nodeFormat: 'f32' });
     let vertexBuffer: GPUBuffer | null = null;
     try {
         for (let frame = 1; frame <= 3; frame++) {
@@ -428,7 +428,7 @@ async function refitIndexedSceneMesh(
         await refit.prepare();
         const layout = { ...tree, triangleLeaves: 'indexed' as const };
         try {
-            refit.setTree(layout, { nodeWordOffset: placement.nodeWordOffset, triangleWordOffset: placement.triangleWordOffset });
+            refit.setTree(layout, { nodeWordOffset: placement.nodeWordOffset, triangleWordOffset: placement.triangleWordOffset, nodeFormat: placement.nodeFormat });
             failures.push(`${name}: setTree took an indexed tree without a vertexBase`);
         } catch {
             // Expected: an indexed tree needs its vertex base.

@@ -34,11 +34,27 @@ Meshes used more than once never merge: copying them would cost memory per copy.
 
 ## Hits stay exact
 
-`hit.instance` is the source instance, `hit.triangle` the triangle's index in its source mesh, `hit.frontFace` the
+On rays with one nearest triangle, `hit.instance` is the source instance, `hit.triangle` the triangle's index in its source mesh, `hit.frontFace` the
 source's authored side (mirrored sources included), and `hit.material` the source's material. The ids use words the
 layout already had, so merging adds no memory to the resident scene.
 
+Near-ties are the exception. Merged triangles are stored in world space, so `t` agrees with the instanced scene to
+rounding, not bit for bit. Where two triangles lie at the same distance, the merged walk may pick the other one, and so
+another instance. The surface-ray benches measured it: 99.949-99.996% of closest hits named the same instance and
+triangle (RTX 3060 Laptop, Sponza and Bistro interior).
+
 ## Static means static
+
+Since merging is on by default, `static: true` now means "merged" for any instance whose mesh it doesn't share. Before
+2026-11-13 it changed nothing unless `mergeStaticInstances` was turned on. Check what you mark:
+
+- `SceneTrees`: moving, hiding, re-masking or removing a merged instance throws.
+- `SceneTreesObject3DSync` (`/three`): changes to a merged object (removal, new geometry, draw range, groups or
+  materials) are skipped with one warning per object, and rays keep seeing it as merged.
+- `mergeStaticGeometry` (and `buildTraceScene`) throw if two static instances that would merge share an
+  `instanceIndex`: a hit names its source by it.
+
+`mergeStaticInstances: false` keeps every instance an ordinary one.
 
 The source transforms are baked into the merged geometry. In `SceneTrees`, moving, hiding, re-masking or removing a
 merged instance throws. With `buildTraceScene`, only assembling again notices that a merged source moved; nothing
@@ -56,8 +72,9 @@ Merged over instanced, 3 runs of 5 paired rounds each per GPU (the median over r
 | Bistro interior | RTX 3060 Laptop | 1.20x | 1.16x | 1.19x | 1.35x |
 | Bistro interior | Apple M5 Pro (indicative) | 1.22x (1.21-1.24) | 1.11x (1.10-1.11) | 1.19x | 1.31x |
 
-RTX 3060 Laptop: Windows, headless Chrome 157, 2026-11-13. Apple M5 Pro: Chrome 157, under a bench lock. Every merged
-answer matched the instanced one. On Sponza, steps per surface ray drop from 113.8 to 70.3, and instance entries from
+RTX 3060 Laptop: Windows, headless Chrome 157, 2026-11-13. Apple M5 Pro: Chrome 157, under a bench lock. On the RTX
+3060, closest hits named the instanced tree's instance and triangle on 99.949-99.996% of rays, and any hits blocked
+exactly the same rays. On Sponza, steps per surface ray drop from 113.8 to 70.3, and instance entries from
 9.8 to 1.0. The option became the default after the RTX 3060 run.
 
 ## Costs

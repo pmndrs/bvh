@@ -97,7 +97,7 @@ Run on Windows in headless Chrome 157.0.8103.51. Sponza and Bistro interior, sec
 
 | Lever | Sponza | Bistro interior | M5 (earlier) | Memory |
 | --- | --- | --- | --- | --- |
-| `mergeStaticInstances` (merged over instanced) | closest 1.44-1.67, any 1.24-1.48 | closest 1.19-1.20, any 1.17-1.35 | 1.85 closest, 1.36 any (Sponza surface) | top level 16.5 KiB to 192 B |
+| `mergeStaticInstances` (merged over instanced) | closest 1.44-1.67, any 1.24-1.48 | closest 1.19-1.20, any 1.16-1.35 | 1.85 closest, 1.36 any (Sponza surface) | top level 16.5 KiB to 192 B |
 | `nodeFormat: 'quantized'` over `f32` | closest 1.04-1.22, any 0.98-1.03 | closest 1.02-1.08, any 0.98-1.01 | 0.93-0.97 | nodes 185 to 93 MiB (Bistro 29.5 to 14.8) |
 | `triangleLeaves: 'indexed'`, `vec4` | 0.92-0.97 | 0.92-0.97 | 0.83-0.99 | triangles 263 to 133 MiB, positions included (Bistro 47.7 to 24.8) |
 | indexed, `positionLayout: 'packed'` | 0.89-0.95 | 0.82-0.88 | 0.75-0.92 | about 11 MiB less than `vec4` on Sponza |
@@ -105,7 +105,7 @@ Run on Windows in headless Chrome 157.0.8103.51. Sponza and Bistro interior, sec
 | `anyHitOrder: 'larger'` over `'far'` | instanced 1.11-1.45; merged air 1.07, merged surface 0.87 | instanced 1.18-1.48; merged air 1.03, merged surface 0.80 | 1.15-1.42 instanced, 0.78 merged surface | none |
 | `anyHitOrder: 'near'` over `'far'` | 0.59-1.18 | 0.75-1.21 | n/a | none |
 
-The bench checked correctness as it ran. Every paired agreement was 1: merged against instanced, compact against full hit record, indexed against records, and every any-hit order against far. Quantized node `t` values differed from `f32` on no ray.
+The bench checked correctness as it ran. Compact against full hit record, indexed against records, and every any-hit order against far agreed on every ray. Merged against instanced: closest hits named the instanced tree's instance and triangle on 99.949-99.996% of rays (the page requires 99.9%). The rest are near-ties at a shared distance, where `t` agrees to rounding and the merged walk can pick another instance or triangle. Any hits blocked exactly the same rays. Quantized node `t` values differed from `f32` on no ray.
 
 Not in this push, and not seen in this session:
 - section 1 correctness pages (`trace-oracle`, `trace-inline` and the rest);

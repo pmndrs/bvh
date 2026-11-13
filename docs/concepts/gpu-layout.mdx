@@ -97,10 +97,13 @@ Two variants of version 2 trade speed for memory. Each is compiled into the walk
 | `nodeFormat` | `'quantized'` (32 B per node) | `'f32'` (64 B per node) | 32-byte nodes with 16-bit planes on a per-mesh grid, and a 32-byte frame slot before each mesh's root. Boxes round outward, so a decoded box always holds the exact one. The top level stays `f32`. |
 | `triangleLeaves` | `'records'` (48 B per triangle) | `'indexed'` | 16-byte triangles `vec4u(i0, i1, i2, id + flags)`, a 16-byte header per mesh, and the scene's own copy of the positions (a fourth binding), welded by exact bits. `positionLayout: 'vec4'` (16 B per vertex) or `'packed'` (12). |
 
-Quantized nodes became the default on 2026-11-13, after the RTX 3060 run. `SceneTrees`, `buildTraceScene`,
-`assembleTraceScene`, `traceModuleWgsl`, `TraceBatchKernel` and `BvhTraceNodes` all default to them, so a scene and a
-walk made without the option agree. The mesh builders still write 64-byte trees unless asked, and a scene quantizes
-them as it places them. Indexed leaves stay off: they wait for an RTX 3060 run with both variants on together.
+Quantized nodes became the default on 2026-11-13, after the RTX 3060 run. **Options default to quantized; data must
+say what it is.** Where the package makes both sides (`SceneTrees`, `buildTraceScene`, `assembleTraceScene`,
+`traceModuleWgsl`, `TraceBatchKernel.create`), a missing `nodeFormat` means quantized, so a scene and a walk made
+without the option agree. Buffers handed to a walk name their own formats: `uploadTraceScene` and
+`trees.traceBuffers` do, and a `TraceBatchKernel` or `BvhTraceNodes` given buffers that don't is refused. The mesh
+builders still write 64-byte trees unless asked, and a scene quantizes them as it places them. Indexed leaves stay
+off: they wait for an RTX 3060 run with both variants on together.
 
 Pass the options to `SceneTrees.create`, `buildTraceScene`, the builders' options, `traceModuleWgsl` and
 `TraceBatchKernel`. `SceneTrees` exposes the values it was made with (`trees.triangleLeaves`, `trees.positionLayout`,

@@ -15,23 +15,53 @@ import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKerne
 import { RAY_MASK_ALL, type NodeFormat, type PositionLayout, type TriangleLeaves } from './layout.ts';
 import { RAY_BYTES } from './rays.ts';
 import { DEFAULT_NODE_FORMAT } from '../gpu-layout.ts';
-
-/** The three storage buffers the tracer reads, and an indexed scene's fourth. */
+/**
+ * The three storage buffers the tracer reads, and an indexed scene's fourth.
+ *
+ * **Data says what it is.** The formats are required: options default to
+ * quantized nodes, but buffers name their own format (`uploadTraceScene` and
+ * `SceneTrees.traceBuffers` always do), and a kernel refuses buffers that
+ * don't. A hand-built object must name `nodeFormat`, `triangleLeaves` and,
+ * for indexed leaves, `positionLayout`.
+ */
 export interface TraceSceneBuffers {
     readonly nodes: GPUBuffer;
     readonly triangles: GPUBuffer;
     readonly topLevel: GPUBuffer;
     /** An indexed scene's positions (`TraceSceneData.positions`), bound fourth. Absent or null for records. */
     readonly positions?: GPUBuffer | null;
-    /** The scene's triangle format; absent means records. A kernel refuses a scene of the other format. */
-    readonly triangleLeaves?: TriangleLeaves;
-    /** An indexed scene's position layout; absent means `'vec4'`. */
-    readonly positionLayout?: PositionLayout;
-    /** The scene's node format; absent means the default, `'quantized'` (`DEFAULT_NODE_FORMAT`). A kernel refuses a scene of the other format. `uploadTraceScene` always sets it. */
-    readonly nodeFormat?: NodeFormat;
+    /** The scene's triangle format. A kernel refuses a scene of the other format. */
+    readonly triangleLeaves: TriangleLeaves;
+    /** The position layout (read for indexed scenes only). */
+    readonly positionLayout: PositionLayout;
+    /** The scene's node format. A kernel refuses a scene of the other format. */
+    readonly nodeFormat: NodeFormat;
     /** Bytes held on the GPU. */
     readonly byteLength: number;
     destroy(): void;
+}
+
+/**
+ * The formats of buffers handed to a walk, checked: plain-JavaScript callers
+ * can leave a field out that the types require, and a guessed format would
+ * read the bytes wrongly. Throws a RangeError naming the missing field.
+ */
+export function traceSourceFormats(
+    source: { readonly nodeFormat?: unknown; readonly triangleLeaves?: unknown; readonly positionLayout?: unknown },
+    where: string,
+): { nodeFormat: NodeFormat; triangleLeaves: TriangleLeaves; positionLayout: PositionLayout } {
+    const { nodeFormat, triangleLeaves } = source;
+    if (nodeFormat !== 'f32' && nodeFormat !== 'quantized') {
+        throw new RangeError(`${where}: the buffers must name their nodeFormat ('f32' or 'quantized'), got ${String(nodeFormat)}. uploadTraceScene and SceneTrees name it; data is never given a default`);
+    }
+    if (triangleLeaves !== 'records' && triangleLeaves !== 'indexed') {
+        throw new RangeError(`${where}: the buffers must name their triangleLeaves ('records' or 'indexed'), got ${String(triangleLeaves)}`);
+    }
+    const positionLayout = source.positionLayout ?? (triangleLeaves === 'records' ? 'vec4' : undefined);
+    if (positionLayout !== 'vec4' && positionLayout !== 'packed') {
+        throw new RangeError(`${where}: indexed buffers must name their positionLayout ('vec4' or 'packed'), got ${String(source.positionLayout)}`);
+    }
+    return { nodeFormat, triangleLeaves, positionLayout };
 }
 
 function checkStorageBinding(device: GPUDevice, name: string, byteLength: number): void {
@@ -172,12 +202,13 @@ export class TraceBatchKernel {
     private groupsFor(scene: TraceSceneBuffers): SceneBindGroups {
         let groups = this.sceneGroups.get(scene);
         if (!groups) {
-            const leaves = scene.triangleLeaves ?? 'records';
+            const formats = traceSourceFormats(scene, 'TraceBatchKernel');
+            const leaves = formats.triangleLeaves;
             if (leaves !== this.triangleLeaves) throw new RangeError(`TraceBatchKernel: the kernel reads ${this.triangleLeaves} triangles, the scene holds ${leaves}`);
-            if (leaves === 'indexed' && (scene.positionLayout ?? 'vec4') !== this.positionLayout) {
-                throw new RangeError(`TraceBatchKernel: the kernel reads ${this.positionLayout} positions, the scene holds ${scene.positionLayout ?? 'vec4'}`);
+            if (leaves === 'indexed' && formats.positionLayout !== this.positionLayout) {
+                throw new RangeError(`TraceBatchKernel: the kernel reads ${this.positionLayout} positions, the scene holds ${formats.positionLayout}`);
             }
-            const nodes = scene.nodeFormat ?? DEFAULT_NODE_FORMAT;
+            const nodes = formats.nodeFormat;
             if (nodes !== this.nodeFormat) throw new RangeError(`TraceBatchKernel: the kernel reads ${this.nodeFormat} nodes, the scene holds ${nodes}`);
             if (leaves === 'indexed' && !scene.positions) throw new RangeError('TraceBatchKernel: an indexed scene needs its positions buffer');
             const make = (pipeline: GPUComputePipeline) =>

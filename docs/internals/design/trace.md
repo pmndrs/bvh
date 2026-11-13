@@ -187,7 +187,7 @@ These match RC5.4 within noise, so the package keeps the gain. On Sponza, steps 
 | Sponza | 1.67x | 1.48x | 1.44x | 1.24x |
 | Bistro interior | 1.20x | 1.16x | 1.19x | 1.35x |
 
-The gain holds on NVIDIA (1.17-1.67x), a little smaller than the M5's on Sponza's surface closest hits. Every merged answer matched the instanced one. **The option became the default on 2026-11-13** (Dennis), in `SceneTrees` and `buildTraceScene`. Static is still opt-in per instance: only instances marked `static: true`, added before the first update (`SceneTrees`), merge, so a scene that marks nothing is unchanged.
+The gain holds on NVIDIA (1.16-1.67x), a little smaller than the M5's on Sponza's surface closest hits. Closest hits named the instanced tree's instance and triangle on 99.949-99.996% of rays (Sponza air grid 0.999958, surface 0.999909; Bistro interior surface 0.999882, air grid 0.999493; the page requires 0.999); the rest are near-ties at a shared distance. Any hits blocked exactly the same rays. **The option became the default on 2026-11-13** (Dennis), in `SceneTrees` and `buildTraceScene`. Static is still opt-in per instance: only instances marked `static: true`, added before the first update (`SceneTrees`), merge, so a scene that marks nothing is unchanged.
 
 ## Why the triangle test is watertight
 

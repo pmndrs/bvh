@@ -250,7 +250,13 @@ export function assembleTraceScene(
     const geometryOf = (index: number): MeshGeometry => {
         if (index >= meshes.length) return merged!.plan.groups[index - meshes.length].geometry;
         const geometry = options.geometries?.[index];
-        if (!geometry) throw new RangeError(`assembleTraceScene: an indexed scene needs geometries[${index}], the positions of mesh ${index}`);
+        if (!geometry) {
+            throw new RangeError(
+                options.triangleLeaves === undefined
+                    ? `assembleTraceScene: the trees are indexed, so the scene is too, and it needs each mesh's positions: pass geometries (geometries[${index}] is missing), or build records trees`
+                    : `assembleTraceScene: an indexed scene needs geometries[${index}], the positions of mesh ${index}`,
+            );
+        }
         return geometry;
     };
     if (!indexed && (options.geometries || options.weld !== undefined || options.positionLayout !== undefined)) {
@@ -596,13 +602,25 @@ export async function buildTraceScene(
     // A tolerance weld renumbers vertices too: the scene's are not the app's, so no refit (meshRefitPlacement).
     const markWelded = (scene: TraceSceneData): TraceSceneData =>
         indexed && tolerance > 0 ? { ...scene, meshes: scene.meshes.map((placement) => ({ ...placement, welded: true })) } : scene;
+    // options.build may return indexed trees; this function takes the scene's format from its options only.
+    const checkBuilt = (trees: readonly (MeshBvh | null)[]): void => {
+        if (indexed) return;
+        const at = trees.findIndex((tree) => tree?.triangleLeaves === 'indexed');
+        if (at >= 0) {
+            throw new RangeError(
+                `buildTraceScene: options.build returned an indexed tree (mesh ${at}) for a records scene; pass triangleLeaves: 'indexed' (the scene then takes its positions from the geometries), or build records trees`,
+            );
+        }
+    };
     if (options.mergeStaticInstances === false || !instances.some((instance) => instance.static)) {
         const meshes = await Promise.all(geometries.map((geometry) => options.build(geometry)));
+        checkBuilt(meshes);
         return markWelded(assembleTraceScene(meshes, instances, options.topLevel, layoutOptions));
     }
     const plan = mergeStaticGeometry(geometries, instances, options);
     const meshes = await Promise.all(geometries.map((geometry, index) => (plan.meshNeeded[index] ? options.build(geometry) : null)));
     const mergedMeshes = await Promise.all(plan.groups.map((group) => options.build(group.geometry)));
+    checkBuilt([...meshes, ...mergedMeshes]);
     return markWelded(assembleTraceScene(meshes, instances, options.topLevel, { ...layoutOptions, merged: { plan, meshes: mergedMeshes } }));
 }
 
@@ -610,8 +628,8 @@ export async function buildTraceScene(
 export interface MeshRefitPlacement {
     /** The mesh's root, in words (quantized scenes: its frame slot is the 8 words before). */
     readonly nodeWordOffset: number;
-    /** The scene's node format: `GpuMeshRefit` refits an `f32` copy and packs it into a quantized scene. */
-    readonly nodeFormat?: GpuLayoutNodeFormat;
+    /** The scene's node format, always given: `GpuMeshRefit` refits an `f32` copy and packs it into a quantized scene. */
+    readonly nodeFormat: GpuLayoutNodeFormat;
     readonly triangleWordOffset: number;
     /** Indexed scenes: the mesh's first vertex in the scene's positions. */
     readonly vertexBase?: number;
@@ -647,7 +665,7 @@ export function meshRefitPlacement(
     }
     if (placement.triangleCount === 0) throw new RangeError(`meshRefitPlacement: mesh ${meshIndex} has no tree in this scene`);
     const nodeWordOffset = placement.nodeOffset * (gpuLayoutNodeBytes(scene.nodeFormat) / 4);
-    const nodes = scene.nodeFormat === 'quantized' ? { nodeFormat: 'quantized' as const } : {};
+    const nodes = { nodeFormat: scene.nodeFormat ?? ('f32' as const) }; // scene data with no format is f32
     if (scene.triangleLeaves !== 'indexed') return { nodeWordOffset, ...nodes, triangleWordOffset: placement.triangleOffset * TRIANGLE_WORDS };
     if (placement.welded) {
         throw new RangeError(

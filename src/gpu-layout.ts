@@ -87,12 +87,17 @@ export const GPU_LAYOUT_NODE_WORD = {
 export type GpuLayoutNodeFormat = 'f32' | 'quantized';
 
 /**
- * The node format of every scene and walk option that isn't given one:
- * `SceneTrees`, `assembleTraceScene`, `buildTraceScene`, `traceModuleWgsl`,
- * `batchKernelWgsl`, `TraceBatchKernel` and `BvhTraceNodes` (Dennis,
+ * The node format of every option that isn't given one, where the library
+ * makes both sides: `SceneTrees`, `assembleTraceScene`, `buildTraceScene`,
+ * `traceModuleWgsl`, `batchKernelWgsl` and `TraceBatchKernel.create` (Dennis,
  * 2026-11-13, after the RTX 3060 bench: docs/internals/design/compressed-nodes.md).
  * Mesh builders still write `'f32'` trees unless asked; a scene quantizes
  * them as it places them.
+ *
+ * Options default to quantized; data must say what it is. Buffers handed to a
+ * walk (`TraceSceneBuffers`, a `BvhTraceNodes` source) must name their format
+ * and are refused when they don't; CPU data that names none (`MeshBvh`,
+ * layouts, `TraceSceneData`) is `f32`, as before the option existed.
  */
 export const DEFAULT_NODE_FORMAT: GpuLayoutNodeFormat = 'quantized';
 

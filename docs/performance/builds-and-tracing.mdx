@@ -49,15 +49,17 @@ each run's median-of-rounds ratio; the range covers surface and air rays, instan
 
 | Lever | Sponza | Bistro interior | Default now |
 | --- | --- | --- | --- |
-| Merged static instances, over instanced | closest 1.44-1.67x, any 1.24-1.48x | closest 1.19-1.20x, any 1.17-1.35x | **on** |
+| Merged static instances, over instanced | closest 1.44-1.67x, any 1.24-1.48x | closest 1.19-1.20x, any 1.16-1.35x | **on** |
 | Quantized nodes, over `f32` | closest 1.04-1.22x, any 0.98-1.03x | closest 1.02-1.08x, any 0.98-1.01x | **on** |
 | Indexed leaves, `vec4`, over records | 0.92-0.97x | 0.92-0.97x | off |
 | Indexed leaves, packed, over records | 0.89-0.95x | 0.82-0.88x | off |
 | 40-byte hit record, over 24-byte | 0.88-0.92x | 0.93-0.94x | 40-byte |
 | `anyHitOrder: 'larger'`, over `'far'` | instanced 1.11-1.45x, merged air 1.07x, merged surface 0.87x | instanced 1.18-1.48x, merged air 1.03x, merged surface 0.80x | `'far'` |
 
-Every paired answer agreed: merged against instanced, compact against full record, indexed against records, every any-hit
-order against far. No quantized `t` differed from the `f32` one.
+Compact against full record, indexed against records and every any-hit order against far agreed on every ray. No
+quantized `t` differed from the `f32` one. Merged against instanced: closest hits named the instanced tree's instance and
+triangle on 99.949-99.996% of rays; the rest are near-ties at a shared distance, where the merged walk can pick another
+instance or triangle. Any hits blocked exactly the same rays.
 
 ## On the Apple M5 (indicative)
 

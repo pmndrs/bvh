@@ -51,6 +51,8 @@ export const STATS_EVERY_FRAMES = 15;
 /** Where a placed tree's words start in the scene's buffers (from `meshRefitPlacement`). */
 export interface DeformingTreePlacement {
     readonly nodeWordOffset: number;
+    /** The scene's node format (the refit packs into quantized scenes). */
+    readonly nodeFormat: 'f32' | 'quantized';
     readonly triangleWordOffset: number;
     /** Indexed scenes: the mesh's first vertex in the positions buffer, and the buffer's layout. */
     readonly vertexBase?: number;
