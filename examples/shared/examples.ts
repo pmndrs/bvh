@@ -59,6 +59,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         timeoutMs: 180_000,
     },
     {
+        name: 'vanilla-workers-cpu',
+        path: 'vanilla/workers-cpu',
+        title: 'Workers (CPU)',
+        description: 'tinybvh builds for many meshes on the main thread, in one worker and in a pool (createBvhWorkerPool, no cross-origin isolation), each tree placed as it arrives while every mesh spins: time to every tree, the worst frame and the long tasks of each, and a timeline row per mesh.',
+        timeoutMs: 180_000,
+    },
+    {
         name: 'three-raycast',
         path: 'three/raycast',
         title: 'Raycast',

@@ -33,6 +33,7 @@ import { bytes } from '../../shared/overlay.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
 import { createVanillaApp } from '../../shared/vanilla/app.ts';
+import { watchPool } from '../../shared/vanilla/watched-pool.ts';
 import { checkViewAgainstCpu } from '../../shared/vanilla/check.ts';
 import { galleryScene, torusKnot, type IndexedMesh, type VanillaScene } from '../../shared/vanilla/geometry.ts';
 import { enableSceneDrop, loadGltfScene } from '../../shared/vanilla/gltf.ts';
@@ -97,39 +98,13 @@ let scene: VanillaScene;
 // Smoke runs start with tinybvh held back, so the first check sees GPU first trees whatever the machine's load.
 const settings = { gpuFirst: true, hold: isSmoke, mode: 'material' as ViewMode, shadows: true };
 
-/** The page's pool, wrapped: each build's call and answer go on the timeline, by the geometry's positions array. */
-function watchedPool(run: () => Run | null): BvhWorkerPool {
-    const pool = createBvhWorkerPool();
-    return {
-        get usesWorkers() {
-            return pool.usesWorkers;
-        },
-        get size() {
-            return pool.size;
-        },
-        get stats() {
-            return pool.stats;
-        },
-        build(geometry, options, request) {
-            const asked = performance.now();
-            const built = pool.build(geometry, options, request);
-            built.then(
-                () => {
-                    const owner = run();
-                    const lane = owner?.lanes.get(geometry.positions);
-                    if (owner?.live && lane !== undefined) timeline.span(lane, 'worker', asked);
-                },
-                () => undefined,
-            );
-            return built;
-        },
-        dispose: () => pool.dispose(),
-    };
-}
-
 async function createRun(target: VanillaScene): Promise<Run> {
     let run: Run | null = null;
-    const pool = watchedPool(() => run);
+    // The page's pool, wrapped: each build's call and answer go on the timeline, by the geometry's positions array.
+    const pool = watchPool(createBvhWorkerPool(), (geometry, asked) => {
+        const lane = run?.lanes.get(geometry.positions);
+        if (run?.live && lane !== undefined) timeline.span(lane, 'worker', asked);
+    });
     const log = new SceneTreesLog();
     const pending: SceneTreeEvent[] = [];
     const trees = await SceneTrees.create(device, {
