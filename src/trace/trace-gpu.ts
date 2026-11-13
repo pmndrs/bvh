@@ -11,7 +11,7 @@
  */
 
 import type { TraceSceneData } from './scene-assembly.ts';
-import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl, type AnyHitOrder } from './wgsl.ts';
+import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl, type AnyHitOrder, type WideStack } from './wgsl.ts';
 import { RAY_MASK_ALL, type NodeFormat, type PositionLayout, type TriangleLeaves } from './layout.ts';
 import { RAY_BYTES } from './rays.ts';
 
@@ -113,6 +113,8 @@ export interface TraceBatchKernelOptions {
     readonly nodeFormat?: NodeFormat;
     /** The any-hit walk's child order, compiled in (`AnyHitOrder`). Default `'far'` (best for rays from surfaces); `'larger'` for rays from outside the geometry or across open space. */
     readonly anyHitOrder?: AnyHitOrder;
+    /** `nodeFormat: 'cwbvh8'`: the mesh walk's stack, `'private'` (the default) or `'workgroup'` (`TraceModuleOptions.wideStack`). */
+    readonly wideStack?: WideStack;
 }
 
 /**
@@ -136,13 +138,13 @@ export class TraceBatchKernel {
     ) {}
 
     static async create(device: GPUDevice, options: TraceBatchKernelOptions = {}): Promise<TraceBatchKernel> {
-        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = 'f32', anyHitOrder } = options;
+        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = 'f32', anyHitOrder, wideStack } = options;
         const pipelineFor = (mode: 'closest' | 'any') =>
             device.createComputePipelineAsync({
                 label: `${label} batch ${mode}`,
                 layout: 'auto',
                 compute: {
-                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks, hitNormal, triangleLeaves, positionLayout, nodeFormat, anyHitOrder }) }),
+                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks, hitNormal, triangleLeaves, positionLayout, nodeFormat, anyHitOrder, wideStack }) }),
                     entryPoint: 'bvhBatch',
                 },
             });

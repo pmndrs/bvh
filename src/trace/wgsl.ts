@@ -70,6 +70,10 @@ import {
     type TriangleLeaves,
 } from './layout.ts';
 import { DEFAULT_TRIANGLE_FILTER_WGSL } from './triangle-filter.ts';
+import { wideWalkWgsl, type WideStack } from './wgsl-wide.ts';
+import { isWideNodeFormat } from '../wide-nodes.ts';
+
+export type { WideStack } from './wgsl-wide.ts';
 
 /** Where the trace module's bindings land inside a kernel (structurally the same as ddgi's `BindingSlot`). */
 export interface BindingSlot {
@@ -640,8 +644,21 @@ export interface TraceModuleOptions {
      * (32-byte nodes decoded on the frame read once per instance entered).
      * Only `bvhLoadMeshNode` and the instance entry's frame read differ; it is
      * the same walk, with the same bindings.
+     *
+     * Experimental: `'bvh4'` and `'cwbvh8'` (docs/internals/design/wide-nodes.md)
+     * compile the wide walks instead (wgsl-wide.ts): the same top level and
+     * hit, a mesh walk per instance. `anyHitOrder: 'larger'` has no wide form.
      */
     readonly nodeFormat?: NodeFormat;
+    /**
+     * `nodeFormat: 'cwbvh8'` only: where the mesh walk keeps its stack of node
+     * groups. `'private'` (the default): a private array. `'workgroup'`: the
+     * first `WIDE_SHARED_STACK_ENTRIES` entries per lane in workgroup memory,
+     * the rest in a private array; the kernel must call
+     * `bvhSetStackLane(local_invocation_index)` before tracing, with a
+     * workgroup of at most `WIDE_SHARED_STACK_LANES` lanes (the batch kernel does).
+     */
+    readonly wideStack?: WideStack;
     /**
      * Which child any-hit enters first when the ray hits both, compiled in
      * like `rayMasks` (see {@link AnyHitOrder}). Default `'far'`. Closest-hit
@@ -697,17 +714,24 @@ export function traceModuleWgsl(options: TraceModuleOptions = {}): string {
     }
     const packed = options.positionLayout === 'packed';
     const nodeFormat = options.nodeFormat ?? 'f32';
-    if (nodeFormat !== 'f32' && nodeFormat !== 'quantized') throw new RangeError(`traceModuleWgsl: nodeFormat must be 'f32' or 'quantized', got ${String(nodeFormat)}`);
+    const wide = isWideNodeFormat(nodeFormat);
+    if (nodeFormat !== 'f32' && nodeFormat !== 'quantized' && !wide) {
+        throw new RangeError(`traceModuleWgsl: nodeFormat must be 'f32', 'quantized', 'bvh4' or 'cwbvh8', got ${String(nodeFormat)}`);
+    }
     const quantized = nodeFormat === 'quantized';
     const anyHitOrder = options.anyHitOrder ?? 'far';
     if (anyHitOrder !== 'far' && anyHitOrder !== 'near' && anyHitOrder !== 'larger') {
         throw new RangeError(`traceModuleWgsl: anyHitOrder must be 'far', 'near' or 'larger', got ${String(anyHitOrder)}`);
     }
+    if (wide && anyHitOrder === 'larger') throw new RangeError(`traceModuleWgsl: anyHitOrder 'larger' has no ${nodeFormat} walk`);
+    const wideStack = options.wideStack ?? 'private';
+    if (wideStack !== 'private' && wideStack !== 'workgroup') throw new RangeError(`traceModuleWgsl: wideStack must be 'private' or 'workgroup', got ${String(wideStack)}`);
+    if (wideStack === 'workgroup' && nodeFormat !== 'cwbvh8') throw new RangeError("traceModuleWgsl: wideStack 'workgroup' is for nodeFormat 'cwbvh8'");
     return /* wgsl */ `${COMMON_WGSL}
 // Nodes and triangles are read as plain vec4s, so every load is one 16-byte
 // read whatever the backend makes of a struct with vec3 members. Quantized
 // nodes are read as vec4u, so no packed plane passes through a float register.
-@group(${group}) @binding(${nodes}) var<storage, read> bvhTraceNodes: array<${quantized ? 'vec4u' : 'vec4f'}>;
+@group(${group}) @binding(${nodes}) var<storage, read> bvhTraceNodes: array<${quantized || wide ? 'vec4u' : 'vec4f'}>;
 @group(${group}) @binding(${triangles}) var<storage, read> bvhTraceTriangles: array<${indexed ? 'vec4u' : 'vec4f'}>;
 @group(${group}) @binding(${topLevel}) var<storage, read> bvhTraceTopLevel: array<vec4u>;${
         indexed ? `\n@group(${group}) @binding(${slot.firstBinding + 3}) var<storage, read> bvhTracePositions: array<${packed ? 'f32' : 'vec4f'}>;` : ''
@@ -728,7 +752,7 @@ const BVH_TRIANGLE_FLAG_FLIP_FRONT_FACE: u32 = ${TRIANGLE_FLAG_FLIP_FRONT_FACE}u
 // Instance flags bit 3: a merged mesh; the hit's instance is the triangle's padding word.
 const BVH_INSTANCE_FLAG_MERGED: u32 = ${INSTANCE_FLAG.merged}u;
 
-${quantized ? QUANTIZED_NODE_LOADERS_WGSL : F32_NODE_LOADERS_WGSL}
+${wide ? '// Wide mesh nodes are read by the mesh walks below.' : quantized ? QUANTIZED_NODE_LOADERS_WGSL : F32_NODE_LOADERS_WGSL}
 
 ${indexed ? indexedLoadersWgsl(packed) : RECORD_LOADERS_WGSL}
 
@@ -989,8 +1013,8 @@ fn bvhIntersectWatertight(triangle: BvhTriangle, setup: BvhRaySetup, tMin: f32, 
 
 ${rayMasks ? INSTANCE_MASK_WGSL : ''}
 ${anyHitOrder === 'larger' ? BOX_HALF_AREA_WGSL : ''}
-${walkWgsl('closest', rayMasks)}
-${walkWgsl('any', rayMasks, anyHitOrder)}
+${wide ? wideWalkWgsl({ format: nodeFormat, rayMasks, anyHitOrder: anyHitOrder === 'near' ? 'near' : 'far', stack: wideStack }) : `${walkWgsl('closest', rayMasks)}
+${walkWgsl('any', rayMasks, anyHitOrder)}`}
 ${rayMasks ? MASKED_TRACE_WGSL : UNMASKED_TRACE_WGSL}
 ${triangleFilter ?? '// bvhTrianglePasses is supplied by the kernel.'}
 `;
@@ -1123,7 +1147,7 @@ export const BATCH_WORKGROUP_SIZE = 64;
  * with material and normal) or, with `hitNormal: false`,
  * `BvhHitRecordCompact` ({@link HIT_RECORD_COMPACT_BYTES}, 24 bytes).
  */
-export function batchEntryWgsl(mode: 'closest' | 'any', group: number, rayMasks = true, hitNormal = true): string {
+export function batchEntryWgsl(mode: 'closest' | 'any', group: number, rayMasks = true, hitNormal = true, setsStackLane = false): string {
     const recordType = hitNormal ? 'BvhHitRecord' : 'BvhHitRecordCompact';
     const recordStruct = hitNormal
         ? `struct BvhHitRecord {
@@ -1187,7 +1211,7 @@ fn bvhBatch(
     if (rayIndex >= arrayLength(&bvhBatchRays)) {
         return;
     }
-    ${body}
+    ${setsStackLane ? 'bvhSetStackLane(localIndex);\n    ' : ''}${body}
 }
 `;
 }
@@ -1221,6 +1245,8 @@ export interface BatchKernelOptions {
     readonly nodeFormat?: NodeFormat;
     /** The any-hit walk's child order (`TraceModuleOptions.anyHitOrder`). Default `'far'`. */
     readonly anyHitOrder?: AnyHitOrder;
+    /** The CWBVH mesh walk's stack (`TraceModuleOptions.wideStack`). Default `'private'`. */
+    readonly wideStack?: WideStack;
 }
 
 /** Bytes of the batch kernel's uniform (`BvhBatchParams`, group 1 binding 2, only with ray masks). Padded to 16. */
@@ -1242,6 +1268,6 @@ export function batchKernelWgsl(mode: 'closest' | 'any', options: BatchKernelOpt
     }
     rejectOldPositionalCall('batchKernelWgsl', options);
     const rayMasks = options.rayMasks ?? true;
-    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat, anyHitOrder: options.anyHitOrder })}
-${batchEntryWgsl(mode, 1, rayMasks, options.hitNormal ?? true)}`;
+    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat, anyHitOrder: options.anyHitOrder, wideStack: options.wideStack })}
+${batchEntryWgsl(mode, 1, rayMasks, options.hitNormal ?? true, options.wideStack === 'workgroup')}`;
 }

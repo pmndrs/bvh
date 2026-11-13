@@ -1,0 +1,4 @@
+{
+    "description": "Compiles every wide-node batch kernel (bvh4, cwbvh8 with private and workgroup stacks; closest and any; masks on and off; records and indexed; 40- and 24-byte records) with the f32 and quantized ones for comparison, and reports each kernel's WGSL bytes and pipeline compile time. Fails on a compile error or a kernel over 50 KB of WGSL.",
+    "timeoutMs": 300000
+}

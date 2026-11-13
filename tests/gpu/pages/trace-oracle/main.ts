@@ -41,6 +41,12 @@
  *   checked by `checkGpuLayout`), masks compiled out, combined with indexed leaves,
  *   and merged groups (one frame per group). The shared-edge rays are B3's leak
  *   class; looser boxes must not lose a hit. The hook cases also run quantized.
+ * - `wide-bvh4-*`, `wide-cwbvh8-*`, `merged-wide-*`: wide nodes (docs/internals/design/wide-nodes.md),
+ *   each f32 tree collapsed into 4-wide or compressed 8-wide nodes at assembly and walked
+ *   by the wide walks (wgsl-wide.ts): tinybvh, GPU LBVH and H-PLOC trees, masks compiled
+ *   out, any-hit near first, indexed leaves, merged groups, materials, and the CWBVH
+ *   workgroup short stack. Looser (8-bit) boxes must lose no hit and let no more rays
+ *   through a one-ulp seam than records. The hook cases also run wide.
  * Every variant also runs the seam fixtures (`seamQuad` in cases.ts): split
  * seams, every corner its own vertex with the same bits, must let nothing
  * through; one-ulp seams leak in every format (the double-precision reference
@@ -140,7 +146,9 @@ interface OracleVariant {
     /** Weld each mesh's vertices within this distance before building (`weldPositions`); default 0, off. */
     weldTolerance?: number;
     /** The trees', scene's and kernel's node format (docs/internals/design/compressed-nodes.md); default f32. */
-    nodeFormat?: 'f32' | 'quantized';
+    nodeFormat?: 'f32' | 'quantized' | 'bvh4' | 'cwbvh8';
+    /** CWBVH: the mesh walk's stack (`wideStack`); default private. */
+    wideStack?: 'private' | 'workgroup';
     /** The kernel's any-hit child order (`anyHitOrder`); default `'far'`. */
     anyHitOrder?: 'far' | 'near' | 'larger';
     /**
@@ -181,7 +189,25 @@ const VARIANTS: OracleVariant[] = [
     { name: 'merged-quantized-tinybvh', treeSource: 'tinybvh', merged: true, nodeFormat: 'quantized' },
     { name: 'merged-quantized-hploc', treeSource: 'gpu-hploc', merged: true, nodeFormat: 'quantized' },
     { name: 'merged-quantized-indexed-hploc', treeSource: 'gpu-hploc', merged: true, nodeFormat: 'quantized', triangleLeaves: 'indexed', positionLayout: 'packed' },
+    { name: 'wide-bvh4-tinybvh', treeSource: 'tinybvh', nodeFormat: 'bvh4' },
+    { name: 'wide-bvh4-tinybvh-nomasks', treeSource: 'tinybvh', nodeFormat: 'bvh4', rayMasks: false },
+    { name: 'wide-bvh4-tinybvh-near', treeSource: 'tinybvh', nodeFormat: 'bvh4', anyHitOrder: 'near' },
+    { name: 'wide-bvh4-hploc', treeSource: 'gpu-hploc', nodeFormat: 'bvh4' },
+    { name: 'wide-bvh4-indexed-tinybvh', treeSource: 'tinybvh', nodeFormat: 'bvh4', triangleLeaves: 'indexed' },
+    { name: 'merged-wide-bvh4-hploc', treeSource: 'gpu-hploc', merged: true, nodeFormat: 'bvh4' },
+    { name: 'wide-cwbvh8-tinybvh', treeSource: 'tinybvh', nodeFormat: 'cwbvh8' },
+    { name: 'wide-cwbvh8-tinybvh-workgroup', treeSource: 'tinybvh', nodeFormat: 'cwbvh8', wideStack: 'workgroup' },
+    { name: 'wide-cwbvh8-tinybvh-nomasks', treeSource: 'tinybvh', nodeFormat: 'cwbvh8', rayMasks: false },
+    { name: 'wide-cwbvh8-tinybvh-near', treeSource: 'tinybvh', nodeFormat: 'cwbvh8', anyHitOrder: 'near' },
+    { name: 'wide-cwbvh8-tmbuild', treeSource: 'three-mesh-bvh', nodeFormat: 'cwbvh8' },
+    { name: 'wide-cwbvh8-lbvh', treeSource: 'gpu-lbvh', nodeFormat: 'cwbvh8' },
+    { name: 'wide-cwbvh8-hploc', treeSource: 'gpu-hploc', nodeFormat: 'cwbvh8' },
+    { name: 'wide-cwbvh8-indexed-tinybvh', treeSource: 'tinybvh', nodeFormat: 'cwbvh8', triangleLeaves: 'indexed' },
+    { name: 'merged-wide-cwbvh8-tinybvh', treeSource: 'tinybvh', merged: true, nodeFormat: 'cwbvh8' },
+    { name: 'merged-wide-cwbvh8-indexed-hploc', treeSource: 'gpu-hploc', merged: true, nodeFormat: 'cwbvh8', triangleLeaves: 'indexed', positionLayout: 'packed', wideStack: 'workgroup' },
     { name: 'materials-tinybvh', treeSource: 'tinybvh', triangleMaterials: true },
+    { name: 'materials-wide-cwbvh8-merged-indexed-tinybvh', treeSource: 'tinybvh', merged: true, nodeFormat: 'cwbvh8', triangleLeaves: 'indexed', triangleMaterials: true },
+    { name: 'materials-wide-bvh4-lbvh', treeSource: 'gpu-lbvh', nodeFormat: 'bvh4', triangleMaterials: true },
     { name: 'materials-quantized-lbvh', treeSource: 'gpu-lbvh', nodeFormat: 'quantized', triangleMaterials: true },
     { name: 'materials-indexed-hploc', treeSource: 'gpu-hploc', triangleLeaves: 'indexed', triangleMaterials: true },
     { name: 'materials-merged-hploc', treeSource: 'gpu-hploc', merged: true, triangleMaterials: true },
@@ -199,7 +225,32 @@ const ULP_SAME_AS_RECORDS = ['indexed-tinybvh', 'indexed-tinybvh-packed'];
  * one-ulp seam may let fewer rays through (a looser box takes rays an exact box's slab test
  * rounds away), never more.
  */
-const ULP_AT_MOST_RECORDS = ['quantized-tinybvh', 'quantized-indexed-tinybvh'];
+const ULP_AT_MOST_RECORDS = [
+    'quantized-tinybvh',
+    'quantized-indexed-tinybvh',
+    'wide-bvh4-tinybvh',
+    'wide-bvh4-indexed-tinybvh',
+    'wide-cwbvh8-tinybvh',
+    'wide-cwbvh8-tinybvh-workgroup',
+    'wide-cwbvh8-indexed-tinybvh',
+];
+
+/** The hooks' wide passes build their trees and scene as these variants do. */
+const WIDE_HOOK_VARIANTS: Record<'bvh4' | 'cwbvh8', OracleVariant> = {
+    bvh4: { name: 'bvh4-hooks', treeSource: 'tinybvh', nodeFormat: 'bvh4' },
+    cwbvh8: { name: 'cwbvh8-hooks', treeSource: 'tinybvh', nodeFormat: 'cwbvh8', wideStack: 'workgroup' },
+};
+const WIDE_INDEXED_HOOK_VARIANT: OracleVariant = { name: 'cwbvh8-indexed-hooks', treeSource: 'tinybvh', nodeFormat: 'cwbvh8', triangleLeaves: 'indexed' };
+
+/** Wide variants build f32 trees; the scene collapses them. */
+function isWide(variant: OracleVariant): boolean {
+    return variant.nodeFormat === 'bvh4' || variant.nodeFormat === 'cwbvh8';
+}
+
+/** The node format a variant's trees are built with: wide scenes collapse f32 trees. */
+function treeNodeFormat(variant: OracleVariant): 'f32' | 'quantized' | undefined {
+    return variant.nodeFormat === 'quantized' ? 'quantized' : 'f32';
+}
 
 /** The hooks' quantized passes build their trees and scene as this variant does. */
 const QUANTIZED_HOOK_VARIANT: OracleVariant = { name: 'quantized-hooks', treeSource: 'tinybvh', nodeFormat: 'quantized' };
@@ -353,7 +404,7 @@ async function buildTrees(builder: MeshBvhBuilder, meshes: readonly MeshGeometry
     if (variant.treeSource === 'gpu-lbvh' || variant.treeSource === 'gpu-hploc') {
         const gpuBuilder = gpuBuilders.get(variant.treeSource);
         assert(gpuBuilder, `the ${variant.treeSource} builder was not made`);
-        const results = await gpuBuilder.buildLayouts(meshes, { triangleLeaves: variant.triangleLeaves, nodeFormat: variant.nodeFormat });
+        const results = await gpuBuilder.buildLayouts(meshes, { triangleLeaves: variant.triangleLeaves, nodeFormat: treeNodeFormat(variant) });
         for (const result of results) assert(result.builtBy === variant.treeSource, `a mesh fell back to ${result.builtBy}: ${result.fallbackReason}`);
         // GPU-packed quantized nodes (the GPU quantize pass) must pass the layout check: every decoded box around its exact one.
         if (variant.nodeFormat === 'quantized') results.forEach((result, index) => assert(result.layout.nodeFormat === 'quantized' && checkGpuLayout(result.layout, meshes[index]).length === 0, `${variant.name}: mesh ${index}'s quantized layout fails the check: ${checkGpuLayout(result.layout, meshes[index]).slice(0, 2).join('; ')}`));
@@ -361,12 +412,12 @@ async function buildTrees(builder: MeshBvhBuilder, meshes: readonly MeshGeometry
         if (variant.triangleLeaves === 'indexed') results.forEach((result, index) => assert(result.layout.triangleLeaves === 'indexed' && checkGpuLayout(result.layout, meshes[index]).length === 0, `${variant.name}: mesh ${index}'s indexed layout fails the check: ${checkGpuLayout(result.layout, meshes[index]).slice(0, 2).join('; ')}`));
         return results.map((result) => result.layout);
     }
-    return Promise.all(meshes.map((mesh) => builder.build(mesh, { triangleLeaves: variant.triangleLeaves, nodeFormat: variant.nodeFormat })));
+    return Promise.all(meshes.map((mesh) => builder.build(mesh, { triangleLeaves: variant.triangleLeaves, nodeFormat: treeNodeFormat(variant) })));
 }
 
 /** The assembly options of a variant's format: indexed scenes take the geometry for their positions. */
 function formatOptions(variant: OracleVariant, geometries: readonly (MeshGeometry | null)[]) {
-    const nodes = variant.nodeFormat === 'quantized' ? { nodeFormat: 'quantized' as const } : {};
+    const nodes = variant.nodeFormat && variant.nodeFormat !== 'f32' ? { nodeFormat: variant.nodeFormat } : {};
     return variant.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const, positionLayout: variant.positionLayout, geometries, ...nodes } : nodes;
 }
 
@@ -545,6 +596,7 @@ await runGpuTest(async ({ device, log }) => {
             positionLayout: variant.positionLayout,
             nodeFormat: variant.nodeFormat,
             anyHitOrder: variant.anyHitOrder,
+            wideStack: variant.wideStack,
         });
         const results = { cases: {} as Record<string, unknown>, sharedEdges: [] as SharedEdgeReport[] };
         byTest[variant.name] = results;
@@ -557,7 +609,8 @@ await runGpuTest(async ({ device, log }) => {
             const { answers, built } = await traceCase(device, kernel, builder, oracleCase, variant);
 
             const result = evaluateCase(oracleCase, tracerAnswers(answers), reference);
-            const stackUsed = probeStackDepth(built.data, oracleCase);
+            // The CPU port walks binary trees only; a wide scene reports its mesh stack need instead.
+            const stackUsed = isWide(variant) ? 0 : probeStackDepth(built.data, oracleCase);
             deepestStackUsed = Math.max(deepestStackUsed, stackUsed);
             deepestRequired = Math.max(deepestRequired, built.data.requiredStackSize);
             const materialHits = countMaterialHits(answers, oracleCase.rays.length / 8);
@@ -636,12 +689,17 @@ await runGpuTest(async ({ device, log }) => {
     const hooks: Record<string, unknown> = {};
     const hookPasses = [
         [true, false, false, false], [false, false, false, false], [true, true, false, false], [true, false, true, false], [false, false, true, false], [true, true, true, false],
-        [true, false, false, true], [false, false, false, true], [true, true, true, true],
+        [true, false, false, 'quantized'], [false, false, false, 'quantized'], [true, true, true, 'quantized'],
+        [true, false, false, 'bvh4'], [false, true, false, 'bvh4'], [true, false, false, 'cwbvh8'], [false, false, false, 'cwbvh8'], [true, true, true, 'cwbvh8'],
     ] as const;
-    for (const [rayMasks, merged, indexed, quantized] of hookPasses) {
-        const format = quantized ? (indexed ? QUANTIZED_INDEXED_HOOK_VARIANT : QUANTIZED_HOOK_VARIANT) : indexed ? INDEXED_HOOK_VARIANT : VARIANTS[0];
+    for (const [rayMasks, merged, indexed, nodes] of hookPasses) {
+        const quantized = nodes === 'quantized';
+        const wide = nodes === 'bvh4' || nodes === 'cwbvh8' ? nodes : null;
+        const format = wide
+            ? indexed ? WIDE_INDEXED_HOOK_VARIANT : WIDE_HOOK_VARIANTS[wide]
+            : quantized ? (indexed ? QUANTIZED_INDEXED_HOOK_VARIANT : QUANTIZED_HOOK_VARIANT) : indexed ? INDEXED_HOOK_VARIANT : VARIANTS[0];
         for (const hook of buildHookCases(hookSizes)) {
-            const kernel = await TraceBatchKernel.create(device, { label: hook.name, triangleFilter: hook.filterWgsl, rayMasks, triangleLeaves: format.triangleLeaves, nodeFormat: format.nodeFormat });
+            const kernel = await TraceBatchKernel.create(device, { label: hook.name, triangleFilter: hook.filterWgsl, rayMasks, triangleLeaves: format.triangleLeaves, nodeFormat: format.nodeFormat, wideStack: format.wideStack });
             let scene: TraceSceneData;
             let flagged: number;
             if (merged) {
@@ -659,7 +717,7 @@ await runGpuTest(async ({ device, log }) => {
                 for (const mask of hookMasks(hook, rayMasks)) {
                     const answers = await traceOnGpu(device, (encoder, batch) => kernel.encode(encoder, buffers, { ...batch, mask }), hook.base.rays);
                     const result = evaluateCase(hook.base, tracerAnswers(answers), await hookReferenceAnswers(hook, mask, rayMasks));
-                    const name = `${quantized ? 'quantized ' : ''}${indexed ? 'indexed ' : ''}${merged ? 'merged ' : ''}${hookPassName(hook, mask, rayMasks)}`;
+                    const name = `${wide ? `${wide} ` : ''}${quantized ? 'quantized ' : ''}${indexed ? 'indexed ' : ''}${merged ? 'merged ' : ''}${hookPassName(hook, mask, rayMasks)}`;
                     hooks[name] = {
                         rays: result.rays,
                         flaggedTriangles: flagged,
