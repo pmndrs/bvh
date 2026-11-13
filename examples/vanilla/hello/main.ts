@@ -18,7 +18,6 @@
  */
 
 import {
-    assembleTraceScene,
     bvhHelperIndices,
     bvhHelperPositions,
     CpuMeshBvh,
@@ -37,7 +36,7 @@ import {
     type TraceSceneData,
 } from '@pmndrs/bvh';
 import { requestedModel } from '../../shared/assets.ts';
-import { GpuRays, traceSourceOf } from '../../shared/gpu-rays.ts';
+import { assembleLayouts, GpuRays, traceSourceOf } from '../../shared/gpu-rays.ts';
 import { GpuTimer } from '../../shared/gpu-timer.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 import { layoutInfo } from '../../shared/stats.ts';
@@ -142,13 +141,22 @@ interface Built {
     readonly center: [number, number, number];
 }
 let built: Built | null = null;
+let picked = 0xffffffff;
 let picks: GpuRays | null = null;
 // The batch kernel, compiled for the scene's formats.
 let batchKernel: TraceBatchKernel | null = null;
 let kernelFormats = '';
 const timer = GpuTimer.create(device, 1);
 
-async function useScene(scene: VanillaScene): Promise<void> {
+// Scene swaps (a drop while one loads) run one after another.
+let swaps: Promise<void> = Promise.resolve();
+function useScene(scene: VanillaScene): Promise<void> {
+    const next = swaps.then(() => swapScene(scene));
+    swaps = next.catch(() => undefined);
+    return next;
+}
+
+async function swapScene(scene: VanillaScene): Promise<void> {
     const mesh = mergeToWorld(scene);
     // The builder: GPU H-PLOC with subgroups, else tinybvh; the chooser says why.
     const prepareStart = performance.now();
@@ -164,17 +172,17 @@ async function useScene(scene: VanillaScene): Promise<void> {
     overlay.set('mesh', `${scene.name}: ${(mesh.indices.length / 3).toLocaleString('en-US')} triangles${scene.instances.length > 1 ? `, ${scene.instances.length} instances merged` : ''}`);
     if (scene.loadMs !== undefined) overlay.set('load', `${scene.loadMs.toFixed(0)} ms`);
 
-    // One instance at the origin: the scene the walk reads. Its formats are whatever the package's defaults are.
-    const data = assembleTraceScene([result.layout], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }]);
+    // One instance at the origin: the scene the walk reads, in the formats the tree came in (the builder's defaults).
+    const data = assembleLayouts([result.layout], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }], [mesh]);
     const buffers = uploadTraceScene(device, data, 'hello');
     const source = traceSourceOf(device, buffers);
+    // Everything new is made before anything old goes: the frames go on with the old scene meanwhile.
     const formats = `${source.triangleLeaves}/${source.positionLayout}/${source.nodeFormat}`;
-    if (!batchKernel || formats !== kernelFormats) {
-        batchKernel = await TraceBatchKernel.create(device, { label: 'hello batch', triangleLeaves: source.triangleLeaves, positionLayout: source.positionLayout, nodeFormat: source.nodeFormat });
-        kernelFormats = formats;
-    }
-    picks?.destroy();
-    picks = await GpuRays.create(source);
+    const kernel =
+        batchKernel && formats === kernelFormats
+            ? batchKernel
+            : await TraceBatchKernel.create(device, { label: 'hello batch', triangleLeaves: source.triangleLeaves, positionLayout: source.positionLayout, nodeFormat: source.nodeFormat });
+    const newPicks = await GpuRays.create(source);
 
     const positions = device.createBuffer({ label: 'hello positions', size: mesh.positions.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     const indices = device.createBuffer({ label: 'hello indices', size: mesh.indices.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -191,15 +199,26 @@ async function useScene(scene: VanillaScene): Promise<void> {
     const box = result.layout.bounds;
     const center: [number, number, number] = [(box[0] + box[3]) / 2, (box[1] + box[4]) / 2, (box[2] + box[5]) / 2];
     const radius = Math.hypot(box[3] - box[0], box[4] - box[1], box[5] - box[2]) / 2;
-    if (built) {
-        built.buffers.destroy();
-        built.positions.destroy();
-        built.indices.destroy();
-    }
-    built = { mesh, layout: result.layout, data, buffers, tree: new CpuMeshBvh(result.layout, { source: mesh }), meshGroup, positions, indices, radius, center };
+    const tree = new CpuMeshBvh(result.layout, { source: mesh });
+
+    // The swap, in one go (no await): frames after it see only the new scene.
+    const old = { built, picks, kernel: batchKernel !== kernel ? batchKernel : null };
+    built = { mesh, layout: result.layout, data, buffers, tree, meshGroup, positions, indices, radius, center };
+    picks = newPicks;
+    batchKernel = kernel;
+    kernelFormats = formats;
+    picked = 0xffffffff;
     camera.frame(box);
     makeBoxes();
     makeRays();
+    // The old scene goes once the picks already asked of it have finished (their trace reads its buffers).
+    old.kernel?.destroy();
+    await old.picks?.retire();
+    if (old.built) {
+        old.built.buffers.destroy();
+        old.built.positions.destroy();
+        old.built.indices.destroy();
+    }
 }
 
 // The tree's boxes at `settings.depth`, from a CPU view of the same layout.
@@ -277,7 +296,6 @@ overlay.note('Hover the mesh: one GPU ray picks a triangle. Green points: the ba
 let pointer: [number, number] | null = null;
 canvas.addEventListener('pointermove', (event) => (pointer = [(event.clientX / canvas.clientWidth) * 2 - 1, 1 - (event.clientY / canvas.clientHeight) * 2]));
 canvas.addEventListener('pointerleave', () => (pointer = null));
-let picked = 0xffffffff;
 
 const model = requestedModel();
 await useScene(model ? await loadGltfScene(model) : singleMeshScene('torus knot', torusKnot()));
@@ -288,6 +306,7 @@ enableSceneDrop(useScene, (error) => overlay.error(String(error)));
 let frame = 0;
 let measuring = false;
 let checked: Record<string, unknown> | null = null;
+let swapped = 0;
 app.loop({
     async update() {
         frame++;
@@ -304,8 +323,15 @@ app.loop({
             picked = hit ? hit.triangle : 0xffffffff;
             overlay.set('picked', hit ? `triangle ${hit.triangle.toLocaleString('en-US')} at t = ${hit.t.toFixed(3)}${hit.frontFace ? '' : ' (back face)'}` : '-');
         }
-        if (isSmoke && frame === 30 && !checked) checked = await smokeCheck();
-        if (isSmoke && frame === 40 && checked) await ready(device, { ...overlay.snapshot(), ...checked });
+        if (isSmoke && frame === 30 && !checked) {
+            checked = await smokeCheck();
+            // A model swap with a pick in flight: the old GpuRays and scene are retired after it, not destroyed under it.
+            const inFlight = picks.traceClosest(camera.packRay(0, 0, app.aspect));
+            await useScene(singleMeshScene('torus knot (3, 5)', torusKnot(1, 0.25, 500, 32, 3, 5)));
+            await inFlight;
+            swapped = frame;
+        }
+        if (isSmoke && swapped && frame === swapped + 10) await ready(device, { ...overlay.snapshot(), first: checked, afterSwap: await smokeCheck() });
     },
     render(encoder, target) {
         if (!built || !batch || !batchKernel) return;

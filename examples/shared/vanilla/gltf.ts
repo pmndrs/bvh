@@ -6,9 +6,11 @@
  *
  * - `.glb`, or `.gltf` with external `.bin` files or `data:` URIs.
  * - Each primitive is one mesh; each node that uses it is one instance.
- * - Not read: sparse accessors, quantized positions (`KHR_mesh_quantization`),
- *   Draco and meshopt compression (a clear error says so), morph targets and
- *   skins (the bind pose is used).
+ * - Refused with a clear error: any required extension that could change the
+ *   geometry (only material, texture and light extensions are let through:
+ *   Draco, meshopt, `KHR_mesh_quantization`, `EXT_mesh_gpu_instancing` and
+ *   anything unknown are refused), GPU instancing on a node, sparse accessors.
+ * - Not read: morph targets and skins (the bind pose is used).
  *
  * `?model=<path>` loads one from the assets base (assets.ts); a `.glb`, or a
  * `.gltf` with its files, can be dropped on the page.
@@ -40,13 +42,15 @@ interface GltfJson {
         readonly translation?: readonly number[];
         readonly rotation?: readonly number[];
         readonly scale?: readonly number[];
+        readonly extensions?: Record<string, unknown>;
     }[];
     readonly scenes?: readonly { readonly nodes?: readonly number[] }[];
     readonly scene?: number;
 }
 
 const COMPONENTS: Readonly<Record<string, number>> = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
-const UNSUPPORTED = ['KHR_draco_mesh_compression', 'EXT_meshopt_compression', 'KHR_meshopt_compression', 'KHR_mesh_quantization'];
+/** Required extensions that leave positions, indices and transforms alone: materials, textures, lights. Any other is refused. */
+const GEOMETRY_NEUTRAL = [/^KHR_materials_/, /^KHR_texture_/, /^EXT_texture_/, /^KHR_lights_punctual$/];
 
 /** Loads a glTF from a `?model=` path or URL. */
 export async function loadGltfScene(path: string): Promise<VanillaScene> {
@@ -83,8 +87,9 @@ export async function parseGltf(bytes: ArrayBuffer, resolve: (uri: string) => Pr
     } else {
         json = JSON.parse(new TextDecoder().decode(bytes)) as GltfJson;
     }
-    const unsupported = (json.extensionsRequired ?? []).filter((extension) => UNSUPPORTED.includes(extension));
-    if (unsupported.length) throw new Error(`${name} needs ${unsupported.join(', ')}, which this minimal reader doesn't decode`);
+    const unsupported = (json.extensionsRequired ?? []).filter((extension) => !GEOMETRY_NEUTRAL.some((pattern) => pattern.test(extension)));
+    if (unsupported.length) throw new Error(`${name} requires ${unsupported.join(', ')}, which this minimal reader doesn't decode`);
+    if ((json.nodes ?? []).some((node) => node.extensions?.EXT_mesh_gpu_instancing)) throw new Error(`${name} uses EXT_mesh_gpu_instancing, which this minimal reader doesn't expand`);
 
     const buffers = await Promise.all(
         (json.buffers ?? []).map(async (buffer) => {
@@ -103,6 +108,7 @@ export async function parseGltf(bytes: ArrayBuffer, resolve: (uri: string) => Pr
         if (accessor.sparse) throw new Error(`${name}: sparse accessors aren't read`);
         const components = COMPONENTS[accessor.type];
         if (kind === 'positions' && (accessor.componentType !== 5126 || components !== 3)) throw new Error(`${name}: positions must be float VEC3 (quantized positions aren't read)`);
+        if (kind === 'indices' && (![5121, 5123, 5125].includes(accessor.componentType) || components !== 1)) throw new Error(`${name}: indices must be unsigned byte, short or int scalars`);
         const out = kind === 'positions' ? new Float32Array(accessor.count * 3) : new Uint32Array(accessor.count);
         if (accessor.bufferView === undefined) return out; // all zeros, as the spec says
         const view = json.bufferViews![accessor.bufferView];
@@ -127,7 +133,9 @@ export async function parseGltf(bytes: ArrayBuffer, resolve: (uri: string) => Pr
         for (const primitive of gltfMesh.primitives) {
             if ((primitive.mode ?? 4) !== 4 || primitive.attributes.POSITION === undefined) continue;
             const positions = read(primitive.attributes.POSITION, 'positions') as Float32Array;
-            const indices = primitive.indices !== undefined ? (read(primitive.indices, 'indices') as Uint32Array) : Uint32Array.from({ length: positions.length / 3 }, (_, i) => i);
+            const vertexCount = positions.length / 3;
+            const indices = primitive.indices !== undefined ? (read(primitive.indices, 'indices') as Uint32Array) : Uint32Array.from({ length: vertexCount }, (_, i) => i);
+            for (const index of indices) if (index >= vertexCount) throw new Error(`${name}: index ${index} past the primitive's ${vertexCount} vertices`);
             if (indices.length < 3) continue;
             list.push({ mesh: meshes.length, material: primitive.material ?? 0 });
             meshes.push({ positions, indices: indices.length % 3 ? indices.slice(0, indices.length - (indices.length % 3)) : indices });
@@ -144,7 +152,9 @@ export async function parseGltf(bytes: ArrayBuffer, resolve: (uri: string) => Pr
         if (node.mesh !== undefined) for (const primitive of primitivesOf[node.mesh]) instances.push({ mesh: primitive.mesh, objectToWorld: world, material: primitive.material });
         for (const child of node.children ?? []) visit(child, world);
     };
-    const roots = json.scenes?.[json.scene ?? 0]?.nodes ?? (json.nodes ?? []).map((_, index) => index);
+    // The scene's roots; without one, every node no other node lists as a child (so none is placed twice).
+    const children = new Set((json.nodes ?? []).flatMap((node) => node.children ?? []));
+    const roots = json.scenes?.[json.scene ?? 0]?.nodes ?? (json.nodes ?? []).map((_, index) => index).filter((index) => !children.has(index));
     for (const root of roots) visit(root, mat4.identity());
     if (instances.length === 0) throw new Error(`${name} has no triangle meshes`);
     return makeScene(name, meshes, instances, performance.now() - start);

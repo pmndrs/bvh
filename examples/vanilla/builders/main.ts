@@ -18,8 +18,9 @@
  */
 
 import {
-    assembleTraceScene,
+    createCpuTracer,
     createRandom,
+    GpuLbvhBuilder,
     HIT_RECORD_BYTES,
     HIT_RECORD_WORD,
     IDENTITY_TRANSFORM,
@@ -28,15 +29,17 @@ import {
     TraceBatchKernel,
     uploadTraceScene,
     type TraceSceneBuffers,
+    type TraceSceneData,
 } from '@pmndrs/bvh';
 import { requestedModel } from '../../shared/assets.ts';
 import { BUILDER_KINDS, MeshBuilds, type BuilderKind, type TimedBuild } from '../../shared/builders.ts';
-import { traceSourceOf, type TraceSource } from '../../shared/gpu-rays.ts';
+import { assembleLayouts, traceSourceOf, type TraceSource } from '../../shared/gpu-rays.ts';
 import { GpuTimer } from '../../shared/gpu-timer.ts';
 import { bytes, type TreeInfo } from '../../shared/overlay.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 import { layoutInfo } from '../../shared/stats.ts';
 import { createVanillaApp } from '../../shared/vanilla/app.ts';
+import { checkAgainstCpu } from '../../shared/vanilla/check.ts';
 import { mergeToWorld, singleMeshScene, torusKnot, type IndexedMesh, type VanillaScene } from '../../shared/vanilla/geometry.ts';
 import { enableSceneDrop, loadGltfScene } from '../../shared/vanilla/gltf.ts';
 import { vec3 } from '../../shared/vanilla/math.ts';
@@ -59,21 +62,33 @@ interface Row {
     readonly kind: BuilderKind;
     readonly built: TimedBuild;
     readonly info: TreeInfo;
+    readonly data: TraceSceneData;
     readonly buffers: TraceSceneBuffers;
     readonly source: TraceSource;
     readonly traceMs: number | null;
     readonly timing: 'timestamps' | 'submit to done';
-    /** t per ray (negative: a miss). */
-    readonly hits: Float32Array;
+    /** t per ray (negative: a miss) and the hit triangle. */
+    readonly t: Float32Array;
+    readonly triangles: Uint32Array;
     agree: number | null;
     readonly element: HTMLTableRowElement;
 }
-let mesh: IndexedMesh;
-let meshName = '';
-let radius = 1;
-let rows: Row[] = [];
+interface Rays {
+    readonly packed: Float32Array;
+    readonly buffer: GPUBuffer;
+    readonly results: GPUBuffer;
+    readonly read: GPUBuffer;
+}
+/** One build pass: a mesh, its rays, a row per builder. Pages swap whole passes, never half of one. */
+interface Pass {
+    readonly mesh: IndexedMesh;
+    readonly name: string;
+    readonly radius: number;
+    readonly rays: Rays;
+    readonly rows: Row[];
+}
+let current: Pass | null = null;
 let selected: Row | null = null;
-let rays: { buffer: GPUBuffer; results: GPUBuffer; read: GPUBuffer } | null = null;
 
 // ---- The table.
 
@@ -86,7 +101,7 @@ document.body.append(table);
 const caption = table.createCaption();
 caption.style.cssText = 'caption-side:bottom;padding:4px 8px 6px;font:11px/1.4 system-ui,sans-serif;color:#8592a3;text-align:left';
 
-function cells(row: Row): string[] {
+function cells(row: Row, rows: readonly Row[]): string[] {
     const tiny = rows.find((other) => other.kind === 'tinybvh');
     const ms = (value: number | null | undefined, digits: number) => (value === undefined ? '-' : value === null ? 'n/a' : `${value.toFixed(digits)} ms`);
     return [
@@ -103,15 +118,15 @@ function cells(row: Row): string[] {
         row.agree === null ? '-' : `${(row.agree * 100).toFixed(2)}%`,
     ];
 }
-function refreshTable(): void {
-    for (const row of rows) {
-        row.element.innerHTML = cells(row)
+function refreshTable(pass: Pass, status = ''): void {
+    for (const row of pass.rows) {
+        row.element.innerHTML = cells(row, pass.rows)
             .map((text) => `<td style="padding:2px 8px">${text}</td>`)
             .join('');
         row.element.style.background = row === selected ? 'rgba(255,200,120,0.14)' : '';
     }
-    const reasons = rows.filter((row) => row.built.fallbackReason).map((row) => `${row.kind}: ${row.built.fallbackReason}`);
-    caption.textContent = `${meshName}: ${(mesh.indices.length / 3).toLocaleString('en-US')} triangles. ${RAY_COUNT.toLocaleString('en-US')} closest-hit rays from around the mesh, median of ${DISPATCHES} dispatches.${reasons.length ? ` * built by tinybvh instead (${reasons.join('; ')}).` : ''} Click a row to view its tree.`;
+    const reasons = pass.rows.filter((row) => row.built.fallbackReason).map((row) => `${row.kind}: ${row.built.fallbackReason}`);
+    caption.textContent = `${pass.name}: ${(pass.mesh.indices.length / 3).toLocaleString('en-US')} triangles. ${RAY_COUNT.toLocaleString('en-US')} closest-hit rays from around the mesh, median of ${DISPATCHES} dispatches.${reasons.length ? ` * built by tinybvh instead (${reasons.join('; ')}).` : ''} Click a row to view its tree.${status ? ` ${status}` : ''}`;
 }
 
 function select(row: Row): void {
@@ -119,20 +134,26 @@ function select(row: Row): void {
     overlay.build({ builtBy: row.built.builtBy, fallbackReason: row.built.fallbackReason, cpuMs: row.built.cpuMs, gpuMs: row.built.gpuMs });
     overlay.tree(row.info);
     if (row.traceMs) overlay.rays(`closest, ${row.kind} tree${row.timing === 'timestamps' ? '' : ' (wall time)'}`, RAY_COUNT / (row.traceMs / 1000));
-    refreshTable();
+    if (current) refreshTable(current);
 }
 
-// ---- Rays: the same seeded set for every tree.
+// ---- Work runs one job at a time (builds, row clicks): timings never overlap, and nothing is freed under a job.
 
-function makeRays(): void {
-    rays?.buffer.destroy();
-    rays?.results.destroy();
-    rays?.read.destroy();
+let work: Promise<void> = Promise.resolve();
+function queue(job: () => Promise<void>): Promise<void> {
+    const next = work.then(job);
+    work = next.catch((error: unknown) => overlay.error(String(error)));
+    return next;
+}
+
+// ---- Rays: the same seeded set for every tree of a pass.
+
+function makeRays(mesh: IndexedMesh): { rays: Rays; box: number[]; radius: number } {
     const random = createRandom(42);
     const packed = new Float32Array(RAY_COUNT * RAY_FLOATS);
-    const b = mesh.positions.length ? bounds(mesh.positions) : [0, 0, 0, 1, 1, 1];
+    const b = bounds(mesh.positions);
     const center = [(b[0] + b[3]) / 2, (b[1] + b[4]) / 2, (b[2] + b[5]) / 2];
-    radius = Math.hypot(b[3] - b[0], b[4] - b[1], b[5] - b[2]) / 2;
+    const radius = Math.hypot(b[3] - b[0], b[4] - b[1], b[5] - b[2]) / 2;
     for (let i = 0; i < RAY_COUNT; i++) {
         const z = random() * 2 - 1;
         const phi = random() * Math.PI * 2;
@@ -146,8 +167,7 @@ function makeRays(): void {
     device.queue.writeBuffer(buffer, 0, packed);
     const results = device.createBuffer({ label: 'builders hits', size: RAY_COUNT * HIT_RECORD_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     const read = device.createBuffer({ label: 'builders hits read', size: RAY_COUNT * HIT_RECORD_BYTES, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    rays = { buffer, results, read };
-    camera.frame(b);
+    return { rays: { packed, buffer, results, read }, box: b, radius };
 }
 
 function bounds(positions: Float32Array): number[] {
@@ -172,9 +192,10 @@ async function kernelFor(source: TraceSource): Promise<TraceBatchKernel> {
 }
 
 /** The rays through one tree: the median of timed dispatches, then the hits read back. */
-async function trace(source: TraceSource): Promise<{ ms: number | null; timing: Row['timing']; hits: Float32Array }> {
+async function trace(source: TraceSource, rays: Rays): Promise<{ ms: number | null; timing: Row['timing']; t: Float32Array; triangles: Uint32Array }> {
     const kernel = await kernelFor(source);
-    const { buffer, results, read } = rays!;
+    const { buffer, results, read } = rays;
+    timer?.reset(); // a trace that failed midway (jobs run one at a time, so none is in flight)
     const times: number[] = [];
     for (let run = 0; run < DISPATCHES + 1; run++) {
         const encoder = device.createCommandEncoder({ label: 'builders trace' });
@@ -194,63 +215,90 @@ async function trace(source: TraceSource): Promise<{ ms: number | null; timing: 
     encoder.copyBufferToBuffer(results, 0, read, 0, RAY_COUNT * HIT_RECORD_BYTES);
     device.queue.submit([encoder.finish()]);
     await read.mapAsync(GPUMapMode.READ);
-    const floats = new Float32Array(read.getMappedRange());
+    const mapped = read.getMappedRange();
+    const floats = new Float32Array(mapped);
+    const words = new Uint32Array(mapped);
     const stride = HIT_RECORD_BYTES / 4;
-    const hits = new Float32Array(RAY_COUNT);
-    for (let i = 0; i < RAY_COUNT; i++) hits[i] = floats[i * stride + HIT_RECORD_WORD.t];
+    const t = new Float32Array(RAY_COUNT);
+    const triangles = new Uint32Array(RAY_COUNT);
+    for (let i = 0; i < RAY_COUNT; i++) {
+        t[i] = floats[i * stride + HIT_RECORD_WORD.t];
+        triangles[i] = words[i * stride + HIT_RECORD_WORD.triangle];
+    }
     read.unmap();
-    return { ms: times[Math.floor(times.length / 2)] || null, timing: timer ? 'timestamps' : 'submit to done', hits };
+    return { ms: times[Math.floor(times.length / 2)] || null, timing: timer ? 'timestamps' : 'submit to done', t, triangles };
 }
 
-/** Builds one row: the tree, its one-instance scene on the GPU, its trace. */
-async function buildRow(kind: BuilderKind): Promise<Row> {
+/** Builds one row: the tree, its one-instance scene on the GPU (in the formats the tree came in), its trace. */
+async function buildRow(kind: BuilderKind, mesh: IndexedMesh, rays: Rays): Promise<Row> {
     const leaf = settings.leaf === 'default' ? {} : { maxLeafPrimitives: Number(settings.leaf) };
     const built = await builds.build(kind, mesh, leaf);
-    const data = assembleTraceScene([built.layout], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }]);
+    const data = assembleLayouts([built.layout], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }], [mesh]);
     const buffers = uploadTraceScene(device, data, kind);
     const source = traceSourceOf(device, buffers);
-    const traced = await trace(source);
+    const traced = await trace(source, rays);
     const element = document.createElement('tr');
-    const row: Row = { kind, built, info: layoutInfo(built.layout), buffers, source, traceMs: traced.ms, timing: traced.timing, hits: traced.hits, agree: null, element };
+    const row: Row = { kind, built, info: layoutInfo(built.layout), data, buffers, source, traceMs: traced.ms, timing: traced.timing, t: traced.t, triangles: traced.triangles, agree: null, element };
     element.addEventListener('click', () => {
-        void view.prepare(row.source).then(() => select(row));
+        void queue(async () => {
+            // Only a row of the pass on show (a click on a row being replaced does nothing).
+            if (!current?.rows.includes(row)) return;
+            await view.prepare(row.source);
+            select(row);
+        });
     });
     return row;
 }
 
-/** Every builder on the current mesh, one after another (so their timings don't overlap). */
-async function buildAll(): Promise<void> {
-    for (const row of rows) row.buffers.destroy();
-    rows = [];
-    table.tBodies[0].replaceChildren();
-    makeRays();
-    for (const kind of BUILDER_KINDS) {
-        const row = await buildRow(kind);
-        rows.push(row);
-        table.tBodies[0].append(row.element);
-        refreshTable();
-    }
-    // Agreement: the same distance as tinybvh's tree (or both missed), ray by ray.
-    const tiny = rows.find((row) => row.kind === 'tinybvh')!;
-    for (const row of rows) {
-        let same = 0;
-        for (let i = 0; i < RAY_COUNT; i++) {
-            const a = row.hits[i];
-            const b = tiny.hits[i];
-            if ((a < 0 && b < 0) || Math.abs(a - b) <= 1e-5 * Math.max(1, b)) same++;
+/** Every builder on `mesh`, one after another (so their timings don't overlap); then the pass replaces the one on show. */
+function buildAll(mesh: IndexedMesh = current!.mesh, name: string = current!.name): Promise<void> {
+    return queue(async () => {
+        const { rays, box, radius } = makeRays(mesh);
+        const pass: Pass = { mesh, name, radius, rays, rows: [] };
+        const pending: Row[] = [];
+        try {
+            for (const kind of BUILDER_KINDS) {
+                caption.textContent = `${name}: building with ${kind}…`;
+                pending.push(await buildRow(kind, mesh, rays));
+            }
+        } catch (error) {
+            for (const row of pending) row.buffers.destroy();
+            for (const buffer of [rays.buffer, rays.results, rays.read]) buffer.destroy();
+            throw error;
         }
-        row.agree = same / RAY_COUNT;
-    }
-    const show = rows.find((row) => row.kind === (params.get('show') ?? 'gpu-hploc')) ?? rows[0];
-    await view.prepare(show.source);
-    select(show);
+        pass.rows.push(...pending);
+        // Agreement: the same distance as tinybvh's tree (or both missed), ray by ray.
+        const tiny = pass.rows.find((row) => row.kind === 'tinybvh')!;
+        for (const row of pass.rows) {
+            let same = 0;
+            for (let i = 0; i < RAY_COUNT; i++) {
+                const a = row.t[i];
+                const b = tiny.t[i];
+                if ((a < 0 && b < 0) || Math.abs(a - b) <= 1e-5 * Math.max(1, b)) same++;
+            }
+            row.agree = same / RAY_COUNT;
+        }
+        const show = pass.rows.find((row) => row.kind === (params.get('show') ?? 'gpu-hploc')) ?? pass.rows[0];
+        await view.prepare(show.source);
+
+        // The swap, in one go (no await): the next frame traces the new pass.
+        const old = current;
+        current = pass;
+        table.tBodies[0].replaceChildren(...pass.rows.map((row) => row.element));
+        if (!old || old.mesh !== mesh) camera.frame(box);
+        select(show);
+        // Nothing traces the old pass after this: its frames were submitted, and jobs run one at a time.
+        if (old) {
+            for (const row of old.rows) row.buffers.destroy();
+            for (const buffer of [old.rays.buffer, old.rays.results, old.rays.read]) buffer.destroy();
+        }
+    });
 }
 
-async function useScene(scene: VanillaScene): Promise<void> {
-    mesh = mergeToWorld(scene);
-    meshName = scene.name;
+function useScene(scene: VanillaScene): Promise<void> {
+    const mesh = mergeToWorld(scene);
     overlay.set('mesh', `${scene.name}: ${(mesh.indices.length / 3).toLocaleString('en-US')} triangles${scene.instances.length > 1 ? `, ${scene.instances.length} instances merged` : ''}`);
-    await buildAll();
+    return buildAll(mesh, scene.name);
 }
 
 overlay.select('largest leaf', ['default', '1', '2', '4', '8'] as const, 'default', (value) => {
@@ -265,25 +313,64 @@ const model = requestedModel();
 await useScene(model ? await loadGltfScene(model) : singleMeshScene('torus knot', torusKnot(1, 0.3, 1000, 50)));
 enableSceneDrop(useScene, (error) => overlay.error(String(error)));
 
+/**
+ * Smoke: three rows; every tree's hits at tinybvh's distance; at least half
+ * the rays hit; tinybvh's hits agree with the CPU walk on 1,024 rays; with
+ * subgroups, the GPU rows were built by their builders.
+ */
+function checkPass(pass: Pass): Record<string, unknown> {
+    if (pass.rows.length !== BUILDER_KINDS.length) throw new Error(`${pass.rows.length} rows`);
+    for (const row of pass.rows) {
+        if (row.agree === null || row.agree < 0.999) throw new Error(`${row.kind}: ${row.agree} of the rays hit at tinybvh's distance`);
+        let hits = 0;
+        for (let i = 0; i < RAY_COUNT; i++) if (row.t[i] >= 0) hits++;
+        if (hits < RAY_COUNT / 2) throw new Error(`${row.kind}: only ${hits} of ${RAY_COUNT} rays hit`);
+        if (row.kind !== 'tinybvh' && GpuLbvhBuilder.isSupported(device) && row.built.builtBy !== row.kind) throw new Error(`${row.kind}: built by ${row.built.builtBy} on a device with subgroups`);
+    }
+    const tiny = pass.rows.find((row) => row.kind === 'tinybvh')!;
+    const subset = pass.rays.packed.subarray(0, 1024 * RAY_FLOATS);
+    const cpu = checkAgainstCpu(subset, (i) => (tiny.t[i] >= 0 ? { t: tiny.t[i], instance: 0, triangle: tiny.triangles[i] } : null), createCpuTracer(tiny.data));
+    return {
+        cpu,
+        rows: pass.rows.map((row) => ({ kind: row.kind, builtBy: row.built.builtBy, fallbackReason: row.built.fallbackReason, cpuMs: row.built.cpuMs, gpuMs: row.built.gpuMs, ...row.info, traceMs: row.traceMs, agree: row.agree })),
+    };
+}
+
 let frame = 0;
+let smoke: Promise<void> | null = null;
 app.loop({
     async update() {
         frame++;
         await view.collect();
-        if (isSmoke && frame === 20) {
-            for (const row of rows) if (row.agree === null || row.agree < 0.999) throw new Error(`${row.kind}: ${row.agree} of the rays hit at tinybvh's distance`);
-            if (rows.length !== BUILDER_KINDS.length) throw new Error(`${rows.length} rows`);
-            await ready(device, {
-                ...overlay.snapshot(),
-                rows: rows.map((row) => ({ kind: row.kind, builtBy: row.built.builtBy, fallbackReason: row.built.fallbackReason, cpuMs: row.built.cpuMs, gpuMs: row.built.gpuMs, ...row.info, traceMs: row.traceMs, agree: row.agree })),
-            });
-        }
+        if (isSmoke && frame === 20) smoke ??= smokeRun();
     },
     render(encoder, target) {
-        if (!selected) return;
+        if (!selected || !current) return;
         const width = canvas.width;
         const height = canvas.height;
-        view.trace(encoder, selected.source, camera.basis(width / height), { mode: settings.mode, shadows: false, sun: [0, 1, 0], highlight: null, sceneRadius: radius }, width, height);
+        view.trace(encoder, selected.source, camera.basis(width / height), { mode: settings.mode, shadows: false, sun: [0, 1, 0], highlight: null, sceneRadius: current.radius }, width, height);
         view.draw(encoder, target);
     },
 });
+
+async function smokeRun(): Promise<void> {
+    const first = checkPass(current!);
+    // Rebuilds while frames trace: a leaf change and "build all again" asked at once run one after the other,
+    // and the pass on show is never freed under a frame.
+    settings.leaf = '2';
+    const a = buildAll();
+    const b = buildAll();
+    await nextFrames(2);
+    await Promise.all([a, b]);
+    await nextFrames(5);
+    const second = checkPass(current!);
+    await ready(device, { ...overlay.snapshot(), first, afterRebuild: second });
+}
+
+function nextFrames(count: number): Promise<void> {
+    const target = frame + count;
+    return new Promise((resolve) => {
+        const poll = () => (frame >= target ? resolve() : requestAnimationFrame(poll));
+        poll();
+    });
+}

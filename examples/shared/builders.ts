@@ -4,13 +4,11 @@
  * wall time from encode to the layout read back, and the batch's passes in
  * one timestamp pair where the device has `timestamp-query`).
  *
- * `createMeshLayoutBuilder` is asked first whether the device can run the GPU
- * builder at all; when it can't, tinybvh builds and its `fallbackReason` says
- * why. Engine-free: the inspector (three) and the vanilla pages share it.
+ * Without `subgroups` (both GPU builders need it) tinybvh builds instead, and
+ * `fallbackReason` says why, as `createMeshLayoutBuilder`'s fallback does. Engine-free: the inspector (three) and the vanilla pages share it.
  */
 
 import {
-    createMeshLayoutBuilder,
     createTinyBvhBuilder,
     GpuHplocBuilder,
     GpuLbvhBuilder,
@@ -49,6 +47,7 @@ export interface TimedBuild {
 export class MeshBuilds {
     private readonly gpuBuilders = new Map<BuilderKind, GpuHplocBuilder | GpuLbvhBuilder>();
     private readonly timer: GpuTimer | null;
+    private queue: Promise<unknown> = Promise.resolve();
 
     private constructor(
         private readonly device: GPUDevice,
@@ -65,15 +64,21 @@ export class MeshBuilds {
      * Builds `input` with `kind`. `warmUp` (default true) builds once untimed
      * first, so the timed build doesn't pay for pipelines and first buffers.
      */
-    async build(kind: BuilderKind, input: MeshInput, options: TimedBuildOptions = {}, warmUp = true): Promise<TimedBuild> {
+    build(kind: BuilderKind, input: MeshInput, options: TimedBuildOptions = {}, warmUp = true): Promise<TimedBuild> {
+        // One build at a time: they share the timer, and overlapping builds would time each other.
+        const next = this.queue.then(() => this.buildNow(kind, input, options, warmUp));
+        this.queue = next.catch(() => undefined);
+        return next;
+    }
+
+    private async buildNow(kind: BuilderKind, input: MeshInput, options: TimedBuildOptions, warmUp: boolean): Promise<TimedBuild> {
         if (kind !== 'tinybvh') {
-            // The chooser says whether this device can run the GPU builder at all, and why not.
-            const chooser = await createMeshLayoutBuilder(this.device, { prefer: kind });
-            if (chooser.kind === kind) {
+            // Both GPU builders need subgroups; without them tinybvh builds, as createMeshLayoutBuilder's fallback does.
+            if (GpuLbvhBuilder.isSupported(this.device)) {
                 if (warmUp) await this.buildOnGpu(kind, input, options);
                 return { ...(await this.buildOnGpu(kind, input, options)), builtBy: kind, fallbackReason: null };
             }
-            return { ...this.buildOnCpu(input, options, false), fallbackReason: chooser.fallbackReason };
+            return { ...this.buildOnCpu(input, options, false), fallbackReason: 'the device has no "subgroups" feature' };
         }
         return { ...this.buildOnCpu(input, options, warmUp), fallbackReason: null };
     }
@@ -103,15 +108,17 @@ export class MeshBuilds {
         const start = performance.now();
         const batch = builder.createBatch([input], lbvhIndexed ? { ...options, triangleLeaves: 'records' } : options);
         let trees: GpuTreeBuffers | null = null;
+        const timer = this.timer && !this.timer.pending ? this.timer : null;
+        let timed = false;
         try {
             const encoder = this.device.createCommandEncoder({ label: 'example build' });
-            const timer = this.timer && !this.timer.pending ? this.timer : null;
             batch.encode(encoder, timer?.pass());
             timer?.resolveInto(encoder);
             this.device.queue.submit([encoder.finish()]);
             trees = await batch.finish();
             // The tree is usable on the GPU here; the readback below is for the CPU copy the page inspects.
             const cpuMs = performance.now() - start;
+            timed = true;
             const gpuMs = timer ? (await timer.result())[0] : null;
             const problem = trees.meshes[0].problem;
             if (problem) throw new Error(`${kind} refused the mesh: ${problem}`);
@@ -119,6 +126,8 @@ export class MeshBuilds {
             const layout = lbvhIndexed ? indexedFromRecords(read!, input) : read!;
             return { layout, cpuMs, gpuMs };
         } finally {
+            // A build that failed before its timestamps were read leaves the timer as it was before it.
+            if (!timed) timer?.reset();
             trees?.destroy();
             batch.destroy();
         }

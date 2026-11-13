@@ -205,8 +205,9 @@ export class RayCastView {
         const key = `${source.triangleLeaves}/${source.positionLayout}/${source.nodeFormat}`;
         if (this.pipeline && key === this.pipelineKey) return;
         const entries = traceModuleEntries({ triangleLeaves: source.triangleLeaves });
-        this.sceneLayout = this.device.createBindGroupLayout({ label: 'raycast scene', entries: entries.map((entry, binding) => ({ ...entry, binding })) });
-        this.ioLayout = this.device.createBindGroupLayout({
+        // Made in locals and swapped in together after the await: frames meanwhile trace with the old kernel and its layouts.
+        const sceneLayout = this.device.createBindGroupLayout({ label: 'raycast scene', entries: entries.map((entry, binding) => ({ ...entry, binding })) });
+        const ioLayout = this.device.createBindGroupLayout({
             label: 'raycast io',
             entries: [
                 { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
@@ -215,11 +216,14 @@ export class RayCastView {
                 { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
             ],
         });
-        this.pipeline = await this.device.createComputePipelineAsync({
+        const pipeline = await this.device.createComputePipelineAsync({
             label: 'raycast view',
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.sceneLayout, this.ioLayout] }),
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [sceneLayout, ioLayout] }),
             compute: { module: this.device.createShaderModule({ label: 'raycast view', code: kernelWgsl(source) }), entryPoint: 'main' },
         });
+        this.sceneLayout = sceneLayout;
+        this.ioLayout = ioLayout;
+        this.pipeline = pipeline;
         this.pipelineKey = key;
         this.sceneGroup = null;
         this.ioGroup = null;
