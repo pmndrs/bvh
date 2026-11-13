@@ -47,6 +47,12 @@ The test needs bit-identical shared vertices, which is why triangles store their
 ## For your own builder or walk
 
 Run your trees through the CPU walk against the reference on random rays first (Node, no GPU), then the oracle page
-on each GPU. The contributor notes are in
+on each GPU.
+
+The fixtures are exported from `@pmndrs/bvh`, so your own correctness page can use the same scenes and rays:
+`tessellatedQuad(cells, half)` is the seam quad, and `sharedEdgeRays(count, options)` returns the rays the oracle aims
+at its shared edges and vertices, with a category per ray (`SHARED_EDGE_RAY_CATEGORIES`). Pass the quad instance's
+`objectToWorld` to aim them through a transform. Every one of those rays must hit; a miss is a slip. `randomRays`,
+`randomTriangleSoup`, `randomAffine` and `createRandom` (seeded) cover the random cases. The contributor notes are in
 [`docs/internals/design/trace.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/trace.md), "The
 oracle and the CPU walk".

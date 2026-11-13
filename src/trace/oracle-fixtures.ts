@@ -1,6 +1,8 @@
 /**
  * Deterministic test scenes and rays for the BVH tests and the GPU oracle
- * page. Not part of the tracer; nothing in production imports this file.
+ * page, exported for consumers' own oracles (a walk built on this one, a
+ * renderer's correctness page). Not part of the tracer; nothing in production
+ * imports this file.
  *
  * Everything is seeded so a failing case can be reproduced exactly.
  */
@@ -86,6 +88,111 @@ export function tessellatedQuad(cells: number, half: number): MeshGeometry {
         }
     }
     return { positions, indices };
+}
+
+/** What each ray of {@link sharedEdgeRays} is aimed at, by its `categories` entry. */
+export const SHARED_EDGE_RAY_CATEGORIES = [
+    'exact vertical ray on a grid line',
+    'oblique ray at a grid-line edge',
+    'oblique ray at a diagonal edge',
+    'oblique ray at an interior vertex',
+] as const;
+
+export type SharedEdgeRayCategory = (typeof SHARED_EDGE_RAY_CATEGORIES)[number];
+
+export interface SharedEdgeRayOptions {
+    /** Cells per side of the quad, as `tessellatedQuad(cells, half)`. Default 8. */
+    readonly cells?: number;
+    /** Half the quad's width, as `tessellatedQuad(cells, half)`. Default 2. */
+    readonly half?: number;
+    /**
+     * The quad instance's object-to-world transform, column-major 4x4 (as
+     * `TraceSceneInstance.objectToWorld`). Rays are aimed in object space and
+     * moved to world space with it. Default identity.
+     */
+    readonly objectToWorld?: readonly number[];
+    /** Seed for {@link createRandom}. Default 555. */
+    readonly seed?: number;
+    /**
+     * One ray in this many (ray 0, `verticalEvery`, ...) is an exact vertical
+     * ray down a grid line (category 0); 0 for none. Default 10 without
+     * `objectToWorld`, 0 with one: through a transform the ray is no longer
+     * exactly along the line in the space the walk tests it in.
+     */
+    readonly verticalEvery?: number;
+}
+
+/**
+ * Rays aimed exactly at the seams of `tessellatedQuad(cells, half)`: interior
+ * grid-line edges, the diagonals, and interior vertices where six triangles
+ * meet (categories cycle through {@link SHARED_EDGE_RAY_CATEGORIES}). Every
+ * target lies strictly inside the quad (grid-line targets at least 0.2 from its
+ * border, diagonal ones at least 5% of a cell), and origins sit 0.5 to 3.5
+ * above or below it, so **every ray must hit**: a miss is a ray that
+ * slipped between two triangles. Watertight walks let none through.
+ *
+ * Seeded and deterministic: the GPU oracle page (`trace-oracle`) traces exactly
+ * these rays (seed 555 plain, 777 through its transform). Rays are rounded to
+ * f32 with unit directions, `tMin` 0 and `tMax` 1e6, so a CPU check and the GPU
+ * see the same ray. `categories[i]` is the index of ray `i`'s category.
+ */
+export function sharedEdgeRays(count: number, options: SharedEdgeRayOptions = {}): { rays: TraceRay[]; categories: Uint8Array } {
+    const cells = options.cells ?? 8;
+    const half = options.half ?? 2;
+    const objectToWorld = options.objectToWorld;
+    const verticalEvery = options.verticalEvery ?? (objectToWorld ? 0 : 10);
+    if (!Number.isInteger(cells) || cells < 2) throw new RangeError(`sharedEdgeRays needs at least 2 cells per side, got ${cells}`);
+    if (!(half > 0.2)) throw new RangeError(`sharedEdgeRays needs half larger than 0.2 (targets stay 0.2 inside the border), got ${half}`);
+    const step = (2 * half) / cells;
+    const random = createRandom(options.seed ?? 555);
+    const move = (point: Vector3): Vector3 => (objectToWorld ? transformColumnMajor(objectToWorld, point) : point);
+
+    const rays: TraceRay[] = [];
+    const categories = new Uint8Array(count);
+    const interiorGridLine = (): number => -half + step * (1 + Math.floor(random() * (cells - 1)));
+    const insideCoordinate = (): number => (random() * 2 - 1) * (half - 0.2);
+
+    for (let i = 0; i < count; i++) {
+        const category = verticalEvery > 0 && i % verticalEvery === 0 ? 0 : 1 + (i % 3);
+        categories[i] = category;
+
+        let target: Vector3;
+        if (category === 0 || category === 1) {
+            // On a grid line: x or y is a multiple of the cell size, the other is anywhere along the line.
+            target = random() < 0.5 ? [interiorGridLine(), insideCoordinate(), 0] : [insideCoordinate(), interiorGridLine(), 0];
+        } else if (category === 2) {
+            // Along the diagonal of a random cell.
+            const column = Math.floor(random() * cells);
+            const row = Math.floor(random() * cells);
+            const along = 0.05 + random() * 0.9;
+            target = [-half + step * (column + along), -half + step * (row + along), 0];
+        } else {
+            target = [interiorGridLine(), interiorGridLine(), 0];
+        }
+
+        const height = 0.5 + random() * 3;
+        const above = random() < 0.5 ? 1 : -1;
+        const origin: Vector3 =
+            category === 0
+                ? [target[0], target[1], above * height]
+                : [target[0] + (random() * 2 - 1) * height * 2, target[1] + (random() * 2 - 1) * height * 2, above * height];
+
+        const worldOrigin = move(origin);
+        const worldTarget = move(target);
+        const direction: Vector3 = [worldTarget[0] - worldOrigin[0], worldTarget[1] - worldOrigin[1], worldTarget[2] - worldOrigin[2]];
+        const length = Math.hypot(direction[0], direction[1], direction[2]);
+        rays.push(toFloat32Ray(worldOrigin, [direction[0] / length, direction[1] / length, direction[2] / length], 0, 1e6));
+    }
+    return { rays, categories };
+}
+
+/** A point through a column-major 4x4 affine transform. */
+function transformColumnMajor(matrix: readonly number[], point: Vector3): Vector3 {
+    return [
+        matrix[0] * point[0] + matrix[4] * point[1] + matrix[8] * point[2] + matrix[12],
+        matrix[1] * point[0] + matrix[5] * point[1] + matrix[9] * point[2] + matrix[13],
+        matrix[2] * point[0] + matrix[6] * point[1] + matrix[10] * point[2] + matrix[14],
+    ];
 }
 
 /**
