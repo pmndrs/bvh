@@ -174,10 +174,14 @@ export interface TraceSceneAssemblyOptions {
      */
     readonly merged?: MergedStaticTrees;
     /**
-     * The scene's triangle format (docs/internals/design/indexed-leaves.md). Default
-     * `'records'`: the scene is byte for byte what it was before the option
-     * existed. `'indexed'` needs {@link geometries}; trees built as records
-     * are converted (`indexedFromRecords`), indexed trees are placed as they are.
+     * The scene's triangle format (docs/internals/design/indexed-leaves.md).
+     * Default: the trees' own format, so a scene assembled with defaults from
+     * trees built with defaults agrees with them. Records trees (the builders'
+     * default) give `'records'`: the scene is byte for byte what it was before
+     * the option existed. Indexed trees give `'indexed'`, which needs
+     * {@link geometries}. A mix of records and indexed trees throws unless the
+     * option is given. `'indexed'` converts records trees
+     * (`indexedFromRecords`) and places indexed trees as they are.
      */
     readonly triangleLeaves?: TriangleLeaves;
     /** Indexed scenes: `'vec4'` (the default) or `'packed'` positions. */
@@ -210,6 +214,21 @@ export interface TraceSceneAssemblyOptions {
     readonly nodeFormat?: GpuLayoutNodeFormat;
 }
 
+/**
+ * The triangle format the trees agree on, for an assembly that names none:
+ * `'indexed'` when every tree is indexed, `'records'` when none is (or there
+ * are no trees). A mix throws: only `triangleLeaves: 'indexed'` can place both.
+ */
+function treesTriangleLeaves(trees: readonly (MeshBvh | null)[]): TriangleLeaves {
+    const present = trees.filter((tree): tree is MeshBvh => tree !== null);
+    const indexed = present.filter((tree) => tree.triangleLeaves === 'indexed').length;
+    if (indexed === 0) return 'records';
+    if (indexed === present.length) return 'indexed';
+    throw new RangeError(
+        `assembleTraceScene: ${indexed} of ${present.length} trees are indexed and the rest records; pass triangleLeaves: 'indexed' (records trees are converted) with their geometries`,
+    );
+}
+
 export function assembleTraceScene(
     meshes: readonly (MeshBvh | null)[],
     instances: readonly TraceSceneInstance[],
@@ -224,7 +243,7 @@ export function assembleTraceScene(
         for (const source of group.sources) if (!merged.plan.meshNeeded[source.meshIndex]) mergedInto.set(source.meshIndex, groupIndex);
     });
 
-    const leaves = checkTriangleLeaves(options.triangleLeaves, 'assembleTraceScene');
+    const leaves = checkTriangleLeaves(options.triangleLeaves ?? treesTriangleLeaves(placed), 'assembleTraceScene');
     const indexed = leaves === 'indexed';
     const positionLayout: PositionLayout = options.positionLayout ?? 'vec4';
     if (positionLayout !== 'vec4' && positionLayout !== 'packed') throw new RangeError(`assembleTraceScene: positionLayout must be 'vec4' or 'packed', got ${String(positionLayout)}`);

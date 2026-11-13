@@ -303,7 +303,9 @@ describe('an indexed scene against the records scene', () => {
 
     it('needs the geometries, and refuses indexed trees in a records scene', () => {
         expect(() => assembleTraceScene(meshes.map(indexed), instances, {}, { triangleLeaves: 'indexed' })).toThrow(/geometries\[0\]/);
-        expect(() => assembleTraceScene(meshes.map(indexed), instances)).toThrow(/is indexed/);
+        // No format named: the trees' (indexed), which needs the geometries; records named: indexed trees are refused.
+        expect(() => assembleTraceScene(meshes.map(indexed), instances)).toThrow(/geometries\[0\]/);
+        expect(() => assembleTraceScene(meshes.map(indexed), instances, {}, { triangleLeaves: 'records' })).toThrow(/is indexed/);
         expect(() => assembleTraceScene(meshes.map(records), instances, {}, { geometries: meshes })).toThrow(/triangleLeaves/);
     });
 });
