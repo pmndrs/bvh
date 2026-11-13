@@ -180,11 +180,17 @@ interface Instance extends SceneInstanceDescriptor {
     readonly meshIndex: number;
 }
 
+/**
+ * The options these tests were written against: f32 nodes and no merging, the defaults before 2026-11-13. Tests of
+ * quantized scenes and merged groups ask for them; 'the defaults' tests the defaults themselves.
+ */
+const OLD_DEFAULTS: Partial<SceneTreesOptions> = { nodeFormat: 'f32', mergeStaticInstances: false };
+
 async function setUp(options: Partial<SceneTreesOptions> & { stand?: boolean } = {}) {
     const gpu: FakeGpu = createFakeGpu({}, { kernels: { bvhMergedIdentity: mergedIdentityStandIn, bvhMergedIdentityIndexed: mergedIdentityIndexedStandIn, bvhqQuantize: quantizeStandIn } });
     const stand = options.stand === false ? null : new StandInGpuBuilder(gpu.device, options.triangleLeaves);
     const events: SceneTreeEvent[] = [];
-    const scene = await SceneTrees.create(gpu.device, { ...options, firstTreeBuilder: stand ?? undefined, onTree: (event) => events.push(event) });
+    const scene = await SceneTrees.create(gpu.device, { ...OLD_DEFAULTS, ...options, firstTreeBuilder: stand ?? undefined, onTree: (event) => events.push(event) });
     const frame = () => {
         const encoder = gpu.createEncoder();
         scene.update(encoder);
@@ -598,7 +604,7 @@ describe('SceneTrees', () => {
         const gpu = createFakeGpu({}, { features: ['subgroups'], kernels: { bvhMergedIdentity: mergedIdentityStandIn } });
         const builder = new StandInGpuBuilder(gpu.device);
         // Uncapped: with a cap the main batch is adopted between updates and the cloth placed in the same update (the capped tests cover that).
-        const deforming = await SceneTrees.create(gpu.device, { firstTreeBuilder: builder, topLevel: 'cpu', gpuTreeOutputs: 'adopt', holdRefinements: true, gpuMaxBatchBytes: Infinity });
+        const deforming = await SceneTrees.create(gpu.device, { firstTreeBuilder: builder, topLevel: 'cpu', gpuTreeOutputs: 'adopt', holdRefinements: true, gpuMaxBatchBytes: Infinity, nodeFormat: 'f32' });
         const tick = () => {
             const encoder = gpu.createEncoder();
             deforming.update(encoder);
@@ -787,7 +793,7 @@ const SMALL_CAP = 4 * 1024;
 async function setUpCapped(options: Partial<SceneTreesOptions> = {}) {
     const gpu: FakeGpu = createFakeGpu({}, { kernels: { bvhMergedIdentity: mergedIdentityStandIn, bvhMergedIdentityIndexed: mergedIdentityIndexedStandIn, bvhqQuantize: quantizeStandIn } });
     const hploc = new FakeHploc(gpu.device);
-    const scene = await SceneTrees.create(gpu.device, { gpuMaxBatchBytes: SMALL_CAP, ...options, firstTreeBuilder: new GpuFirstTrees(gpu.device, { hploc, triangleLeaves: options.triangleLeaves }) });
+    const scene = await SceneTrees.create(gpu.device, { ...OLD_DEFAULTS, gpuMaxBatchBytes: SMALL_CAP, ...options, firstTreeBuilder: new GpuFirstTrees(gpu.device, { hploc, triangleLeaves: options.triangleLeaves }) });
     const frame = () => {
         const encoder = gpu.createEncoder();
         scene.update(encoder);
@@ -920,6 +926,31 @@ describe('SceneTrees with quantized nodes', () => {
         }
         expect(sizes[1]).toBe(sizes[0] / 2 + trees * 32);
         await expect(setUp({ stand: false, nodeFormat: 'quantized', gpuTreeOutputs: 'adopt' })).rejects.toThrow(/gpuTreeOutputs: 'copy'/);
+    });
+
+    it('the defaults: quantized nodes, static instances merged at the first update, adopt asks for f32', async () => {
+        // undefined overrides the helper's old defaults, so SceneTrees picks its own.
+        const { scene, frame } = await setUp({ stand: false, nodeFormat: undefined, mergeStaticInstances: undefined });
+        expect(scene.nodeFormat).toBe('quantized');
+        const { geometries, instances, rays } = sceneOf(4);
+        // Instances 0-2 static, mesh 3's not: only the static ones merge.
+        addAll(scene, geometries, instances.map((instance, index) => ({ ...instance, static: index < 3 })));
+        frame();
+        await scene.whenRefined();
+        await scene.whenBuilt();
+        frame();
+        expect(scene.counts.mergedGroups).toBeGreaterThan(0);
+        expect(disagreements(readScene(scene), await reference(geometries, instances), rays)).toEqual([]);
+        scene.dispose();
+        // Unmarked instances are untouched by the merge default.
+        const unmarked = await setUp({ stand: false, nodeFormat: undefined, mergeStaticInstances: undefined });
+        addAll(unmarked.scene, geometries, instances.map(({ static: _, ...instance }) => instance));
+        unmarked.frame();
+        await unmarked.scene.whenRefined();
+        unmarked.frame();
+        expect(unmarked.scene.counts.mergedGroups).toBe(0);
+        unmarked.scene.dispose();
+        await expect(setUp({ stand: false, nodeFormat: undefined, gpuTreeOutputs: 'adopt' })).rejects.toThrow(/'adopt' needs nodeFormat: 'f32'/);
     });
 });
 

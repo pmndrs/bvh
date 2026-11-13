@@ -38,6 +38,7 @@ export async function readBuffer(device: GPUDevice, source: GPUBuffer, byteLengt
 export async function readScene(
     device: GPUDevice,
     buffers: { nodes: GPUBuffer; triangles: GPUBuffer; topLevel: GPUBuffer; positions?: GPUBuffer | null },
+    /** The buffers' formats; pass them from the scene (`SceneTrees.nodeFormat`): absent node format means f32 here. */
     format: { triangleLeaves?: TriangleLeaves; positionLayout?: PositionLayout; nodeFormat?: 'f32' | 'quantized' } = {},
 ): Promise<TraceSceneData> {
     const [nodes, triangles, topLevelBytes, positions] = await Promise.all([

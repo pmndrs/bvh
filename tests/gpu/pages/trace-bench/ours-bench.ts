@@ -284,6 +284,9 @@ async function assembleOursScene(
     const data = assembleTraceScene(
         bvhs,
         instances.map((instance, index) => ({ meshIndex: instance.meshIndex, instanceIndex: index, objectToWorld: instance.objectToWorld })),
+        {},
+        // f32 nodes, as every row in bench/results/trace.csv so far (the default became quantized on 2026-11-13).
+        { nodeFormat: 'f32' },
     );
     const assembleMs = performance.now() - assembleStart;
 
@@ -432,8 +435,8 @@ export async function runOursTracer(
     try {
         // The numbers compared with other tracers come from a build without ray masks, as the earlier
         // measurements did. A second kernel with masks (all-ones mask) measures what the masks cost.
-        const kernel = await TraceBatchKernel.create(device, { label: tracer, rayMasks: false });
-        const maskedKernel = await TraceBatchKernel.create(device, { label: `${tracer} masked`, rayMasks: true });
+        const kernel = await TraceBatchKernel.create(device, { label: tracer, rayMasks: false, nodeFormat: 'f32' });
+        const maskedKernel = await TraceBatchKernel.create(device, { label: `${tracer} masked`, rayMasks: true, nodeFormat: 'f32' });
         const scene = resources.add(uploadTraceScene(device, data, tracer));
 
         const hits = resources.add(
@@ -517,7 +520,7 @@ export async function estimateNsPerRay(device: GPUDevice, timer: DispatchTimer, 
     const resources = new Resources();
     try {
         const count = sampleRays.length / RAY_FLOATS;
-        const kernel = await TraceBatchKernel.create(device, { label: 'ours calibrate', rayMasks: false });
+        const kernel = await TraceBatchKernel.create(device, { label: 'ours calibrate', rayMasks: false, nodeFormat: 'f32' });
         const scene = resources.add(uploadTraceScene(device, data, 'ours calibrate'));
         const rays = resources.add(uploadRays(device, 'calibration rays', sampleRays));
         const hits = resources.add(
@@ -549,7 +552,7 @@ export async function traceClosestOnce(
 ): Promise<ArrayBuffer> {
     const resources = new Resources();
     try {
-        const kernel = await TraceBatchKernel.create(device, { label: 'ours prepare', rayMasks: false });
+        const kernel = await TraceBatchKernel.create(device, { label: 'ours prepare', rayMasks: false, nodeFormat: 'f32' });
         const scene = resources.add(uploadTraceScene(device, data, 'ours prepare'));
         const hits = resources.add(
             device.createBuffer({

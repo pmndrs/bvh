@@ -58,13 +58,17 @@ interface Format {
     readonly name: string;
     readonly triangleLeaves: 'records' | 'indexed';
     readonly positionLayout?: 'vec4' | 'packed';
-    /** Quantized nodes (docs/internals/design/compressed-nodes.md); default f32. */
+    /**
+     * The node format (docs/internals/design/compressed-nodes.md), passed to the assembly and the module.
+     * Absent: neither is given one, so the page checks that the two defaults agree (both quantized).
+     */
     readonly nodeFormat?: 'f32' | 'quantized';
 }
 const FORMATS: readonly Format[] = [
-    { name: 'records', triangleLeaves: 'records' },
-    { name: 'indexed', triangleLeaves: 'indexed' },
-    { name: 'indexed-packed', triangleLeaves: 'indexed', positionLayout: 'packed' },
+    { name: 'records', triangleLeaves: 'records', nodeFormat: 'f32' },
+    { name: 'indexed', triangleLeaves: 'indexed', nodeFormat: 'f32' },
+    { name: 'indexed-packed', triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'f32' },
+    { name: 'defaults', triangleLeaves: 'records' },
     { name: 'quantized', triangleLeaves: 'records', nodeFormat: 'quantized' },
     { name: 'quantized-indexed', triangleLeaves: 'indexed', nodeFormat: 'quantized' },
 ];
@@ -122,7 +126,7 @@ async function assemble(oracleCase: OracleCase, format: Format): Promise<TraceSc
     const builder = createMeshBvhBuilder({ worker: 'auto' });
     try {
         const bvhs = await Promise.all(oracleCase.meshes.map((mesh) => builder.build(mesh, { triangleLeaves: format.triangleLeaves, nodeFormat: format.nodeFormat })));
-        const nodes = format.nodeFormat === 'quantized' ? { nodeFormat: 'quantized' as const } : {};
+        const nodes = format.nodeFormat ? { nodeFormat: format.nodeFormat } : {};
         if (format.triangleLeaves === 'records') return assembleTraceScene(bvhs, oracleCase.instances, {}, nodes);
         return assembleTraceScene(bvhs, oracleCase.instances, {}, { triangleLeaves: 'indexed', positionLayout: format.positionLayout, geometries: oracleCase.meshes, ...nodes });
     } finally {

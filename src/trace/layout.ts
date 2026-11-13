@@ -41,8 +41,9 @@ export const TRACER_GPU_LAYOUT_VERSION = 2;
 
 /**
  * How a scene stores its mesh nodes (docs/internals/design/compressed-nodes.md):
- * `'f32'` (the default, the 64-byte nodes below) or `'quantized'` (32-byte
- * nodes on a per-mesh frame, `GpuLayoutNodeFormat`). The walk is compiled
+ * `'quantized'` (the default, `DEFAULT_NODE_FORMAT`: 32-byte nodes on a
+ * per-mesh frame, `GpuLayoutNodeFormat`) or `'f32'` (the 64-byte nodes
+ * below, what builders write). The walk is compiled
  * for one (`traceModuleWgsl({ nodeFormat })`); the top level is always `f32`.
  */
 export type NodeFormat = GpuLayoutNodeFormat;

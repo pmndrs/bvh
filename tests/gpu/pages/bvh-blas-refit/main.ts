@@ -409,7 +409,7 @@ async function refitIndexedSceneMesh(
 
     const indexed = (geometry: MeshGeometry) => buildMeshBvhWithTinyBvh(geometry, tinyBvh, { triangleLeaves: 'indexed' });
     const records = (geometry: MeshGeometry) => buildMeshBvhWithTinyBvh(geometry, tinyBvh);
-    const welded = await buildTraceScene(meshes, instances, { build: indexed, triangleLeaves: 'indexed', positionLayout });
+    const welded = await buildTraceScene(meshes, instances, { build: indexed, triangleLeaves: 'indexed', positionLayout, nodeFormat });
     try {
         meshRefitPlacement(welded, refitMesh);
         failures.push(`${name}: meshRefitPlacement accepted a welded mesh`);
@@ -441,7 +441,7 @@ async function refitIndexedSceneMesh(
         device.queue.submit([encoder.finish()]);
         const refitScene = { ...scene, nodes: await read(device, nodes), triangles: await read(device, triangles), positions: await read(device, positions) };
 
-        const reference = await buildTraceScene(meshes.map((mesh, index) => (index === refitMesh ? { ...mesh, positions: pose } : mesh)), instances, { build: records });
+        const reference = await buildTraceScene(meshes.map((mesh, index) => (index === refitMesh ? { ...mesh, positions: pose } : mesh)), instances, { build: records, nodeFormat: 'f32' });
         const actual = createCpuTracer(refitScene);
         const expected = createCpuTracer(reference);
         const rays = randomRays(createRandom(31), 4000, [-8, -4, -8, 8, 4, 8], 1);

@@ -69,9 +69,10 @@ export interface NodeFrame {
     readonly exponent: readonly [number, number, number];
 }
 
-/** Checks a `nodeFormat` option: undefined is `'f32'`. */
-export function checkNodeFormat(format: GpuLayoutNodeFormat | undefined, where: string): GpuLayoutNodeFormat {
-    if (format === undefined || format === 'f32') return 'f32';
+/** Checks a `nodeFormat` option: undefined is `fallback` (`'f32'` for a mesh builder, `DEFAULT_NODE_FORMAT` for a scene). */
+export function checkNodeFormat(format: GpuLayoutNodeFormat | undefined, where: string, fallback: GpuLayoutNodeFormat = 'f32'): GpuLayoutNodeFormat {
+    if (format === undefined) return fallback;
+    if (format === 'f32') return 'f32';
     if (format === 'quantized') return 'quantized';
     throw new RangeError(`${where}: nodeFormat must be 'f32' or 'quantized', got ${String(format)}`);
 }

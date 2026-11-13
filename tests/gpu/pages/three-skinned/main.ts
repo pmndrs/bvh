@@ -337,7 +337,7 @@ try {
                 if (handle === undefined) throw new Error(`${phase}: no sync instance for reference instance ${i}`);
                 return { ...instance, instanceIndex: handle };
             });
-            const referenceTrace = await buildTraceScene(referenceScene.meshes, instances, { build: (geometry) => buildMeshBvhWithTinyBvh(geometry, tinyBvh) });
+            const referenceTrace = await buildTraceScene(referenceScene.meshes, instances, { build: (geometry) => buildMeshBvhWithTinyBvh(geometry, tinyBvh), nodeFormat: 'f32' });
             const targets: Vector3[] = [];
             for (const mesh of reference) {
                 const position = mesh.geometry.attributes.position;
@@ -345,7 +345,7 @@ try {
             }
             const rays = aimedRays(createRandom(1000 + at), targets, 16384);
             const gpuHits = await traceOnGpu(device, kernel[triangleLeaves], trees.traceBuffers, rays);
-            const gpuScene = await readScene(device, trees.buffers, { triangleLeaves: trees.triangleLeaves, positionLayout: trees.positionLayout });
+            const gpuScene = await readScene(device, trees.buffers, { triangleLeaves: trees.triangleLeaves, positionLayout: trees.positionLayout, nodeFormat: trees.nodeFormat });
             const { disagreements, count, hits } = compareWithReference(rays, gpuHits, gpuScene, referenceTrace);
             const counts = trees.deformingCounts;
             results[phase] = { hits, disagreements: count, worstVertex, boxMargin: contained.margin, refits: counts.refits, driftRebuilds: counts.driftRebuilds, boundsMoved, posesSkipped: counts.posesSkipped };

@@ -14,6 +14,7 @@ import type { TraceSceneData } from './scene-assembly.ts';
 import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl, type AnyHitOrder } from './wgsl.ts';
 import { RAY_MASK_ALL, type NodeFormat, type PositionLayout, type TriangleLeaves } from './layout.ts';
 import { RAY_BYTES } from './rays.ts';
+import { DEFAULT_NODE_FORMAT } from '../gpu-layout.ts';
 
 /** The three storage buffers the tracer reads, and an indexed scene's fourth. */
 export interface TraceSceneBuffers {
@@ -26,7 +27,7 @@ export interface TraceSceneBuffers {
     readonly triangleLeaves?: TriangleLeaves;
     /** An indexed scene's position layout; absent means `'vec4'`. */
     readonly positionLayout?: PositionLayout;
-    /** The scene's node format; absent means `'f32'`. A kernel refuses a scene of the other format. */
+    /** The scene's node format; absent means the default, `'quantized'` (`DEFAULT_NODE_FORMAT`). A kernel refuses a scene of the other format. `uploadTraceScene` always sets it. */
     readonly nodeFormat?: NodeFormat;
     /** Bytes held on the GPU. */
     readonly byteLength: number;
@@ -73,7 +74,7 @@ export function uploadTraceScene(device: GPUDevice, scene: TraceSceneData, label
         positions: indexed ? positions : null,
         triangleLeaves: scene.triangleLeaves ?? 'records',
         positionLayout: scene.positionLayout ?? 'vec4',
-        nodeFormat: scene.nodeFormat ?? 'f32',
+        nodeFormat: scene.nodeFormat ?? 'f32', // assembly always sets it; absent in scene data means f32
         byteLength: scene.byteLength,
         destroy: () => buffers.forEach((buffer) => buffer.destroy()),
     };
@@ -109,7 +110,7 @@ export interface TraceBatchKernelOptions {
     readonly triangleLeaves?: TriangleLeaves;
     /** Indexed only: `'vec4'` (the default) or `'packed'` positions, compiled in. */
     readonly positionLayout?: PositionLayout;
-    /** The scenes' node format, compiled in. Default `'f32'`. */
+    /** The scenes' node format, compiled in. Default `'quantized'` (`DEFAULT_NODE_FORMAT`), as scenes are by default; a kernel refuses a scene of the other format. */
     readonly nodeFormat?: NodeFormat;
     /** The any-hit walk's child order, compiled in (`AnyHitOrder`). Default `'far'` (best for rays from surfaces); `'larger'` for rays from outside the geometry or across open space. */
     readonly anyHitOrder?: AnyHitOrder;
@@ -136,7 +137,7 @@ export class TraceBatchKernel {
     ) {}
 
     static async create(device: GPUDevice, options: TraceBatchKernelOptions = {}): Promise<TraceBatchKernel> {
-        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = 'f32', anyHitOrder } = options;
+        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = DEFAULT_NODE_FORMAT, anyHitOrder } = options;
         const pipelineFor = (mode: 'closest' | 'any') =>
             device.createComputePipelineAsync({
                 label: `${label} batch ${mode}`,
@@ -176,7 +177,7 @@ export class TraceBatchKernel {
             if (leaves === 'indexed' && (scene.positionLayout ?? 'vec4') !== this.positionLayout) {
                 throw new RangeError(`TraceBatchKernel: the kernel reads ${this.positionLayout} positions, the scene holds ${scene.positionLayout ?? 'vec4'}`);
             }
-            const nodes = scene.nodeFormat ?? 'f32';
+            const nodes = scene.nodeFormat ?? DEFAULT_NODE_FORMAT;
             if (nodes !== this.nodeFormat) throw new RangeError(`TraceBatchKernel: the kernel reads ${this.nodeFormat} nodes, the scene holds ${nodes}`);
             if (leaves === 'indexed' && !scene.positions) throw new RangeError('TraceBatchKernel: an indexed scene needs its positions buffer');
             const make = (pipeline: GPUComputePipeline) =>

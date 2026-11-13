@@ -55,6 +55,7 @@
 import { CodeNode, REVISION, StorageBufferAttribute, StructTypeNode, type Node, type NodeBuilder } from 'three/webgpu';
 import { float, storage, wgslFn } from 'three/tsl';
 import { traceModuleWgsl, type AnyHitOrder } from '../trace/wgsl.ts';
+import { DEFAULT_NODE_FORMAT } from '../gpu-layout.ts';
 
 /** Where the trace buffers come from: a `SceneTrees` (buffers and version), or fixed buffers (`uploadTraceScene`). */
 export interface BvhTraceBufferSource {
@@ -66,7 +67,7 @@ export interface BvhTraceBufferSource {
     readonly triangleLeaves?: 'records' | 'indexed';
     /** An indexed source's position layout; absent means `'vec4'`. */
     readonly positionLayout?: 'vec4' | 'packed';
-    /** The source's node format (`SceneTrees.nodeFormat`, `TraceSceneBuffers.nodeFormat`); absent means `'f32'`. */
+    /** The source's node format (`SceneTrees.nodeFormat`, `TraceSceneBuffers.nodeFormat`); absent means the default, `'quantized'` (`DEFAULT_NODE_FORMAT`). Name it for buffers you pass by hand. */
     readonly nodeFormat?: 'f32' | 'quantized';
 }
 
@@ -348,7 +349,7 @@ export class BvhTraceNodes {
         this.rayMasks = options.rayMasks ?? true;
         this.triangleLeaves = source.triangleLeaves ?? 'records';
         this.positionLayout = source.positionLayout ?? 'vec4';
-        this.nodeFormat = source.nodeFormat ?? 'f32';
+        this.nodeFormat = source.nodeFormat ?? DEFAULT_NODE_FORMAT;
         this.specs = buffersOf(this.triangleLeaves, this.positionLayout, this.nodeFormat);
         this.bound = source.buffers;
         this.boundVersion = source.version;

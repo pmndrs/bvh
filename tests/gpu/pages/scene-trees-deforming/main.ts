@@ -115,6 +115,8 @@ await runGpuTest(
                 const reference = assembleTraceScene(
                     [buildMeshBvhWithTinyBvh({ positions, indices: rest.indices, triangleMaterials: rest.triangleMaterials }, tinyBvh), buildMeshBvhWithTinyBvh(rock, tinyBvh)],
                     instances.map(({ mesh: _mesh, ...instance }) => instance),
+                    {},
+                    { nodeFormat: 'f32' },
                 );
                 const gpu = await traceOnGpu(device, kernel, scene.traceBuffers, rays);
                 const comparison = compareWithReference(rays, gpu, await readScene(device, scene.buffers, { triangleLeaves: scene.triangleLeaves, positionLayout: scene.positionLayout, nodeFormat: scene.nodeFormat }), reference);

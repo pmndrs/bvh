@@ -92,7 +92,8 @@ export class CpuSceneBvh {
         instances: readonly TraceSceneInstance[],
         private readonly topLevelOptions: Partial<SahBuildOptions> = {},
     ) {
-        this.current = assembleTraceScene(meshes, instances, topLevelOptions);
+        // f32 nodes, as before the scene default became quantized (2026-11-13): the CPU walk skips the decode.
+        this.current = assembleTraceScene(meshes, instances, topLevelOptions, { nodeFormat: 'f32' });
         this.view = viewOf(this.current);
         this.tracer = this.makeTracer();
     }

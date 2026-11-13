@@ -34,7 +34,7 @@ async function main(): Promise<void> {
             perMesh.push(performance.now() - start);
             return tree;
         });
-        const instanced = assembleTraceScene(trees, instances);
+        const instanced = assembleTraceScene(trees, instances, {}, { nodeFormat: 'f32' });
         const sum = perMesh.reduce((a, b) => a + b, 0);
         const max = Math.max(...perMesh);
 
@@ -52,7 +52,7 @@ async function main(): Promise<void> {
         const sourceTrees = trees.map((tree, index) => (plan.meshNeeded[index] ? tree : null));
         const unmergedMs = perMesh.reduce((total, ms, index) => total + (plan.meshNeeded[index] ? ms : 0), 0);
         const assembleStart = performance.now();
-        const merged = assembleTraceScene(sourceTrees, instances, {}, { merged: { plan, meshes: groupTrees } });
+        const merged = assembleTraceScene(sourceTrees, instances, {}, { merged: { plan, meshes: groupTrees }, nodeFormat: 'f32' });
         const assembleMs = performance.now() - assembleStart;
 
         const sizes = (scene: typeof merged) => ({

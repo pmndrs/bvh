@@ -23,8 +23,9 @@
  * - **The top level** is `GpuTopLevel` (refit on the GPU, shapes from a
  *   worker) on a device with subgroups, and the CPU top level
  *   (`buildTopLevel`, rebuilt on this thread when something changed) without.
- * - **Merged static instances** (`mergeStaticInstances`): at the first update,
- *   the static instances added so far are merged (static-merge.ts), and each
+ * - **Merged static instances** (`mergeStaticInstances`, on by default): at
+ *   the first update, the instances added so far with `static: true` are
+ *   merged (static-merge.ts; nothing else is), and each
  *   group's world-space mesh is built the same way as any mesh (GPU tree first,
  *   tinybvh's from a worker later: the merged Sponza takes 1.5 s, so it never
  *   runs on the main thread). Merged instances never move: moving, hiding,
@@ -120,7 +121,7 @@ import { quantizeNodes } from '../quantized-nodes.ts';
 import { weldPositions } from '../indexed-leaves.ts';
 import { meshRefitPlacement, type TraceSceneMeshPlacement } from '../trace/scene-assembly.ts';
 import type { MeshRefitVertices } from '../gpu-mesh-refit.ts';
-import type { GpuLayoutMeshBvh } from '../gpu-layout.ts';
+import { DEFAULT_NODE_FORMAT, type GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import { DeformingTrees, type DeformingTreeCounts } from './deforming-trees.ts';
 import { MERGED_INSTANCE_INDEX, mergeStaticGeometry, writeMergedIndexedIdentity, writeMergedTriangleIdentity, type StaticMergeGroup, type StaticMergePlan } from '../trace/static-merge.ts';
 import { buildTopLevel, IDENTITY_TRANSFORM, throwMergedTransformChange, type Mat4, type TraceInstance } from '../trace/top-level.ts';
@@ -174,7 +175,7 @@ export interface SceneTreesOptions {
     readonly label?: string;
     /** First trees from the GPU (H-PLOC) on a device with subgroups. Default true; false: tinybvh only. */
     readonly gpuFirstTrees?: boolean;
-    /** How GPU trees reach the scene's buffers: `'copy'` (default) or `'adopt'` (see the file comment). */
+    /** How GPU trees reach the scene's buffers: `'copy'` (default) or `'adopt'` (see the file comment). `'adopt'` needs `nodeFormat: 'f32'`. */
     readonly gpuTreeOutputs?: GpuTreeOutputsMode;
     /**
      * Cap each GPU build batch's bytes (inputs, scratch and outputs) and build
@@ -195,7 +196,12 @@ export interface SceneTreesOptions {
      * geometry is the scene's own and always moves.
      */
     readonly transferGeometry?: boolean;
-    /** Merge static instances at the first update (see the file comment). Default false. */
+    /**
+     * Merge static instances at the first update (see the file comment).
+     * Default true. Only instances added with `static: true` before the first
+     * update are merged; every other instance is untouched. `false` keeps
+     * static instances as ordinary ones.
+     */
     readonly mergeStaticInstances?: boolean;
     /**
      * tinybvh's trees wait instead of replacing a mesh's GPU tree, until
@@ -231,15 +237,16 @@ export interface SceneTreesOptions {
     /** Indexed: `'vec4'` (the default, 16 bytes per vertex) or `'packed'` (12) positions. */
     readonly positionLayout?: PositionLayout;
     /**
-     * The node format (docs/internals/design/compressed-nodes.md): `'f32'` (the
-     * default, 64 bytes per node) or `'quantized'` (32 bytes per node, plus a
-     * 32-byte frame slot per mesh before its root). The walk that reads the
-     * scene must be built with the same `nodeFormat`. tinybvh trees come
+     * The node format (docs/internals/design/compressed-nodes.md): `'quantized'`
+     * (the default, `DEFAULT_NODE_FORMAT`: 32 bytes per node, plus a 32-byte
+     * frame slot per mesh before its root) or `'f32'` (64 bytes per node). The
+     * walk that reads the scene must be built with the same `nodeFormat`
+     * ({@link SceneTrees.nodeFormat}; the walk's default is quantized too). tinybvh trees come
      * quantized from the workers (deforming meshes' come `f32`: their refit
      * keeps an `f32` copy, and they are packed when placed); GPU trees are
      * built `f32` and packed by a compute pass on their way into the storage.
      * Quantized needs `gpuTreeOutputs: 'copy'` (an adopted batch's nodes are
-     * `f32`). Independent of `triangleLeaves`.
+     * `f32`), so `'adopt'` needs `nodeFormat: 'f32'`. Independent of `triangleLeaves`.
      * A coordinate of magnitude 2^100 or more, or a non-finite one, makes a quantized box empty on that axis (hits there are lost).
      */
     readonly nodeFormat?: NodeFormat;
@@ -681,7 +688,7 @@ export class SceneTrees {
         if (!(maxBatchBytes > 0)) throw new RangeError(`gpuMaxBatchBytes must be a positive number of bytes (Infinity: no cap), got ${maxBatchBytes}`);
         this.maxBatchBytes = maxBatchBytes === Infinity ? undefined : maxBatchBytes;
         this.transferGeometry = options.transferGeometry ?? false;
-        this.mergeStatic = options.mergeStaticInstances ?? false;
+        this.mergeStatic = options.mergeStaticInstances ?? true;
         this.gpuMaxDepth = options.gpuMaxDepth ?? GPU_TREE_MAX_DEPTH;
         this.refinementHold = options.holdRefinements ? () => true : null;
         const workers = options.workers;
@@ -712,9 +719,15 @@ export class SceneTrees {
         const indexed = this.triangleLeaves === 'indexed';
         if (indexed && this.gpuTreeOutputs === 'adopt') throw new RangeError("SceneTrees: triangleLeaves: 'indexed' needs gpuTreeOutputs: 'copy' (an adopted batch's buffers have no mesh headers)");
         this.triangleBytes = indexed ? INDEXED_TRIANGLE_BYTES : TRIANGLE_BYTES;
-        this.nodeFormat = options.nodeFormat ?? 'f32';
+        this.nodeFormat = options.nodeFormat ?? DEFAULT_NODE_FORMAT;
         if (this.nodeFormat !== 'f32' && this.nodeFormat !== 'quantized') throw new RangeError(`nodeFormat must be 'f32' or 'quantized', got ${String(this.nodeFormat)}`);
-        if (this.nodeFormat === 'quantized' && this.gpuTreeOutputs === 'adopt') throw new RangeError("SceneTrees: nodeFormat: 'quantized' needs gpuTreeOutputs: 'copy' (an adopted batch's nodes are f32)");
+        if (this.nodeFormat === 'quantized' && this.gpuTreeOutputs === 'adopt') {
+            throw new RangeError(
+                options.nodeFormat === undefined
+                    ? "SceneTrees: gpuTreeOutputs: 'adopt' needs nodeFormat: 'f32' (an adopted batch's nodes are f32, and the default node format is 'quantized')"
+                    : "SceneTrees: nodeFormat: 'quantized' needs gpuTreeOutputs: 'copy' (an adopted batch's nodes are f32)",
+            );
+        }
         this.nodeBytes = this.nodeFormat === 'quantized' ? QUANTIZED_NODE_BYTES : BVH_NODE_BYTES;
         this.nodeLeading = this.nodeFormat === 'quantized' ? 1 : 0;
         this.nodes = new GrowableStorage(device, `${this.label} trace nodes`, this.nodeBytes, INITIAL_NODES);
@@ -996,7 +1009,7 @@ export class SceneTrees {
         if (mesh.mergedInto !== null) {
             throw new RangeError(
                 `SceneTrees.addInstance: mesh ${descriptor.mesh} was merged away into static group ${mesh.mergedInto} (only merged instances used it, so its geometry was dropped at the first update); ` +
-                    'add the mesh again with addMesh for new instances, or turn mergeStaticInstances off',
+                    'add the mesh again with addMesh for new instances. To keep a mesh for later instances, add its instances without static: true, or create the scene with mergeStaticInstances: false (merging is on by default)',
             );
         }
         const slot = this.instanceSlots.take();

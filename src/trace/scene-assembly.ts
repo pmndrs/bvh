@@ -31,7 +31,7 @@ import {
     writeIndexedMeshHeader,
 } from './layout.ts';
 import { checkNodeFormat, quantizeNodes } from '../quantized-nodes.ts';
-import { gpuLayoutNodeBytes, gpuLayoutNodeSlots, type GpuLayoutNodeFormat } from '../gpu-layout.ts';
+import { DEFAULT_NODE_FORMAT, gpuLayoutNodeBytes, gpuLayoutNodeSlots, type GpuLayoutNodeFormat } from '../gpu-layout.ts';
 import { checkTriangleLeaves, indexedFromRecords, weldExactBits, weldPositions } from '../indexed-leaves.ts';
 import { checkTriangleFlags, triangleMaterialCodes } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
@@ -59,7 +59,7 @@ export interface TraceSceneInstance {
      */
     readonly material?: number;
     /**
-     * The instance never moves. With `mergeStaticInstances` on, a static
+     * The instance never moves. With `mergeStaticInstances` on (the default in `buildTraceScene`), a static
      * instance whose mesh no other instance uses is merged into a world-space
      * mesh with others of the same flags and mask (static-merge.ts). Ignored
      * otherwise. Default false.
@@ -99,7 +99,7 @@ export interface TraceSceneMeshPlacement {
 export interface TraceSceneData {
     /** Every mesh's nodes, one after another (quantized: each mesh's frame slot, then its nodes). */
     readonly nodes: ArrayBuffer;
-    /** How `nodes` stores them. Default (absent) `'f32'`; assembly sets it, `'quantized'` when assembled with `nodeFormat: 'quantized'`. */
+    /** How `nodes` stores them. Assembly always sets it: `'quantized'` by default, `'f32'` when assembled with `nodeFormat: 'f32'`. Absent (a scene written by other code) means `'f32'`. */
     readonly nodeFormat?: GpuLayoutNodeFormat;
     /**
      * Every mesh's triangles, one after another. Indexed scenes: 16-byte
@@ -199,11 +199,13 @@ export interface TraceSceneAssemblyOptions {
      */
     readonly weld?: boolean;
     /**
-     * The scene's node format (docs/internals/design/compressed-nodes.md). Default
-     * `'f32'`: the scene is byte for byte what it was before the option
-     * existed. `'quantized'`: 32-byte nodes, each mesh's frame slot before its
-     * root; `f32` trees are quantized (`quantizeNodes`), quantized trees are
-     * placed as they are. Independent of {@link triangleLeaves}.
+     * The scene's node format (docs/internals/design/compressed-nodes.md).
+     * Default `'quantized'` ({@link DEFAULT_NODE_FORMAT}): 32-byte nodes, each
+     * mesh's frame slot before its root; `f32` trees are quantized
+     * (`quantizeNodes`), quantized trees are placed as they are. `'f32'`:
+     * 64-byte nodes, the scene byte for byte what it was before the option
+     * existed. The walk must be compiled for the same format. Independent of
+     * {@link triangleLeaves}.
      */
     readonly nodeFormat?: GpuLayoutNodeFormat;
 }
@@ -236,7 +238,7 @@ export function assembleTraceScene(
         throw new RangeError("assembleTraceScene: geometries, weld and positionLayout are for triangleLeaves: 'indexed'");
     }
 
-    const nodeFormat = checkNodeFormat(options.nodeFormat, 'assembleTraceScene');
+    const nodeFormat = checkNodeFormat(options.nodeFormat, 'assembleTraceScene', DEFAULT_NODE_FORMAT);
     const quantized = nodeFormat === 'quantized';
     const nodeBytes = gpuLayoutNodeBytes(nodeFormat);
     let totalNodes = 0;
@@ -517,9 +519,10 @@ export interface TraceSceneBuildOptions extends StaticMergeOptions {
     readonly build: (geometry: MeshGeometry) => MeshBvh | Promise<MeshBvh>;
     /**
      * Merge static instances whose mesh is used once into world-space meshes
-     * (static-merge.ts; docs/internals/design/trace.md). Default false: every instance
-     * is a normal instance, and the scene is exactly what building each mesh
-     * and calling `assembleTraceScene` gives.
+     * (static-merge.ts; docs/internals/design/trace.md). Default true; it only
+     * touches instances marked `static: true`. With none (or with `false`),
+     * every instance is a normal instance, and the scene is exactly what
+     * building each mesh and calling `assembleTraceScene` gives.
      */
     readonly mergeStaticInstances?: boolean;
     readonly topLevel?: Partial<SahBuildOptions>;
@@ -529,7 +532,7 @@ export interface TraceSceneBuildOptions extends StaticMergeOptions {
     readonly positionLayout?: PositionLayout;
     /** Indexed scenes: the exact-bit weld at assembly. Default true. */
     readonly weld?: boolean;
-    /** The scene's node format (see `TraceSceneAssemblyOptions.nodeFormat`). Default `'f32'`; trees are built `f32` and quantized at assembly. */
+    /** The scene's node format (see `TraceSceneAssemblyOptions.nodeFormat`). Default `'quantized'`; trees are built `f32` and quantized at assembly. */
     readonly nodeFormat?: GpuLayoutNodeFormat;
     /**
      * Opt-in: weld each mesh's vertices closer than this on every axis before
@@ -543,8 +546,9 @@ export interface TraceSceneBuildOptions extends StaticMergeOptions {
 
 /**
  * Builds every mesh tree with `options.build` and assembles the scene. With
- * `mergeStaticInstances`, meshes only merged instances use get no tree of
- * their own, and each merged group's geometry is built instead.
+ * `mergeStaticInstances` (on by default) and instances marked `static`,
+ * meshes only merged instances use get no tree of their own, and each merged
+ * group's geometry is built instead.
  *
  * Every mesh's `triangleFlags` may set bit 0 only; a reserved bit throws,
  * naming the mesh and triangle.
@@ -566,14 +570,14 @@ export async function buildTraceScene(
     const tolerance = options.weldTolerance ?? 0;
     const geometries = tolerance > 0 ? inputs.map((geometry) => weldPositions(geometry, { tolerance })) : inputs;
     const indexed = checkTriangleLeaves(options.triangleLeaves, 'buildTraceScene') === 'indexed';
-    const nodeOptions: TraceSceneAssemblyOptions = checkNodeFormat(options.nodeFormat, 'buildTraceScene') === 'quantized' ? { nodeFormat: 'quantized' } : {};
+    const nodeOptions: TraceSceneAssemblyOptions = { nodeFormat: checkNodeFormat(options.nodeFormat, 'buildTraceScene', DEFAULT_NODE_FORMAT) };
     const layoutOptions: TraceSceneAssemblyOptions = indexed
         ? { triangleLeaves: 'indexed', geometries, positionLayout: options.positionLayout, weld: options.weld, ...nodeOptions }
         : nodeOptions;
     // A tolerance weld renumbers vertices too: the scene's are not the app's, so no refit (meshRefitPlacement).
     const markWelded = (scene: TraceSceneData): TraceSceneData =>
         indexed && tolerance > 0 ? { ...scene, meshes: scene.meshes.map((placement) => ({ ...placement, welded: true })) } : scene;
-    if (!options.mergeStaticInstances) {
+    if (options.mergeStaticInstances === false || !instances.some((instance) => instance.static)) {
         const meshes = await Promise.all(geometries.map((geometry) => options.build(geometry)));
         return markWelded(assembleTraceScene(meshes, instances, options.topLevel, layoutOptions));
     }

@@ -125,7 +125,9 @@ describe('BvhTraceNodes', () => {
             expect(backend.get(bvh.storage.nodes.value as object).buffer).toBe(source.buffers.nodes);
             bvh.dispose();
         }
-        expect(new BvhTraceNodes(renderer, { buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } }).nodeFormat).toBe('f32');
+        // A source that names no format is the default, quantized (as SceneTrees and assembled scenes are by default).
+        expect(new BvhTraceNodes(renderer, { buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } }).nodeFormat).toBe('quantized');
+        expect(new BvhTraceNodes(renderer, { nodeFormat: 'f32', buffers: { nodes: buffer('n'), triangles: buffer('t'), topLevel: buffer('l') } }).nodeFormat).toBe('f32');
     });
 
     it("survives three's disposal: renderer.dispose() (Attributes.dispose) and a stand-in's dispose()", () => {

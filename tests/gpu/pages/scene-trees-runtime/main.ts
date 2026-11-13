@@ -11,6 +11,9 @@
  * which cancels its tinybvh build). tinybvh's trees are held each round, so
  * the new meshes are first traced on their run-time GPU trees: then the GPU
  * walk must agree with the CPU-assembled scene; and again after the swap. Merged instances must refuse to move, hide or go.
+ *
+ * The scene and the kernel are made with the defaults (merged static instances on, quantized
+ * nodes), so the page also checks that the defaults pair; the CPU reference is `f32`.
  */
 
 import { SceneTrees, type SceneInstanceDescriptor } from '../../../../src/scene/scene-trees.ts';
@@ -35,7 +38,8 @@ await runGpuTest(
         const random = createRandom(31);
         const tinyBvh = await createTinyBvhBuilder();
         const kernel = await TraceBatchKernel.create(device);
-        const scene = await SceneTrees.create(device, { label: 'runtime', mergeStaticInstances: true, holdRefinements: true, workers: { size: 3 } });
+        const scene = await SceneTrees.create(device, { label: 'runtime', holdRefinements: true, workers: { size: 3 } });
+        assert(scene.nodeFormat === 'quantized' && kernel.nodeFormat === 'quantized', 'expected the default node format, quantized, on both sides');
         assert(scene.topLevelPath === 'gpu' && scene.gpuFirstTrees.enabled, 'expected the GPU top level and GPU first trees');
         const meshGeometry = new Map<number, MeshGeometry>();
         const live = new Map<number, LiveInstance>();
@@ -84,12 +88,12 @@ await runGpuTest(
                 }
                 instances.push({ meshIndex: meshIndex.get(instance.geometry)!, instanceIndex: instance.instanceIndex, objectToWorld: instance.objectToWorld, visible: instance.visible, mask: instance.mask, material: instance.material });
             }
-            return assembleTraceScene(meshes.map((mesh) => buildMeshBvhWithTinyBvh(mesh, tinyBvh)), instances);
+            return assembleTraceScene(meshes.map((mesh) => buildMeshBvhWithTinyBvh(mesh, tinyBvh)), instances, {}, { nodeFormat: 'f32' });
         };
         const check = async (name: string, onlyPlaced: boolean) => {
             await device.queue.onSubmittedWorkDone();
             const gpu = await traceOnGpu(device, kernel, scene.traceBuffers, rays);
-            const comparison = compareWithReference(rays, gpu, await readScene(device, scene.buffers), reference(onlyPlaced));
+            const comparison = compareWithReference(rays, gpu, await readScene(device, scene.buffers, { nodeFormat: scene.nodeFormat }), reference(onlyPlaced));
             results[name] = { disagreements: comparison.count, hits: comparison.hits, gpuTrees: scene.counts.onGpuTrees, tinybvhTrees: scene.counts.onTinybvhTrees, instances: live.size };
             log(`${name}: ${comparison.hits} hits, ${comparison.count} disagreements (${scene.counts.onGpuTrees} GPU / ${scene.counts.onTinybvhTrees} tinybvh trees)`);
             if (comparison.count > 0) failures.push(`${name}: ${comparison.count} disagreements, first ${JSON.stringify(comparison.disagreements.slice(0, 2))}`);
