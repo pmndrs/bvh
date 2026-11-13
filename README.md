@@ -109,13 +109,18 @@ Sponza (5,744,384 triangles in 132 meshes), RTX 3060 Laptop, headless Chrome 156
 | Closest-hit rate on tinybvh trees | 104.3 Mrays/s, **1.20x** three-mesh-bvh's |
 | GPU top-level refit, 10,000 moving instances | about **0.09 ms** |
 
-Memory, Sponza, bytes beyond the app's own geometry: 448.1 MiB in the default layout against three-mesh-bvh's 51.2 MiB,
-225.5 MiB with the two off-by-default layout variants. The GPU build's peak is capped at about the scene plus 256 MiB
-(711 MiB on Sponza, Apple M5, indicative).
+These rows predate the 2026-11 defaults (they used instanced trees and `f32` nodes). On the same laptop (headless
+Chrome 157, 2026-11-13), Sponza's rays traced 1.24-1.67x faster on the merged tree, and closest hits 1.04-1.22x faster
+with quantized nodes.
+
+Memory, Sponza, bytes beyond the app's own geometry: 355.5 MiB in the default layout (quantized nodes) against
+three-mesh-bvh's 51.2 MiB, 225.5 MiB with indexed leaves as well (off by default). The GPU build's peak is capped at
+about the scene plus 256 MiB (613 MiB on Sponza, Apple M5, indicative).
 
 How each number was measured, and the rest: [Builds and tracing](https://bvh.docs.pmnd.rs/performance/builds-and-tracing)
-and [Memory](https://bvh.docs.pmnd.rs/performance/memory). The RTX 3060 and the Intel UHD have not yet run the
-2026-11 work (`SceneTrees`, the cap, the layout variants).
+and [Memory](https://bvh.docs.pmnd.rs/performance/memory). The RTX 3060 has run the 2026-11 trace benches (merged
+static instances, the layout variants, the hit record, the any-hit order); `SceneTrees` memory and the cap on it, and
+the Intel UHD, are still to come.
 
 ## Licences
 

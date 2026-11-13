@@ -68,7 +68,7 @@ export function runtimeChanges(trees: SceneTrees, lamp: MeshGeometry, matrix: Fl
 
 export async function mergedStatic(device: GPUDevice, room: readonly MeshGeometry[], matrices: readonly Float32Array[]): Promise<SceneTrees> {
     // #region merged-static
-    const trees = await SceneTrees.create(device, { mergeStaticInstances: true });
+    const trees = await SceneTrees.create(device); // mergeStaticInstances is on by default
     room.forEach((geometry, index) => {
         const mesh = trees.addMesh(geometry);
         // static: never moves. Merged at the first update when its mesh has no other instance.
@@ -110,8 +110,9 @@ export async function options(device: GPUDevice): Promise<SceneTrees> {
         gpuMaxBatchBytes: 256 * 1024 * 1024, // the build-peak cap (default); Infinity: one batch
         workers: { size: 4 }, // the tinybvh worker pool, or a pool of your own
         topLevel: 'auto', // the GPU top level with subgroups, the CPU one without (default)
-        triangleLeaves: 'records', // or 'indexed' (off by default)
-        nodeFormat: 'f32', // or 'quantized' (off by default)
+        mergeStaticInstances: true, // the default: static instances merge at the first update
+        triangleLeaves: 'records', // the default; or 'indexed' (16-byte triangles)
+        nodeFormat: 'quantized', // the default; or 'f32' (64-byte nodes)
     });
     // #endregion
     return trees;

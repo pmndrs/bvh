@@ -53,7 +53,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
 export function matchScene(trees: SceneTrees): string {
     // #region match-scene
-    // Compile the walk for the scene's formats (all three are off by default).
+    // Compile the walk for the scene's formats (the defaults: records, vec4 positions, quantized nodes).
     const options = { triangleLeaves: trees.triangleLeaves, positionLayout: trees.positionLayout, nodeFormat: trees.nodeFormat };
     const walk = traceModuleWgsl({ traceSlot: { group: 0, firstBinding: 0 }, ...options });
     const entries = traceModuleEntries(options); // a fourth binding, the positions, for indexed leaves

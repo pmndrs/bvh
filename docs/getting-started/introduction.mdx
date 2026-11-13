@@ -22,7 +22,7 @@ same `GPUDevice`.
 | Part | What it does | Page |
 | --- | --- | --- |
 | Builders | tinybvh (CPU, WebAssembly), H-PLOC and LBVH (GPU, WGSL), and a chooser that picks one | [Choosing a builder](/builders/choosing-a-builder) |
-| One GPU layout | 64-byte two-child nodes, 48-byte triangles, a parent per node, `GPU_LAYOUT_VERSION` | [The GPU layout](/concepts/gpu-layout) |
+| One GPU layout | 64-byte two-child nodes (32-byte quantized ones in scenes, by default), 48-byte triangles, a parent per node, `GPU_LAYOUT_VERSION` | [The GPU layout](/concepts/gpu-layout) |
 | `SceneTrees` | A scene's trees on one device: GPU trees first, tinybvh's swapped in, the GPU top level, runtime changes | [SceneTrees](/scenes/scene-trees) |
 | Refits | Top-level refit over moving instances, per-mesh refit for deforming meshes, both on the GPU | [Refits](/scenes/refits) |
 | The WGSL walk | `bvhTraceClosest` and `bvhTraceAny`, masks, a triangle filter, a watertight triangle test | [Tracing in WGSL](/tracing/wgsl-walk) |

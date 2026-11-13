@@ -11,7 +11,7 @@ How to read it:
 - Numbers are as written in those docs. Hardware is the RTX 3060 Laptop unless a row says otherwise. Scenes are Sponza (5.74 M triangles, 132 meshes) unless said.
 - Checked: this file was written from the docs and the code comments in this repo and in ddgi. No source repo (tinybvh, HIPRT) was available locally, so "source does" cells repeat what our comments and notes say about the source. Nothing was checked against the source's code.
 
-Contents: [tinybvh](#1-tinybvh) · [HIPRT's LBVH](#2-hiprts-lbvh) · [Woop, Benthin and Wald](#3-woop-benthin-and-wald-watertight-raytriangle-test) · [H-PLOC paper and NexusBVH](#4-h-ploc-the-paper-and-nexusbvh) · [Sort, scan, refit](#5-radix-sort-scans-refit-and-instance-boxes) · [Not ported / dropped](#deliberately-not-ported--dropped) · [Not divergences](#intentional-design-choices-that-arent-divergences) · [Open](#open)
+Contents: [tinybvh](#1-tinybvh) · [HIPRT's LBVH](#2-hiprts-lbvh) · [Woop, Benthin and Wald](#3-woop-benthin-and-wald-watertight-raytriangle-test) · [H-PLOC paper and NexusBVH](#4-h-ploc-the-paper-and-nexusbvh) · [Sort, scan, refit](#5-radix-sort-scans-refit-and-instance-boxes) · [Our own design docs](#6-our-own-design-docs-as-built) · [Not ported / dropped](#deliberately-not-ported--dropped) · [Not divergences](#intentional-design-choices-that-arent-divergences) · [Open](#open)
 
 ---
 
@@ -107,6 +107,19 @@ Benthin et al., HPG 2024, "H-PLOC: Hierarchical Parallel Locally-Ordered Cluster
 
 ---
 
+## 6. Our own design docs, as built
+
+Where the built code differs from what our own design docs planned. The "source" is the design doc. Dennis accepted each on 2026-11-13; the design docs now state the as-built choice.
+
+| # | What differs | The design says | We do | Why | Get the design's behaviour back | Where |
+| --- | --- | --- | --- | --- | --- | --- |
+| A1 | Indexed leaves: where the vertex base lives | The scene adds each mesh's vertex base into its indexed records when it places the tree (`docs/internals/design/indexed-leaves.md`, section 1) | Records keep mesh-relative indices in the scene too. A 16-byte header before each mesh's triangles (`triangleOffset - 1`, `GPU_LAYOUT_MESH_HEADER_WORD`) holds the vertex base, read once per instance entered | Records written by any builder are placed and moved (growable storage, swaps, GPU copies) without rewriting them. The cost is 16 bytes per mesh and one load per instance entry | Not switchable: rewriting records at placement, and dropping the header, means a new triangle format | `src/trace/layout.ts` (`writeIndexedMeshHeader`); `src/trace/wgsl.ts` (`bvhMeshVertexBase`) |
+| A2 | Indexed merged groups: a cap on sources | No cap named (indexed-leaves.md, section 5: a 4-byte side table per triangle) | An indexed plan closes a merged group at 65,536 sources (`MAX_MERGED_SOURCES`); more static instances make more groups. Records scenes have no cap | The side table names a triangle's source by a 16-bit slot, beside its 16-bit material code | Not switchable: a wider slot needs a bigger side table | `src/trace/layout.ts:173`; `src/trace/static-merge.ts` |
+| A3 | Quantized nodes: where the frame lives | Derived from the mesh's bounds by a fixed rule, `nodeFrameOf(bounds)`, so the rule is part of the file format (`docs/internals/design/compressed-nodes.md`, sections 1 and 4) | The tree carries its frame in its first node slot (32 bytes), then the nodes; a scene copies the slot to `rootNodeOffset - 1`, and a serialized file carries it too. No frame rule is in the file format | A quantized tree's nodes are self-contained: a scene copies them, slot included, and a file carries the frame, so no rule over `bounds` becomes part of the format. The frame is still derived the same way when a tree is quantized (`nodeFrameOf`; the CPU and GPU quantizers agree), and a refit writes the current pose's frame | Not switchable | `src/quantized-nodes.ts`; `src/gpu-quantize.ts`; `src/serialize.ts` |
+| A4 | GPU tree ranges gained `parentOffset` | A mesh's parents start at its `nodeOffset` in the batch's parent buffer (`GpuMeshTreeRange`) | Quantized batches give each range a `parentOffset` | The quantize pass packs the nodes into a compact buffer (each mesh's frame slot, then its nodes) and leaves the parents where they were | `nodeFormat: 'f32'` on the GPU builder: no `parentOffset`, parents at `nodeOffset` | `src/mesh-input.ts` (`GpuMeshTreeRange.parentOffset`); `src/gpu-quantize.ts:342-366` |
+
+---
+
 ## Deliberately not ported / dropped
 
 | What | Status | Why, with the measurement | Where it is written down |
@@ -127,7 +140,7 @@ Benthin et al., HPG 2024, "H-PLOC: Hierarchical Parallel Locally-Ordered Cluster
 These look like differences but have no source to differ from, or they match it.
 
 - **The tracer's walk is ours, not a port.** One loop with one 64-entry stack for both levels. Closest-hit visits the nearer child first; any-hit visits the **farther** child first by default (1.1-2.8x faster on the bench scenes with the same answers; T1.3), or the larger child with `anyHitOrder: 'larger'` (for occlusion rays from outside or across open space; trace.md, "Any-hit child order"). On the RTX 3060 (2026-11-13), `'larger'` was 1.11-1.48x far-first on instanced trees and 0.80-0.87x on merged surface rays, the same pattern as the M5 (`WINDOWS-RUNBOOK.md`, section 7). Back-face hits count (DDGI uses them). Rays in object space are not renormalized, so `t` stays in world units. Front face is the authored side, also under mirrored transforms. See `docs/internals/design/trace.md` and `src/trace/wgsl.ts:152-160`. The plan said to cross-check the walk against tinybvh's `traverse_bvh2.cl`; whether that was done is not recorded (see Open).
-- **The node layout** (64 bytes, two child boxes, Aila-Laine) is tinybvh's `BVH_GPU` layout, "byte for byte ours" (`docs/internals/design/bvh-framework.md`). The triangle record is ours (W4).
+- **The node layout** (64 bytes, two child boxes, Aila-Laine) is tinybvh's `BVH_GPU` layout, "byte for byte ours" (`docs/internals/design/bvh-framework.md`). Every builder writes it. Scenes store nodes quantized by default since 2026-11-13 (32 bytes, ours: `docs/internals/design/compressed-nodes.md`, option A), packed from that layout; `nodeFormat: 'f32'` keeps it. The triangle record is ours (W4).
 - **Kept as published:** H-PLOC's merge threshold 16 and search radius 8 (tinybvh and NexusBVH use 8; 16 is "half the 32-wide wave of the paper", `src/hploc-cpu.ts:62-66`); Apetrei's index tie-break in the LBVH (HIPRT's rule); the Arvo box formula (S4).
 - **The WASM is tinybvh's headers, unchanged.** Only the flags and the wrapper differ (W1-W6). The licences travel inside the `.wasm` file's TypeScript wrapper (`THIRD_PARTY.md`).
 

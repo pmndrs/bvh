@@ -55,8 +55,8 @@ The standalone builders keep no cap unless given one: `createMeshLayoutBuilder(d
 `createBatch(meshes, options, pool)`. `hplocBatchBytes` and `lbvhBatchBytes` give every buffer's bytes for a batch
 before you build it.
 
-Measured on Sponza, Apple M5, Chrome (`scene-trees-sponza` page, `copy` mode, one update per animation frame after a
-warm-up load; indicative):
+Measured on Sponza, Apple M5, Chrome (`scene-trees-sponza` page, `copy` mode, `f32` nodes, one update per animation
+frame after a warm-up load; indicative):
 
 | Cap | Batches | Peak MiB | Settled MiB | First trees ms |
 | --- | ---: | ---: | ---: | ---: |
@@ -65,5 +65,7 @@ warm-up load; indicative):
 | 256 MiB (default) | 7 | 711.0 | 458.6 | 166 |
 | 128 MiB | 13 | 581.4 | 453.3 | 192 |
 
-The GPU walk gave the CPU reference's hits on 20,000 rays in every row. The RTX 3060 and the Intel UHD have not run
-these rows yet.
+The GPU walk gave the CPU reference's hits on 20,000 rays in every row. With quantized nodes, the default now, the
+same page measured 613.2 MiB at peak and 360.8 settled under the default cap: GPU batches still write 64-byte nodes, so
+the batches are the same size, and the storage under them is smaller. The RTX 3060 and the Intel UHD have not run these
+rows yet (the RTX 3060 has run the trace benches, not this page).

@@ -36,7 +36,7 @@ Ours is the tinybvh tree set that `SceneTrees` settles on (`buildTraceScene` ove
 
 | Sponza, MiB | Beyond geometry | Total in memory |
 | --- | ---: | ---: |
-| **Ours** (nodes 185.1 + triangle records 263.0 + top level <0.1) | **448.1** | **549.4** |
+| **Ours**, `f32` nodes (nodes 185.1 + triangle records 263.0 + top level <0.1) | **448.1** | **549.4** |
 | three-mesh-bvh, defaults (CENTER, leaf 10) | 51.2 | 152.6 |
 | three-mesh-bvh, SAH, leaf 4 | 109.3 | 210.7 |
 | three-mesh-bvh, SAH, leaf 10 | 50.5 | 151.8 |
@@ -45,12 +45,14 @@ Ours is the tinybvh tree set that `SceneTrees` settles on (`buildTraceScene` ove
 
 | Bistro exterior, MiB | Beyond geometry | Total in memory |
 | --- | ---: | ---: |
-| **Ours** (nodes 80.4 + triangle records 129.5 + top level 0.2) | **210.1** | **275.9** |
+| **Ours**, `f32` nodes (nodes 80.4 + triangle records 129.5 + top level 0.2) | **210.1** | **275.9** |
 | three-mesh-bvh, defaults (CENTER, leaf 10) | 26.3 | 92.1 |
 | three-mesh-bvh, SAH, leaf 4 | 53.4 | 119.2 |
 | three-mesh-bvh, SAH, leaf 10 | 24.9 | 90.7 |
 | three-mesh-bvh, CENTER, leaf 10, `indirect` | 32.0 | 97.8 |
 | Ours against defaults | 8.0x | 3.0x |
+
+These tables were made with `f32` nodes, the default until 2026-11-13. With quantized nodes, the default since (lever 3, "Quantized nodes" below), ours is 355.5 MiB beyond geometry and 456.8 in total on Sponza (6.9x and 3.0x three-mesh-bvh's defaults), and 169.9 and 235.7 on Bistro exterior (6.5x and 2.6x).
 
 Reading it:
 
@@ -230,13 +232,13 @@ Also, not on the P9 list but measured:
 
 **Reading the ranking.** The load's peak, not the settled scene, is the biggest number and the cheapest to cut (lever 1 changes scheduling, not the layout, so `GPU_LAYOUT_VERSION` stays). Of the resident levers, only indexed leaves and compressed nodes are large. Together, keeping a 4-byte id per triangle and 32-byte nodes, they would take Sponza from 448.1 to about 115 MiB beyond geometry (216 if the geometry has to be added to the GPU for them), against three-mesh-bvh's 51. What is left is the 3.03M nodes: their count follows from leaves of 1.9 triangles, which is lever 5, and the speed measurement has to decide that one.
 
-## Indexed leaves (lever 2, built; off by default)
+## Indexed leaves (lever 2, built; off by default, waiting for a run with quantized nodes)
 
 Lever 2 as option B of [indexed-leaves.md](indexed-leaves.md): 16-byte tree-ordered triangles `vec4u(i0, i1, i2, id + flags)`, a 16-byte header per mesh, and our own copy of the positions, welded by exact bits. `tools/memory-breakdown.ts` (Node, the same tinybvh trees, `buildTraceScene`), MiB:
 
 | | Sponza | Bistro exterior |
 | --- | ---: | ---: |
-| Records (today's default): nodes + 48 B triangles + top level | 185.1 + 263.0 + 0.0 = **448.1** | 80.4 + 129.5 + 0.2 = **210.1** |
+| Records (the default), `f32` nodes: nodes + 48 B triangles + top level | 185.1 + 263.0 + 0.0 = **448.1** | 80.4 + 129.5 + 0.2 = **210.1** |
 | Indexed, `vec4f` positions, welded (the indexed default) | 185.1 + 87.7 + 45.2 = **318.0** (−130.1) | 80.4 + 43.2 + 31.7 = **155.5** (−54.6) |
 | Indexed, `vec4f`, unwelded | 320.2 | 168.3 |
 | Indexed, packed `f32` positions, welded | **306.7** (−141.4) | **147.5** (−62.6) |
@@ -249,24 +251,25 @@ Lever 2 as option B of [indexed-leaves.md](indexed-leaves.md): 16-byte tree-orde
 - **The build peak**: an H-PLOC batch writes 16-byte triangles too, so a batch goes from 270.6 to 238.6 bytes per triangle on Sponza (276.6 to 244.6 on Bistro exterior); one uncapped Sponza batch from 1,482.4 to 1,307.1 MiB. With `gpuMaxBatchBytes`, about 13% more triangles fit under the cap.
 - **`SceneTrees` on Sponza** (`scene-trees-sponza`, M5, the default 256 MiB cap, settled after the swaps): records 458.6 MiB, peak 711; indexed `vec4` 327.1 (nodes 194.1 with growth room, triangles 87.7, positions 45.2), peak 580; indexed packed 315.8, peak 568.7. Merged, uncapped: records 470.4, peak 1,482.6; indexed 362.2, peak 1,350.9. First trees 130 ms indexed against 118 (records), tinybvh 300 ms against 285. 0 disagreements with the CPU reference in every state.
 - The CPU trees (`CpuMeshBvh`) stay on records: an indexed tree is expanded with its source on construction.
-- Speed (M5, indicative): `vec4` indexed traces at 0.83-0.99x records' rate (median of rounds), packed at 0.75-0.92x; details in indexed-leaves.md, "Measured". Records stay the default until the RTX 3060 is measured.
+- Speed (M5, indicative): `vec4` indexed traces at 0.83-0.99x records' rate (median of rounds), packed at 0.75-0.92x. RTX 3060 Laptop (2026-11-13, median of three runs): `vec4` 0.92-0.97x, packed 0.82-0.95x. Details in indexed-leaves.md, "Measured". Records stay the default (Dennis, 2026-11-13): indexed leaves wait for an RTX 3060 run together with quantized nodes, the new default.
 
-## Quantized nodes (lever 3, built; off by default)
+## Quantized nodes (lever 3, built; the default since 2026-11-13)
 
 Lever 3 as option A of [compressed-nodes.md](compressed-nodes.md): 32-byte two-child nodes with 16-bit planes on a per-mesh grid, and one 32-byte frame slot per placed tree. `tools/memory-breakdown.ts` (Node, the same tinybvh trees, `buildTraceScene`), MiB beyond the app's geometry:
 
 | | Sponza | Bistro exterior |
 | --- | ---: | ---: |
-| `f32` nodes, records (today's default) | 185.1 + 263.0 + 0.0 = **448.1** | 80.4 + 129.5 + 0.2 = **210.1** |
-| Quantized nodes, records | 92.6 + 263.0 + 0.0 = **355.5** (−92.6) | 40.3 + 129.5 + 0.2 = **169.9** (−40.2) |
+| `f32` nodes, records (the default before 2026-11-13) | 185.1 + 263.0 + 0.0 = **448.1** | 80.4 + 129.5 + 0.2 = **210.1** |
+| **Quantized nodes, records (the default now)** | 92.6 + 263.0 + 0.0 = **355.5** (−92.6) | 40.3 + 129.5 + 0.2 = **169.9** (−40.2) |
 | Indexed leaves (`vec4`, welded), `f32` nodes | 318.0 | 155.5 |
 | **Quantized nodes and indexed leaves** | 92.6 + 87.7 + 45.2 = **225.5** (−222.6) | 40.3 + 43.2 + 31.7 = **115.3** (−94.8) |
 | Merged static, quantized, records / indexed | 355.5 / 247.4 | 169.8 / 125.9 |
 
 - The nodes halve exactly, plus 32 bytes per tree (132 on Sponza, 1,296 on Bistro exterior: 4 KiB and 41 KiB). The design's 225.4 / 115.3 estimate holds.
 - **The build peak**: GPU batches still write 64-byte nodes (the climbs need `f32` words), so the batch sizes and `gpuMaxBatchBytes` planning don't change; `SceneTrees` packs them on the way into storage, so the settled storage, and the capped peak's floor (storage plus one batch), drop by the node saving. A GPU builder asked for quantized output (`nodeFormat: 'quantized'`) holds both node buffers for the moment of its `finish`.
-- **Deforming meshes** keep a 64-byte copy of their nodes on the GPU in `GpuMeshRefit` (the refit's climb runs on it): 64 bytes per node, deforming meshes only.
-- `SceneTrees` on Sponza: see compressed-nodes.md, "Measured".
+- **Deforming meshes** keep a 64-byte copy of their nodes on the GPU in `GpuMeshRefit` (the refit's climb runs on it): 64 bytes per node, deforming meshes only. With quantized nodes the default, every deforming mesh pays it unless the scene asks for `f32`: 96 bytes per node in all (32 in the scene, 64 in the copy) against 64 in an `f32` scene. Sponza's largest mesh has about 115k nodes, so about 7 MiB of copy if it deformed.
+- `SceneTrees` on Sponza (`scene-trees-sponza`, M5, default 256 MiB cap, settled): 360.8 MiB quantized against 458.6 `f32`, peak 613.2 against 711; more in compressed-nodes.md, "Measured".
+- Speed: M5 0.93-0.97x `f32` (indicative); RTX 3060 Laptop (2026-11-13, median of three runs) closest hits 1.02-1.22x, any hits 0.98-1.03x. The RTX 3060 run made it the default (compressed-nodes.md, question 2).
 - The CPU trees (`CpuMeshBvh`) stay 64 bytes per node: a quantized tree is decoded on construction.
 
 ## The 40-byte hit record
@@ -282,7 +285,18 @@ Ratio = rate with the 40-byte record over rate with the 24-byte record (above 1:
 | Bistro interior | instanced | 1.059 (1.010-1.088) | 1.046 (1.005-1.061) |
 | Bistro interior | merged | 1.030 (0.991-1.032) | 1.023 (1.011-1.055) |
 
-The 40-byte record costs nothing measurable here: 37 of the 40 rounds (4 cases x 5 rounds x 2 scenes) came out above 1 (the three below, 0.958, 0.991 and 0.993, were merged-tree rounds), and no median fell below 1. That the bigger record is up to 11% faster is not something to rely on or to explain from this data (the two kernels are different pipelines; the walk is the same). The reading is that the walk dominates and the extra two loads after it are in the noise on this GPU. It has not been measured on the RTX 3060 or on Intel. The rates behind it (Mrays/s, median of rounds, 40 / 24 byte): Sponza instanced surface 40.7 / 36.8, merged surface 73.7 / 69.5; Bistro interior instanced surface 22.1 / 20.7, merged surface 26.5 / 25.7. The same runs re-measured merged over instanced (40-byte records, today's tree): Sponza surface 1.80x closest and 1.41x any-hit; Bistro interior 1.19x and 1.10x (rows in `bench/results/trace.csv`, scenes `sponza` and `bistro-interior`, metrics `surface-rays/paired/ratio/...` and `surface-rays/paired/hit_record_40_over_24/...`).
+The 40-byte record costs nothing measurable here: 37 of the 40 rounds (4 cases x 5 rounds x 2 scenes) came out above 1 (the three below, 0.958, 0.991 and 0.993, were merged-tree rounds), and no median fell below 1. That the bigger record is up to 11% faster is not something to rely on or to explain from this data (the two kernels are different pipelines; the walk is the same). The reading is that the walk dominates and the extra two loads after it are in the noise on this GPU. The rates behind it (Mrays/s, median of rounds, 40 / 24 byte): Sponza instanced surface 40.7 / 36.8, merged surface 73.7 / 69.5; Bistro interior instanced surface 22.1 / 20.7, merged surface 26.5 / 25.7. The same runs re-measured merged over instanced (40-byte records, today's tree): Sponza surface 1.80x closest and 1.41x any-hit; Bistro interior 1.19x and 1.10x (rows in `bench/results/trace.csv`, scenes `sponza` and `bistro-interior`, metrics `surface-rays/paired/ratio/...` and `surface-rays/paired/hit_record_40_over_24/...`).
+
+**On the RTX 3060 Laptop it costs 6-12%** (2026-11-13, commit `63af716`, Windows, headless Chrome 157; three runs of 5 paired rounds; each figure is the median over the runs of each run's median of rounds; WINDOWS-RUNBOOK.md, section 7):
+
+| | Tree | `surface` rays | `air-grid` rays |
+| --- | --- | --- | --- |
+| Sponza | instanced | 0.916 | 0.895 |
+| Sponza | merged | 0.911 | 0.881 |
+| Bistro interior | instanced | 0.934 | 0.938 |
+| Bistro interior | merged | 0.933 | 0.931 |
+
+So 0.88-0.94x, against 0.96-1.15x on the M5. On NVIDIA the bigger record shows; on the M5 it didn't. Why is not measured (the two kernels are different pipelines; the walk is the same). The compact kernel's hits matched the full one's on every ray. **Dennis kept the 40-byte record as the default** (2026-11-13): a hit should carry its material and normal unless the caller says otherwise. Shadow and occlusion passes that read neither should pass `hitNormal: false`, or trace any-hit rays (one word per ray). Intel has not run it. Rows: device `RTX 3060 Laptop`, metrics `median/surface-rays/paired/hit_record_40_over_24/...`.
 
 ## Reproducing
 

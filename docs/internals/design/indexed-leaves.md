@@ -1,14 +1,14 @@
 # Indexed leaves (P9 lever 2)
 
-## Status (2026-11-12): built, off by default
+## Status (2026-11-13): built, off by default
 
-Dennis's answers to section 7: option B (16-byte record, our own positions); `vec4f` positions by default with packed `f32` as a compile-time variant; merged groups indexed with a side table; a variant flag inside `GPU_LAYOUT_VERSION` 2; an exact-bit weld at load, on by default, with an opt-in tolerance weld; records stay the default until the RTX 3060 is measured.
+Dennis's answers to section 7: option B (16-byte record, our own positions); `vec4f` positions by default with packed `f32` as a compile-time variant; merged groups indexed with a side table; a variant flag inside `GPU_LAYOUT_VERSION` 2; an exact-bit weld at load, on by default, with an opt-in tolerance weld. After the RTX 3060 run (2026-11-13, "Measured" below) records stay the default: indexed leaves wait for an RTX 3060 run of quantized nodes and indexed leaves together, now that quantized nodes are the default ([compressed-nodes.md](compressed-nodes.md)). He accepted both as-built departures from section 1 below (the vertex base in a per-mesh header, and the 65,536-source cap); [DIVERGENCES.md](../DIVERGENCES.md) rows A1 and A2.
 
 **What is in.** One walk, with the triangle source compiled in as `rayMasks` is:
 
 - `triangleLeaves: 'records' | 'indexed'` and `positionLayout: 'vec4' | 'packed'` on `traceModuleWgsl`, `batchKernelWgsl`, `TraceBatchKernel`, `assembleTraceScene`/`buildTraceScene`, `SceneTrees`; `BvhTraceNodes` reads them from its source. Only `bvhLoadTriangle` (and the merged-hit lookups) differ; the walk's text is identical (a unit test compares it).
-- The record: `vec4u(i0, i1, i2, id | filter << 28 | flip << 29)` (`GPU_LAYOUT_INDEXED_TRIANGLE_WORD`). Vertex indices stay **mesh-relative in the scene too**: each mesh's region starts with a 16-byte header (`GPU_LAYOUT_MESH_HEADER_WORD`: vertex base, and for a merged group its side and source table distances) at `triangleOffset - 1`, which the walk reads once per instance entered. This differs from section 1 ("the scene adds the vertex base"): records written by any builder are placed and moved (growable storage, swaps, GPU copies) without rewriting them, and the cost is 16 bytes per mesh and one load per instance entry.
-- Merged groups: word 3 holds the source triangle, filter and flip; a 4-byte side table per triangle (source slot, material code) and a source table (slot to `instanceIndex`) sit before the header. The plan now caps a group at 65,536 sources (`MAX_MERGED_SOURCES`).
+- The record: `vec4u(i0, i1, i2, id | filter << 28 | flip << 29)` (`GPU_LAYOUT_INDEXED_TRIANGLE_WORD`). Vertex indices stay **mesh-relative in the scene too**: each mesh's region starts with a 16-byte header (`GPU_LAYOUT_MESH_HEADER_WORD`: vertex base, and for a merged group its side and source table distances) at `triangleOffset - 1`, which the walk reads once per instance entered. This differs from section 1 ("the scene adds the vertex base"): records written by any builder are placed and moved (growable storage, swaps, GPU copies) without rewriting them, and the cost is 16 bytes per mesh and one load per instance entry. This is the format (accepted 2026-11-13).
+- Merged groups: word 3 holds the source triangle, filter and flip; a 4-byte side table per triangle (source slot, material code) and a source table (slot to `instanceIndex`) sit before the header. The plan caps a group at 65,536 sources (`MAX_MERGED_SOURCES`, the side table's 16-bit source slot; accepted 2026-11-13): more static instances make more groups.
 - Per-triangle materials (`MeshInput.triangleMaterials`): word 3 has no room (bits 30-31 stay reserved), so an unmerged mesh that has them gets a material table before its header: each original triangle's code (material + 1, 0 for none), 16 bits, by original index (the walk has it from word 3), eight to a unit; header word 3 (`materialTableDistance`) is its distance, 0 for none. By original index, so the scene writes it from the geometry whatever builder made the tree, GPU trees included. A merged triangle's code is in its side table (its source triangle's, else its source instance's).
 - Builders: tinybvh (converted on the way out of the WASM, `indexedTrianglesFromRecordWords`; no WASM change), the topology builder, the LBVH and H-PLOC CPU twins, the GPU H-PLOC (`lbvhWriteTriangle`, `LbvhParams` grew to 48 bytes). The **GPU LBVH stays on records**: its emit reads leaf boxes back from the records and has no binding left for positions (8 per stage); `createMeshLayoutBuilder` converts its trees after the readback.
 - `checkGpuLayout` checks the indices and word 3, then the rest on the same tree with its corners copied out. Serialization writes the format in header word 7 (0 records, 1 indexed; old files have 0); a reader refuses another value. `CpuMeshBvh` takes an indexed tree with its `source` and expands it to records in the constructor (documented: CPU trees stay 48 bytes per triangle).
@@ -16,7 +16,7 @@ Dennis's answers to section 7: option B (16-byte record, our own positions); `ve
 - Deforming meshes: `GpuMeshRefit` copies the pose into the mesh's range of the scene's positions (`meshRefitCopyVertices`) and refits the boxes from there; the triangles are not written.
 - `SceneTrees`: positions storage (growable, a range per mesh, placed when its builds start), headers and side tables, `buffers.positions`, `memory.positions`. Indexed needs `gpuTreeOutputs: 'copy'` (an adopted batch has no headers).
 
-**Measured** (Apple M5; the RTX 3060 is still to do): see "Measured" at the end.
+**Measured** on the Apple M5 (2026-11-12) and the RTX 3060 Laptop (2026-11-13): see "Measured" at the end.
 
 ---
 
@@ -47,7 +47,7 @@ Counts from memory.md: Sponza has 5,744,384 triangles and 3,108,999 vertices; Bi
 - bit 29: the flip flag;
 - bits 30-31: reserved.
 
-Material bits move to a side table, used only by merged meshes (section 5). Builders write vertex indices relative to the mesh. The scene adds the mesh's vertex base when it places the tree, because the instance record has no free word for it.
+Material bits move to a side table, used only by merged meshes (section 5). Builders write vertex indices relative to the mesh. The scene adds the mesh's vertex base when it places the tree, because the instance record has no free word for it. (As built, the scene does not add it: the vertex base sits in a 16-byte header before each mesh's triangles, read once per instance entered. See Status.)
 
 ## 2. Watertightness
 
@@ -147,17 +147,17 @@ The test needs identical coordinate *bits*, not shared indices. `bvhEdgeFunction
 
 - the public fourth binding and `SceneTrees.buffers.positions`;
 - the format word in files;
-- absolute vertex indices in scene storage;
+- mesh-relative vertex indices and the per-mesh header in scene storage (as built; this section planned absolute indices);
 - custom walks reading `buffers.triangles` as 48-byte records, if indexed becomes the default.
 
-## 7. Open questions for Dennis
+## 7. Questions for Dennis, answered
 
-1. Is B (our own `f32` copy, about 140 MiB saved on Sponza) the first step, with A (about 241 MiB, binding the app's buffers) kept for later, or dropped?
-2. Packed `f32` positions (12 B, 9 loads) or `vec4f` (16 B, 3 loads)? Should the bench choose, or do we ship one?
-3. Should merged groups go indexed with the 4 B side table, rather than stay on records with a mode bit?
-4. Should the triangle format be a variant flag inside version 2, or a bump to 3?
-5. Should the weld by exact bits be on by default? Do we want an opt-in tolerance weld?
-6. What closest-hit cost on the RTX 3060 is 140 MiB worth before indexed becomes the default?
+1. B first (our own `f32` copy, about 140 MiB saved on Sponza); A (binding the app's buffers) is kept for later.
+2. `vec4f` positions by default; packed `f32` is a compile-time variant (`positionLayout: 'packed'`).
+3. Merged groups go indexed, with the 4-byte side table.
+4. A variant flag inside version 2 (header word 7).
+5. The exact-bit weld is on by default; the tolerance weld is opt-in (`weldTolerance`).
+6. Not yet (2026-11-13). On the RTX 3060, `vec4` cost 3-8% (0.92-0.97x) and packed 5-18% (0.82-0.95x), each timed alone. Records stay the default until a run of indexed leaves with quantized nodes, the new default, on the RTX 3060.
 
 ## Measured (2026-11-12, Apple M5, Chrome 157 headless)
 
@@ -184,13 +184,31 @@ The test needs identical coordinate *bits*, not shared indices. `bvhEdgeFunction
 | merged, surface | 0.939 (0.89-1.03) | 0.979 (0.95-1.04) | 0.808 (0.69-0.96) | 0.879 (0.81-1.01) |
 | merged, air grid | 0.993 (0.97-1.01) | 0.943 (0.92-0.97) | 0.889 (0.82-0.91) | 0.827 (0.80-0.85) |
 
-Reading it, on the M5 only: `vec4` positions cost 1-6% on instanced trees and up to 17% on Sponza's merged tree with surface rays (the fastest case, so the extra dependent load shows most); packed `f32` costs another 5-10% everywhere, so `vec4` is the right default and packed is a memory option (11 MiB more saved on Sponza). Nowhere near the old 10-30% everywhere, but not free either. The Sponza instanced rounds swung widely (0.5-1.5), so its medians are the least sure. Rows: `bench/results/trace.csv`, metrics `surface-rays/paired/indexed_over_records/...` and `indexed_packed_over_records/...`, commit `8654783`. The RTX 3060 decides the default (section 7, question 6).
+Reading it, on the M5 only: `vec4` positions cost 1-6% on instanced trees and up to 17% on Sponza's merged tree with surface rays (the fastest case, so the extra dependent load shows most); packed `f32` costs another 5-10% everywhere, so `vec4` is the right default and packed is a memory option (11 MiB more saved on Sponza). Nowhere near the old 10-30% everywhere, but not free either. The Sponza instanced rounds swung widely (0.5-1.5), so its medians are the least sure. Rows: `bench/results/trace.csv`, metrics `surface-rays/paired/indexed_over_records/...` and `indexed_packed_over_records/...`, commit `8654783`.
+
+**Speed on the RTX 3060 Laptop** (2026-11-13, commit `63af716`, Windows, headless Chrome 157; three runs of 5 paired rounds per scene; each figure is the median over the runs of each run's median of rounds; `f32` nodes throughout; [WINDOWS-RUNBOOK.md](../WINDOWS-RUNBOOK.md), section 7):
+
+| Sponza | `vec4` closest | `vec4` any | packed closest | packed any |
+| --- | --- | --- | --- | --- |
+| instanced, surface | 0.949 | 0.967 | 0.911 | 0.940 |
+| instanced, air grid | 0.956 | 0.974 | 0.932 | 0.945 |
+| merged, surface | 0.938 | 0.949 | 0.895 | 0.915 |
+| merged, air grid | 0.925 | 0.955 | 0.891 | 0.914 |
+
+| Bistro interior | `vec4` closest | `vec4` any | packed closest | packed any |
+| --- | --- | --- | --- | --- |
+| instanced, surface | 0.966 | 0.933 | 0.881 | 0.841 |
+| instanced, air grid | 0.967 | 0.928 | 0.883 | 0.843 |
+| merged, surface | 0.947 | 0.920 | 0.863 | 0.821 |
+| merged, air grid | 0.954 | 0.925 | 0.856 | 0.827 |
+
+Every indexed answer matched records' on every ray. Reading it: `vec4` costs 3-8% everywhere on NVIDIA, steadier than the M5 (no 17% case), and packed costs 5-11% on Sponza and 12-18% on Bistro interior. Dennis kept records as the default (question 6): the memory case for indexed leaves is strongest with quantized nodes, and that pair has not been timed together. Rows: `bench/results/trace.csv`, scenes `sponza` and `bistro-interior`, device `RTX 3060 Laptop`, metrics `median/surface-rays/paired/indexed_over_records/...` and `indexed_packed_over_records/...`.
 
 **Bytes**: [memory.md](memory.md), "Indexed leaves": `SceneTrees` on Sponza settles at 327.1 MiB indexed against 458.6 records, peak 580 against 711 MiB; Sponza 448.1 to 318.0 MiB beyond geometry (306.7 packed), Bistro exterior 210.1 to 155.5 (147.5); an H-PLOC batch 270.6 to 238.6 bytes per triangle.
 
 ## Left to do
 
-- The RTX 3060 and Intel: the oracle pages and the paired bench. The default stays records until then.
+- The RTX 3060: the oracle pages (not reported from the 2026-11-13 pass), and indexed leaves with quantized nodes together in the paired bench, which decides whether indexed becomes the default. Intel: the oracle pages.
 - tinybvh writes records inside the WASM and converts on the way out: a WASM change would skip the 48-byte copy (needs the pinned emsdk).
 - The GPU LBVH writes records only (its emit pass has no binding left for positions).
 - `CpuMeshBvh` and `/three`'s `BvhBoundsTree` expand indexed trees to records; reading corners through the source's positions would make CPU trees 16 bytes per triangle too.

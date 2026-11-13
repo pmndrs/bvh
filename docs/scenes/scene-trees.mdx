@@ -89,23 +89,24 @@ const trees = await SceneTrees.create(device, {
     gpuMaxBatchBytes: 256 * 1024 * 1024, // the build-peak cap (default); Infinity: one batch
     workers: { size: 4 }, // the tinybvh worker pool, or a pool of your own
     topLevel: 'auto', // the GPU top level with subgroups, the CPU one without (default)
-    triangleLeaves: 'records', // or 'indexed' (off by default)
-    nodeFormat: 'f32', // or 'quantized' (off by default)
+    mergeStaticInstances: true, // the default: static instances merge at the first update
+    triangleLeaves: 'records', // the default; or 'indexed' (16-byte triangles)
+    nodeFormat: 'quantized', // the default; or 'f32' (64-byte nodes)
 });
 ```
 
 | Option | Default | What it does |
 | --- | --- | --- |
 | `gpuFirstTrees` | `true` | H-PLOC first trees on a device with subgroups. `false`: tinybvh only. |
-| `gpuTreeOutputs` | `'copy'` | `'adopt'` makes the load batch's output buffers the scene's own (no copy), for a lower load peak and more node memory after the swaps. |
+| `gpuTreeOutputs` | `'copy'` | `'adopt'` makes the load batch's output buffers the scene's own (no copy), for a lower load peak and more node memory after the swaps. It needs `nodeFormat: 'f32'`. |
 | `gpuMaxBatchBytes` | 256 MiB | [The build-peak cap](/builders/fallbacks-and-limits#the-build-peak-cap). `Infinity` turns it off. |
 | `workers` | a pool of its own | A `BvhWorkerPool` to share, or options for the one it makes (and disposes). |
 | `transferGeometry` | `false` | Move each mesh's arrays into the worker instead of copying them. |
-| `mergeStaticInstances` | `false` | [Merged static instances](/scenes/merged-static). |
+| `mergeStaticInstances` | `true` | [Merged static instances](/scenes/merged-static): instances added with `static: true` before the first update merge into world-space trees. Nothing else is touched. |
 | `holdRefinements` | `false` | tinybvh trees wait until `releaseRefinements()`, for tools that check a scene mid-swap. |
 | `gpuMaxDepth` | `GPU_TREE_MAX_DEPTH` (47) | Deeper trees are refused, keeping every tree within the walk's stack. |
 | `topLevel` | `'auto'` | The GPU top level with subgroups, the CPU one without. `'cpu'`: always the CPU one. |
-| `triangleLeaves`, `positionLayout`, `nodeFormat`, `weld` | records, `vec4`, `f32`, `true` | [Layout variants](/concepts/gpu-layout#variants). Indexed and quantized need `gpuTreeOutputs: 'copy'`. |
+| `triangleLeaves`, `positionLayout`, `nodeFormat`, `weld` | records, `vec4`, `'quantized'`, `true` | [Layout variants](/concepts/gpu-layout#variants). Indexed and quantized need `gpuTreeOutputs: 'copy'`. Compile your walk from `trees.nodeFormat` (or leave the walk's default, also quantized). |
 | `diagnostics` | `false` | Read the top level's refit stats back. |
 | `onTree`, `warn`, `label` | | Events, where problems are reported, GPU object labels. |
 

@@ -54,7 +54,11 @@ const bvh = new BvhTraceNodes(renderer, trees, {
 ```
 
 `anyHitOrder` is the any-hit walk's child order, compiled in: `'far'` (the default) is best for rays that start on
-surfaces, `'larger'` for rays from outside or across open space. Answers are the same either way.
+surfaces, `'larger'` for rays from outside or across open space. Answers are the same either way. On the RTX 3060
+Laptop (Windows, headless Chrome 157, 2026-11-13, Sponza and Bistro interior, the median of three runs), `'larger'` was
+1.11-1.48x `'far'` on instanced trees and 1.03-1.07x on merged trees with rays from the air, but 0.80-0.87x on merged
+trees with rays from surfaces. The Apple M5 showed the same pattern (1.15-1.42x instanced, 0.78x merged surface rays).
+Merged trees are the default, so `'far'` stays the default.
 
 The walk is compiled for the source's formats (`triangleLeaves`, `positionLayout`, `nodeFormat`); with indexed leaves
 a fourth storage node, `bvh.storage.positions`, is bound. Nothing changes for the caller.

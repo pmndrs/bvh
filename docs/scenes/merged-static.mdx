@@ -1,6 +1,6 @@
 ---
 title: Merged static instances
-description: One world-space tree over the instances that never move, for faster rays from surfaces. Off by default.
+description: One world-space tree over the instances that never move, for faster rays from surfaces. On by default for instances marked static.
 nav: 32
 sourcecode: src/trace/static-merge.ts
 ---
@@ -10,9 +10,13 @@ of one instance per mesh (architecture, Sponza, Bistro) the boxes overlap heavil
 for it: on Sponza a surface point sits inside 5.8 instance boxes, and a ray enters 9.8 instances, 8.1 of them without a
 hit. Merging puts the instances that never move into one world-space tree.
 
+`mergeStaticInstances` is on by default (`SceneTrees` and `buildTraceScene`), but nothing merges unless you mark it:
+only instances added with `static: true` are candidates. A scene that marks nothing is the same as before.
+`mergeStaticInstances: false` keeps static instances as ordinary ones.
+
 {/* snippet: merged-static */}
 ```ts
-const trees = await SceneTrees.create(device, { mergeStaticInstances: true });
+const trees = await SceneTrees.create(device); // mergeStaticInstances is on by default
 room.forEach((geometry, index) => {
     const mesh = trees.addMesh(geometry);
     // static: never moves. Merged at the first update when its mesh has no other instance.
@@ -42,17 +46,19 @@ checks between assemblies. Never refit a merged range: its corners are in world 
 
 ## Measured
 
-Merged over instanced, Apple M5 Pro, Chrome 157, 3 runs of 5 paired rounds each (median over runs of each run's paired
-median; pages `trace-bench-surface-sponza` and `trace-bench-surface-bistro-interior`, rows in
-`bench/results/trace.csv`; indicative):
+Merged over instanced, 3 runs of 5 paired rounds each per GPU (the median over runs of each run's paired median; pages
+`trace-bench-surface-sponza` and `trace-bench-surface-bistro-interior`, rows in `bench/results/trace.csv`):
 
-| Scene | Surface rays, closest | Surface rays, any | Air grid, closest | Air grid, any |
-| --- | --- | --- | --- | --- |
-| Sponza | 1.85x (1.83-1.93) | 1.36x (1.33-1.44) | 1.49x | 1.20x |
-| Bistro interior | 1.22x (1.21-1.24) | 1.11x (1.10-1.11) | 1.19x | 1.31x |
+| Scene | GPU | Surface rays, closest | Surface rays, any | Air grid, closest | Air grid, any |
+| --- | --- | --- | --- | --- | --- |
+| Sponza | RTX 3060 Laptop | 1.67x | 1.48x | 1.44x | 1.24x |
+| Sponza | Apple M5 Pro (indicative) | 1.85x (1.83-1.93) | 1.36x (1.33-1.44) | 1.49x | 1.20x |
+| Bistro interior | RTX 3060 Laptop | 1.20x | 1.16x | 1.19x | 1.35x |
+| Bistro interior | Apple M5 Pro (indicative) | 1.22x (1.21-1.24) | 1.11x (1.10-1.11) | 1.19x | 1.31x |
 
-On Sponza, steps per surface ray drop from 113.8 to 70.3, and instance entries from 9.8 to 1.0. The RTX 3060 hasn't
-been measured, so the option stays off by default.
+RTX 3060 Laptop: Windows, headless Chrome 157, 2026-11-13. Apple M5 Pro: Chrome 157, under a bench lock. Every merged
+answer matched the instanced one. On Sponza, steps per surface ray drop from 113.8 to 70.3, and instance entries from
+9.8 to 1.0. The option became the default after the RTX 3060 run.
 
 ## Costs
 
@@ -67,6 +73,7 @@ been measured, so the option stays off by default.
 
 ## Without SceneTrees
 
-`buildTraceScene(meshes, instances, { build, mergeStaticInstances: true })` builds and assembles in one call. The lower
-level is `mergeStaticGeometry(meshes, instances)`, which returns a plan whose groups you build with any builder and pass
-to `assembleTraceScene(..., { merged: { plan, meshes } })`.
+`buildTraceScene(meshes, instances, { build })` builds and assembles in one call, merging the instances marked
+`static` (`mergeStaticInstances: false` turns it off). The lower level is `mergeStaticGeometry(meshes, instances)`,
+which returns a plan whose groups you build with any builder and pass to
+`assembleTraceScene(..., { merged: { plan, meshes } })`.

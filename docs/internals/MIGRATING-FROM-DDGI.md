@@ -113,6 +113,8 @@ ddgi's GPU pass (`gi/triangle-flags`) writes the same bit of the same word, so i
 
 `GPU_LAYOUT_VERSION` goes from 1 to 2 (`TRACER_GPU_LAYOUT_VERSION` too). Serialized trees from version 1 are refused by `deserializeLayout` ("rebuild the tree"); trees are cheap to rebuild. Mesh nodes and triangle records didn't change, only the meaning of the instance record's flags word. (Version 2 also has a second triangle format, indexed leaves, off by default: `triangleLeaves: 'indexed'`, docs/internals/design/indexed-leaves.md. ddgi needs nothing for it: records stay the default, and a ddgi kernel that reads `buffers.triangles` as 48-byte records keeps working as long as it doesn't opt in.)
 
+**Quantized nodes are the default since 2026-11-13** (`nodeFormat: 'quantized'`, docs/internals/design/compressed-nodes.md): `SceneTrees`, `assembleTraceScene` and `buildTraceScene` store 32-byte nodes with a 32-byte frame slot before each mesh's root, and `traceModuleWgsl`, `batchKernelWgsl` and `TraceBatchKernel` compile the matching walk unless told otherwise. A ddgi walk built with `traceModuleWgsl` from the same options agrees on its own; build it with `nodeFormat: trees.nodeFormat` to be explicit. Anything in ddgi that reads `buffers.nodes` itself with the 64-byte stride (`GPU_LAYOUT_NODE_WORDS`) must either read the quantized node (`GPU_LAYOUT_QUANTIZED_NODE_WORD`, frame at `rootNodeOffset - 1`) or make the scene with `nodeFormat: 'f32'`. `gpuTreeOutputs: 'adopt'` needs `nodeFormat: 'f32'`. Mesh builders (`GpuFirstTrees`, tinybvh, `createMeshLayoutBuilder`) still write 64-byte trees unless asked, and `GpuMeshRefit` refits a deforming mesh's 64-byte copy and packs it.
+
 | Bits of `INSTANCE_WORD.flags` | Meaning |
 | --- | --- |
 | 0-2 | `contributesToGi`, `visible`, `mirrored` (unchanged) |
@@ -134,9 +136,9 @@ ddgi's own scene-copy `INSTANCE_FLAG` (`scene/layout.ts`: `live`, `contributesTo
 
 The batch kernel (`batchKernelWgsl`, and `TraceBatchKernel` in `src/trace/trace-gpu.ts`, exported from the package) takes one mask per batch, from a uniform at group 1 binding 2 (`BATCH_PARAMS_BYTES`), only when masks are on. No per-ray mask buffer.
 
-## 6. Merging static instances (`mergeStaticInstances`, optional)
+## 6. Merging static instances (`mergeStaticInstances`)
 
-Off by default, and nothing changes when it stays off. It targets the surface-ray slowdown that RC5.4 found (lever 20 in ddgi-radiance-cache's `radiance-cache-speed.md`). To enable it in ddgi:
+On by default since 2026-11-13 in `SceneTrees` and `buildTraceScene`, but it only touches instances marked `static: true`: a scene that marks none is unchanged, and `assembleTraceScene` merges only when given a plan. `mergeStaticInstances: false` turns it off. It targets the surface-ray slowdown that RC5.4 found (lever 20 in ddgi-radiance-cache's `radiance-cache-speed.md`). To enable it in ddgi:
 
 1. Mark never-moving instances `static: true` in the `TraceSceneInstance`s ddgi builds from its scene copy. Instances that ddgi can move, hide or toggle at runtime must stay `static: false`, because a merged instance can't move. Static instances that are already hidden or don't contribute to GI are left unmerged. Merged instances need distinct `instanceIndex` values.
 2. Call `mergeStaticGeometry(meshes, instances)`. Build each `plan.groups[g].geometry` with the same builder as the other meshes: the GPU H-PLOC first, then tinybvh when the swap comes. Assemble with `assembleTraceScene(meshes, instances, {}, { merged: { plan, meshes: groupTrees } })`. At the tinybvh swap, assemble again with tinybvh's group trees. Meshes with `plan.meshNeeded[i] === 0` need no tree of their own.
@@ -155,7 +157,8 @@ Off by default, and nothing changes when it stays off. It targets the surface-ra
 4. Move the CPU tracer and reference calls to the options objects; wrap the material rules as a `TrianglePasses`.
 5. Rebuild any serialized trees.
 6. Run ddgi's oracle and material pages; both must report 0 mismatches.
-7. Optionally, turn on `mergeStaticInstances` (section 6) and re-run the surface-ray benches.
+7. Optionally, mark never-moving instances `static: true` (merging is on by default; section 6) and re-run the surface-ray benches.
+8. Check every ddgi reader of `buffers.nodes`: quantized nodes are the default (section 5), or pass `nodeFormat: 'f32'`.
 
 ## 8. Scene trees: `SceneTrees` replaces ddgi's tree half of `ray-queries.ts`
 
@@ -173,9 +176,10 @@ Off by default, and nothing changes when it stays off. It targets the surface-ra
 The GPU top level's gather reads its own instance table, not the scene copy: hits name `instanceIndex` (ddgi passes its scene slot). ddgi's install hook for triangle flags (`requestTriangleFlags`) has no twin yet: write flags before the build (`MeshInput.triangleFlags`) or after placement on `meshStatus(mesh).placement`.
 
 
-Three rules differ from ddgi's:
+These rules differ from ddgi's:
 
 - **When `update` throws.** A storage limit (node or triangle buffer) or a failed tinybvh build is thrown before anything is recorded: the encoder is untouched and the scene unchanged, so the frame can be dropped. A top-level error (trace stack, a limit) comes after the frame was recorded: submit the encoder anyway.
-- **Merged-away meshes.** With `mergeStaticInstances`, a mesh that only merged instances used has no tree and no geometry after the first update; `addInstance` of it throws. Add the mesh again for new instances.
+- **Merged-away meshes.** With `mergeStaticInstances` (on by default) and static instances, a mesh that only merged instances used has no tree and no geometry after the first update; `addInstance` of it throws. Add the mesh again for new instances.
+- **Quantized nodes by default.** `trees.nodeFormat` is `'quantized'` unless the scene was made with `nodeFormat: 'f32'` (section 5); compile the walk from it.
 - **`gpuMaxDepth` covers tinybvh's trees too.** A deeper tinybvh tree is refused (with `fallbackReason`), and the mesh keeps its GPU tree, if any.
 - **The load's GPU build is capped at 256 MiB a batch by default** (`gpuMaxBatchBytes`; ddgi built one batch). The batches build one after another and go on between updates, so `whenBuilt` needs no updates; the peak is the storage plus one batch (Sponza 1,483 → 711 MiB, −771) and the first trees come as soon as before. `gpuMaxBatchBytes: Infinity` gives ddgi's single batch back. `version` can now also change between updates (a capped batch growing the buffers on its own): check it before binding, as after an update.

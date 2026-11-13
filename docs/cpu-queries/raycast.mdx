@@ -23,7 +23,8 @@ Other ways to get one:
 - `generateCpuMeshBvh(pool, input)` from `@pmndrs/bvh/worker`, off the main thread;
 - `CpuMeshBvh.deserialize(bytes)` ([Serialization](/serialization/serialization-and-baking)).
 
-Quantized and indexed trees are decoded to the default layout when the tree is made.
+Quantized and indexed trees are decoded to 64-byte `f32` nodes and 48-byte records when the tree is made: CPU trees
+stay in that layout.
 
 ## Raycast
 
