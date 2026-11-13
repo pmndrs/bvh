@@ -32,6 +32,7 @@ import {
     PACKED_ORIENTED_BOX_FLOATS,
     triangleClosestPointToPoint,
     type BvhBox3Like,
+    type BvhVector3Like,
 } from './shapes.ts';
 
 let builder: TinyBvhBuilder;
@@ -50,7 +51,7 @@ function intersectsBoxReference(tree: CpuMeshBvh, box: BvhBox3Like, matrix?: Arr
  * is at most 1e-7, the nearest point of its edges (a-b, a-c, b-c) replaces
  * `point` when strictly nearer to `p` (or when `point` is NaN).
  */
-function nearerOnSliverEdges(a: BvhVector3, b: BvhVector3, c: BvhVector3, p: BvhVector3, point: BvhVector3): void {
+function nearerOnSliverEdges(a: BvhVector3Like, b: BvhVector3Like, c: BvhVector3Like, p: BvhVector3Like, point: BvhVector3Like): void {
     const ab = [b.x - a.x, b.y - a.y, b.z - a.z];
     const ac = [c.x - a.x, c.y - a.y, c.z - a.z];
     const n = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]];
@@ -66,7 +67,9 @@ function nearerOnSliverEdges(a: BvhVector3, b: BvhVector3, c: BvhVector3, p: Bvh
         const q = [s.x + edge[0] * t, s.y + edge[1] * t, s.z + edge[2] * t];
         if (distanceSq(q) < best) {
             best = distanceSq(q);
-            point.set(q[0], q[1], q[2]);
+            point.x = q[0];
+            point.y = q[1];
+            point.z = q[2];
         }
     }
 }

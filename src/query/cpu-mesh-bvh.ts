@@ -104,8 +104,8 @@ import {
 
 const TRIANGLE_WORDS = GPU_LAYOUT_TRIANGLE_BYTES / 4;
 /** Scratch for closestPointToPoint and intersectsBox, which run no user code (so they can't be re-entered mid-call). */
-/** The query point (0-2) and the point found on a triangle (3-5): {@link closestOnTriangle}'s numbers. */
-const CLOSEST_NEAR = new Float64Array(6);
+/** The query point (0-2), the point found on a triangle (3-5) and its sliver flag (6): {@link closestOnTriangle}'s numbers. */
+const CLOSEST_NEAR = new Float64Array(7);
 const CLOSEST_BEST = new BvhVector3();
 const BOX_QUERY_OBB = new OrientedBox();
 const BOX_QUERY_PACKED = new Float64Array(PACKED_ORIENTED_BOX_FLOATS);
@@ -1757,11 +1757,7 @@ const SLIVER_SINE_SQ = 1e-7;
  */
 function closestOnTriangle(records: Float32Array, base: number, out: Float64Array): void {
     closestByRegions(records, base, out);
-    const ax = records[base + VERTEX0], ay = records[base + VERTEX0 + 1], az = records[base + VERTEX0 + 2];
-    const abx = records[base + VERTEX1] - ax, aby = records[base + VERTEX1 + 1] - ay, abz = records[base + VERTEX1 + 2] - az;
-    const acx = records[base + VERTEX2] - ax, acy = records[base + VERTEX2 + 1] - ay, acz = records[base + VERTEX2 + 2] - az;
-    const nx = aby * acz - abz * acy, ny = abz * acx - abx * acz, nz = abx * acy - aby * acx;
-    if (nx * nx + ny * ny + nz * nz <= SLIVER_SINE_SQ * (abx * abx + aby * aby + abz * abz) * (acx * acx + acy * acy + acz * acz)) closestOnEdges(records, base, out);
+    if (out[6] !== 0) closestOnEdges(records, base, out);
 }
 
 /**
@@ -1796,7 +1792,12 @@ function closestOnEdges(records: Float32Array, base: number, out: Float64Array):
     }
 }
 
-/** Three's `Triangle.closestPointToPoint` (`triangleClosestPointToPoint`) on the record at `base`, plain numbers, the same operations in the same order: the same bits. */
+/**
+ * Three's `Triangle.closestPointToPoint` (`triangleClosestPointToPoint`) on the
+ * record at `base`, plain numbers, the same operations in the same order: the
+ * same bits. `io[6]` is set to 1 when the triangle is a sliver (squared sine at
+ * `a` at most {@link SLIVER_SINE_SQ}), else 0.
+ */
 function closestByRegions(records: Float32Array, base: number, out: Float64Array): void {
     const ax = records[base + VERTEX0], ay = records[base + VERTEX0 + 1], az = records[base + VERTEX0 + 2];
     const bx = records[base + VERTEX1], by = records[base + VERTEX1 + 1], bz = records[base + VERTEX1 + 2];
@@ -1804,6 +1805,8 @@ function closestByRegions(records: Float32Array, base: number, out: Float64Array
     const px = out[0], py = out[1], pz = out[2];
     const abx = bx - ax, aby = by - ay, abz = bz - az;
     const acx = cx - ax, acy = cy - ay, acz = cz - az;
+    const nx = aby * acz - abz * acy, ny = abz * acx - abx * acz, nz = abx * acy - aby * acx;
+    out[6] = nx * nx + ny * ny + nz * nz <= SLIVER_SINE_SQ * (abx * abx + aby * aby + abz * abz) * (acx * acx + acy * acy + acz * acz) ? 1 : 0;
     const apx = px - ax, apy = py - ay, apz = pz - az;
     const d1 = abx * apx + aby * apy + abz * apz;
     const d2 = acx * apx + acy * apy + acz * apz;
