@@ -147,3 +147,14 @@ export class GpuBracket {
         this.read.destroy();
     }
 }
+
+/**
+ * A GPU time with the precision it has. Chrome rounds timestamps to 0.1 ms
+ * unless WebGPU's developer features (or `--enable-unsafe-webgpu`) are on, so
+ * a whole number of tenths is shown as such, and a zero as under 0.1 ms.
+ */
+export function gpuMsText(ms: number): string {
+    const tenths = ms * 10;
+    if (Math.abs(tenths - Math.round(tenths)) < 1e-6) return ms === 0 ? '< 0.1 ms (timestamps rounded to 0.1 ms)' : `${ms.toFixed(1)} ms (timestamps rounded to 0.1 ms)`;
+    return `${ms.toFixed(3)} ms`;
+}

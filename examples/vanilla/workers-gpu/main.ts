@@ -56,7 +56,7 @@ camera.distance *= 0.7;
 
 const worker = new Worker(new URL('./gpu-worker.ts', import.meta.url), { type: 'module', name: 'workers-gpu' });
 const send = (message: ToWorker, transfer: Transferable[] = []) => worker.postMessage(message, transfer);
-const answers = new Map<string, (message: FromWorker) => void>();
+const answers = new Map<string, { readonly id: number; readonly resolve: (message: FromWorker | null) => void }>();
 worker.addEventListener('message', (event: MessageEvent<FromWorker>) => {
     const message = event.data;
     if (message.type === 'error') {
@@ -68,13 +68,23 @@ worker.addEventListener('message', (event: MessageEvent<FromWorker>) => {
         return;
     }
     const key = message.type === 'trees' ? `${message.type}:${message.id}:${message.stage}` : `${message.type}:${message.id}`;
-    answers.get(key)?.(message);
+    const entry = answers.get(key);
     answers.delete(key);
+    entry?.resolve(message);
 });
 worker.addEventListener('error', (event) => fail(`worker: ${event.message}`));
-/** The worker's answer of `type` (and `stage`) to request `id`. */
-function answer<T extends FromWorker['type']>(type: T, id: number, stage?: 'first' | 'best'): Promise<Extract<FromWorker, { type: T }>> {
-    return new Promise((resolve) => answers.set(stage ? `${type}:${id}:${stage}` : `${type}:${id}`, resolve as (message: FromWorker) => void));
+/** The worker's answer of `type` (and `stage`) to request `id`; null when the run was replaced first ({@link dropTreeAnswers}). */
+function answer<T extends FromWorker['type']>(type: T, id: number, stage?: 'first' | 'best'): Promise<Extract<FromWorker, { type: T }> | null> {
+    return new Promise((resolve) => answers.set(stage ? `${type}:${id}:${stage}` : `${type}:${id}`, { id, resolve: resolve as (message: FromWorker | null) => void }));
+}
+/** A stopped way-3 run's tree answers, settled with null: the worker sends nothing more for it, so nothing waits forever. */
+function dropTreeAnswers(id: number): void {
+    for (const [key, entry] of answers) {
+        if (entry.id === id && key.startsWith('trees:')) {
+            answers.delete(key);
+            entry.resolve(null);
+        }
+    }
 }
 
 // ---- What is on screen: a SceneTrees (ways 1 and 4), an uploaded scene (way 2) or the worker's canvas (way 3).
@@ -111,6 +121,7 @@ function swapIn(next: Current): void {
     } else if (old.kind === 'uploaded') old.buffers.destroy();
     else {
         send({ type: 'stop', id: old.id });
+        dropTreeAnswers(old.id);
         camera.target = [...old.camera.target];
         Object.assign(camera, { distance: old.camera.distance, yaw: old.camera.yaw, pitch: old.camera.pitch });
         camera.version++;
@@ -126,7 +137,7 @@ interface RunResult {
     readonly firstMs: number | null;
     readonly bestMs: number | null;
     readonly worstFrameMs: number;
-    /** Main-thread milliseconds the way itself took (way 2's assembly and upload), where it has any. */
+    /** Main-thread milliseconds the way itself took: posting the meshes to the worker (a structured clone) and, way 2, the assembly and upload. */
     readonly mainMs: number | null;
 }
 const results = new Map<Way, RunResult>();
@@ -149,7 +160,17 @@ function record(result: RunResult): void {
     }
 }
 
-const settings = { way: 'render device' as Way, builder: 'gpu-hploc' as GpuBuilderKind };
+// `hold` (smoke runs only): tinybvh's trees are held back on the render device and in the worker canvas until release(), so the GPU trees can be checked.
+const settings = { way: 'render device' as Way, builder: 'gpu-hploc' as GpuBuilderKind, hold: false };
+
+/** Lets the held tinybvh trees of the run on screen swap in. */
+function release(): void {
+    const on = current;
+    if (on?.kind === 'trees') {
+        on.trees.setHoldRefinements(false);
+        on.trees.releaseRefinements();
+    } else if (on?.kind === 'worker canvas') send({ type: 'release', id: on.id });
+}
 
 /** Starts a run of `way`; resolves when its first usable scene is on screen (ways 1, 3, 4 keep going to their best trees). */
 async function run(way: Way): Promise<RunResult | null> {
@@ -168,10 +189,29 @@ async function runSceneTrees(id: number, way: Way, started: number): Promise<Run
     const gpuFirst = way === 'render device';
     const pool = createBvhWorkerPool();
     const log = new SceneTreesLog();
-    const trees = await SceneTrees.create(device, { label: `workers-gpu ${way}`, gpuFirstTrees: gpuFirst, workers: pool, onTree: log.onTree, ...(gpuFirst ? { gpuTreeOutputs: 'adopt', nodeFormat: 'f32' } : {}) });
+    let trees: SceneTrees;
+    try {
+        trees = await SceneTrees.create(device, {
+            label: `workers-gpu ${way}`,
+            gpuFirstTrees: gpuFirst,
+            workers: pool,
+            onTree: log.onTree,
+            holdRefinements: gpuFirst && settings.hold,
+            ...(gpuFirst ? { gpuTreeOutputs: 'adopt', nodeFormat: 'f32' } : {}),
+        });
+    } catch (error) {
+        pool.dispose(); // the scene that would own it never came
+        throw error;
+    }
     const handles = scene.meshes.map((mesh) => trees.addMesh(mesh));
     scene.instances.forEach((instance, index) => trees.addInstance({ mesh: handles[instance.mesh], objectToWorld: instance.objectToWorld, instanceIndex: index, material: instance.material }));
-    await viewFor(trees);
+    try {
+        await viewFor(trees);
+    } catch (error) {
+        trees.dispose();
+        pool.dispose();
+        throw error;
+    }
     if (id !== runId) {
         trees.dispose();
         pool.dispose();
@@ -200,8 +240,11 @@ async function runSceneTrees(id: number, way: Way, started: number): Promise<Run
 async function runWorkerDevice(id: number, started: number): Promise<RunResult | null> {
     const builder = settings.builder;
     const built = answer('built', id);
+    // postMessage clones every mesh here, on the main thread: part of the way's main-thread cost.
+    const sendStart = performance.now();
     send({ type: 'build', id, builder, meshes: scene.meshes });
-    const message = await built;
+    const sendMs = performance.now() - sendStart;
+    const message = (await built)!;
     if (id !== runId) {
         // Another run started meanwhile: these trees were never uploaded, nothing to free on the GPU.
         staleDropped++;
@@ -210,7 +253,7 @@ async function runWorkerDevice(id: number, started: number): Promise<RunResult |
     const mainStart = performance.now();
     const data = assembleLayouts(message.layouts as GpuLayoutMeshBvh[], instances, scene.meshes);
     const buffers = uploadTraceScene(device, data, 'workers-gpu transferred');
-    const mainMs = performance.now() - mainStart;
+    const assemblyMs = performance.now() - mainStart;
     const source = traceSourceOf(device, buffers);
     await viewFor(source);
     if (id !== runId) {
@@ -226,7 +269,14 @@ async function runWorkerDevice(id: number, started: number): Promise<RunResult |
         'worker build',
         `${message.deviceMs ? `device ${message.deviceMs.toFixed(0)} ms, ` : ''}${message.prepareMs ? `pipelines ${message.prepareMs.toFixed(0)} ms, ` : ''}build ${message.buildMs.toFixed(0)} ms, read back ${message.readMs.toFixed(0)} ms, ${bytes(message.bytes)} transferred`,
     );
-    const result: RunResult = { way: 'worker device', detail: `${message.builtBy} on the worker's device, ${bytes(message.bytes)} through the CPU`, firstMs, bestMs: null, worstFrameMs: worstGap, mainMs };
+    const result: RunResult = {
+        way: 'worker device',
+        detail: `${message.builtBy} on the worker's device, ${bytes(message.bytes)} through the CPU; main thread: ${sendMs.toFixed(0)} ms posting the meshes, ${assemblyMs.toFixed(0)} ms assembly and upload`,
+        firstMs,
+        bestMs: null,
+        worstFrameMs: worstGap,
+        mainMs: sendMs + assemblyMs,
+    };
     record(result);
     lastBuilt = message.builtBy;
     return result;
@@ -246,15 +296,19 @@ async function runWorkerCanvas(id: number, started: number): Promise<RunResult |
     const offscreen = element.transferControlToOffscreen();
     const first = answer('trees', id, 'first');
     const best = answer('trees', id, 'best');
-    send({ type: 'render', id, canvas: offscreen, meshes: scene.meshes, instances: scene.instances, radius }, [offscreen]);
-    // Nothing awaited since the run started, so it is still the latest: the worker builds the new scene before it stops the old one's frames.
+    // postMessage clones every mesh here, on the main thread: the way's one main-thread cost besides the camera.
+    const sendStart = performance.now();
+    send({ type: 'render', id, canvas: offscreen, meshes: scene.meshes, instances: scene.instances, radius, hold: settings.hold }, [offscreen]);
+    const sendMs = performance.now() - sendStart;
+    // Swapped in at once (nothing awaited since the run started): the old run's canvas is stopped now, and this one shows
+    // nothing until the worker's first frame. A replaced run's tree answers are settled with null (dropTreeAnswers).
     swapIn({ kind: 'worker canvas', id, element, camera: own, stats: null });
-    await first;
+    if (!(await first)) return null;
     const firstMs = performance.now() - started;
-    await best;
+    if (!(await best)) return null;
     const bestMs = performance.now() - started;
     if (id !== runId) return null;
-    const result: RunResult = { way: 'worker canvas', detail: 'SceneTrees and the view in the worker; tinybvh from its own pool', firstMs, bestMs, worstFrameMs: worstGap, mainMs: 0 };
+    const result: RunResult = { way: 'worker canvas', detail: `SceneTrees and the view in the worker; tinybvh from its own pool; main thread: ${sendMs.toFixed(0)} ms posting the meshes`, firstMs, bestMs, worstFrameMs: worstGap, mainMs: sendMs };
     record(result);
     return result;
 }
@@ -357,7 +411,7 @@ async function checkView(label: string): Promise<Record<string, unknown>> {
     if (on.kind === 'worker canvas') {
         const pixels = answer('pixels', on.id);
         send({ type: 'check', id: on.id });
-        const message = await pixels;
+        const message = (await pixels)!;
         const { packed } = viewCheckRays(message.basis, message.width, message.height);
         agreement = checkAgainstCpu(packed, (index) => message.hits[index], cpuTracer(), { perturb: 1e-6 });
     } else {
@@ -367,51 +421,100 @@ async function checkView(label: string): Promise<Record<string, unknown>> {
     return { label, agreement };
 }
 
+/** Waits up to `frames` frames for `condition`; throws `what` if it never holds. */
+async function until(condition: () => boolean, what: string, frames = 1200): Promise<void> {
+    for (let i = 0; i < frames; i++) {
+        if (condition()) return;
+        await nextFrames(1);
+    }
+    throw new Error(`${what}: not after ${frames} frames`);
+}
+
+let statusId = 1_000_000;
+/** The worker's renderers: running, and still setting up. */
+async function workerStatus(): Promise<Extract<FromWorker, { type: 'status' }>> {
+    const id = ++statusId;
+    const reply = answer('status', id);
+    send({ type: 'status', id });
+    return (await reply)!;
+}
+
 /**
- * Smoke: (1) on the render device, the first trees came from the GPU (with
- * subgroups) and the view agrees with the CPU walk, then every mesh ends on
- * tinybvh's tree; (2) mid-run change: a worker-device build (LBVH) is
- * started and tinybvh-only is started before it returns, so its trees must
- * be dropped, never shown; tinybvh-only runs to its best trees and agrees;
- * (3) the worker device with H-PLOC: built by H-PLOC there (with
- * subgroups), uploaded here, agrees; (4) the worker canvas: first and best
- * trees reported by the worker, every mesh on tinybvh's tree there, and its
- * own pixels agree with the CPU walk here.
+ * Smoke, with tinybvh's trees held back until each GPU check is done:
+ * (1) the render device: GPU first trees (adopted, `f32` nodes) agree with the
+ * CPU walk, then, released, every mesh ends on tinybvh's tree and agrees
+ * again; (2) mid-run change: a worker-device build (LBVH) is overtaken by
+ * tinybvh-only, so its trees must be dropped, never shown; tinybvh-only
+ * agrees; (3) the worker device with H-PLOC: built by H-PLOC there (with
+ * subgroups), uploaded here, agrees; (4) the worker canvas: its GPU trees,
+ * then tinybvh's, agree from its own pixels; (5) quick switches: two worker
+ * canvases and the render device asked for within a frame: the replaced runs
+ * settle (none hangs), and the worker ends with no renderer running or
+ * setting up; (6) every way once more, unheld, for the rows.
  */
 async function smokeRun(): Promise<void> {
     const subgroups = device.features.has('subgroups');
     const checks: Record<string, unknown>[] = [];
-    const rows: (RunResult | null)[] = [];
+    settings.hold = true;
 
-    rows.push(await run('render device'));
-    const on = current;
-    if (on?.kind !== 'trees') throw new Error('render device: no SceneTrees on screen');
-    if (subgroups && on.trees.counts.gpuTreesBuilt === 0) throw new Error('render device: the GPU built no first trees');
+    const renderRun = run('render device');
+    const allPlaced = () => current?.kind === 'trees' && current.trees.counts.meshes > 0 && current.trees.counts.onGpuTrees + current.trees.counts.onTinybvhTrees === current.trees.counts.meshes;
+    await until(allPlaced, 'render device: every mesh placed');
+    const on = current as Extract<Current, { kind: 'trees' }>;
+    if (subgroups && on.trees.counts.onGpuTrees === 0) throw new Error('render device: no mesh is on a GPU tree while tinybvh is held');
+    checks.push({ ...(await checkView('render device, GPU trees (adopted, f32)')), onGpuTrees: on.trees.counts.onGpuTrees });
+    release();
+    if (!(await renderRun)) throw new Error('render device: the run was superseded');
     for (const handle of on.log.meshes()) if (on.trees.meshStatus(handle).builtBy !== 'tinybvh') throw new Error(`render device: mesh ${handle} did not end on tinybvh's tree`);
-    checks.push(await checkView('render device'));
+    checks.push(await checkView('render device, tinybvh trees'));
 
     settings.builder = 'gpu-lbvh';
     const dropped = run('worker device');
     await nextFrames(1);
-    rows.push(await run('tinybvh only'));
+    if (!(await run('tinybvh only'))) throw new Error('tinybvh only: the run was superseded');
     if ((await dropped) !== null) throw new Error('a worker build that came back after another run started was shown');
     if (staleDropped === 0) throw new Error('the interrupted worker build was not dropped');
     checks.push(await checkView('tinybvh only'));
 
     settings.builder = 'gpu-hploc';
-    rows.push(await run('worker device'));
+    if (!(await run('worker device'))) throw new Error('worker device: the run was superseded');
     if (subgroups && lastBuilt !== 'gpu-hploc') throw new Error(`worker device: built by ${lastBuilt}, not H-PLOC`);
     checks.push(await checkView('worker device (H-PLOC)'));
 
-    rows.push(await run('worker canvas'));
-    const canvasRun = current;
-    if (canvasRun?.kind !== 'worker canvas') throw new Error('worker canvas: not on screen');
-    while (!canvasRun.stats || canvasRun.stats.counts.onTinybvhTrees !== canvasRun.stats.counts.meshes) await nextFrames(1);
-    checks.push(await checkView('worker canvas'));
-    if (rows.some((row) => row === null)) throw new Error('a run of the smoke sequence was superseded');
+    const canvasRun = run('worker canvas');
+    const canvasOn = current as Extract<Current, { kind: 'worker canvas' }>;
+    const counts = () => canvasOn.stats?.counts;
+    await until(() => !!counts() && counts()!.meshes > 0 && counts()!.onGpuTrees + counts()!.onTinybvhTrees === counts()!.meshes, 'worker canvas: every mesh placed');
+    const canvasGpuTrees = counts()!.onGpuTrees;
+    if (subgroups && canvasGpuTrees === 0) throw new Error('worker canvas: no mesh is on a GPU tree while tinybvh is held');
+    checks.push({ ...(await checkView('worker canvas, GPU trees (adopted, f32)')), onGpuTrees: canvasGpuTrees });
+    release();
+    if (!(await canvasRun)) throw new Error('worker canvas: the run was superseded');
+    await until(() => counts()!.onTinybvhTrees === counts()!.meshes, 'worker canvas: every mesh on tinybvh');
+    checks.push(await checkView('worker canvas, tinybvh trees'));
+
+    // Quick switches while worker canvases set up: the replaced ones must settle and leave nothing running in the worker.
+    settings.hold = false;
+    const first = run('worker canvas');
+    const second = run('worker canvas');
+    await nextFrames(1);
+    const last = run('render device');
+    const settled = await Promise.race([Promise.all([first, second, last]), nextFrames(1200).then(() => null)]);
+    if (!settled) throw new Error('quick switches: a replaced run never settled');
+    if (settled[0] !== null || settled[1] !== null) throw new Error('quick switches: a replaced worker canvas run reported a result');
+    if (!settled[2]) throw new Error('quick switches: the render device run did not finish');
+    let status = await workerStatus();
+    for (let i = 0; i < 300 && (status.renderers > 0 || status.settingUp > 0); i++) {
+        await nextFrames(1);
+        status = await workerStatus();
+    }
+    if (status.renderers > 0 || status.settingUp > 0) throw new Error(`quick switches: the worker still has ${status.renderers} renderers and ${status.settingUp} setting up`);
+    const switches = { renderers: status.renderers, settingUp: status.settingUp, abandoned: status.abandoned };
+
+    await runAll();
     showStats();
     await nextFrames(10);
-    await ready(device, { ...overlay.snapshot(), rows, checks, staleDropped });
+    await ready(device, { ...overlay.snapshot(), rows: [...results.values()], checks, switches, staleDropped });
 }
 
 function nextFrames(count: number): Promise<void> {

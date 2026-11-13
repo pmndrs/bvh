@@ -44,7 +44,7 @@ import {
     type TraceSceneInstance,
 } from '@pmndrs/bvh';
 import { traceSourceOf, type TraceSource } from '../../shared/gpu-rays.ts';
-import { GpuTimer } from '../../shared/gpu-timer.ts';
+import { gpuMsText, GpuTimer } from '../../shared/gpu-timer.ts';
 import { bytes } from '../../shared/overlay.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 import { layoutInfo } from '../../shared/stats.ts';
@@ -186,6 +186,8 @@ async function buildFromPose(timed: boolean): Promise<Built> {
         const gpuMs = timer ? (await timer.result())[0] : null;
         if (trees.meshes[0].problem) throw new Error(`H-PLOC refused the mesh: ${trees.meshes[0].problem}`);
         const [layout] = await hploc.readLayouts(trees);
+        // relativeSahCost reads 64-byte f32 nodes: the GPU builders write those unless asked for quantized ones (dequantizeNodes would give them).
+        if ((layout!.nodeFormat ?? 'f32') !== 'f32') throw new Error(`refit: expected an f32 tree from H-PLOC, got ${layout!.nodeFormat} nodes`);
         return { layout: layout!, cpuMs, gpuMs, cost: relativeSahCost(new Float32Array(layout!.nodes), new Uint32Array(layout!.nodes), 0, layout!.nodeCount) };
     } catch (error) {
         timer?.reset();
@@ -253,7 +255,9 @@ async function rebuildNow(reason: 'button' | 'auto' | 'start'): Promise<void> {
         old.buffers.destroy();
         stats.destroyed++;
     }
+    // The old tree's drift says nothing about the new one: wait for the new tree's stats before another auto rebuild.
     driftSince = null;
+    drift = NaN;
     overlay.build({ builtBy: 'gpu-hploc', fallbackReason: null, cpuMs: built.cpuMs, gpuMs: built.gpuMs });
     overlay.tree(layoutInfo(built.layout));
     overlay.set('scene on the GPU', `${bytes(buffers.byteLength)} (${next.source.triangleLeaves}, ${next.source.nodeFormat} nodes), refit ${bytes(refit.memoryBytes)}`);
@@ -333,7 +337,7 @@ app.loop({
         const [{ measurement, pick }, times] = await Promise.all([view.collect(), measuring && frameTimer ? frameTimer.result() : Promise.resolve(null)]);
         if (times) {
             measuring = false;
-            overlay.set('pose + refit (GPU)', `${times[0].toFixed(3)} ms pose, ${times[1].toFixed(3)} ms refit (${triangleCount.toLocaleString('en-US')} triangles)`);
+            overlay.set('pose + refit (GPU)', `${gpuMsText(times[0])} pose, ${gpuMsText(times[1])} refit (${triangleCount.toLocaleString('en-US')} triangles)`);
         }
         if (measurement?.gpuMs) overlay.rays('primary (GPU timestamps)', measurement.primaryRays / (measurement.gpuMs / 1000));
         if (pick !== undefined) overlay.set('pixel', pick ? `instance ${pick.instance}, triangle ${pick.triangle}, t ${pick.t.toFixed(3)}` : '-');

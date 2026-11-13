@@ -91,6 +91,8 @@ interface Run {
     readonly log: SceneTreesLog;
     readonly lanes: Map<number, number>;
     readonly spinners: Spinner[];
+    /** The scene this run built (a check compares against it, not the page's latest). */
+    readonly target: VanillaScene;
     readonly started: number;
     live: boolean;
     /** Set when every mesh has its tree: the run's numbers. */
@@ -119,17 +121,23 @@ async function createRun(target: VanillaScene, mode: Mode): Promise<Run> {
         if (run?.live && lane !== undefined) timeline.span(lane, 'built', asked);
     });
     const log = new SceneTreesLog();
-    const trees = await SceneTrees.create(device, {
-        label: 'workers-cpu',
-        gpuFirstTrees: false,
-        workers: pool,
-        onTree: (event) => {
-            log.onTree(event);
-            const lane = event.mesh === null ? undefined : run?.lanes.get(event.mesh);
-            if (run?.live && lane !== undefined) timeline.mark(lane, 'placed');
-        },
-    });
-    run = { mode, trees, pool, log, lanes: new Map(), spinners: [], started: performance.now(), live: true, result: null };
+    let trees: SceneTrees;
+    try {
+        trees = await SceneTrees.create(device, {
+            label: 'workers-cpu',
+            gpuFirstTrees: false,
+            workers: pool,
+            onTree: (event) => {
+                log.onTree(event);
+                const lane = event.mesh === null ? undefined : run?.lanes.get(event.mesh);
+                if (run?.live && lane !== undefined) timeline.mark(lane, 'placed');
+            },
+        });
+    } catch (error) {
+        pool.dispose(); // the scene that would own it never came
+        throw error;
+    }
+    run = { mode, trees, pool, log, lanes: new Map(), spinners: [], target, started: performance.now(), live: true, result: null };
     const handles = target.meshes.map((geometry, lane) => {
         const handle = trees.addMesh(geometry);
         run!.lanes.set(handle, lane);
@@ -162,9 +170,10 @@ function start(mode: Mode, target = scene): Promise<void> {
 
 /** Build new, swap, then dispose the old (its builds still running, maybe): nothing recorded after the swap names its buffers. */
 async function startNow(mode: Mode, target: VanillaScene): Promise<void> {
-    scene = target;
     settings.mode = modeSelect.value = mode;
     const next = await createRun(target, mode);
+    // Only now, with the new scene made: a start that failed leaves the page on the scene it shows.
+    scene = target;
     const old = current;
     current = next;
     if (old) {
@@ -285,7 +294,7 @@ async function checkView(): Promise<Record<string, unknown>> {
     settings.spin = false;
     await nextFrames(3);
     const run = current!;
-    const layouts = scene.meshes.map((mesh) => {
+    const layouts = run.target.meshes.map((mesh) => {
         if (!cpuLayouts.has(mesh)) cpuLayouts.set(mesh, tinybvh.buildLayout(mesh).layout);
         return cpuLayouts.get(mesh)!;
     });

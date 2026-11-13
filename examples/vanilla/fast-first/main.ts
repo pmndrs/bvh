@@ -107,16 +107,22 @@ async function createRun(target: VanillaScene): Promise<Run> {
     });
     const log = new SceneTreesLog();
     const pending: SceneTreeEvent[] = [];
-    const trees = await SceneTrees.create(device, {
-        label: 'fast-first',
-        gpuFirstTrees: settings.gpuFirst,
-        holdRefinements: settings.hold,
-        workers: pool,
-        onTree: (event) => {
-            log.onTree(event);
-            pending.push(event);
-        },
-    });
+    let trees: SceneTrees;
+    try {
+        trees = await SceneTrees.create(device, {
+            label: 'fast-first',
+            gpuFirstTrees: settings.gpuFirst,
+            holdRefinements: settings.hold,
+            workers: pool,
+            onTree: (event) => {
+                log.onTree(event);
+                pending.push(event);
+            },
+        });
+    } catch (error) {
+        pool.dispose(); // the scene that would own it never came
+        throw error;
+    }
     run = { trees, pool, log, meshes: new Map(), gpuFirst: settings.gpuFirst, pending, lanes: new Map(), floorLane: -1, nextLane: 0, nextInstance: 0, live: true, framesTraced: 0, framesTracedLoading: 0 };
     const handles = target.meshes.map((geometry) => addMesh(run!, geometry).handle);
     // A gallery's last mesh is its floor: grey whatever tree it is on.
@@ -155,8 +161,9 @@ function load(target: VanillaScene): Promise<void> {
 
 /** Build new, swap, then dispose the old: the next frame updates and traces the new scene, and nothing recorded after names the old one's buffers. */
 async function loadNow(target: VanillaScene): Promise<void> {
-    scene = target;
     const next = await createRun(target);
+    // Only now, with the new scene made: a load that failed leaves the page on the scene it shows.
+    scene = target;
     const old = current;
     current = next;
     timeline.reset(next.nextLane, `per mesh, from the load (${target.meshes.length} meshes, ${settings.gpuFirst ? 'GPU first trees' : 'tinybvh only'})`);

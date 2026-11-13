@@ -22,7 +22,7 @@
 
 import { createRandom, SceneTrees, type MeshGeometry } from '@pmndrs/bvh';
 import { GpuRays } from '../../shared/gpu-rays.ts';
-import { GpuBracket } from '../../shared/gpu-timer.ts';
+import { GpuBracket, gpuMsText } from '../../shared/gpu-timer.ts';
 import { bytes } from '../../shared/overlay.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
@@ -238,7 +238,9 @@ function showStats(): void {
     overlay.set('meshes, instances', `${counts.meshes}, ${counts.instances.toLocaleString('en-US')}`);
     overlay.set('top level', trees.topLevelPath === 'gpu' ? 'GPU (refit each frame)' : 'CPU (rebuilt when something moved)');
     overlay.set('setTransform + update (CPU)', `${updateMs.toFixed(2)} ms per frame`);
-    overlay.set('update (GPU, bracketed)', updateGpuMs === null ? (bracket ? '…' : 'no timestamp-query') : `${updateGpuMs.toFixed(3)} ms (the top-level refit of ${trees.counts.instances.toLocaleString('en-US')} instances)`);
+    // Everything update recorded: the top-level refit (GPU top level), and on load or swap frames builds, copies and quantize jobs too.
+    const holds = trees.topLevelPath === 'gpu' ? `the top-level refit of ${trees.counts.instances.toLocaleString('en-US')} instances, plus any builds or copies` : 'no top-level refit here (the CPU top level), only builds or copies';
+    overlay.set('GPU work recorded by update', updateGpuMs === null ? (bracket ? '…' : 'no timestamp-query') : `${gpuMsText(updateGpuMs)} (${holds})`);
     overlay.set('swaps (GPU tree → tinybvh)', counts.swaps);
     overlay.set('memory', `${bytes(trees.memory.resident)} resident, ${bytes(trees.memory.peak)} peak`);
     if (log.events.length !== lastEvents) {
