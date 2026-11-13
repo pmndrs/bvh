@@ -19,6 +19,7 @@ interface Kernel {
     nodeFormat: Format;
     wideStack?: 'private' | 'workgroup';
     wideWalk?: 'nested' | 'single';
+    wideDecode?: 'exact' | 'folded';
     rayMasks: boolean;
     triangleLeaves: 'records' | 'indexed';
     hitNormal: boolean;
@@ -27,11 +28,13 @@ interface Kernel {
 
 function kernels(): Kernel[] {
     const list: Kernel[] = [];
-    const formats: { nodeFormat: Format; wideStack?: 'private' | 'workgroup'; wideWalk?: 'nested' | 'single' }[] = [
+    const formats: { nodeFormat: Format; wideStack?: 'private' | 'workgroup'; wideWalk?: 'nested' | 'single'; wideDecode?: 'exact' | 'folded' }[] = [
         { nodeFormat: 'f32' },
         { nodeFormat: 'quantized' },
         { nodeFormat: 'bvh4' },
         { nodeFormat: 'bvh4', wideWalk: 'single' },
+        { nodeFormat: 'bvh4', wideDecode: 'folded' },
+        { nodeFormat: 'cwbvh8', wideStack: 'private', wideDecode: 'folded' },
         { nodeFormat: 'cwbvh8', wideStack: 'private' },
         { nodeFormat: 'cwbvh8', wideStack: 'workgroup' },
     ];
@@ -40,13 +43,13 @@ function kernels(): Kernel[] {
             for (const rayMasks of [true, false]) {
                 for (const triangleLeaves of ['records', 'indexed'] as const) {
                     for (const hitNormal of mode === 'closest' ? [true, false] : [true]) {
-                        const name = `${format.nodeFormat}${format.wideStack ? `-${format.wideStack}` : ''}${format.wideWalk ? `-${format.wideWalk}` : ''} ${mode}${rayMasks ? '' : ' nomasks'} ${triangleLeaves}${hitNormal ? '' : ' compact'}`;
+                        const name = `${format.nodeFormat}${format.wideStack ? `-${format.wideStack}` : ''}${format.wideWalk ? `-${format.wideWalk}` : ''}${format.wideDecode ? `-${format.wideDecode}` : ''} ${mode}${rayMasks ? '' : ' nomasks'} ${triangleLeaves}${hitNormal ? '' : ' compact'}`;
                         list.push({ name, mode, ...format, rayMasks, triangleLeaves, hitNormal });
                     }
                 }
             }
             if (mode === 'any' && (format.nodeFormat === 'bvh4' || format.nodeFormat === 'cwbvh8')) {
-                list.push({ name: `${format.nodeFormat}${format.wideStack ? `-${format.wideStack}` : ''}${format.wideWalk ? `-${format.wideWalk}` : ''} any near`, mode, ...format, rayMasks: true, triangleLeaves: 'records', hitNormal: true, anyHitOrder: 'near' });
+                list.push({ name: `${format.nodeFormat}${format.wideStack ? `-${format.wideStack}` : ''}${format.wideWalk ? `-${format.wideWalk}` : ''}${format.wideDecode ? `-${format.wideDecode}` : ''} any near`, mode, ...format, rayMasks: true, triangleLeaves: 'records', hitNormal: true, anyHitOrder: 'near' });
             }
         }
     }
@@ -64,6 +67,7 @@ await runGpuTest(async ({ device, log }) => {
             nodeFormat: kernel.nodeFormat,
             wideStack: kernel.wideStack,
             wideWalk: kernel.wideWalk,
+            wideDecode: kernel.wideDecode,
             anyHitOrder: kernel.anyHitOrder,
         });
         const bytes = new TextEncoder().encode(code).length;

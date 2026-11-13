@@ -4,7 +4,8 @@
  * files (docs/internals/design/wide-nodes.md): per scene, format, tree, ray set and mode,
  * the wide-over-f32 ratio as min..max of the runs' medians (and the single-loop BVH4 walk
  * over the nested one, lever L7), the runs' machine load, and how many answers differed
- * from f32 (must be 0; ties apart).
+ * from f32 (must be 0; ties apart). The levers' A/Bs come out as `l7_bvh4-single_over_bvh4/...`
+ * and `l1_<format>-folded_over_<format>/...` (above 1: the lever is faster).
  *
  *   node --experimental-transform-types tools/wide-summary.ts run1.json run2.json run3.json [more ...] [--markdown]
  *
@@ -53,13 +54,20 @@ for (const file of files) {
             list.push(ratio.median);
             scene.ratios.set(ratio.name, list);
         }
-        // L7: the single-loop BVH4 walk over the nested one, per round, then the median.
+        // The levers' A/Bs, per round then the median: L7 the single-loop BVH4 walk over the nested one,
+        // L1 the folded plane decode over the exact one.
         const entry = (tree: string, set: string, mode: string, layout: string) => wide.entries.find((e) => e.tree === tree && e.set === set && e.mode === mode && e.layout === layout);
+        const levers: Record<string, [string, string]> = {
+            'bvh4-single': ['l7_bvh4-single_over_bvh4', 'bvh4'],
+            'bvh4-folded': ['l1_bvh4-folded_over_bvh4', 'bvh4'],
+            'cwbvh8-folded': ['l1_cwbvh8-folded_over_cwbvh8', 'cwbvh8'],
+        };
         for (const e of wide.entries) {
-            if (e.layout !== 'bvh4-single') continue;
-            const nested = entry(e.tree, e.set, e.mode, 'bvh4');
+            const lever = levers[e.layout];
+            if (!lever) continue;
+            const nested = entry(e.tree, e.set, e.mode, lever[1]);
             if (!nested) continue;
-            const name = `l7_bvh4-single_over_bvh4/${e.tree}/${e.set}/${e.mode}`;
+            const name = `${lever[0]}/${e.tree}/${e.set}/${e.mode}`;
             const list = scene.ratios.get(name) ?? [];
             list.push(middle(e.mraysPerRound.map((rate, round) => rate / nested.mraysPerRound[round])));
             scene.ratios.set(name, list);

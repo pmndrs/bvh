@@ -97,6 +97,11 @@ describe('a wide scene', () => {
         const single = traceModuleWgsl({ nodeFormat: 'bvh4', wideWalk: 'single' });
         expect(single).toContain('BVH_REF_INSTANCE_MARKER');
         expect(single).not.toContain('fn bvhMeshClosest');
+        expect(traceModuleWgsl({ nodeFormat: 'cwbvh8', wideDecode: 'folded' })).toContain('BVH_WIDE_FOLD_PAD');
+        expect(traceModuleWgsl({ nodeFormat: 'cwbvh8' })).not.toContain('BVH_WIDE_FOLD_PAD');
+        expect(() => traceModuleWgsl({ wideDecode: 'folded' })).toThrow(/bvh4/);
+        // The pad is 2^-20, written out exactly.
+        expect(9.5367431640625e-7).toBe(2 ** -20);
         expect(traceModuleWgsl({ nodeFormat: 'cwbvh8', wideStack: 'workgroup' })).toContain('var<workgroup> bvhWideSharedClosest');
         expect(traceModuleWgsl({ nodeFormat: 'cwbvh8' })).toContain('var<storage, read> bvhTraceNodes: array<vec4u>;');
         // The f32 walk is untouched by the wide formats.

@@ -11,7 +11,7 @@
  */
 
 import type { TraceSceneData } from './scene-assembly.ts';
-import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl, type AnyHitOrder, type WideStack, type WideWalk } from './wgsl.ts';
+import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl, type AnyHitOrder, type WideDecode, type WideStack, type WideWalk } from './wgsl.ts';
 import { RAY_MASK_ALL, type NodeFormat, type PositionLayout, type TriangleLeaves } from './layout.ts';
 import { RAY_BYTES } from './rays.ts';
 
@@ -117,6 +117,8 @@ export interface TraceBatchKernelOptions {
     readonly wideStack?: WideStack;
     /** `nodeFormat: 'bvh4'`: the walk's shape, `'nested'` (the default) or `'single'` (`TraceModuleOptions.wideWalk`). */
     readonly wideWalk?: WideWalk;
+    /** Wide formats: `'exact'` (the default) or `'folded'` plane decode (`TraceModuleOptions.wideDecode`). */
+    readonly wideDecode?: WideDecode;
 }
 
 /**
@@ -140,13 +142,13 @@ export class TraceBatchKernel {
     ) {}
 
     static async create(device: GPUDevice, options: TraceBatchKernelOptions = {}): Promise<TraceBatchKernel> {
-        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = 'f32', anyHitOrder, wideStack, wideWalk } = options;
+        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = 'f32', anyHitOrder, wideStack, wideWalk, wideDecode } = options;
         const pipelineFor = (mode: 'closest' | 'any') =>
             device.createComputePipelineAsync({
                 label: `${label} batch ${mode}`,
                 layout: 'auto',
                 compute: {
-                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks, hitNormal, triangleLeaves, positionLayout, nodeFormat, anyHitOrder, wideStack, wideWalk }) }),
+                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks, hitNormal, triangleLeaves, positionLayout, nodeFormat, anyHitOrder, wideStack, wideWalk, wideDecode }) }),
                     entryPoint: 'bvhBatch',
                 },
             });

@@ -89,7 +89,7 @@ Everything below is on `main` and pushed to origin. No release, tag or npm publi
   - instanced trees: 0.56-0.86x for both formats;
   - every answer equals f32's, ties apart.
 - **The gate** (≥1.3x on both the M5 and the RTX 3060) is met on the M5 only per scene, on merged trees.
-- **L7** (`wideWalk: 'single'`, a single-loop BVH4 walk for the instanced-tree hypothesis) is built and passes the full oracle; it has not been timed.
+- **Levers built, not timed:** L7 (`wideWalk: 'single'`, a single-loop BVH4 walk, for the instanced-tree hypothesis) and L1 (`wideDecode: 'folded'`, Ylitie's one-FMA plane decode, padded so the hits stay the binary walk's). Both are in the oracle and the quiet pass.
 - **Precision timing:** the "Quiet pass" section below; the RTX 3060 runs are in runbook section 2d.
 - **Timed pages** now hold the shared GPU lock (`/tmp/rt-gpu.lock`) and record the machine's load (`tests/gpu/README.md`, "Timed pages").
 
@@ -97,7 +97,7 @@ Everything below is on `main` and pushed to origin. No release, tag or npm publi
 
 For the session that runs the maintainer's quiet pass (pathtracer `docs/QUIET-PASS.md`). Nothing else may run: no browser, no other agent jobs. The load check can't see an open Chrome window.
 
-**What it measures:** the wide-node experiment (`docs/internals/design/wide-nodes.md`, section 8): `bvh4`, `bvh4-single` (lever L7, the single-loop walk), `cwbvh8` and `cwbvh8-workgroup` against `f32`, on primary, surface and air-grid rays, closest and any hit, instanced and merged trees. One page run times all of them, about 3 minutes each. The runner takes the shared GPU lock (`/tmp/rt-gpu.lock`) itself and records the load.
+**What it measures:** the wide-node experiment (`docs/internals/design/wide-nodes.md`, section 8): `bvh4`, `bvh4-single` (lever L7, the single-loop walk), `bvh4-folded` and `cwbvh8-folded` (lever L1, the folded plane decode), `cwbvh8` and `cwbvh8-workgroup` against `f32`, on primary, surface and air-grid rays, closest and any hit, instanced and merged trees. One page run times all of them, about 4-5 minutes each. The runner takes the shared GPU lock (`/tmp/rt-gpu.lock`) itself and records the load.
 
 **Setup:**
 
@@ -131,8 +131,9 @@ node --experimental-transform-types --no-warnings tools/wide-summary.ts ~/quiet-
 
 It prints, per scene, the load of each run and whether it counted as quiet, answers differing from `f32` (must be 0), and every ratio as min..max of the three runs' medians:
 
-- `wide_<format>_over_f32/<tree>/<set>/<mode>`, where `<format>` is `bvh4`, `bvh4-single`, `cwbvh8` or `cwbvh8-workgroup`; `<tree>` is `instanced` or `merged`; `<set>` is `primary`, `surface` or `air-grid`; `<mode>` is `closest` or `any`;
-- `l7_bvh4-single_over_bvh4/<tree>/<set>/<mode>`: the L7 A/B, single loop over nested.
+- `wide_<format>_over_f32/<tree>/<set>/<mode>`, where `<format>` is `bvh4`, `bvh4-single`, `bvh4-folded`, `cwbvh8`, `cwbvh8-folded` or `cwbvh8-workgroup`; `<tree>` is `instanced` or `merged`; `<set>` is `primary`, `surface` or `air-grid`; `<mode>` is `closest` or `any`;
+- `l7_bvh4-single_over_bvh4/<tree>/<set>/<mode>`: the L7 A/B, single loop over nested;
+- `l1_bvh4-folded_over_bvh4/...` and `l1_cwbvh8-folded_over_cwbvh8/...`: the L1 A/B, folded over exact decode.
 
 Report those tables, plus which format and tree reach 1.3x closest-hit on `surface` and `air-grid` (the gate) on both scenes. To keep the rows:
 
@@ -142,7 +143,7 @@ node --experimental-transform-types --no-warnings tests/gpu/pages/trace-bench/su
 
 Then commit `bench/results/trace.csv` on the branch. Don't merge or push.
 
-**Today's numbers are best effort** (2026-11-14, design note section 8). They were taken under the lock with the load average at 2-6, but Chrome was open for browsing, so they are not quiet. L7 has not been timed at all.
+**Today's numbers are best effort** (2026-11-14, design note section 8). They were taken under the lock with the load average at 2-6, but Chrome was open for browsing, so they are not quiet. L7 and L1 have not been timed at all.
 
 **Consumers** (survey of ~/Developer, 2026-11-11)
 - **ddgi and its rc-\* copies:** on the frozen copy; they switch at P3.

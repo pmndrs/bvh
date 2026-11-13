@@ -151,6 +151,8 @@ interface OracleVariant {
     wideStack?: 'private' | 'workgroup';
     /** BVH4: the walk's shape (`wideWalk`); default nested. */
     wideWalk?: 'nested' | 'single';
+    /** Wide formats: the plane decode (`wideDecode`); default exact. */
+    wideDecode?: 'exact' | 'folded';
     /** The kernel's any-hit child order (`anyHitOrder`); default `'far'`. */
     anyHitOrder?: 'far' | 'near' | 'larger';
     /**
@@ -202,6 +204,10 @@ const VARIANTS: OracleVariant[] = [
     { name: 'wide-bvh4-indexed-tinybvh', treeSource: 'tinybvh', nodeFormat: 'bvh4', triangleLeaves: 'indexed' },
     { name: 'merged-wide-bvh4-hploc', treeSource: 'gpu-hploc', merged: true, nodeFormat: 'bvh4' },
     { name: 'wide-cwbvh8-tinybvh', treeSource: 'tinybvh', nodeFormat: 'cwbvh8' },
+    { name: 'wide-cwbvh8-folded-tinybvh', treeSource: 'tinybvh', nodeFormat: 'cwbvh8', wideDecode: 'folded' },
+    { name: 'wide-bvh4-folded-tinybvh', treeSource: 'tinybvh', nodeFormat: 'bvh4', wideDecode: 'folded' },
+    { name: 'wide-bvh4-single-folded-lbvh', treeSource: 'gpu-lbvh', nodeFormat: 'bvh4', wideWalk: 'single', wideDecode: 'folded' },
+    { name: 'merged-wide-cwbvh8-folded-indexed-hploc', treeSource: 'gpu-hploc', merged: true, nodeFormat: 'cwbvh8', wideDecode: 'folded', triangleLeaves: 'indexed', wideStack: 'workgroup' },
     { name: 'wide-cwbvh8-tinybvh-workgroup', treeSource: 'tinybvh', nodeFormat: 'cwbvh8', wideStack: 'workgroup' },
     { name: 'wide-cwbvh8-tinybvh-nomasks', treeSource: 'tinybvh', nodeFormat: 'cwbvh8', rayMasks: false },
     { name: 'wide-cwbvh8-tinybvh-near', treeSource: 'tinybvh', nodeFormat: 'cwbvh8', anyHitOrder: 'near' },
@@ -238,6 +244,8 @@ const ULP_AT_MOST_RECORDS = [
     'wide-bvh4-indexed-tinybvh',
     'wide-bvh4-single-tinybvh',
     'wide-cwbvh8-tinybvh',
+    'wide-cwbvh8-folded-tinybvh',
+    'wide-bvh4-folded-tinybvh',
     'wide-cwbvh8-tinybvh-workgroup',
     'wide-cwbvh8-indexed-tinybvh',
 ];
@@ -245,7 +253,7 @@ const ULP_AT_MOST_RECORDS = [
 /** The hooks' wide passes build their trees and scene as these variants do. */
 const WIDE_HOOK_VARIANTS: Record<'bvh4' | 'cwbvh8', OracleVariant> = {
     bvh4: { name: 'bvh4-hooks', treeSource: 'tinybvh', nodeFormat: 'bvh4', wideWalk: 'single' },
-    cwbvh8: { name: 'cwbvh8-hooks', treeSource: 'tinybvh', nodeFormat: 'cwbvh8', wideStack: 'workgroup' },
+    cwbvh8: { name: 'cwbvh8-hooks', treeSource: 'tinybvh', nodeFormat: 'cwbvh8', wideStack: 'workgroup', wideDecode: 'folded' },
 };
 const WIDE_INDEXED_HOOK_VARIANT: OracleVariant = { name: 'cwbvh8-indexed-hooks', treeSource: 'tinybvh', nodeFormat: 'cwbvh8', triangleLeaves: 'indexed' };
 
@@ -605,6 +613,7 @@ await runGpuTest(async ({ device, log }) => {
             anyHitOrder: variant.anyHitOrder,
             wideStack: variant.wideStack,
             wideWalk: variant.wideWalk,
+            wideDecode: variant.wideDecode,
         });
         const results = { cases: {} as Record<string, unknown>, sharedEdges: [] as SharedEdgeReport[] };
         byTest[variant.name] = results;
@@ -707,7 +716,7 @@ await runGpuTest(async ({ device, log }) => {
             ? indexed ? WIDE_INDEXED_HOOK_VARIANT : WIDE_HOOK_VARIANTS[wide]
             : quantized ? (indexed ? QUANTIZED_INDEXED_HOOK_VARIANT : QUANTIZED_HOOK_VARIANT) : indexed ? INDEXED_HOOK_VARIANT : VARIANTS[0];
         for (const hook of buildHookCases(hookSizes)) {
-            const kernel = await TraceBatchKernel.create(device, { label: hook.name, triangleFilter: hook.filterWgsl, rayMasks, triangleLeaves: format.triangleLeaves, nodeFormat: format.nodeFormat, wideStack: format.wideStack, wideWalk: format.wideWalk });
+            const kernel = await TraceBatchKernel.create(device, { label: hook.name, triangleFilter: hook.filterWgsl, rayMasks, triangleLeaves: format.triangleLeaves, nodeFormat: format.nodeFormat, wideStack: format.wideStack, wideWalk: format.wideWalk, wideDecode: format.wideDecode });
             let scene: TraceSceneData;
             let flagged: number;
             if (merged) {

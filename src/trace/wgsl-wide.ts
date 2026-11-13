@@ -90,7 +90,12 @@ export interface WideWalkOptions {
     readonly stack: WideStack;
     /** BVH4 only: `'nested'` (a mesh loop per instance) or `'single'` (one loop, lever L7). */
     readonly walk: WideWalk;
+    /** How child planes are decoded: `'exact'` or `'folded'` (lever L1); see {@link wideEntryWordsWgsl}. */
+    readonly decode: WideDecode;
 }
+
+/** How the wide walks decode a child's planes (`TraceModuleOptions.wideDecode`). */
+export type WideDecode = 'exact' | 'folded';
 
 /** How a BVH4 scene is walked (`TraceModuleOptions.wideWalk`): a mesh loop per instance, or one loop for both levels. */
 export type WideWalk = 'nested' | 'single';
@@ -179,6 +184,57 @@ fn bvhWideEntry(
 `;
 
 /**
+ * Four children's entry distances from their plane words (min x, max x, min y, max y, min z,
+ * max z: a byte per child), with the node corner `p` and plane scale `2^e`, by `wideDecode`:
+ *
+ * - `'exact'` (the default): each plane decoded as `p + f32(q) * 2^e` (one rounding of an exact
+ *   value), then the binary walk's slab arithmetic (`bvhWideEntry`). A decoded box that contains
+ *   the exact box is entered by every ray that enters the exact box, so hits equal the binary walk's.
+ * - `'folded'` (lever L1, Ylitie's form): per node and axis `a = 2^e / d` and `b = (p - o) / d`,
+ *   then each plane's distance is one FMA, `q * a + b`. That is not the exact plane's distance,
+ *   and its error is absolute (it grows with `|p - o|`), so each axis's near distance moves down
+ *   and its far distance up by `2^-20 * (|b| + (|p| + 255 * 2^e) * |1/d|)`: more than the
+ *   folded arithmetic's error, the exact path's, and the half ulp by which the plane rounds,
+ *   together. The box only grows, so the hit argument holds; the trace-oracle checks it.
+ */
+function wideEntryWordsWgsl(decode: WideDecode): string {
+    if (decode === 'exact') {
+        return /* wgsl */ `
+fn bvhWideEntryWords(p: vec3f, scale: vec3f, xMin: u32, xMax: u32, yMin: u32, yMax: u32, zMin: u32, zMax: u32, setup: BvhRaySetup, tMin: f32, tMax: f32) -> vec4f {
+    return bvhWideEntry(
+        bvhWidePlanes(p.x, scale.x, xMin), bvhWidePlanes(p.x, scale.x, xMax),
+        bvhWidePlanes(p.y, scale.y, yMin), bvhWidePlanes(p.y, scale.y, yMax),
+        bvhWidePlanes(p.z, scale.z, zMin), bvhWidePlanes(p.z, scale.z, zMax),
+        setup, tMin, tMax,
+    );
+}
+`;
+    }
+    return /* wgsl */ `
+// The folded decode's padding factor, 2^-20 (see wideEntryWordsWgsl in wgsl-wide.ts).
+const BVH_WIDE_FOLD_PAD: f32 = 9.5367431640625e-7;
+
+fn bvhWideEntryWords(p: vec3f, scale: vec3f, xMin: u32, xMax: u32, yMin: u32, yMax: u32, zMin: u32, zMax: u32, setup: BvhRaySetup, tMin: f32, tMax: f32) -> vec4f {
+    let inverse = setup.inverseDirection;
+    let a = scale * inverse;
+    let b = (p - setup.origin) * inverse;
+    let pad = (abs(b) + (abs(p) + 255.0 * scale) * abs(inverse)) * BVH_WIDE_FOLD_PAD;
+    let negative = inverse < vec3f(0.0);
+    // The near plane is the min plane for a positive direction, the max plane for a negative one.
+    let x0 = fma(vec4f(unpack4xU8(select(xMin, xMax, negative.x))), vec4f(a.x), vec4f(b.x)) - pad.x;
+    let x1 = fma(vec4f(unpack4xU8(select(xMax, xMin, negative.x))), vec4f(a.x), vec4f(b.x)) + pad.x;
+    let y0 = fma(vec4f(unpack4xU8(select(yMin, yMax, negative.y))), vec4f(a.y), vec4f(b.y)) - pad.y;
+    let y1 = fma(vec4f(unpack4xU8(select(yMax, yMin, negative.y))), vec4f(a.y), vec4f(b.y)) + pad.y;
+    let z0 = fma(vec4f(unpack4xU8(select(zMin, zMax, negative.z))), vec4f(a.z), vec4f(b.z)) - pad.z;
+    let z1 = fma(vec4f(unpack4xU8(select(zMax, zMin, negative.z))), vec4f(a.z), vec4f(b.z)) + pad.z;
+    let enter = max(max(x0, max(y0, z0)), vec4f(tMin));
+    let exit = min(min(x1, min(y1, z1)) * BVH_BOX_EXIT_PADDING, vec4f(tMax));
+    return select(vec4f(BVH_BOX_MISS), enter, enter <= exit);
+}
+`;
+}
+
+/**
  * One BVH4 node (tinybvh's `BVH4_GPU::Intersect` step) as text: decode and test the four
  * children of the node at mesh node `node`, sort them, test the leaf children's triangles
  * (`leafCall`) and push the inner ones (`push`), far to near (so the nearest is popped first)
@@ -205,12 +261,7 @@ function bvh4NodeStepWgsl(closest: boolean, anyHitOrder: 'far' | 'near', tFar: s
         let d3 = bvhTraceNodes[base + 3u];
         let p = bitcast<vec3f>(d0.xyz);
         let scale = bitcast<vec3f>(d1.xyz);
-        let entry = bvhWideEntry(
-            bvhWidePlanes(p.x, scale.x, d0.w), bvhWidePlanes(p.x, scale.x, d1.w),
-            bvhWidePlanes(p.y, scale.y, d2.x), bvhWidePlanes(p.y, scale.y, d2.y),
-            bvhWidePlanes(p.z, scale.z, d2.z), bvhWidePlanes(p.z, scale.z, d2.w),
-            setup, tMin, ${tFar},
-        );
+        let entry = bvhWideEntryWords(p, scale, d0.w, d1.w, d2.x, d2.y, d2.z, d2.w, setup, tMin, ${tFar});
         // A missing child (word 0) is never entered.
         let dist = select(entry, vec4f(BVH_BOX_MISS), d3 == vec4u(0u));
         var dist0 = dist.x;
@@ -447,18 +498,8 @@ fn ${closest ? 'bvhMeshClosest' : 'bvhMeshAny'}(instance: BvhInstance, setup: Bv
         let scale = bitcast<vec3f>(vec3u(extractBits(e4, 0u, 8u), extractBits(e4, 8u, 8u), extractBits(e4, 16u, 8u)) << vec3u(23u));
         let tFar = ${closest ? 'best.t' : 'tMax'};
         // Slots 0-3, then 4-7. Plane words: lo x n2.x|y, lo y n2.z|w, lo z n3.x|y, hi x n3.z|w, hi y n4.x|y, hi z n4.z|w.
-        let entryA = bvhWideEntry(
-            bvhWidePlanes(p.x, scale.x, n2.x), bvhWidePlanes(p.x, scale.x, n3.z),
-            bvhWidePlanes(p.y, scale.y, n2.z), bvhWidePlanes(p.y, scale.y, n4.x),
-            bvhWidePlanes(p.z, scale.z, n3.x), bvhWidePlanes(p.z, scale.z, n4.z),
-            setup, tMin, tFar,
-        );
-        let entryB = bvhWideEntry(
-            bvhWidePlanes(p.x, scale.x, n2.y), bvhWidePlanes(p.x, scale.x, n3.w),
-            bvhWidePlanes(p.y, scale.y, n2.w), bvhWidePlanes(p.y, scale.y, n4.y),
-            bvhWidePlanes(p.z, scale.z, n3.y), bvhWidePlanes(p.z, scale.z, n4.w),
-            setup, tMin, tFar,
-        );
+        let entryA = bvhWideEntryWords(p, scale, n2.x, n3.z, n2.z, n4.x, n3.x, n4.z, setup, tMin, tFar);
+        let entryB = bvhWideEntryWords(p, scale, n2.y, n3.w, n2.w, n4.y, n3.y, n4.w, setup, tMin, tFar);
         let hitmask = bvhCwbvhHitBits(n1.z, octantInverse4, entryA) | bvhCwbvhHitBits(n1.w, octantInverse4, entryB);
         ngroup = vec2u(n1.x, (hitmask & 0xff000000u) | (e4 >> 24u));
         let triangleBase = n1.y;
@@ -643,7 +684,7 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${closest ? 'BvhHit' : 'bool'} {
  * Any-hit's top level goes far first unless `anyHitOrder` is `'near'`.
  */
 export function wideWalkWgsl(options: WideWalkOptions): string {
-    const { format, rayMasks, anyHitOrder, stack, walk } = options;
+    const { format, rayMasks, anyHitOrder, stack, walk, decode } = options;
     const cwbvh = format === 'cwbvh8';
     const single = walk === 'single';
     if (single && cwbvh) throw new RangeError("wideWalk 'single' is for nodeFormat 'bvh4'");
@@ -673,6 +714,7 @@ struct BvhMeshHit {
     originalIndex: u32,
 }
 ${WIDE_BOX_WGSL}
+${wideEntryWordsWgsl(decode)}
 ${cwbvh ? CWBVH_HIT_BITS_WGSL : ''}
 ${single ? '' : meshStackWgsl(format, stack)}
 ${triangleGroupWgsl('closest', rayMasks)}

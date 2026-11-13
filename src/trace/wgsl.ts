@@ -70,10 +70,10 @@ import {
     type TriangleLeaves,
 } from './layout.ts';
 import { DEFAULT_TRIANGLE_FILTER_WGSL } from './triangle-filter.ts';
-import { wideWalkWgsl, type WideStack, type WideWalk } from './wgsl-wide.ts';
+import { wideWalkWgsl, type WideDecode, type WideStack, type WideWalk } from './wgsl-wide.ts';
 import { isWideNodeFormat } from '../wide-nodes.ts';
 
-export type { WideStack, WideWalk } from './wgsl-wide.ts';
+export type { WideDecode, WideStack, WideWalk } from './wgsl-wide.ts';
 
 /** Where the trace module's bindings land inside a kernel (structurally the same as ddgi's `BindingSlot`). */
 export interface BindingSlot {
@@ -667,6 +667,13 @@ export interface TraceModuleOptions {
      */
     readonly wideWalk?: WideWalk;
     /**
+     * Wide formats: how child planes are decoded. `'exact'` (the default):
+     * `p + q * 2^e`, then the binary walk's slab test. `'folded'` (lever L1,
+     * Ylitie's form): one FMA per plane, padded by its error bound. Same hits
+     * either way (docs/internals/design/wide-nodes.md).
+     */
+    readonly wideDecode?: WideDecode;
+    /**
      * Which child any-hit enters first when the ray hits both, compiled in
      * like `rayMasks` (see {@link AnyHitOrder}). Default `'far'`. Closest-hit
      * always enters the nearer one. Answers are the same either way.
@@ -737,6 +744,9 @@ export function traceModuleWgsl(options: TraceModuleOptions = {}): string {
     const wideWalk = options.wideWalk ?? 'nested';
     if (wideWalk !== 'nested' && wideWalk !== 'single') throw new RangeError(`traceModuleWgsl: wideWalk must be 'nested' or 'single', got ${String(wideWalk)}`);
     if (wideWalk === 'single' && nodeFormat !== 'bvh4') throw new RangeError("traceModuleWgsl: wideWalk 'single' is for nodeFormat 'bvh4'");
+    const wideDecode = options.wideDecode ?? 'exact';
+    if (wideDecode !== 'exact' && wideDecode !== 'folded') throw new RangeError(`traceModuleWgsl: wideDecode must be 'exact' or 'folded', got ${String(wideDecode)}`);
+    if (wideDecode === 'folded' && !wide) throw new RangeError("traceModuleWgsl: wideDecode 'folded' is for nodeFormat 'bvh4' or 'cwbvh8'");
     return /* wgsl */ `${COMMON_WGSL}
 // Nodes and triangles are read as plain vec4s, so every load is one 16-byte
 // read whatever the backend makes of a struct with vec3 members. Quantized
@@ -1023,7 +1033,7 @@ fn bvhIntersectWatertight(triangle: BvhTriangle, setup: BvhRaySetup, tMin: f32, 
 
 ${rayMasks ? INSTANCE_MASK_WGSL : ''}
 ${anyHitOrder === 'larger' ? BOX_HALF_AREA_WGSL : ''}
-${wide ? wideWalkWgsl({ format: nodeFormat, rayMasks, anyHitOrder: anyHitOrder === 'near' ? 'near' : 'far', stack: wideStack, walk: wideWalk }) : `${walkWgsl('closest', rayMasks)}
+${wide ? wideWalkWgsl({ format: nodeFormat, rayMasks, anyHitOrder: anyHitOrder === 'near' ? 'near' : 'far', stack: wideStack, walk: wideWalk, decode: wideDecode }) : `${walkWgsl('closest', rayMasks)}
 ${walkWgsl('any', rayMasks, anyHitOrder)}`}
 ${rayMasks ? MASKED_TRACE_WGSL : UNMASKED_TRACE_WGSL}
 ${triangleFilter ?? '// bvhTrianglePasses is supplied by the kernel.'}
@@ -1259,6 +1269,8 @@ export interface BatchKernelOptions {
     readonly wideStack?: WideStack;
     /** The BVH4 walk's shape (`TraceModuleOptions.wideWalk`). Default `'nested'`. */
     readonly wideWalk?: WideWalk;
+    /** The wide walks' plane decode (`TraceModuleOptions.wideDecode`). Default `'exact'`. */
+    readonly wideDecode?: WideDecode;
 }
 
 /** Bytes of the batch kernel's uniform (`BvhBatchParams`, group 1 binding 2, only with ray masks). Padded to 16. */
@@ -1280,6 +1292,6 @@ export function batchKernelWgsl(mode: 'closest' | 'any', options: BatchKernelOpt
     }
     rejectOldPositionalCall('batchKernelWgsl', options);
     const rayMasks = options.rayMasks ?? true;
-    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat, anyHitOrder: options.anyHitOrder, wideStack: options.wideStack, wideWalk: options.wideWalk })}
+    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat, anyHitOrder: options.anyHitOrder, wideStack: options.wideStack, wideWalk: options.wideWalk, wideDecode: options.wideDecode })}
 ${batchEntryWgsl(mode, 1, rayMasks, options.hitNormal ?? true, options.wideStack === 'workgroup')}`;
 }
