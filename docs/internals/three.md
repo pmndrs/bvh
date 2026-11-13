@@ -15,6 +15,9 @@ The three.js side of the package. It's the only part that imports three, which i
 | `bvh.fns.raycastFirstHit(ray, &hit) -> bool` | WGSL: `bvhTraceClosest(ray: BvhRay) -> BvhHit` (`hit.t < 0` on a miss). TSL: `bvh.traceClosest(origin, direction, tMin, tMax)`, a `BvhTraceHit` struct node. |
 | `bvh.fns.raycastAnyHit(ray) -> bool` | WGSL: `bvhTraceAny(ray) -> bool`. TSL: `bvh.traceAny(origin, direction, tMin, tMax)`. |
 | (none) | Ray masks: `bvhTraceClosestMasked(ray, mask)` / `bvhTraceAnyMasked`, or TSL `traceClosestMasked` / `traceAnyMasked`. Use `rayMaskFromLayers(camera.layers)`. |
+| `bvh.fns.closestPointToPoint` | With `new BvhTraceNodes(renderer, trees, { queries: true })`: WGSL `bvhClosestPoint(point, maxDistance) -> BvhClosestHit` over the whole scene in world space; TSL `bvh.closestPoint(point, maxDistance)`, a `BvhClosestPointHit` struct node (`bvhClosestPointHitStruct`). Also `bvhIntersectsSphere`, `bvhIntersectsBox`, `bvhIntersectsOrientedBox` (docs/tracing/gpu-queries.mdx). |
+| `getShapecastFn({ intersectsBounds, intersectsTriangle, ... })` | `BvhTraceNodes` option `shapecast`: WGSL hooks `bvhShapecastBounds`, `bvhShapecastKeep`, `bvhShapecastTriangle`, compiled into `bvhShapecast()` in the module. WGSL functions, not TSL callbacks. |
+| `intersectRayTriangle`, `closestPointToTriangle` (WGSL helpers) | `bvhIntersectRayTriangle(ray, a, b, c)` (the walk's watertight test) and `bvhClosestPointToTriangle(point, a, b, c)`, in `bvh.module`, or binding-free in `triangleGeometryWgsl()`. |
 | `wgslTagFn` with `${bvh.fns.raycastFirstHit}` | three's own `wgslFn(code, [bvh.module])`, calling the walk by name. |
 | `rayStruct` (`origin, direction, maxDist`; 0 means unbounded) | `BvhRay(origin, tMin, direction, tMax)`, with an explicit interval. |
 | `rayIntersectionResultStruct` | `BvhHit { t, instance, triangle, barycentrics, frontFace, material, normal }` in WGSL; `bvhTraceHitStruct` (`BvhTraceHit`, the same members) for TSL. |

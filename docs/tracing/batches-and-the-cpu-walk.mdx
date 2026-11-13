@@ -40,6 +40,7 @@ device.queue.submit([encoder.finish()]);
 - **Any-hit results:** one `u32` per ray, 1 when blocked.
 - **Masks:** one ray mask per batch (`mask`), a uniform; there is no per-ray mask buffer.
 - **Timing:** pass `timestampWrites` to time the dispatch's pass.
+- **Sizes:** `encode` throws a `RangeError` when `rays` or `results` holds fewer than `count` items.
 
 The 40-byte record is the default: a hit carries its material and normal unless you say otherwise. It has a cost on
 NVIDIA. Against the 24-byte record, closest-hit rays traced at 0.88-0.92x on Sponza and 0.93-0.94x on Bistro interior

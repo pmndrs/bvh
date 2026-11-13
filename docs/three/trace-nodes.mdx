@@ -15,11 +15,19 @@ bvh.traceClosest(origin, direction, tMin = 0, tMax = 1e30)      -> BvhTraceHit s
 bvh.traceAny(origin, direction, tMin = 0, tMax = 1e30)          -> bool node
 bvh.traceClosestMasked(origin, direction, tMin, tMax, mask)     -> BvhTraceHit
 bvh.traceAnyMasked(origin, direction, tMin, tMax, mask)         -> bool
+bvh.closestPoint(point, maxDistance = 1e30)                     -> BvhClosestPointHit   // with queries: true
+bvh.closestPointMasked(point, maxDistance, mask)                -> BvhClosestPointHit
 ```
 
 `BvhTraceHit` has `BvhHit`'s members: `t`, `instance`, `triangle`, `barycentrics`, `frontFace`, `material` and
 `normal`. Read them with `hit.get('t')`. The [first build](/getting-started/first-build#threejs-on-the-gpu) has a full
 example; the [path tracer example](/examples/examples) traces a bounce loop with it.
+
+With `queries: true` the module also has the [spatial queries](/tracing/gpu-queries). `BvhClosestPointHit` has
+`BvhClosestHit`'s members: `distance` (negative when nothing is nearer than `maxDistance`), `instance`, `triangle`,
+`material`, `barycentrics`, `point` and `normal`, in world space. From WGSL, call `bvhClosestPoint`,
+`bvhIntersectsSphere`, `bvhIntersectsBox` and `bvhIntersectsOrientedBox` by name; `shapecast: wgsl` compiles your
+own shapecast hooks into the module.
 
 ## WGSL
 

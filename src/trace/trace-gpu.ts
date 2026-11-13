@@ -11,7 +11,8 @@
  */
 
 import type { TraceSceneData } from './scene-assembly.ts';
-import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl, type AnyHitOrder } from './wgsl.ts';
+import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl, closestPointKernelWgsl, hitRecordBytes, type AnyHitOrder } from './wgsl.ts';
+import { CLOSEST_POINT_RECORD_BYTES, POINT_QUERY_BYTES } from './query-wgsl.ts';
 import { RAY_MASK_ALL, type NodeFormat, type PositionLayout, type TriangleLeaves } from './layout.ts';
 import { RAY_BYTES } from './rays.ts';
 import { DEFAULT_NODE_FORMAT } from '../gpu-layout.ts';
@@ -110,6 +111,72 @@ export function uploadTraceScene(device: GPUDevice, scene: TraceSceneData, label
     };
 }
 
+/** The formats a kernel was compiled for. */
+interface KernelFormats {
+    readonly triangleLeaves: TriangleLeaves;
+    readonly positionLayout: PositionLayout;
+    readonly nodeFormat: NodeFormat;
+}
+
+/** The scene's bind group entries (group 0), after checking that its formats are the kernel's. */
+function sceneEntries(scene: TraceSceneBuffers, kernel: KernelFormats, where: string): GPUBindGroupEntry[] {
+    const formats = traceSourceFormats(scene, where);
+    const leaves = formats.triangleLeaves;
+    if (leaves !== kernel.triangleLeaves) throw new RangeError(`${where}: the kernel reads ${kernel.triangleLeaves} triangles, the scene holds ${leaves}`);
+    if (leaves === 'indexed' && formats.positionLayout !== kernel.positionLayout) {
+        throw new RangeError(`${where}: the kernel reads ${kernel.positionLayout} positions, the scene holds ${formats.positionLayout}`);
+    }
+    const nodes = formats.nodeFormat;
+    if (nodes !== kernel.nodeFormat) throw new RangeError(`${where}: the kernel reads ${kernel.nodeFormat} nodes, the scene holds ${nodes}`);
+    if (leaves === 'indexed' && !scene.positions) throw new RangeError(`${where}: an indexed scene needs its positions buffer`);
+    return [
+        { binding: 0, resource: { buffer: scene.nodes } },
+        { binding: 1, resource: { buffer: scene.triangles } },
+        { binding: 2, resource: { buffer: scene.topLevel } },
+        ...(leaves === 'indexed' ? [{ binding: 3, resource: { buffer: scene.positions! } }] : []),
+    ];
+}
+
+/** One small uniform per mask used (`BATCH_PARAMS_BYTES`): dispatches recorded into one command buffer may use different masks. */
+class MaskUniforms {
+    private readonly buffers = new Map<number, GPUBuffer>();
+
+    constructor(
+        private readonly device: GPUDevice,
+        private readonly label: string,
+    ) {}
+
+    get(mask: number): GPUBuffer {
+        let buffer = this.buffers.get(mask);
+        if (!buffer) {
+            buffer = this.device.createBuffer({ label: `${this.label} mask ${mask.toString(16)}`, size: BATCH_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            const words = new Uint32Array(BATCH_PARAMS_BYTES / 4);
+            words[BATCH_PARAMS_WORD.rayMask] = mask;
+            this.device.queue.writeBuffer(buffer, 0, words);
+            this.buffers.set(mask, buffer);
+        }
+        return buffer;
+    }
+
+    destroy(): void {
+        for (const buffer of this.buffers.values()) buffer.destroy();
+        this.buffers.clear();
+    }
+}
+
+/** Throws a RangeError when a batch's buffer holds fewer than `count` items of `itemBytes` (WebGPU would read or write past it silently, or fail validation far from the cause). */
+function checkBatchBuffer(where: string, name: string, buffer: GPUBuffer, count: number, itemBytes: number): void {
+    const needed = count * itemBytes;
+    if (buffer.size < needed) throw new RangeError(`${where}: ${name} holds ${buffer.size} bytes, ${count} items need ${needed} (${itemBytes} each)`);
+}
+
+/** A 2D dispatch of `count` items in workgroups of `BATCH_WORKGROUP_SIZE`, so a large batch stays under the per-dimension limit. */
+function dispatchSize(device: GPUDevice, count: number): [number, number] {
+    const workgroups = Math.ceil(count / BATCH_WORKGROUP_SIZE);
+    const x = Math.min(workgroups, device.limits.maxComputeWorkgroupsPerDimension);
+    return [x, Math.ceil(workgroups / x)];
+}
+
 export interface TraceBatch {
     readonly mode: 'closest' | 'any';
     /** At least `count` rays of 32 bytes (`BvhRay`). */
@@ -154,7 +221,7 @@ export interface TraceBatchKernelOptions {
 export class TraceBatchKernel {
     private readonly sceneGroups = new WeakMap<TraceSceneBuffers, SceneBindGroups>();
     /** One small uniform per mask used: dispatches recorded into one command buffer may use different masks. */
-    private readonly maskBuffers = new Map<number, GPUBuffer>();
+    private readonly masks: MaskUniforms;
 
     private constructor(
         private readonly device: GPUDevice,
@@ -164,7 +231,11 @@ export class TraceBatchKernel {
         readonly triangleLeaves: TriangleLeaves,
         readonly positionLayout: PositionLayout,
         readonly nodeFormat: NodeFormat,
-    ) {}
+        /** Closest-hit records are 40 bytes (true) or the compact 24. */
+        readonly hitNormal: boolean,
+    ) {
+        this.masks = new MaskUniforms(device, 'trace batch');
+    }
 
     static async create(device: GPUDevice, options: TraceBatchKernelOptions = {}): Promise<TraceBatchKernel> {
         const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = DEFAULT_NODE_FORMAT, anyHitOrder } = options;
@@ -178,50 +249,19 @@ export class TraceBatchKernel {
                 },
             });
         const [closestPipeline, anyPipeline] = await Promise.all([pipelineFor('closest'), pipelineFor('any')]);
-        return new TraceBatchKernel(device, closestPipeline, anyPipeline, rayMasks, triangleLeaves, positionLayout, nodeFormat);
-    }
-
-    private maskBuffer(mask: number): GPUBuffer {
-        let buffer = this.maskBuffers.get(mask);
-        if (!buffer) {
-            buffer = this.device.createBuffer({ label: `trace batch mask ${mask.toString(16)}`, size: BATCH_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-            const words = new Uint32Array(BATCH_PARAMS_BYTES / 4);
-            words[BATCH_PARAMS_WORD.rayMask] = mask;
-            this.device.queue.writeBuffer(buffer, 0, words);
-            this.maskBuffers.set(mask, buffer);
-        }
-        return buffer;
+        return new TraceBatchKernel(device, closestPipeline, anyPipeline, rayMasks, triangleLeaves, positionLayout, nodeFormat, hitNormal);
     }
 
     /** Frees the mask uniforms. The pipelines need no freeing. */
     destroy(): void {
-        for (const buffer of this.maskBuffers.values()) buffer.destroy();
-        this.maskBuffers.clear();
+        this.masks.destroy();
     }
 
     private groupsFor(scene: TraceSceneBuffers): SceneBindGroups {
         let groups = this.sceneGroups.get(scene);
         if (!groups) {
-            const formats = traceSourceFormats(scene, 'TraceBatchKernel');
-            const leaves = formats.triangleLeaves;
-            if (leaves !== this.triangleLeaves) throw new RangeError(`TraceBatchKernel: the kernel reads ${this.triangleLeaves} triangles, the scene holds ${leaves}`);
-            if (leaves === 'indexed' && formats.positionLayout !== this.positionLayout) {
-                throw new RangeError(`TraceBatchKernel: the kernel reads ${this.positionLayout} positions, the scene holds ${formats.positionLayout}`);
-            }
-            const nodes = formats.nodeFormat;
-            if (nodes !== this.nodeFormat) throw new RangeError(`TraceBatchKernel: the kernel reads ${this.nodeFormat} nodes, the scene holds ${nodes}`);
-            if (leaves === 'indexed' && !scene.positions) throw new RangeError('TraceBatchKernel: an indexed scene needs its positions buffer');
-            const make = (pipeline: GPUComputePipeline) =>
-                this.device.createBindGroup({
-                    label: 'trace scene',
-                    layout: pipeline.getBindGroupLayout(0),
-                    entries: [
-                        { binding: 0, resource: { buffer: scene.nodes } },
-                        { binding: 1, resource: { buffer: scene.triangles } },
-                        { binding: 2, resource: { buffer: scene.topLevel } },
-                        ...(leaves === 'indexed' ? [{ binding: 3, resource: { buffer: scene.positions! } }] : []),
-                    ],
-                });
+            const entries = sceneEntries(scene, this, 'TraceBatchKernel');
+            const make = (pipeline: GPUComputePipeline) => this.device.createBindGroup({ label: 'trace scene', layout: pipeline.getBindGroupLayout(0), entries });
             groups = { closest: make(this.closestPipeline), any: make(this.anyPipeline) };
             this.sceneGroups.set(scene, groups);
         }
@@ -231,6 +271,8 @@ export class TraceBatchKernel {
     /** Records one dispatch into `encoder`. */
     encode(encoder: GPUCommandEncoder, scene: TraceSceneBuffers, batch: TraceBatch): void {
         if (batch.count <= 0) return;
+        checkBatchBuffer('TraceBatchKernel', 'the rays buffer', batch.rays, batch.count, RAY_BYTES);
+        checkBatchBuffer('TraceBatchKernel', 'the results buffer', batch.results, batch.count, batch.mode === 'closest' ? hitRecordBytes(this.hitNormal) : 4);
         const pipeline = batch.mode === 'closest' ? this.closestPipeline : this.anyPipeline;
         // The ray count is the size of the bound range; the mask is the only uniform.
         const batchGroup = this.device.createBindGroup({
@@ -239,12 +281,10 @@ export class TraceBatchKernel {
             entries: [
                 { binding: 0, resource: { buffer: batch.rays, offset: 0, size: batch.count * RAY_BYTES } },
                 { binding: 1, resource: { buffer: batch.results } },
-                ...(this.rayMasks ? [{ binding: 2, resource: { buffer: this.maskBuffer((batch.mask ?? RAY_MASK_ALL) >>> 0) } }] : []),
+                ...(this.rayMasks ? [{ binding: 2, resource: { buffer: this.masks.get((batch.mask ?? RAY_MASK_ALL) >>> 0) } }] : []),
             ],
         });
-        const workgroups = Math.ceil(batch.count / BATCH_WORKGROUP_SIZE);
-        const x = Math.min(workgroups, this.device.limits.maxComputeWorkgroupsPerDimension);
-        const y = Math.ceil(workgroups / x);
+        const [x, y] = dispatchSize(this.device, batch.count);
         const groups = this.groupsFor(scene);
         const pass = encoder.beginComputePass({
             label: `trace batch ${batch.mode}`,
@@ -252,6 +292,105 @@ export class TraceBatchKernel {
         });
         pass.setPipeline(pipeline);
         pass.setBindGroup(0, batch.mode === 'closest' ? groups.closest : groups.any);
+        pass.setBindGroup(1, batchGroup);
+        pass.dispatchWorkgroups(x, y);
+        pass.end();
+    }
+}
+
+/** One batch of closest-point queries (`ClosestPointBatchKernel.encode`). */
+export interface ClosestPointBatch {
+    /** At least `count` queries of `POINT_QUERY_BYTES` (16): `vec4f(point.xyz, maxDistance)`, world space. */
+    readonly queries: GPUBuffer;
+    /** `count` records of `CLOSEST_POINT_RECORD_BYTES` (48), words in `CLOSEST_POINT_RECORD_WORD`. */
+    readonly results: GPUBuffer;
+    readonly count: number;
+    /** The batch's instance mask (one for the whole batch). Default all ones. Ignored by a kernel made with `rayMasks: false`. */
+    readonly mask?: number;
+    /** Optional GPU timing for the dispatch's pass. */
+    readonly timestampWrites?: GPUComputePassTimestampWrites;
+}
+
+/** Options of {@link ClosestPointBatchKernel.create}: the scenes' formats, compiled in, as for {@link TraceBatchKernel}. */
+export interface ClosestPointBatchKernelOptions {
+    readonly label?: string;
+    /** Default true: each batch has an instance mask (`ClosestPointBatch.mask`). False compiles masks out. */
+    readonly rayMasks?: boolean;
+    /** The scenes' triangle format. Default `'records'`. */
+    readonly triangleLeaves?: TriangleLeaves;
+    /** Indexed only: `'vec4'` (the default) or `'packed'` positions. */
+    readonly positionLayout?: PositionLayout;
+    /** The scenes' node format. Default `'quantized'` (`DEFAULT_NODE_FORMAT`); a kernel refuses a scene of the other format. */
+    readonly nodeFormat?: NodeFormat;
+}
+
+/**
+ * Runs batches of closest-point queries over a scene (`bvhClosestPoint`, the
+ * trace module with `queries: true`): points in, the nearest triangle point
+ * of the whole scene out, per query. Group 0 is the scene, as for
+ * {@link TraceBatchKernel}; group 1 the batch's queries and results (and its mask).
+ */
+export class ClosestPointBatchKernel {
+    private readonly sceneGroups = new WeakMap<TraceSceneBuffers, GPUBindGroup>();
+    private readonly masks: MaskUniforms;
+
+    private constructor(
+        private readonly device: GPUDevice,
+        private readonly pipeline: GPUComputePipeline,
+        readonly rayMasks: boolean,
+        readonly triangleLeaves: TriangleLeaves,
+        readonly positionLayout: PositionLayout,
+        readonly nodeFormat: NodeFormat,
+    ) {
+        this.masks = new MaskUniforms(device, 'closest point batch');
+    }
+
+    static async create(device: GPUDevice, options: ClosestPointBatchKernelOptions = {}): Promise<ClosestPointBatchKernel> {
+        const { label = 'closest point', rayMasks = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = DEFAULT_NODE_FORMAT } = options;
+        const pipeline = await device.createComputePipelineAsync({
+            label: `${label} batch`,
+            layout: 'auto',
+            compute: {
+                module: device.createShaderModule({ label: `${label} batch`, code: closestPointKernelWgsl({ rayMasks, triangleLeaves, positionLayout, nodeFormat }) }),
+                entryPoint: 'bvhClosestPointBatch',
+            },
+        });
+        return new ClosestPointBatchKernel(device, pipeline, rayMasks, triangleLeaves, positionLayout, nodeFormat);
+    }
+
+    /** Frees the mask uniforms. The pipeline needs no freeing. */
+    destroy(): void {
+        this.masks.destroy();
+    }
+
+    private groupFor(scene: TraceSceneBuffers): GPUBindGroup {
+        let group = this.sceneGroups.get(scene);
+        if (!group) {
+            group = this.device.createBindGroup({ label: 'closest point scene', layout: this.pipeline.getBindGroupLayout(0), entries: sceneEntries(scene, this, 'ClosestPointBatchKernel') });
+            this.sceneGroups.set(scene, group);
+        }
+        return group;
+    }
+
+    /** Records one dispatch into `encoder`. */
+    encode(encoder: GPUCommandEncoder, scene: TraceSceneBuffers, batch: ClosestPointBatch): void {
+        if (batch.count <= 0) return;
+        checkBatchBuffer('ClosestPointBatchKernel', 'the queries buffer', batch.queries, batch.count, POINT_QUERY_BYTES);
+        checkBatchBuffer('ClosestPointBatchKernel', 'the results buffer', batch.results, batch.count, CLOSEST_POINT_RECORD_BYTES);
+        const batchGroup = this.device.createBindGroup({
+            label: 'closest point batch',
+            layout: this.pipeline.getBindGroupLayout(1),
+            entries: [
+                { binding: 0, resource: { buffer: batch.queries, offset: 0, size: batch.count * POINT_QUERY_BYTES } },
+                { binding: 1, resource: { buffer: batch.results } },
+                ...(this.rayMasks ? [{ binding: 2, resource: { buffer: this.masks.get((batch.mask ?? RAY_MASK_ALL) >>> 0) } }] : []),
+            ],
+        });
+        const [x, y] = dispatchSize(this.device, batch.count);
+        const sceneGroup = this.groupFor(scene);
+        const pass = encoder.beginComputePass({ label: 'closest point batch', timestampWrites: batch.timestampWrites });
+        pass.setPipeline(this.pipeline);
+        pass.setBindGroup(0, sceneGroup);
         pass.setBindGroup(1, batchGroup);
         pass.dispatchWorkgroups(x, y);
         pass.end();

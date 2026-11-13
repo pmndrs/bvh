@@ -248,3 +248,61 @@ function isIdentity(m: ArrayLike<number>): boolean {
     for (let i = 0; i < 16; i++) if (m[i] !== (i % 5 === 0 ? 1 : 0)) return false;
     return true;
 }
+
+/**
+ * Many meshes of very different sizes, one instance each, in a grid on a
+ * floor: the scene of the worker and fast-first pages, where the order in
+ * which each mesh's tree arrives is the point. Torus knots, tori and spheres
+ * from about 2,000 to 115,000 triangles (`detail` scales every mesh's
+ * segments), seeded so every run builds the same set. Each instance's
+ * material is its mesh's index; the floor is the last mesh.
+ */
+export function galleryScene(count = 32, detail = 1, seed = 5): VanillaScene {
+    let state = seed >>> 0;
+    // mulberry32: deterministic, no dependency.
+    const random = () => {
+        state = (state + 0x6d2b79f5) >>> 0;
+        let t = state;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const segments = (value: number) => Math.max(3, Math.round(value * detail));
+    const knots: readonly [number, number][] = [
+        [2, 3],
+        [3, 4],
+        [2, 5],
+        [3, 5],
+        [2, 7],
+        [3, 7],
+    ];
+    const tiers: readonly [number, number][] = [
+        [120, 12],
+        [200, 16],
+        [300, 24],
+        [500, 32],
+        [800, 40],
+        [1200, 48],
+    ];
+    const meshes: IndexedMesh[] = [];
+    for (let i = 0; i < count; i++) {
+        const tier = tiers[Math.floor(random() * tiers.length)];
+        const kind = i % 4;
+        if (kind === 3) meshes.push(sphere(0.9, segments(tier[0] / 3), segments(tier[0] / 6)));
+        else if (kind === 2) meshes.push(torus(0.75, 0.3, segments(tier[1]), segments(tier[0] / 2)));
+        else {
+            const [p, q] = knots[Math.floor(random() * knots.length)];
+            meshes.push(torusKnot(0.75, 0.2, segments(tier[0]), segments(tier[1]), p, q));
+        }
+    }
+    const columns = Math.ceil(Math.sqrt(count));
+    const spacing = 2.8;
+    const width = (columns - 1) * spacing;
+    const instances: VanillaInstance[] = meshes.map((_mesh, i) => {
+        const at: [number, number, number] = [(i % columns) * spacing - width / 2, 1.1, Math.floor(i / columns) * spacing - width / 2];
+        return { mesh: i, objectToWorld: mat4.compose(at, mat4.axisAngle([0, 1, 0], random() * Math.PI * 2), [1, 1, 1]), material: i };
+    });
+    meshes.push(ground(width + spacing * 2, 12));
+    instances.push({ mesh: count, objectToWorld: mat4.identity(), material: count });
+    return makeScene(`gallery of ${count}`, meshes, instances);
+}
