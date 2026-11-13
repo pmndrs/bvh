@@ -73,3 +73,88 @@ export class GpuTimer {
         this.read.destroy();
     }
 }
+
+/**
+ * GPU time of work recorded by someone else's code (a `SceneTrees.update`,
+ * which takes no timestamp writes): two tiny compute passes around it, the
+ * first writing a timestamp at its start, the second at its end. Includes
+ * the two one-thread dispatches; null without `timestamp-query`.
+ */
+export class GpuBracket {
+    private readonly querySet: GPUQuerySet;
+    private readonly resolve: GPUBuffer;
+    private readonly read: GPUBuffer;
+    private readonly pipeline: GPUComputePipeline;
+    private state: 'idle' | 'open' | 'recorded' | 'reading' = 'idle';
+
+    private constructor(device: GPUDevice) {
+        this.querySet = device.createQuerySet({ type: 'timestamp', count: 2 });
+        this.resolve = device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+        this.read = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        const module = device.createShaderModule({ label: 'bracket', code: '@compute @workgroup_size(1) fn main() {}' });
+        this.pipeline = device.createComputePipeline({ label: 'bracket', layout: 'auto', compute: { module, entryPoint: 'main' } });
+    }
+
+    static create(device: GPUDevice): GpuBracket | null {
+        return device.features.has('timestamp-query') ? new GpuBracket(device) : null;
+    }
+
+    /** True while a measurement is recorded or being read (don't start another). */
+    get busy(): boolean {
+        return this.state !== 'idle';
+    }
+
+    private pass(encoder: GPUCommandEncoder, timestampWrites: GPUComputePassTimestampWrites): void {
+        const pass = encoder.beginComputePass({ label: 'bracket', timestampWrites });
+        pass.setPipeline(this.pipeline);
+        pass.dispatchWorkgroups(1);
+        pass.end();
+    }
+
+    /** Before the work: a timestamp. */
+    begin(encoder: GPUCommandEncoder): void {
+        if (this.state !== 'idle') throw new Error('GpuBracket: a measurement is already under way');
+        this.pass(encoder, { querySet: this.querySet, beginningOfPassWriteIndex: 0 });
+        this.state = 'open';
+    }
+
+    /** After the work: a timestamp, resolved for {@link result} after the submit. */
+    end(encoder: GPUCommandEncoder): void {
+        if (this.state !== 'open') throw new Error('GpuBracket: end() without begin()');
+        this.pass(encoder, { querySet: this.querySet, endOfPassWriteIndex: 1 });
+        encoder.resolveQuerySet(this.querySet, 0, 2, this.resolve, 0);
+        encoder.copyBufferToBuffer(this.resolve, 0, this.read, 0, 16);
+        this.state = 'recorded';
+    }
+
+    /** Milliseconds between the two timestamps, or null if nothing was recorded. Call after the submit. */
+    async result(): Promise<number | null> {
+        if (this.state !== 'recorded') return null;
+        this.state = 'reading';
+        try {
+            await this.read.mapAsync(GPUMapMode.READ);
+            const stamps = new BigInt64Array(this.read.getMappedRange().slice(0));
+            this.read.unmap();
+            return Math.max(0, Number(stamps[1] - stamps[0])) / 1e6;
+        } finally {
+            this.state = 'idle';
+        }
+    }
+
+    destroy(): void {
+        this.querySet.destroy();
+        this.resolve.destroy();
+        this.read.destroy();
+    }
+}
+
+/**
+ * A GPU time with the precision it has. Chrome rounds timestamps to 0.1 ms
+ * unless WebGPU's developer features (or `--enable-unsafe-webgpu`) are on, so
+ * a whole number of tenths is shown as such, and a zero as under 0.1 ms.
+ */
+export function gpuMsText(ms: number): string {
+    const tenths = ms * 10;
+    if (Math.abs(tenths - Math.round(tenths)) < 1e-6) return ms === 0 ? '< 0.1 ms (timestamps rounded to 0.1 ms)' : `${ms.toFixed(1)} ms (timestamps rounded to 0.1 ms)`;
+    return `${ms.toFixed(3)} ms`;
+}

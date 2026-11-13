@@ -97,6 +97,7 @@ export async function createVanillaApp(title: string, folder: string): Promise<V
             if (running) throw new Error('loop() already started');
             running = true;
             let busy = false;
+            let frames = 0;
             let stopped = false;
             let last = performance.now();
             const tick = async (now: number) => {
@@ -111,9 +112,18 @@ export async function createVanillaApp(title: string, folder: string): Promise<V
                     last = now;
                     resize();
                     await frame.update?.(now, delta);
-                    const encoder = device.createCommandEncoder({ label: `${title} frame` });
-                    frame.render(encoder, context.getCurrentTexture().createView());
-                    device.queue.submit([encoder.finish()]);
+                    // Each frame in its own error scope: a frame that names a destroyed buffer (a swap done in the wrong order) fails with its number.
+                    const index = ++frames;
+                    device.pushErrorScope('validation');
+                    try {
+                        const encoder = device.createCommandEncoder({ label: `${title} frame` });
+                        frame.render(encoder, context.getCurrentTexture().createView());
+                        device.queue.submit([encoder.finish()]);
+                    } finally {
+                        void device.popErrorScope().then((error) => {
+                            if (error) fail(`frame ${index}: ${error.message}`);
+                        });
+                    }
                 } catch (error) {
                     stopped = true;
                     fail(error);
