@@ -41,5 +41,5 @@ Raw WebGPU and `@pmndrs/bvh` only: no three, no engine.
 - **Vanilla WebGPU:** `workers-cpu`, `workers-gpu`, `fast-first` and `refit` (a deforming mesh).
 - **Node:** `bake` (build in Node, load with no build).
 - **Comparisons with three-mesh-bvh** (`compare/`): raycast, async builds, path tracer, skinned, tree quality.
-- **three:** `sdf`, once GPU closest-point queries exist.
+- **three:** `sdf`, on the GPU closest-point query (`bvhClosestPoint`; the sign needs an inside test, not built yet).
 - **Babylon:** picking and GPU tracing, after the Babylon subpath.

@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { createFakeGpu, type FakeBuffer } from '../../tests/support/fake-gpu.ts';
+import { createFakeGpu, type FakeBuffer, type FakeEncoder } from '../../tests/support/fake-gpu.ts';
+import { CLOSEST_POINT_RECORD_BYTES, POINT_QUERY_BYTES } from './query-wgsl.ts';
 import { createTinyBvhBuilder } from '../index.ts';
 import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
 import { tessellatedQuad } from './oracle-fixtures.ts';
 import { assembleTraceScene } from './scene-assembly.ts';
 import { IDENTITY_TRANSFORM } from './top-level.ts';
-import { traceSourceFormats, uploadTraceScene } from './trace-gpu.ts';
+import { ClosestPointBatchKernel, traceSourceFormats, uploadTraceScene } from './trace-gpu.ts';
 
 const tinyBvh = await createTinyBvhBuilder();
 const scene = assembleTraceScene([buildMeshBvhWithTinyBvh(tessellatedQuad(8, 1), tinyBvh)], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }]);
@@ -27,6 +28,27 @@ describe('uploadTraceScene', () => {
         const gpu = createFakeGpu({ maxStorageBufferBindingSize: scene.triangles.byteLength - 4 });
         expect(() => uploadTraceScene(gpu.device, scene)).toThrow(/triangles.*maxStorageBufferBindingSize/);
         expect(gpu.buffers).toHaveLength(0);
+    });
+});
+
+describe('ClosestPointBatchKernel', () => {
+    it('binds the scene and the batch, and refuses a scene of another format', async () => {
+        const gpu = createFakeGpu();
+        const kernel = await ClosestPointBatchKernel.create(gpu.device);
+        expect([kernel.nodeFormat, kernel.triangleLeaves, kernel.rayMasks]).toEqual(['quantized', 'records', true]);
+        const buffers = uploadTraceScene(gpu.device, scene);
+        const queries = gpu.device.createBuffer({ size: 4 * POINT_QUERY_BYTES, usage: 0 });
+        const results = gpu.device.createBuffer({ size: 4 * CLOSEST_POINT_RECORD_BYTES, usage: 0 });
+        const encoder = gpu.createEncoder();
+        kernel.encode(encoder, buffers, { queries, results, count: 3, mask: 1 });
+        const commands = (encoder as unknown as FakeEncoder).commands;
+        expect(commands).toHaveLength(1);
+        const dispatch = (commands[0] as unknown as { dispatch: { entryPoint: string; bindings: Map<number, { buffer: unknown }> } }).dispatch;
+        expect(dispatch.entryPoint).toBe('bvhClosestPointBatch');
+        expect([...dispatch.bindings.values()].map((binding) => binding.buffer)).toEqual([buffers.nodes, buffers.triangles, buffers.topLevel]);
+        const f32Scene = assembleTraceScene([buildMeshBvhWithTinyBvh(tessellatedQuad(2, 1), tinyBvh)], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }], {}, { nodeFormat: 'f32' });
+        expect(() => kernel.encode(encoder, uploadTraceScene(gpu.device, f32Scene), { queries, results, count: 3 })).toThrow(/ClosestPointBatchKernel: the kernel reads quantized nodes, the scene holds f32/);
+        kernel.destroy();
     });
 });
 

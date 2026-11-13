@@ -21,6 +21,12 @@
  *   `BvhTraceHit` struct node (`.get('t')`, `'instance'`, `'triangle'`,
  *   `'barycentrics'`, `'frontFace'`, `'material'`, `'normal'`; `t < 0` on a
  *   miss), `bvh.traceAny(...)` a bool; the `*Masked` forms take a ray mask.
+ *   With `queries: true`, `bvh.closestPoint(point, maxDistance)` returns a
+ *   `BvhClosestPointHit` struct node (`'distance'`, negative when nothing is
+ *   nearer, `'instance'`, `'triangle'`, `'material'`, `'barycentrics'`,
+ *   `'point'`, `'normal'`), and the WGSL module has the spatial queries
+ *   (`bvhClosestPoint`, `bvhIntersectsSphere`, `bvhIntersectsBox`,
+ *   `bvhIntersectsOrientedBox`; docs/tracing/gpu-queries.mdx).
  *
  * **Buffers.** Three storage nodes (`bvhTraceNodes`, `bvhTraceTriangles`,
  * `bvhTraceTopLevel`, read-only) bound to the source's `GPUBuffer`s, which must
@@ -106,6 +112,13 @@ export interface BvhTraceNodesOptions {
     readonly rayMasks?: boolean;
     /** As `traceModuleWgsl`'s `anyHitOrder`: the any-hit walk's child order. Default `'far'`; `'larger'` for rays from outside the geometry. */
     readonly anyHitOrder?: AnyHitOrder;
+    /**
+     * As `traceModuleWgsl`'s `queries`: the module also has the spatial queries,
+     * and {@link BvhTraceNodes.closestPoint} works. Default false (the walk alone).
+     */
+    readonly queries?: boolean;
+    /** As `traceModuleWgsl`'s `shapecast`: the caller's WGSL hooks, compiled into a `bvhShapecast()` in the module. Default none. */
+    readonly shapecast?: string;
 }
 
 /** The parts of three's `WebGPURenderer` this file uses (see {@link threeInternals}). */
@@ -232,6 +245,20 @@ export const bvhTraceHitStruct = new StructTypeNode(
     'BvhTraceHit',
 );
 
+/** The struct {@link BvhTraceNodes.closestPoint} returns. Its members are `BvhClosestHit`'s. */
+export const bvhClosestPointHitStruct = new StructTypeNode(
+    {
+        distance: 'float',
+        instance: 'uint',
+        triangle: 'uint',
+        material: 'uint',
+        barycentrics: 'vec2',
+        point: 'vec3',
+        normal: 'vec3',
+    },
+    'BvhClosestPointHit',
+);
+
 type BufferKey = 'nodes' | 'triangles' | 'topLevel' | 'positions';
 type BufferName = 'bvhTraceNodes' | 'bvhTraceTriangles' | 'bvhTraceTopLevel' | 'bvhTracePositions';
 interface BufferSpec {
@@ -268,7 +295,7 @@ function buffersOf(triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4'
 
 /** The walk's text without its binding declarations: three declares the storage nodes instead. */
 function moduleWithoutBindings(options: BvhTraceNodesOptions, triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4' | 'packed', nodeFormat: 'f32' | 'quantized'): string {
-    const text = traceModuleWgsl({ triangleFilter: options.triangleFilter, rayMasks: options.rayMasks, anyHitOrder: options.anyHitOrder, triangleLeaves, positionLayout, nodeFormat });
+    const text = traceModuleWgsl({ triangleFilter: options.triangleFilter, rayMasks: options.rayMasks, anyHitOrder: options.anyHitOrder, queries: options.queries, shapecast: options.shapecast, triangleLeaves, positionLayout, nodeFormat });
     let removed = 0;
     const stripped = text.replace(/^@group\(\d+\) @binding\(\d+\) var<storage, read> bvhTrace(?:Nodes|Triangles|TopLevel|Positions): array<(?:vec4[fu]|f32)>;$/gm, () => {
         removed++;
@@ -324,6 +351,18 @@ fn ${name}(origin: vec3f, direction: vec3f, tMin: f32, tMax: f32${masked ? ', ma
     return ${masked ? 'bvhTraceAnyMasked' : 'bvhTraceAny'}(BvhRay(origin, tMin, direction, tMax)${masked ? ', mask' : ''});
 }`;
 
+const closestPointWgsl = (name: string, masked: boolean) => /* wgsl */ `
+fn ${name}(point: vec3f, maxDistance: f32${masked ? ', mask: u32' : ''}) -> BvhClosestPointHit {
+    let hit = ${masked ? 'bvhClosestPointMasked' : 'bvhClosestPoint'}(point, maxDistance${masked ? ', mask' : ''});
+    return BvhClosestPointHit(hit.distance, hit.instance, hit.triangle, hit.material, hit.barycentrics, hit.point, hit.normal);
+}`;
+
+/** The closest-point helper as a `wgslFn`, with a TSL-friendly call (default `maxDistance` 1e30). */
+function pointHelper(code: string, includes: Node[]) {
+    const fn = wgslFn(code, includes as never) as unknown as (...args: unknown[]) => BvhTslNode;
+    return (point: BvhTslNode, maxDistance: NodeInput = 1e30, ...mask: BvhTslNode[]): BvhTslNode => fn(point, typeof maxDistance === 'number' ? float(maxDistance) : maxDistance, ...mask);
+}
+
 /** One `wgslFn` per helper, with a TSL-friendly call (default `tMin` 0, `tMax` 1e30). */
 function helper(code: string, includes: Node[]) {
     const fn = wgslFn(code, includes as never) as unknown as (...args: unknown[]) => BvhTslNode;
@@ -357,6 +396,16 @@ export class BvhTraceNodes {
     readonly traceClosestMasked: (origin: BvhTslNode, direction: BvhTslNode, tMin: NodeInput, tMax: NodeInput, mask: BvhTslNode) => BvhTslNode;
     /** As {@link traceAny} with a `u32` ray mask; throws with `rayMasks: false`. */
     readonly traceAnyMasked: (origin: BvhTslNode, direction: BvhTslNode, tMin: NodeInput, tMax: NodeInput, mask: BvhTslNode) => BvhTslNode;
+    /** Whether the module has the spatial queries (`queries: true`). */
+    readonly queries: boolean;
+    /**
+     * `(point, maxDistance = 1e30) => BvhClosestPointHit` struct node: the
+     * scene's triangle point nearest to a world-space point (`bvhClosestPoint`).
+     * Throws unless made with `queries: true`.
+     */
+    readonly closestPoint: (point: BvhTslNode, maxDistance?: NodeInput) => BvhTslNode;
+    /** As {@link closestPoint} with a `u32` instance mask; throws with `rayMasks: false` or without `queries`. */
+    readonly closestPointMasked: (point: BvhTslNode, maxDistance: NodeInput, mask: BvhTslNode) => BvhTslNode;
 
     private readonly renderer: RendererLike;
     private boundVersion: number | undefined;
@@ -398,6 +447,13 @@ export class BvhTraceNodes {
         };
         this.traceClosestMasked = this.rayMasks ? helper(closestWgsl('bvhThreeTraceClosestMasked', true), includes) : unmasked;
         this.traceAnyMasked = this.rayMasks ? helper(anyWgsl('bvhThreeTraceAnyMasked', true), includes) : unmasked;
+        this.queries = options.queries ?? false;
+        const noQueries = () => {
+            throw new Error('@pmndrs/bvh/three: this BvhTraceNodes was made without queries: true');
+        };
+        const pointIncludes = [bvhClosestPointHitStruct, this.module];
+        this.closestPoint = this.queries ? pointHelper(closestPointWgsl('bvhThreeClosestPoint', false), pointIncludes) : noQueries;
+        this.closestPointMasked = !this.queries ? noQueries : this.rayMasks ? pointHelper(closestPointWgsl('bvhThreeClosestPointMasked', true), pointIncludes) : unmasked;
     }
 
     /** The version bound now (the source's at the last {@link update}). */

@@ -71,6 +71,7 @@ import {
 } from './layout.ts';
 import { DEFAULT_TRIANGLE_FILTER_WGSL } from './triangle-filter.ts';
 import { DEFAULT_NODE_FORMAT } from '../gpu-layout.ts';
+import { closestPointBatchEntryWgsl, queriesWgsl } from './query-wgsl.ts';
 
 /** Where the trace module's bindings land inside a kernel (structurally the same as ddgi's `BindingSlot`). */
 export interface BindingSlot {
@@ -117,13 +118,6 @@ const hex = (value: number): string => `0x${value.toString(16)}u`;
 const COMMON_WGSL = /* wgsl */ `
 // ---- Contract types (see docs/api/platform.md) ------------------------------
 
-struct BvhRay {
-    origin: vec3f,
-    tMin: f32,
-    direction: vec3f,   // normalized
-    tMax: f32,
-}
-
 struct BvhHit {
     t: f32,              // distance along the ray; negative means no hit
     instance: u32,       // platform instance index
@@ -169,14 +163,6 @@ struct BvhNode {
     rightMax: vec3f, rightCount: u32,
 }
 
-// A triangle is its three corners, stored as they are so that a corner shared
-// by two triangles has the same bits in both (the watertight test needs that).
-struct BvhTriangle {
-    vertex0: vec3f, originalIndex: u32,
-    vertex1: vec3f, flags: u32,
-    vertex2: vec3f, padding: u32,   // 0, or the source instance in a merged mesh
-}
-
 // The world-to-object transform is a 3x4 matrix stored as three rows.
 struct BvhInstance {
     worldToObjectRow0: vec4f,
@@ -213,14 +199,264 @@ const BVH_STACK_SIZE: u32 = ${TRACE_STACK_SIZE}u;
 // Returned by the box test for "no hit". Far larger than any scene distance.
 const BVH_BOX_MISS: f32 = 3.0e38;
 
-// Direction components smaller than this are treated as this, so 1/direction
-// stays finite and 0 * (1/direction) can never produce a NaN.
-const BVH_MIN_DIRECTION: f32 = 1.0e-30;
-
 // Rounding in (box - origin) * (1 / direction) can put a ray that touches a
 // box a few ulps outside its slab interval. Growing the exit distance by this
 // much keeps such rays (Ize, "Robust BVH Ray Traversal"). About 3 f32 steps.
 const BVH_BOX_EXIT_PADDING: f32 = 1.0000004;
+`;
+
+/**
+ * The two triangle helpers of the public API (PARITY 8.8a), built on the walk's
+ * own code: `bvhIntersectRayTriangle` is the walk's watertight test
+ * (`bvhMakeRaySetup` + `bvhIntersectWatertight`) on three corners, and
+ * `bvhClosestPointToTriangle` is three's `Triangle.closestPointToPoint`
+ * (Ericson's regions, the CPU queries' `triangleClosestPointToPoint`, in its
+ * order) returning the barycentrics too. The spatial queries (query-wgsl.ts)
+ * use the second one.
+ */
+const TRIANGLE_HELPERS_WGSL = /* wgsl */ `
+// The walk's watertight test on one triangle: a hit within [ray.tMin, ray.tMax],
+// t in the units of ray.direction, barycentrics the weights of b and c, and
+// frontFacing true when the ray runs against the winding normal cross(b - a, c - a).
+// Building the ray setup costs a few divisions: a kernel testing many triangles
+// against one ray should keep bvhMakeRaySetup's result and call bvhIntersectWatertight.
+fn bvhIntersectRayTriangle(ray: BvhRay, a: vec3f, b: vec3f, c: vec3f) -> BvhTriangleHit {
+    return bvhIntersectWatertight(BvhTriangle(a, 0u, b, 0u, c, 0u), bvhMakeRaySetup(ray.origin, ray.direction), ray.tMin, ray.tMax);
+}
+
+// A point on a triangle, with its barycentric weights of corners b and c (a's is 1 - x - y).
+struct BvhTrianglePoint {
+    point: vec3f,
+    barycentrics: vec2f,
+}
+
+// The point of triangle a, b, c nearest to 'point' (three's Triangle.closestPointToPoint,
+// Ericson's "Real-Time Collision Detection" 5.1.5: the corner, edge or face region
+// 'point' projects into). A degenerate triangle can give NaN, as three's does.
+fn bvhClosestPointToTriangle(point: vec3f, a: vec3f, b: vec3f, c: vec3f) -> BvhTrianglePoint {
+    let ab = b - a;
+    let ac = c - a;
+    let ap = point - a;
+    let d1 = dot(ab, ap);
+    let d2 = dot(ac, ap);
+    if (d1 <= 0.0 && d2 <= 0.0) {
+        return BvhTrianglePoint(a, vec2f(0.0, 0.0));
+    }
+    let bp = point - b;
+    let d3 = dot(ab, bp);
+    let d4 = dot(ac, bp);
+    if (d3 >= 0.0 && d4 <= d3) {
+        return BvhTrianglePoint(b, vec2f(1.0, 0.0));
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 && d1 - d3 > 0.0) {
+        let v = d1 / (d1 - d3);
+        return BvhTrianglePoint(a + ab * v, vec2f(v, 0.0));
+    }
+    let cp = point - c;
+    let d5 = dot(ab, cp);
+    let d6 = dot(ac, cp);
+    if (d6 >= 0.0 && d5 <= d6) {
+        return BvhTrianglePoint(c, vec2f(0.0, 1.0));
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+        let w = d2 / (d2 - d6);
+        return BvhTrianglePoint(a + ac * w, vec2f(0.0, w));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if (va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0) {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return BvhTrianglePoint(b + (c - b) * w, vec2f(1.0 - w, w));
+    }
+    let denominator = 1.0 / (va + vb + vc);
+    let v = vb * denominator;
+    let w = vc * denominator;
+    return BvhTrianglePoint(a + ab * v + ac * w, vec2f(v, w));
+}
+`;
+
+/**
+ * The ray and triangle geometry the walk is made of, binding-free: `BvhRay`, the
+ * ray setup, the watertight triangle test, and the helpers built on them
+ * (`bvhIntersectRayTriangle`, `bvhClosestPointToTriangle`). The trace module
+ * includes it once; {@link triangleGeometryWgsl} is the same text alone, for a
+ * kernel that tests triangles without a scene.
+ */
+const GEOMETRY_WGSL = /* wgsl */ `
+// ---- Ray and triangle geometry (binding-free; also triangleGeometryWgsl()) ----
+
+struct BvhRay {
+    origin: vec3f,
+    tMin: f32,
+    direction: vec3f,   // normalized
+    tMax: f32,
+}
+
+// A triangle is its three corners, stored as they are so that a corner shared
+// by two triangles has the same bits in both (the watertight test needs that).
+struct BvhTriangle {
+    vertex0: vec3f, originalIndex: u32,
+    vertex1: vec3f, flags: u32,
+    vertex2: vec3f, padding: u32,   // 0, or the source instance in a merged mesh
+}
+
+// Direction components smaller than this are treated as this, so 1/direction
+// stays finite and 0 * (1/direction) can never produce a NaN.
+const BVH_MIN_DIRECTION: f32 = 1.0e-30;
+
+// ---- Rays ----------------------------------------------------------------------------
+
+// A ray in the space of the level being walked (world space at the top level,
+// an instance's object space inside it), with everything the tests reuse
+// precomputed once instead of per box or per triangle.
+struct BvhRaySetup {
+    // The direction is not stored: the tests use only these precomputed forms of
+    // it. It is not normalized in object space, so t stays in world units.
+    origin: vec3f,
+    inverseDirection: vec3f,   // for the box test
+    // Watertight triangle test: the permute-and-shear that maps a point (relative
+    // to the ray origin) into the space where the ray runs along +z'. A point p
+    // becomes (dot(p, shearRowX), dot(p, shearRowY), dot(p, shearRowZ)).
+    shearRowX: vec3f,
+    shearRowY: vec3f,
+    shearRowZ: vec3f,
+}
+
+fn bvhSafeInverse(direction: vec3f) -> vec3f {
+    let magnitude = max(abs(direction), vec3f(BVH_MIN_DIRECTION));
+    let directionSign = select(vec3f(1.0), vec3f(-1.0), direction < vec3f(0.0));
+    return 1.0 / (magnitude * directionSign);
+}
+
+fn bvhMakeRaySetup(origin: vec3f, direction: vec3f) -> BvhRaySetup {
+    // The axis the ray runs along most becomes z'; x' is the axis after it
+    // (x -> y -> z -> x) and y' the one after that. Swapping x' and y' when the
+    // ray points the negative way keeps triangle winding, so the sign of the
+    // determinant still tells front from back.
+    //
+    // The axes are unit vectors picked with select(), never a vector indexed by
+    // a per-ray value: a runtime index into a vector can push it into slow
+    // per-thread scratch memory (T0.10 part C measured that on NVIDIA).
+    let magnitude = abs(direction);
+    let zIsX = magnitude.x > magnitude.y && magnitude.x > magnitude.z;
+    let zIsY = !zIsX && magnitude.y > magnitude.z;
+    let axisZ = select(select(vec3f(0.0, 0.0, 1.0), vec3f(0.0, 1.0, 0.0), zIsY), vec3f(1.0, 0.0, 0.0), zIsX);
+    var axisX = axisZ.zxy;   // the next axis: x for z, y for x, z for y
+    var axisY = axisX.zxy;
+    // Each of these dot products has one product with 1 and two with 0, so it is
+    // the direction's component exactly, as the indexed version was.
+    let directionZ = dot(direction, axisZ);
+    if (directionZ < 0.0) {
+        let swapped = axisX;
+        axisX = axisY;
+        axisY = swapped;
+    }
+    let shearX = dot(direction, axisX) / directionZ;
+    let shearY = dot(direction, axisY) / directionZ;
+    let shearZ = 1.0 / directionZ;
+    // The rows hold only 0, 1 and the shear factors. A row times a corner is then
+    // a[x'] - shearX * a[z'] (and so on) with exactly the old rounding: products
+    // with 0 and 1 are exact. A corner shared by two triangles is transformed the
+    // same way in both, which is what keeps the test watertight.
+    return BvhRaySetup(
+        origin,
+        bvhSafeInverse(direction),
+        axisX - shearX * axisZ,
+        axisY - shearY * axisZ,
+        shearZ * axisZ,
+    );
+}
+
+struct BvhTriangleHit {
+    hit: bool,
+    t: f32,
+    barycentrics: vec2f,   // weights of vertices 1 and 2
+    // True when the ray runs against the triangle's winding normal, in the
+    // space the test ran in (object space).
+    frontFacing: bool,
+}
+
+fn bvhNoTriangleHit() -> BvhTriangleHit {
+    return BvhTriangleHit(false, 0.0, vec2f(0.0), true);
+}
+
+// One edge function of the watertight test: for the edge from 'start' to 'end'
+// (corners already sheared into the 2-D space where the ray is the origin), the
+// scaled barycentric weight of the corner opposite it, end.x * start.y - end.y * start.x.
+//
+// Two triangles that share an edge walk it in opposite directions, and their
+// values must be exact negatives of each other, or a ray can slip between
+// them. Written plainly, that holds only if both products are rounded on their
+// own. A shader compiler may fuse one product into the subtraction (an FMA),
+// and which product it fuses changes the rounding, so the two triangles can
+// round the same edge to the same sign. Dawn compiles for Metal in relaxed math
+// mode, which allows that fusing: about 0.1% of the oracle's shared-edge rays
+// slipped through on an Apple M5 Pro while NVIDIA and Intel let none through.
+//
+// So the two corners are put in a fixed order first (by x, then y). Both
+// triangles then run the same arithmetic on the same operands and get the same
+// bits, whatever the compiler fuses, and the one that walks the edge the other
+// way negates the result, which is exact. A shared corner has the same sheared
+// bits in every triangle (bvhMakeRaySetup), so both triangles agree on the order.
+fn bvhEdgeFunction(start: vec2f, end: vec2f) -> f32 {
+    let reversed = start.x > end.x || (start.x == end.x && start.y > end.y);
+    let first = select(start, end, reversed);
+    let second = select(end, start, reversed);
+    // An edge that shears to a single point runs along the ray; exactly, its
+    // value is 0. A fused x * y - y * x would give the rounding error instead,
+    // with the same sign in both triangles (neither negates, as neither is reversed).
+    let ordered = select(second.x * first.y - second.y * first.x, 0.0, all(first == second));
+    return select(ordered, -ordered, reversed);
+}
+
+// Woop, Benthin and Wald, "Watertight Ray/Triangle Intersection" (2013).
+// Triangles store three corners. The three edge functions are computed from
+// the same corner bits for both triangles that share an edge, with opposite
+// signs (bvhEdgeFunction), so a ray cannot pass between them. A zero counts as
+// inside for both, so a ray exactly on an edge hits both neighbours rather than neither.
+fn bvhIntersectWatertight(triangle: BvhTriangle, setup: BvhRaySetup, tMin: f32, tMax: f32) -> BvhTriangleHit {
+    // Corners relative to the ray origin.
+    let a = triangle.vertex0 - setup.origin;
+    let b = triangle.vertex1 - setup.origin;
+    let c = triangle.vertex2 - setup.origin;
+
+    // Shear and scale into the space where the ray runs along +z' through the origin
+    // (see bvhMakeRaySetup for why these are dot products with rows).
+    let ax = dot(a, setup.shearRowX);
+    let ay = dot(a, setup.shearRowY);
+    let bx = dot(b, setup.shearRowX);
+    let by = dot(b, setup.shearRowY);
+    let cx = dot(c, setup.shearRowX);
+    let cy = dot(c, setup.shearRowY);
+
+    // Edge functions: the (scaled) barycentric weights of corners 0, 1 and 2,
+    // from the edges opposite them (b to c, c to a, a to b).
+    let projectedA = vec2f(ax, ay);
+    let projectedB = vec2f(bx, by);
+    let projectedC = vec2f(cx, cy);
+    let weight0 = bvhEdgeFunction(projectedB, projectedC);
+    let weight1 = bvhEdgeFunction(projectedC, projectedA);
+    let weight2 = bvhEdgeFunction(projectedA, projectedB);
+    if ((weight0 < 0.0 || weight1 < 0.0 || weight2 < 0.0) && (weight0 > 0.0 || weight1 > 0.0 || weight2 > 0.0)) {
+        return bvhNoTriangleHit();   // the weights disagree in sign: outside the triangle
+    }
+
+    let determinant = weight0 + weight1 + weight2;
+    if (determinant == 0.0) {
+        return bvhNoTriangleHit();   // edge-on
+    }
+    // z' of each corner, scaled by 1 / direction along z'.
+    let scaledT = weight0 * dot(a, setup.shearRowZ) + weight1 * dot(b, setup.shearRowZ) + weight2 * dot(c, setup.shearRowZ);
+    let inverseDeterminant = 1.0 / determinant;
+    let t = scaledT * inverseDeterminant;
+    if (t < tMin || t > tMax) {
+        return bvhNoTriangleHit();
+    }
+    // With the axis swap in bvhMakeRaySetup the determinant is positive for a front hit.
+    return BvhTriangleHit(true, t, vec2f(weight1, weight2) * inverseDeterminant, determinant > 0.0);
+}
+${TRIANGLE_HELPERS_WGSL}
 `;
 
 /**
@@ -652,6 +888,28 @@ export interface TraceModuleOptions {
      * always enters the nearer one. Answers are the same either way.
      */
     readonly anyHitOrder?: AnyHitOrder;
+    /**
+     * The spatial queries (query-wgsl.ts; docs/tracing/gpu-queries.mdx), compiled in
+     * beside the walk: `bvhClosestPoint(point, maxDistance) -> BvhClosestHit`,
+     * `bvhIntersectsSphere(center, radius)`, `bvhIntersectsBox(boxMin, boxMax)`
+     * and `bvhIntersectsOrientedBox(center, halfSize, rotation)`, with
+     * `*Masked` forms unless `rayMasks: false`. Default false: the module is
+     * the ray walk alone, as before the queries existed.
+     */
+    readonly queries?: boolean;
+    /**
+     * A shapecast over the caller's hooks: WGSL declaring
+     *
+     *     fn bvhShapecastBounds(bounds: BvhShapecastBounds) -> f32   // < 0 skips the box; else a score, the lower entered first
+     *     fn bvhShapecastKeep(score: f32) -> bool                    // asked when a pushed box is popped; false skips it
+     *     fn bvhShapecastTriangle(triangle: BvhShapecastTriangle) -> bool   // true stops the cast
+     *
+     * which the module includes, with `bvhShapecast() -> bool` (and
+     * `bvhShapecastMasked(mask)`) walking the scene with them in world space.
+     * `''` compiles the walk with the hooks left for the kernel to declare.
+     * Default: no shapecast.
+     */
+    readonly shapecast?: string;
 }
 
 /**
@@ -708,6 +966,7 @@ export function traceModuleWgsl(options: TraceModuleOptions = {}): string {
         throw new RangeError(`traceModuleWgsl: anyHitOrder must be 'far', 'near' or 'larger', got ${String(anyHitOrder)}`);
     }
     return /* wgsl */ `${COMMON_WGSL}
+${GEOMETRY_WGSL}
 // Nodes and triangles are read as plain vec4s, so every load is one 16-byte
 // read whatever the backend makes of a struct with vec3 members. Quantized
 // nodes are read as vec4u, so no packed plane passes through a float register.
@@ -762,69 +1021,6 @@ fn bvhLoadTopLevelNode(firstNode: u32, nodeIndex: u32) -> BvhNode {
         bitcast<vec3f>(b.xyz), b.w,
         bitcast<vec3f>(c.xyz), c.w,
         bitcast<vec3f>(d.xyz), d.w,
-    );
-}
-
-// ---- Rays ----------------------------------------------------------------------------
-
-// A ray in the space of the level being walked (world space at the top level,
-// an instance's object space inside it), with everything the tests reuse
-// precomputed once instead of per box or per triangle.
-struct BvhRaySetup {
-    // The direction is not stored: the tests use only these precomputed forms of
-    // it. It is not normalized in object space, so t stays in world units.
-    origin: vec3f,
-    inverseDirection: vec3f,   // for the box test
-    // Watertight triangle test: the permute-and-shear that maps a point (relative
-    // to the ray origin) into the space where the ray runs along +z'. A point p
-    // becomes (dot(p, shearRowX), dot(p, shearRowY), dot(p, shearRowZ)).
-    shearRowX: vec3f,
-    shearRowY: vec3f,
-    shearRowZ: vec3f,
-}
-
-fn bvhSafeInverse(direction: vec3f) -> vec3f {
-    let magnitude = max(abs(direction), vec3f(BVH_MIN_DIRECTION));
-    let directionSign = select(vec3f(1.0), vec3f(-1.0), direction < vec3f(0.0));
-    return 1.0 / (magnitude * directionSign);
-}
-
-fn bvhMakeRaySetup(origin: vec3f, direction: vec3f) -> BvhRaySetup {
-    // The axis the ray runs along most becomes z'; x' is the axis after it
-    // (x -> y -> z -> x) and y' the one after that. Swapping x' and y' when the
-    // ray points the negative way keeps triangle winding, so the sign of the
-    // determinant still tells front from back.
-    //
-    // The axes are unit vectors picked with select(), never a vector indexed by
-    // a per-ray value: a runtime index into a vector can push it into slow
-    // per-thread scratch memory (T0.10 part C measured that on NVIDIA).
-    let magnitude = abs(direction);
-    let zIsX = magnitude.x > magnitude.y && magnitude.x > magnitude.z;
-    let zIsY = !zIsX && magnitude.y > magnitude.z;
-    let axisZ = select(select(vec3f(0.0, 0.0, 1.0), vec3f(0.0, 1.0, 0.0), zIsY), vec3f(1.0, 0.0, 0.0), zIsX);
-    var axisX = axisZ.zxy;   // the next axis: x for z, y for x, z for y
-    var axisY = axisX.zxy;
-    // Each of these dot products has one product with 1 and two with 0, so it is
-    // the direction's component exactly, as the indexed version was.
-    let directionZ = dot(direction, axisZ);
-    if (directionZ < 0.0) {
-        let swapped = axisX;
-        axisX = axisY;
-        axisY = swapped;
-    }
-    let shearX = dot(direction, axisX) / directionZ;
-    let shearY = dot(direction, axisY) / directionZ;
-    let shearZ = 1.0 / directionZ;
-    // The rows hold only 0, 1 and the shear factors. A row times a corner is then
-    // a[x'] - shearX * a[z'] (and so on) with exactly the old rounding: products
-    // with 0 and 1 are exact. A corner shared by two triangles is transformed the
-    // same way in both, which is what keeps the test watertight.
-    return BvhRaySetup(
-        origin,
-        bvhSafeInverse(direction),
-        axisX - shearX * axisZ,
-        axisY - shearY * axisZ,
-        shearZ * axisZ,
     );
 }
 
@@ -902,102 +1098,28 @@ fn bvhBoxEntry(boxMin: vec3f, boxMax: vec3f, setup: BvhRaySetup, tMin: f32, tMax
     return select(BVH_BOX_MISS, tEnter, tEnter <= tExit);
 }
 
-struct BvhTriangleHit {
-    hit: bool,
-    t: f32,
-    barycentrics: vec2f,   // weights of vertices 1 and 2
-    // True when the ray runs against the triangle's winding normal, in the
-    // space the test ran in (object space).
-    frontFacing: bool,
-}
-
-fn bvhNoTriangleHit() -> BvhTriangleHit {
-    return BvhTriangleHit(false, 0.0, vec2f(0.0), true);
-}
-
-// One edge function of the watertight test: for the edge from 'start' to 'end'
-// (corners already sheared into the 2-D space where the ray is the origin), the
-// scaled barycentric weight of the corner opposite it, end.x * start.y - end.y * start.x.
-//
-// Two triangles that share an edge walk it in opposite directions, and their
-// values must be exact negatives of each other, or a ray can slip between
-// them. Written plainly, that holds only if both products are rounded on their
-// own. A shader compiler may fuse one product into the subtraction (an FMA),
-// and which product it fuses changes the rounding, so the two triangles can
-// round the same edge to the same sign. Dawn compiles for Metal in relaxed math
-// mode, which allows that fusing: about 0.1% of the oracle's shared-edge rays
-// slipped through on an Apple M5 Pro while NVIDIA and Intel let none through.
-//
-// So the two corners are put in a fixed order first (by x, then y). Both
-// triangles then run the same arithmetic on the same operands and get the same
-// bits, whatever the compiler fuses, and the one that walks the edge the other
-// way negates the result, which is exact. A shared corner has the same sheared
-// bits in every triangle (bvhMakeRaySetup), so both triangles agree on the order.
-fn bvhEdgeFunction(start: vec2f, end: vec2f) -> f32 {
-    let reversed = start.x > end.x || (start.x == end.x && start.y > end.y);
-    let first = select(start, end, reversed);
-    let second = select(end, start, reversed);
-    // An edge that shears to a single point runs along the ray; exactly, its
-    // value is 0. A fused x * y - y * x would give the rounding error instead,
-    // with the same sign in both triangles (neither negates, as neither is reversed).
-    let ordered = select(second.x * first.y - second.y * first.x, 0.0, all(first == second));
-    return select(ordered, -ordered, reversed);
-}
-
-// Woop, Benthin and Wald, "Watertight Ray/Triangle Intersection" (2013).
-// Triangles store three corners. The three edge functions are computed from
-// the same corner bits for both triangles that share an edge, with opposite
-// signs (bvhEdgeFunction), so a ray cannot pass between them. A zero counts as
-// inside for both, so a ray exactly on an edge hits both neighbours rather than neither.
-fn bvhIntersectWatertight(triangle: BvhTriangle, setup: BvhRaySetup, tMin: f32, tMax: f32) -> BvhTriangleHit {
-    // Corners relative to the ray origin.
-    let a = triangle.vertex0 - setup.origin;
-    let b = triangle.vertex1 - setup.origin;
-    let c = triangle.vertex2 - setup.origin;
-
-    // Shear and scale into the space where the ray runs along +z' through the origin
-    // (see bvhMakeRaySetup for why these are dot products with rows).
-    let ax = dot(a, setup.shearRowX);
-    let ay = dot(a, setup.shearRowY);
-    let bx = dot(b, setup.shearRowX);
-    let by = dot(b, setup.shearRowY);
-    let cx = dot(c, setup.shearRowX);
-    let cy = dot(c, setup.shearRowY);
-
-    // Edge functions: the (scaled) barycentric weights of corners 0, 1 and 2,
-    // from the edges opposite them (b to c, c to a, a to b).
-    let projectedA = vec2f(ax, ay);
-    let projectedB = vec2f(bx, by);
-    let projectedC = vec2f(cx, cy);
-    let weight0 = bvhEdgeFunction(projectedB, projectedC);
-    let weight1 = bvhEdgeFunction(projectedC, projectedA);
-    let weight2 = bvhEdgeFunction(projectedA, projectedB);
-    if ((weight0 < 0.0 || weight1 < 0.0 || weight2 < 0.0) && (weight0 > 0.0 || weight1 > 0.0 || weight2 > 0.0)) {
-        return bvhNoTriangleHit();   // the weights disagree in sign: outside the triangle
-    }
-
-    let determinant = weight0 + weight1 + weight2;
-    if (determinant == 0.0) {
-        return bvhNoTriangleHit();   // edge-on
-    }
-    // z' of each corner, scaled by 1 / direction along z'.
-    let scaledT = weight0 * dot(a, setup.shearRowZ) + weight1 * dot(b, setup.shearRowZ) + weight2 * dot(c, setup.shearRowZ);
-    let inverseDeterminant = 1.0 / determinant;
-    let t = scaledT * inverseDeterminant;
-    if (t < tMin || t > tMax) {
-        return bvhNoTriangleHit();
-    }
-    // With the axis swap in bvhMakeRaySetup the determinant is positive for a front hit.
-    return BvhTriangleHit(true, t, vec2f(weight1, weight2) * inverseDeterminant, determinant > 0.0);
-}
-
 ${rayMasks ? INSTANCE_MASK_WGSL : ''}
 ${anyHitOrder === 'larger' ? BOX_HALF_AREA_WGSL : ''}
 ${walkWgsl('closest', rayMasks)}
 ${walkWgsl('any', rayMasks, anyHitOrder)}
 ${rayMasks ? MASKED_TRACE_WGSL : UNMASKED_TRACE_WGSL}
 ${triangleFilter ?? '// bvhTrianglePasses is supplied by the kernel.'}
-`;
+${queriesWgsl({ rayMasks, queries: options.queries ?? false, shapecast: options.shapecast })}`;
+}
+
+/**
+ * The ray and triangle geometry of the trace module alone, with no bindings:
+ * `BvhRay`, `BvhTriangleHit`, `BvhTrianglePoint`, and
+ *
+ *     fn bvhIntersectRayTriangle(ray: BvhRay, a: vec3f, b: vec3f, c: vec3f) -> BvhTriangleHit
+ *     fn bvhClosestPointToTriangle(point: vec3f, a: vec3f, b: vec3f, c: vec3f) -> BvhTrianglePoint
+ *
+ * plus the ray setup and watertight test they use (`bvhMakeRaySetup`,
+ * `bvhIntersectWatertight`). It is the text the trace module includes, so a
+ * kernel uses one or the other, never both.
+ */
+export function triangleGeometryWgsl(): string {
+    return GEOMETRY_WGSL;
 }
 
 // Only in a module with anyHitOrder 'larger'.
@@ -1248,4 +1370,21 @@ export function batchKernelWgsl(mode: 'closest' | 'any', options: BatchKernelOpt
     const rayMasks = options.rayMasks ?? true;
     return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat, anyHitOrder: options.anyHitOrder })}
 ${batchEntryWgsl(mode, 1, rayMasks, options.hitNormal ?? true)}`;
+}
+
+/** Options of {@link closestPointKernelWgsl}: the trace module's format options and `rayMasks`. */
+export type ClosestPointKernelOptions = Pick<BatchKernelOptions, 'traceSlot' | 'rayMasks' | 'triangleLeaves' | 'positionLayout' | 'nodeFormat'>;
+
+/**
+ * The closest-point batch kernel: the trace module at `traceSlot` with
+ * `queries: true`, and the batch's own group 1 (`BvhPointQuery`s in at
+ * binding 0, `BvhClosestPointRecord`s out at binding 1, and with ray masks
+ * the batch's mask as a uniform at binding 2, {@link BATCH_PARAMS_BYTES}).
+ * The entry point is `bvhClosestPointBatch`.
+ */
+export function closestPointKernelWgsl(options: ClosestPointKernelOptions = {}): string {
+    rejectOldPositionalCall('closestPointKernelWgsl', options);
+    const rayMasks = options.rayMasks ?? true;
+    return `${traceModuleWgsl({ traceSlot: options.traceSlot, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat, queries: true })}
+${closestPointBatchEntryWgsl(1, rayMasks, BATCH_WORKGROUP_SIZE)}`;
 }

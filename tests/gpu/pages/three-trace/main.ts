@@ -6,7 +6,11 @@
  * BvhTraceNodes:
  *
  * - TSL: `traceClosestMasked` (the camera's layers as the ray mask) and `traceAny`;
- * - WGSL: a `wgslFn` that includes `bvh.module` and calls `bvhTraceClosest` by name.
+ * - WGSL: a `wgslFn` that includes `bvh.module` and calls `bvhTraceClosest` by name;
+ * - TSL `closestPoint` (BvhTraceNodes with `queries: true`) from every ray's origin,
+ *   which must give exactly the records of the package's `ClosestPointBatchKernel`
+ *   on the same buffers (its answers are checked against the CPU queries by
+ *   tests/gpu/pages/query-oracle).
  *
  * The oracle rule: every hit must match the CPU walk over a scene the CPU
  * assembled from the same three objects (bvhSceneFromObject3D, tinybvh trees),
@@ -28,7 +32,8 @@ import { buildMeshBvhWithTinyBvh } from '../../../../src/trace/mesh-bvh-topology
 import { createRandom, randomRays } from '../../../../src/trace/oracle-fixtures.ts';
 import { packRays, type TraceRay } from '../../../../src/trace/rays.ts';
 import { buildTraceScene } from '../../../../src/trace/scene-assembly.ts';
-import { TraceBatchKernel } from '../../../../src/trace/trace-gpu.ts';
+import { ClosestPointBatchKernel, TraceBatchKernel } from '../../../../src/trace/trace-gpu.ts';
+import { CLOSEST_POINT_RECORD_BYTES, POINT_QUERY_BYTES } from '../../../../src/trace/query-wgsl.ts';
 import { BvhTraceNodes, SceneTreesObject3DSync, bvhSceneFromObject3D, deviceFromRenderer, rayMaskFromLayers, type BvhTslNode } from '../../../../src/three/index.ts';
 import { drainDevice, reportGpuTest, summarizeAdapterInfo, watchDevice } from '../../client.ts';
 import { sameHit, traceOnGpu } from '../../scene-check.ts';
@@ -91,6 +96,29 @@ const select = tslSelect as unknown as (...parts: BvhTslNode[]) => BvhTslNode;
 /** Three uvec4 per ray: (t, instance, triangle, frontFace), (u, v, material, blocked), normal. */
 const WORDS_PER_RAY = 12;
 
+/** The closest-point record's 12 words (CLOSEST_POINT_RECORD_WORD), which the TSL kernel writes in the same order. */
+const WORDS_PER_POINT = CLOSEST_POINT_RECORD_BYTES / 4;
+
+/** The package's closest-point batch from each ray's origin (maxDistance 1e30), read back. */
+async function closestPointsOnGpu(device: GPUDevice, kernel: ClosestPointBatchKernel, buffers: Parameters<ClosestPointBatchKernel['encode']>[1], rays: readonly TraceRay[]): Promise<Uint32Array> {
+    const data = new Float32Array(rays.length * 4);
+    rays.forEach((ray, index) => data.set([...ray.origin, 1e30], index * 4));
+    const queries = device.createBuffer({ label: 'three-trace points', size: rays.length * POINT_QUERY_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(queries, 0, data);
+    const size = rays.length * CLOSEST_POINT_RECORD_BYTES;
+    const results = device.createBuffer({ label: 'three-trace closest points', size, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const readback = device.createBuffer({ label: 'three-trace closest points readback', size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const encoder = device.createCommandEncoder();
+    kernel.encode(encoder, buffers, { queries, results, count: rays.length });
+    encoder.copyBufferToBuffer(results, 0, readback, 0, size);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    const words = new Uint32Array(readback.getMappedRange().slice(0));
+    readback.unmap();
+    for (const buffer of [queries, results, readback]) buffer.destroy();
+    return words;
+}
+
 try {
     const renderer = new WebGPURenderer();
     await renderer.init();
@@ -111,8 +139,9 @@ try {
         const syncOptions = { material: materialOf };
         const trees = await SceneTrees.create(device, { label: `three-trace ${label}`, holdRefinements: true, workers: { size: 2 }, triangleLeaves, nodeFormat });
         const sync = new SceneTreesObject3DSync(trees, root, syncOptions);
-        const bvh = new BvhTraceNodes(renderer, trees);
+        const bvh = new BvhTraceNodes(renderer, trees, { queries: true });
         const kernel = await TraceBatchKernel.create(device, { triangleLeaves, nodeFormat });
+        const pointKernel = await ClosestPointBatchKernel.create(device, { triangleLeaves, nodeFormat });
         const tinyBvh = await createTinyBvhBuilder();
         let rebinds = 0;
 
@@ -171,6 +200,21 @@ try {
         };
         const tslKernel = makeKernel(false);
         const wgslKernel = makeKernel(true);
+        // TSL closestPoint from each ray's origin, written as the batch kernel's record.
+        const pointOut = new StorageBufferAttribute(new Uint32Array(count * WORDS_PER_POINT), 4);
+        const pointOutNode = storage(pointOut, 'uvec4', count * 3);
+        const pointNode = Fn(() => {
+            If(instanceIndex.lessThan(count), () => {
+                const hit = bvh.closestPoint(rayNode.element(instanceIndex.mul(2)).xyz).toVar();
+                const bary = hit.get('barycentrics');
+                const point = hit.get('point');
+                const normal = hit.get('normal');
+                const base = instanceIndex.mul(3);
+                pointOutNode.element(base).assign(uvec4(floatBitsToUint(hit.get('distance')), hit.get('instance'), hit.get('triangle'), hit.get('material')));
+                pointOutNode.element(base.add(1)).assign(uvec4(floatBitsToUint(bary.x), floatBitsToUint(bary.y), floatBitsToUint(point.x), floatBitsToUint(point.y)));
+                pointOutNode.element(base.add(2)).assign(uvec4(floatBitsToUint(point.z), floatBitsToUint(normal.x), floatBitsToUint(normal.y), floatBitsToUint(normal.z)));
+            });
+        })().compute(count, [64]);
 
         const check = async (state: string) => {
             const phase = `${label} ${state}`;
@@ -179,6 +223,21 @@ try {
             await renderer.computeAsync(tslKernel.node);
             await renderer.computeAsync(wgslKernel.node);
             const computeMs = performance.now() - t0;
+            await renderer.computeAsync(pointNode);
+            const tslPoints = new Uint32Array(await renderer.getArrayBufferAsync(pointOut));
+            const ownPoints = await closestPointsOnGpu(device, pointKernel, trees.traceBuffers, rays);
+            let pointDisagreements = 0;
+            let pointsFound = 0;
+            for (let ray = 0; ray < count; ray++) {
+                const base = ray * WORDS_PER_POINT;
+                if (new Float32Array(ownPoints.buffer, base * 4, 1)[0] >= 0) pointsFound++;
+                for (let word = 0; word < WORDS_PER_POINT; word++) {
+                    if (tslPoints[base + word] === ownPoints[base + word]) continue;
+                    if (pointDisagreements++ < 4) failures.push(`${phase}: ray ${ray}'s origin: TSL closestPoint word ${word} ${tslPoints[base + word]} vs ClosestPointBatchKernel ${ownPoints[base + word]}`);
+                    break;
+                }
+            }
+            if (pointsFound < count / 2) failures.push(`${phase}: only ${pointsFound} closest points found`);
             const [tslWords, wgslWords] = (await Promise.all([renderer.getArrayBufferAsync(tslKernel.out), renderer.getArrayBufferAsync(wgslKernel.out)])).map((bytes) => new Uint32Array(bytes));
             const tslFloats = new Float32Array(tslWords.buffer);
             const wgslFloats = new Float32Array(wgslWords.buffer);
@@ -234,7 +293,7 @@ try {
                 if (!sameHit(toReference(ours), expected)) note(`ray ${ray}: TSL ${JSON.stringify(toReference(ours))} vs CPU reference ${JSON.stringify(expected)}`);
                 if (blocked !== reference.any(rays[ray])) note(`ray ${ray}: TSL any ${blocked} vs CPU reference`);
             }
-            results[phase] = { hits, blocked: blockedCount, disagreements, computeMs: Math.round(computeMs), gpuTrees: trees.counts.onGpuTrees, tinybvhTrees: trees.counts.onTinybvhTrees, version: trees.version, instances: sync.instanceCount };
+            results[phase] = { hits, blocked: blockedCount, disagreements, pointsFound, pointDisagreements, computeMs: Math.round(computeMs), gpuTrees: trees.counts.onGpuTrees, tinybvhTrees: trees.counts.onTinybvhTrees, version: trees.version, instances: sync.instanceCount };
             log(`${phase}: ${hits} hits, ${blockedCount} blocked, ${disagreements} disagreements (${trees.counts.onGpuTrees} GPU / ${trees.counts.onTinybvhTrees} tinybvh trees, version ${trees.version})`);
             if (hits < count / 20) failures.push(`${phase}: only ${hits} hits`);
         };
@@ -280,6 +339,8 @@ try {
         results[`${label} afterStandInDispose`] = { changed: changedByDispose };
 
         bvh.dispose();
+        kernel.destroy();
+        pointKernel.destroy();
         sync.dispose();
         trees.dispose();
     }
