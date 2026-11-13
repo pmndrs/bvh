@@ -189,6 +189,14 @@ These match RC5.4 within noise, so the package keeps the gain. On Sponza, steps 
 
 The gain holds on NVIDIA (1.16-1.67x), a little smaller than the M5's on Sponza's surface closest hits. Closest hits named the instanced tree's instance and triangle on 99.949-99.996% of rays (Sponza air grid 0.999958, surface 0.999909; Bistro interior surface 0.999882, air grid 0.999493; the page requires 0.999); the rest are near-ties at a shared distance. Any hits blocked exactly the same rays. **The option became the default on 2026-11-13** (Dennis), in `SceneTrees` and `buildTraceScene`. Static is still opt-in per instance: only instances marked `static: true`, added before the first update (`SceneTrees`), merge, so a scene that marks nothing is unchanged.
 
+## Indirect batches (pmndrs/bvh#1 item 5): a note, not built
+
+The request: a `TraceBatchKernel` that reads its ray count from a GPU buffer, so a wavefront renderer needs no CPU-known count, and pathtracer could drop its own batch kernel (`packages/raytracer/src/trace/batch.ts` at pathtracer `6ecd315`).
+
+**What it would be.** `encode(encoder, scene, { mode, rays, results, count: { buffer, word, capacity } })`. One more pipeline per mode, compiled on first use: the bound check reads `min(count, capacity)` from a storage binding at group 1 instead of `arrayLength`. Before the trace, a one-thread pass writes the dispatch's workgroup counts (2D, as `dispatchSize` splits them, under `maxComputeWorkgroupsPerDimension`) into a 16-byte args buffer the kernel owns, then `dispatchWorkgroupsIndirect`. The only contract is a `u32` count at a word of the caller's buffer: the args layout stays private. WebGPU orders the storage write before the indirect read within a pass. Speed should equal the direct kernel's (the walk is the same text); the A/B would be direct against indirect on Sponza primary and air rays, ABBA, on a quiet machine.
+
+**Why not now.** Pathtracer's batch tracer would not shrink to it: it also takes SoA rays, per-ray cones (width at the hit) and its `rtSurface` table, sets its workgroup size and caches bind groups per batch shape. Cones and surface lookups decide what a hit looks like, so they stay above bvh (the scope rule in HANDOFF), and pathtracer keeps its kernel either way. The shared part is the count-to-args pass, about 40 lines on each side. bvh's own batch users (the oracle pages and the benches) know their counts on the CPU, and no other consumer has asked. Build it when a consumer that would use bvh's kernel as it is asks for indirect counts; until then pathtracer's own indirect path is the right place for it.
+
 ## Spatial queries (`queries`, `shapecast`; PARITY 8.5, 8.6, 8.8a)
 
 Closest point to a point, sphere and box tests and a caller's shapecast, over the same buffers as the rays (`src/trace/query-wgsl.ts`; user page `docs/tracing/gpu-queries.mdx`). Built 2026-11-13.
