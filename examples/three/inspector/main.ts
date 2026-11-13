@@ -16,24 +16,10 @@
  */
 
 import { BufferAttribute, BufferGeometry, Mesh, MeshStandardMaterial, TorusKnotGeometry, Vector3, type Object3D } from 'three';
-import {
-    BVH_INTERSECTED,
-    BVH_NOT_INTERSECTED,
-    CpuMeshBvh,
-    createMeshLayoutBuilder,
-    createTinyBvhBuilder,
-    GpuHplocBuilder,
-    GpuLbvhBuilder,
-    indexedFromRecords,
-    type GpuLayoutMeshBvh,
-    type GpuLayoutNodeFormat,
-    type GpuLayoutTriangleLeaves,
-    type GpuTreeBuffers,
-    type MeshInput,
-} from '@pmndrs/bvh';
+import { BVH_INTERSECTED, BVH_NOT_INTERSECTED, CpuMeshBvh, type GpuLayoutNodeFormat, type GpuLayoutTriangleLeaves, type MeshInput } from '@pmndrs/bvh';
 import { MeshBVHHelper, meshInputFromGeometry } from '@pmndrs/bvh/three';
 import { createApp } from '../../shared/app.ts';
-import { GpuTimer } from '../../shared/gpu-timer.ts';
+import { MeshBuilds, type BuilderKind, type TimedBuild } from '../../shared/builders.ts';
 import { enableDrop, frameObject, loadGltf, meshesOf, requestedModel } from '../../shared/loader.ts';
 import { bytes } from '../../shared/overlay.ts';
 import { layoutInfo } from '../../shared/stats.ts';
@@ -42,7 +28,7 @@ import { isSmoke, ready } from '../../shared/smoke.ts';
 const app = await createApp('Inspector', 'three/inspector');
 const { device, scene, camera, controls, overlay } = app;
 
-type Builder = 'tinybvh' | 'gpu-hploc' | 'gpu-lbvh';
+type Builder = BuilderKind;
 const settings = {
     builder: 'tinybvh' as Builder,
     leaf: 4,
@@ -82,73 +68,12 @@ function useObject(root: Object3D, label: string): void {
     frameObject(mesh, camera, controls);
 }
 
-// The builders.
-const tinybvh = await createTinyBvhBuilder();
-const timer = GpuTimer.create(device, 1);
-const gpuBuilders = new Map<Builder, GpuHplocBuilder | GpuLbvhBuilder>();
-async function gpuBuilder(kind: 'gpu-hploc' | 'gpu-lbvh'): Promise<GpuHplocBuilder | GpuLbvhBuilder> {
-    let builder = gpuBuilders.get(kind);
-    if (!builder) {
-        builder = kind === 'gpu-hploc' ? new GpuHplocBuilder(device, { label: 'inspector' }) : new GpuLbvhBuilder(device, { label: 'inspector' });
-        await builder.prepare();
-        gpuBuilders.set(kind, builder);
-    }
-    return builder;
-}
-
-interface Built {
-    readonly layout: GpuLayoutMeshBvh;
-    readonly builtBy: Builder;
-    readonly fallbackReason: string | null;
-    readonly cpuMs: number;
-    readonly gpuMs: number | null | undefined;
-}
-
-/** One GPU build, recorded and timed: the batch's passes in one timestamp pair. */
-async function buildOnGpu(kind: 'gpu-hploc' | 'gpu-lbvh', options: { maxLeafPrimitives: number; triangleLeaves: GpuLayoutTriangleLeaves; nodeFormat: GpuLayoutNodeFormat }): Promise<Omit<Built, 'builtBy' | 'fallbackReason'>> {
-    const builder = await gpuBuilder(kind);
-    // The LBVH writes records only; indexed trees are converted after the readback.
-    const lbvhIndexed = kind === 'gpu-lbvh' && options.triangleLeaves === 'indexed';
-    const start = performance.now();
-    const batch = builder.createBatch([input], lbvhIndexed ? { ...options, triangleLeaves: 'records' } : options);
-    let trees: GpuTreeBuffers | null = null;
-    try {
-        const encoder = device.createCommandEncoder({ label: 'inspector build' });
-        const timestampWrites = timer?.pass();
-        batch.encode(encoder, timestampWrites);
-        if (timer) timer.resolveInto(encoder);
-        device.queue.submit([encoder.finish()]);
-        trees = await batch.finish();
-        const gpuMs = timer ? (await timer.result())[0] : null;
-        const cpuMs = performance.now() - start;
-        const problem = trees.meshes[0].problem;
-        if (problem) throw new Error(`${kind} refused the mesh: ${problem}`);
-        const [read] = await builder.readLayouts(trees);
-        const layout = lbvhIndexed ? indexedFromRecords(read!, input) : read!;
-        return { layout, cpuMs, gpuMs };
-    } finally {
-        trees?.destroy();
-        batch.destroy();
-    }
-}
+// The builders (shared/builders.ts: the chooser's fallback, warm-up, timestamps).
+const builds = await MeshBuilds.create(device);
+type Built = TimedBuild;
 
 async function build(): Promise<Built> {
-    const options = { maxLeafPrimitives: settings.leaf, triangleLeaves: settings.triangleLeaves, nodeFormat: settings.nodeFormat };
-    if (settings.builder !== 'tinybvh') {
-        // The chooser says whether this device can run the GPU builder at all, and why not.
-        const chooser = await createMeshLayoutBuilder(device, { prefer: settings.builder });
-        if (chooser.kind === settings.builder) {
-            await buildOnGpu(settings.builder, options); // warm-up: the first build pays for pipeline and buffer setup
-            return { ...(await buildOnGpu(settings.builder, options)), builtBy: settings.builder, fallbackReason: null };
-        }
-        const start = performance.now();
-        const layout = tinybvh.buildLayout(input, options).layout;
-        return { layout, builtBy: 'tinybvh', fallbackReason: chooser.fallbackReason, cpuMs: performance.now() - start, gpuMs: undefined };
-    }
-    tinybvh.buildLayout(input, options); // warm-up
-    const start = performance.now();
-    const layout = tinybvh.buildLayout(input, options).layout;
-    return { layout, builtBy: 'tinybvh', fallbackReason: null, cpuMs: performance.now() - start, gpuMs: undefined };
+    return builds.build(settings.builder, input, { maxLeafPrimitives: settings.leaf, triangleLeaves: settings.triangleLeaves, nodeFormat: settings.nodeFormat });
 }
 
 // The comparison table.

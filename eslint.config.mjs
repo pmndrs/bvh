@@ -73,4 +73,21 @@ export default tseslint.config(
             'no-restricted-syntax': 'off',
         },
     },
+    {
+        // The vanilla examples prove the "not a three library" claim: raw WebGPU and @pmndrs/bvh only, and only the shared modules that are three-free.
+        files: ['examples/vanilla/**/*.ts', 'examples/shared/vanilla/**/*.ts'],
+        rules: {
+            'no-restricted-imports': [
+                'error',
+                {
+                    paths: [{ name: 'three', message: 'The vanilla examples use no engine.' }],
+                    patterns: [
+                        { group: ['**/src/**', '../../src/*', '../../../src/*'], message: 'Examples use the package by its public names: @pmndrs/bvh, @pmndrs/bvh/three, @pmndrs/bvh/worker.' },
+                        { group: ['three/*', '@pmndrs/bvh/three'], message: 'The vanilla examples use no engine.' },
+                        { group: ['**/shared/app.ts', '**/shared/loader.ts', '**/shared/compare.ts'], message: 'Three shell modules; the vanilla pages use shared/vanilla/*.' },
+                    ],
+                },
+            ],
+        },
+    },
 );

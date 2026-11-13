@@ -37,6 +37,11 @@ export class GpuTimer {
         return { querySet: this.querySet, beginningOfPassWriteIndex: at, endOfPassWriteIndex: at + 1 };
     }
 
+    /** Forgets passes recorded but never resolved and read (a measurement that failed midway). */
+    reset(): void {
+        if (!this.busy) this.used = 0;
+    }
+
     /** Resolves the passes recorded so far into `encoder`; then {@link result} after the submit. */
     resolveInto(encoder: GPUCommandEncoder): void {
         if (this.used === 0) return;

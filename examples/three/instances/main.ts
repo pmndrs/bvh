@@ -15,8 +15,8 @@
 import { BatchedMesh, BoxGeometry, Color, ConeGeometry, IcosahedronGeometry, InstancedMesh, Matrix4, MeshStandardMaterial, Quaternion, TorusGeometry, Vector2, Vector3, type Mesh } from 'three';
 import { SceneTrees } from '@pmndrs/bvh';
 import { SceneTreesObject3DSync } from '@pmndrs/bvh/three';
-import { createApp } from '../../shared/app.ts';
-import { cameraRay, GpuRays } from '../../shared/gpu-rays.ts';
+import { cameraRay, createApp } from '../../shared/app.ts';
+import { GpuRays } from '../../shared/gpu-rays.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 
