@@ -1,0 +1,4 @@
+{
+    "description": "GPU spatial queries (closest point, sphere, box, oriented box, a caller's shapecast, the triangle helpers) against CpuMeshBvh on the oracle scenes: f32 and quantized nodes, records and indexed leaves, instanced and merged, masks on and off, per-triangle materials.",
+    "timeoutMs": 600000
+}

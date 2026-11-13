@@ -187,3 +187,107 @@ export async function cpuWalk(geometry: MeshGeometry): Promise<number> {
     // #endregion
     return (hit ? 1 : 0) + (blocked ? 1 : 0);
 }
+
+// #region gpu-closest-point
+import { CLOSEST_POINT_RECORD_BYTES, ClosestPointBatchKernel, POINT_QUERY_BYTES } from '@pmndrs/bvh';
+
+// #endregion
+
+export async function gpuClosestPoint(trees: SceneTrees, points: readonly [number, number, number][]): Promise<void> {
+    const device = trees.device;
+    // #region gpu-closest-point
+    const kernel = await ClosestPointBatchKernel.create(device, {
+        triangleLeaves: trees.triangleLeaves,
+        positionLayout: trees.positionLayout,
+        nodeFormat: trees.nodeFormat,
+    });
+    const count = points.length;
+    // One query per point: vec4f(point.xyz, maxDistance). Only triangles nearer than maxDistance count.
+    const data = new Float32Array(count * 4);
+    points.forEach((point, i) => data.set([...point, 1e30], i * 4));
+    const queries = device.createBuffer({ size: count * POINT_QUERY_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    const results = device.createBuffer({ size: count * CLOSEST_POINT_RECORD_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    device.queue.writeBuffer(queries, 0, data);
+
+    const encoder = device.createCommandEncoder();
+    kernel.encode(encoder, trees.traceBuffers, { queries, results, count, mask: 0xff });
+    device.queue.submit([encoder.finish()]);
+    // 48-byte records, words in CLOSEST_POINT_RECORD_WORD: distance (negative: nothing within maxDistance),
+    // instance, triangle, material, barycentrics, point (world) and normal (the triangle's authored front side).
+    // #endregion
+}
+
+export function gpuQueriesWgsl(): string {
+    // #region gpu-queries
+    const code = /* wgsl */ `
+${traceModuleWgsl({ queries: true })}
+fn nearestSurface(p: vec3f) -> vec3f {
+    let hit = bvhClosestPoint(p, 10.0);   // world space; hit.distance < 0: nothing within 10
+    return select(p, hit.point, hit.distance >= 0.0);
+}
+fn overlaps(p: vec3f, axes: mat3x3f) -> bool {
+    return bvhIntersectsSphere(p, 0.5)
+        || bvhIntersectsBox(p - vec3f(1.0), p + vec3f(1.0))
+        || bvhIntersectsOrientedBox(p, vec3f(2.0, 0.5, 0.5), axes);   // axes: orthonormal columns
+}`;
+    // #endregion
+    return code;
+}
+
+export function gpuShapecastWgsl(): string {
+    // #region gpu-shapecast
+    // Count the triangles within a radius of a point: the caller's three hooks, compiled into the walk.
+    const shapecast = /* wgsl */ `
+var<private> queryCenter: vec3f;
+var<private> queryRadiusSq: f32;
+var<private> touched: u32;
+
+fn bvhShapecastBounds(bounds: BvhShapecastBounds) -> f32 {
+    let distanceSq = bvhPointBoxDistanceSq(queryCenter, bounds.min, bounds.max);
+    return select(-1.0, distanceSq, distanceSq <= queryRadiusSq);   // < 0 skips the box; else the lower goes first
+}
+
+fn bvhShapecastKeep(score: f32) -> bool {
+    return true;   // asked when a pushed box is popped, with its score: false skips it
+}
+
+fn bvhShapecastTriangle(triangle: BvhShapecastTriangle) -> bool {
+    let offset = bvhClosestPointToTriangle(queryCenter, triangle.a, triangle.b, triangle.c).point - queryCenter;
+    if (dot(offset, offset) <= queryRadiusSq) {
+        touched += 1u;   // triangle.instance and triangle.triangle name it; its corners are in world space
+    }
+    return false;   // true stops the cast
+}`;
+    const code = /* wgsl */ `
+${traceModuleWgsl({ shapecast })}
+fn countNear(p: vec3f, radius: f32) -> u32 {
+    queryCenter = p;
+    queryRadiusSq = radius * radius;
+    touched = 0u;
+    _ = bvhShapecast();
+    return touched;
+}`;
+    // #endregion
+    return code;
+}
+
+// #region triangle-helpers
+import { triangleGeometryWgsl } from '@pmndrs/bvh';
+
+// #endregion
+
+export function triangleHelpers(): string {
+    // #region triangle-helpers
+    // The walk's watertight test and the closest point on one triangle, with no scene and no bindings.
+    const code = /* wgsl */ `
+${triangleGeometryWgsl()}
+fn pick(ray: BvhRay, a: vec3f, b: vec3f, c: vec3f) -> f32 {
+    let hit = bvhIntersectRayTriangle(ray, a, b, c);   // hit.hit, hit.t, hit.barycentrics, hit.frontFacing
+    return select(-1.0, hit.t, hit.hit);
+}
+fn snap(p: vec3f, a: vec3f, b: vec3f, c: vec3f) -> vec3f {
+    return bvhClosestPointToTriangle(p, a, b, c).point;   // .barycentrics: the weights of b and c
+}`;
+    // #endregion
+    return code;
+}

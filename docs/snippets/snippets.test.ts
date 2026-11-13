@@ -61,7 +61,8 @@ describe('docs pages', () => {
     });
 
     it('name only WGSL the walk declares', () => {
-        const module = traceModuleWgsl();
+        // The walk with everything compiled in: the spatial queries and a shapecast whose hooks a kernel declares.
+        const module = traceModuleWgsl({ queries: true, shapecast: '' });
         const missing: string[] = [];
         for (const page of docPages()) {
             for (const [, block] of readFileSync(page, 'utf8').matchAll(/```wgsl\n([\s\S]*?)```/g)) {
@@ -106,6 +107,9 @@ describe('docs samples that need no GPU', () => {
         expect(tracing.maskedWgsl()).toContain('fn bvhTraceAnyMasked');
         expect(tracing.filterWgsl()).toContain('candidate.query == BVH_QUERY_ANY');
         expect(tracing.noMasks()).not.toContain('bvhTraceAnyMasked');
+        expect(tracing.gpuQueriesWgsl()).toContain('fn bvhClosestPoint(point: vec3f, maxDistance: f32) -> BvhClosestHit');
+        expect(tracing.gpuShapecastWgsl()).toContain('fn bvhShapecast() -> bool');
+        expect(tracing.triangleHelpers()).not.toContain('@binding');
     });
 
     it('raycast, shapecast, bvhcast and closest point on a CpuMeshBvh', async () => {

@@ -109,13 +109,13 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 | 8.2 | `fns.raycastAnyHit` | have | `bvhTraceAny` / `traceAny` | as 8.1 |
 | 8.3 | `BVHComputeData`, `update`, `updateTransforms` | have | `SceneTrees` + `SceneTreesObject3DSync` + `BvhTraceNodes` (`docs/internals/three.md`) | as 5.1 |
 | 8.4 | `BVHComputeData.updateAsync` | partial | `SceneTrees.whenBuilt()` / `whenRefined()` (`src/scene/scene-trees.ts:830,836`) | None |
-| 8.5 | `fns.closestPointToPoint` (GPU) | missing | | None found |
-| 8.6 | `getShapecastFn` (GPU shapecast) | missing | | None found |
+| 8.5 | `fns.closestPointToPoint` (GPU) | have | `bvhClosestPoint(point, maxDistance) -> BvhClosestHit` (distance, instance, triangle, material, barycentrics, point, normal) and `bvhClosestPointMasked` in the trace module with `queries: true` (`src/trace/query-wgsl.ts`), over the whole scene (top level and mesh trees, instanced or merged, every node and triangle format), in world space through scaled, rotated and mirrored instances; `ClosestPointBatchKernel` (points in, 48-byte records out; `src/trace/trace-gpu.ts`); TSL `BvhTraceNodes.closestPoint` with `queries: true`. Differences: scene-wide rather than one mesh; `maxDistance` culls triangles too (three-mesh-bvh's `maxThreshold` culls boxes only); no `minThreshold` (the walk stops at distance 0). Checked against `CpuMeshBvh.closestPointToPoint` by `tests/gpu/pages/query-oracle` (2026-11-13) | None found |
+| 8.6 | `getShapecastFn` (GPU shapecast) | partial | `traceModuleWgsl({ shapecast })`: one shapecast walk compiled around the caller's WGSL hooks `bvhShapecastBounds` (a box's score; negative skips it, lower first), `bvhShapecastKeep` (re-asked on pop, for distance culling) and `bvhShapecastTriangle` (world-space corners, instance, triangle; true stops), as `bvhTrianglePasses` is compiled into the ray walk; `bvhShapecast()` / `bvhShapecastMasked(mask)`. Helpers built on it: `bvhIntersectsSphere`, `bvhIntersectsBox`, `bvhIntersectsOrientedBox` (`queries: true`), checked against `intersectsSphere` / `intersectsBox` by `query-oracle`. Partial: the hooks are WGSL, not TSL callbacks as `getShapecastFn` takes (`BvhTraceNodes` passes `shapecast` through to its module); no `intersectsRange` or `contained` | None found |
 | 8.7 | `fns.sampleTrianglePoint` | won't | Out of scope: the package ends at the hit (HANDOFF "Rules", `docs/internals/README.md`). Interpolating attributes at a point on a triangle belongs to the renderer or the tracing layer above the package; a hit gives `triangle` and `barycentrics` for it (2026-11-13) | None found |
-| 8.8a | WGSL helpers `intersectRayTriangle`, `closestPointToTriangle` | missing | Geometry, so in scope. The watertight ray-triangle test sits inside our walk (`src/trace/wgsl.ts`), not exported as a function | None found |
+| 8.8a | WGSL helpers `intersectRayTriangle`, `closestPointToTriangle` | have | `bvhIntersectRayTriangle(ray, a, b, c) -> BvhTriangleHit` (the walk's own watertight test, `bvhMakeRaySetup` + `bvhIntersectWatertight`, not a copy) and `bvhClosestPointToTriangle(point, a, b, c) -> BvhTrianglePoint` (three's `Triangle.closestPointToPoint`, with barycentrics), in every trace module and binding-free in `triangleGeometryWgsl()` (`src/trace/wgsl.ts`); checked by `query-oracle` (2026-11-13) | None found |
 | 8.8b | WGSL helper `ndcToCameraRay` | won't | Out of scope: making camera rays is the renderer's job, above the package, which ends at the hit (2026-11-13) | None found |
 | 8.9 | `ClusteredBVH` | missing | | None found |
-| 8.10 | SDF generation (GPU distance queries, README example) | missing | Needs 8.5 and 8.6 | None found |
+| 8.10 | SDF generation (GPU distance queries, README example) | missing | Unblocked (2026-11-13): 8.5 and 8.6 exist. A signed field also needs an inside test (ray parity or winding number), not built. The `three/sdf` example (HANDOFF) can start on `bvhClosestPoint` | None found |
 | 8.11 | `wgslTagFn`, `rayStruct`, `rayIntersectionResultStruct` | have | three's `wgslFn(code, [bvh.module])`, `BvhRay`, `BvhHit` (mapping table in `docs/internals/three.md`) | Denoiser (`shadows.ts:36`), upscaler (`RealtimeRadianceCascades.js:14`), ddgi-research (`tests/gpu.js:5`) |
 | 8.12 | GLSL and WebGL2: `MeshBVHUniformStruct`, `BVHShaderGLSL`, `shaderStructs`, `shaderIntersectFunction`, `VertexAttributeTexture` classes | won't | WebGL2 isn't a target (HANDOFF "Rules") | drei (`legacy/Materials/MeshRefractionMaterial/MeshRefractionMaterial.tsx:8,20,181,255`), pathtracer (`materials/pathtracing/PhysicalPathTracingMaterial.js:4,87`, `materials/surface/AmbientOcclusionMaterial.js:3,49`, `uniforms/FloatAttributeTextureArray.js:2`) |
 
@@ -128,7 +128,7 @@ Not counted: `BVH.getBoundingBox` (now `CpuMeshBvh.getBoundingBox`, which writes
 
 ## Counts
 
-52 rows: **31 have, 7 partial, 9 missing, 5 won't** (4.8, 8.7, 8.8b, 8.12, 9.2). Row 8.8 was split on 2026-11-13 (8.8a geometry, still missing; 8.8b `ndcToCameraRay`, won't), and 8.7 became won't under the scope rule (the package ends at the hit). At the audit, before items 1 to 5: 12 have, 13 partial, 23 missing (51 rows). Every "won't" has its reason in its row; P8's done-when also wants them in the "Coming from three-mesh-bvh" docs page.
+52 rows: **33 have, 8 partial, 6 missing, 5 won't** (4.8, 8.7, 8.8b, 8.12, 9.2). On 2026-11-13 the GPU queries landed: 8.5 and 8.8a have, 8.6 partial (WGSL hooks, not TSL callbacks); 8.10 is unblocked. Before them: 31 have, 7 partial, 9 missing. Row 8.8 was split on 2026-11-13 (8.8a geometry; 8.8b `ndcToCameraRay`, won't), and 8.7 became won't under the scope rule (the package ends at the hit). At the audit, before items 1 to 5: 12 have, 13 partial, 23 missing (51 rows). Every "won't" has its reason in its row; P8's done-when also wants them in the "Coming from three-mesh-bvh" docs page.
 
 ## Proposed build-out order
 
@@ -152,7 +152,7 @@ P8's order was: Q2 closest point and shapecast plus shapes; the drop-in three in
 | 7 (done) | `MeshBVHHelper` in `/three` | 6.4 | S | drei (story only) |
 | 8 | `StaticGeometryGenerator` | 6.3 | M | pathtracer (has its own) |
 | 9 | CPU object BVH queries: scene `raycast`, `shapecast`, frustum culling | 5.2, 5.3, 5.6 | M | none found; P8 lists it |
-| 10 | GPU closest point and shapecast in WGSL, with `intersectRayTriangle` and `closestPointToTriangle`, then SDF; `ClusteredBVH` after (`sampleTrianglePoint` and `ndcToCameraRay` won't: out of scope) | 8.5, 8.6, 8.8a, 8.9, 8.10 | L | none found (needs a user first, e.g. the SDF compare) |
+| 10 (part done) | GPU closest point and shapecast in WGSL, with `intersectRayTriangle` and `closestPointToTriangle` (done 2026-11-13), then SDF (needs an inside test); `ClusteredBVH` after (`sampleTrianglePoint` and `ndcToCameraRay` won't: out of scope) | 8.5, 8.6, 8.8a, 8.9, 8.10 | L | none found (needs a user first, e.g. the SDF compare) |
 | 11 | Points, lines, `SkinnedMeshBVH` | 3.2-3.4 | L | none found |
 | 12 (part done) | Per-tree utilities: `estimateMemoryInBytes` and `getBVHExtremes` (done); three-mesh-bvh-format `serialize`, `getJSONStructure` (left) | 7.1-7.3, 7.5 | S | none found |
 
