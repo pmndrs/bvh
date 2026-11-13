@@ -208,13 +208,13 @@ What the surveyed callers pass, all accepted: homefig `{ maxLeafSize: 10 }`; dre
 
 Two things in homefig's own code depend on the tree, with either library: the float sensor keeps the first of several tied hits its walk reaches (176 of 2,000 capsules pick a different one of the same tied points), and its vertical test takes `|dot|`, so it accepts hits above the sensor, outside the box it culls with, which a tree reaches only when they share a leaf with a triangle inside (18 of 2,000 differ for that). With the cull box applied to each triangle too, all 2,000 agree.
 
-**Closest point** (`node --experimental-transform-types bench/closest-point.ts --rounds 10`, same machine and room, 2,000 points per row, 200 placements):
+**Closest point** (`node --experimental-transform-types bench/closest-point.ts --rounds 10`, same machine and room, 2,000 points per row, 200 placements; rerun 2026-11-13 after the CPU query pass made `closestPointToPoint` a flat walk, under load):
 
 | Query | Agreement with three-mesh-bvh 0.9.18 | Ours | three-mesh-bvh |
 | --- | --- | --- | --- |
-| `closestPointToPoint`, random points in the room's box | 2,000 / 2,000 the same distance; 1,759 the same triangle, 241 another equally near | 5.1 us | 5.5 us |
-| `closestPointToPoint`, points just off random surfaces | 2,000 / 2,000; 1,755 the same triangle, 245 tied | 8.1-8.6 us | 7.5 us |
-| `closestPointToGeometry`, a 180-triangle icosphere with its own tree, rigidly placed | 200 / 200 the same distance | 30.8 ms | 28.7 ms |
+| `closestPointToPoint`, random points in the room's box | 2,000 / 2,000 the same distance; 1,759 the same triangle, 241 another equally near | 1.6 us | 4.9 us |
+| `closestPointToPoint`, points just off random surfaces | 2,000 / 2,000; 1,755 the same triangle, 245 tied | 2.4 us | 6.6 us |
+| `closestPointToGeometry`, a 180-triangle icosphere with its own tree, rigidly placed | 200 / 200 the same distance | 28.4 ms | 27.7 ms |
 
 Raycasts per second, Node 22 on the Apple M5 while other jobs were running (`node --experimental-transform-types bench/three-raycast.ts --seconds 2`, three runs, median). The mesh is a torus knot, the rays come from outside, and 81% of them hit:
 

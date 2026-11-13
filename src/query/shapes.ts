@@ -1287,6 +1287,168 @@ export function orientedBoxIntersectsTriangle(obb: OrientedBoxState, triangleLik
     return true;
 }
 
+/** Floats of a box packed by {@link packOrientedBox}: 8 corners, 3 axes, their 3 intervals, the 3 aligned intervals. */
+export const PACKED_ORIENTED_BOX_FLOATS = 45;
+const PACKED_AXES = 24;
+const PACKED_BOUNDS = 33;
+const PACKED_ALIGNED = 39;
+
+/**
+ * An updated oriented box's corners, axes and intervals as plain numbers
+ * (`CpuMeshBvh.intersectsBox` reads them per triangle, with no objects):
+ * corners `x, y, z` at 0-23, axes at 24-32, `min, max` per axis at 33-38,
+ * the aligned `min, max` per axis at 39-44.
+ */
+export function packOrientedBox(obb: OrientedBoxState, out: Float64Array): Float64Array {
+    if (obb.needsUpdate) updateOrientedBox(obb);
+    for (let i = 0; i < 8; i++) {
+        const p = obb.points[i];
+        out[i * 3] = p.x;
+        out[i * 3 + 1] = p.y;
+        out[i * 3 + 2] = p.z;
+    }
+    for (let i = 0; i < 3; i++) {
+        const axis = obb.satAxes[i];
+        out[PACKED_AXES + i * 3] = axis.x;
+        out[PACKED_AXES + i * 3 + 1] = axis.y;
+        out[PACKED_AXES + i * 3 + 2] = axis.z;
+        out[PACKED_BOUNDS + i * 2] = obb.satBounds[i].min;
+        out[PACKED_BOUNDS + i * 2 + 1] = obb.satBounds[i].max;
+        out[PACKED_ALIGNED + i * 2] = obb.alignedSatBounds[i].min;
+        out[PACKED_ALIGNED + i * 2 + 1] = obb.alignedSatBounds[i].max;
+    }
+    return out;
+}
+
+/**
+ * Scratch for {@link packedBoxIntersectsTriangle}: the corners (0-8), the axis
+ * being tested (9-11) and the triangle's interval on it (12, 13). The helpers
+ * read and write it instead of taking numbers, because a call V8 doesn't
+ * inline boxes every number argument (an allocation per call).
+ */
+const sat = new Float64Array(14);
+
+/** The triangle's interval along `sat`'s axis, as `SeparatingAxisBounds.setFromPoints` finds it (a NaN projection is skipped). */
+function triangleRange(s: Float64Array): void {
+    const x = s[9], y = s[10], z = s[11];
+    let min = Infinity;
+    let max = -Infinity;
+    let v = x * s[0] + y * s[1] + z * s[2];
+    min = v < min ? v : min;
+    max = v > max ? v : max;
+    v = x * s[3] + y * s[4] + z * s[5];
+    min = v < min ? v : min;
+    max = v > max ? v : max;
+    v = x * s[6] + y * s[7] + z * s[8];
+    min = v < min ? v : min;
+    max = v > max ? v : max;
+    s[12] = min;
+    s[13] = max;
+}
+
+/** Whether the triangle's interval and the packed box's corners are apart along `sat`'s axis (`SeparatingAxisBounds.isSeparated`, triangle first). */
+function separatedFromBox(box: Float64Array, s: Float64Array): boolean {
+    triangleRange(s);
+    const x = s[9], y = s[10], z = s[11];
+    let min = Infinity;
+    let max = -Infinity;
+    for (let i = 0; i < 24; i += 3) {
+        const v = x * box[i] + y * box[i + 1] + z * box[i + 2];
+        min = v < min ? v : min;
+        max = v > max ? v : max;
+    }
+    return s[12] > max || min > s[13];
+}
+
+/**
+ * {@link orientedBoxIntersectsTriangle} on a {@link packOrientedBox} box and a
+ * triangle whose corners are `x, y, z` at offsets `a`, `b` and `c` of
+ * `corners`: the same separating axes with the same arithmetic, so the same
+ * answer bit for bit (NaN included), with no triangle object or cached
+ * state. The triangle's normal and edges are worked out here as
+ * `updateExtendedTriangle` works them out.
+ */
+export function packedBoxIntersectsTriangle(box: Float64Array, corners: Float32Array | Float64Array, a: number, b: number, c: number): boolean {
+    const s = sat;
+    const ax = (s[0] = corners[a]), ay = (s[1] = corners[a + 1]), az = (s[2] = corners[a + 2]);
+    const bx = (s[3] = corners[b]), by = (s[4] = corners[b + 1]), bz = (s[5] = corners[b + 2]);
+    const cx = (s[6] = corners[c]), cy = (s[7] = corners[c + 1]), cz = (s[8] = corners[c + 2]);
+    // The box's own axes against the triangle's corners (the cheap test that turns most triangles away).
+    for (let i = 0; i < 3; i++) {
+        const axis = PACKED_AXES + i * 3;
+        s[9] = box[axis];
+        s[10] = box[axis + 1];
+        s[11] = box[axis + 2];
+        triangleRange(s);
+        if (box[PACKED_BOUNDS + i * 2] > s[13] || s[12] > box[PACKED_BOUNDS + i * 2 + 1]) return false;
+    }
+    // triangleGetNormal: (c - b) x (a - b), normalized, zero when degenerate.
+    const ux = cx - bx, uy = cy - by, uz = cz - bz;
+    const vx = ax - bx, vy = ay - by, vz = az - bz;
+    let nx = uy * vz - uz * vy;
+    let ny = uz * vx - ux * vz;
+    let nz = ux * vy - uy * vx;
+    const lengthSq = nx * nx + ny * ny + nz * nz;
+    if (lengthSq > 0) {
+        const scale = 1 / Math.sqrt(lengthSq);
+        nx *= scale;
+        ny *= scale;
+        nz *= scale;
+    } else {
+        nx = ny = nz = 0;
+    }
+    // The triangle's axes: the normal, a - b, b - c (and c - a for the cross products).
+    const e1x = ax - bx, e1y = ay - by, e1z = az - bz;
+    const e2x = bx - cx, e2y = by - cy, e2z = bz - cz;
+    const e3x = cx - ax, e3y = cy - ay, e3z = cz - az;
+    s[9] = nx;
+    s[10] = ny;
+    s[11] = nz;
+    if (separatedFromBox(box, s)) return false;
+    s[9] = e1x;
+    s[10] = e1y;
+    s[11] = e1z;
+    if (separatedFromBox(box, s)) return false;
+    s[9] = e2x;
+    s[10] = e2y;
+    s[11] = e2z;
+    if (separatedFromBox(box, s)) return false;
+    // cross(box axis, triangle axis) for each pair (three's crossVectors).
+    for (let i = 0; i < 3; i++) {
+        const axis = PACKED_AXES + i * 3;
+        const px = box[axis], py = box[axis + 1], pz = box[axis + 2];
+        for (let i2 = 0; i2 < 4; i2++) {
+            const tx = i2 === 0 ? nx : i2 === 1 ? e1x : i2 === 2 ? e2x : e3x;
+            const ty = i2 === 0 ? ny : i2 === 1 ? e1y : i2 === 2 ? e2y : e3y;
+            const tz = i2 === 0 ? nz : i2 === 1 ? e1z : i2 === 2 ? e2z : e3z;
+            s[9] = py * tz - pz * ty;
+            s[10] = pz * tx - px * tz;
+            s[11] = px * ty - py * tx;
+            if (separatedFromBox(box, s)) return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * {@link orientedBoxIntersectsBox} for a packed box that is axis-aligned
+ * (made with no matrix, or the identity) with finite corners: only the
+ * aligned intervals are tested. The box's own three axes are then
+ * `(min - max)` along x, y and z, and a product with a fixed number is
+ * monotone, so those three tests can't part what the aligned ones didn't
+ * (NaN and infinite node corners part nothing on either). Same answer.
+ */
+export function alignedPackedBoxIntersectsBox(box: Float64Array, minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number): boolean {
+    return !(
+        box[PACKED_ALIGNED] > maxX ||
+        minX > box[PACKED_ALIGNED + 1] ||
+        box[PACKED_ALIGNED + 2] > maxY ||
+        minY > box[PACKED_ALIGNED + 3] ||
+        box[PACKED_ALIGNED + 4] > maxZ ||
+        minZ > box[PACKED_ALIGNED + 5]
+    );
+}
+
 /** The point of the oriented box (solid) closest to `point`, into `target` (three-mesh-bvh's `OrientedBox.closestPointToPoint`). */
 export function orientedBoxClosestPointToPoint<T extends BvhVector3Like>(obb: OrientedBoxState, point: BvhVector3Like, target: T): T {
     if (obb.needsUpdate) updateOrientedBox(obb);

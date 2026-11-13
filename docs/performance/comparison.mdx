@@ -14,7 +14,9 @@ gets no ratio on it: a faster wrong answer is not faster.** The full tables, the
 > [!NOTE]
 > Every number here is from one Apple M5 Pro (Node 22 and headless Chrome), and is **indicative**. The suite has not run
 > on the RTX 3060 yet; our own levers' RTX 3060 numbers are in [Builds and tracing](/performance/builds-and-tracing).
-> The GPU rows were taken with `f32` nodes, the default before 2026-11-13 (quantized nodes are the default now).
+> The GPU rows were taken with `f32` nodes, the default before 2026-11-13 (quantized nodes are the default now). The CPU
+> box, closest-point and refit numbers are from the CPU query pass (2026-11-13), measured while other projects loaded the
+> machine (load average 8–10): ranges over two full runs before and two after.
 
 ## The libraries
 
@@ -38,8 +40,8 @@ gets no ratio on it: a faster wrong answer is not faster.** The full tables, the
 
 Measured on the same harness. These are open items, not footnotes:
 
-- **Rapier** answers box queries 2.3–2.7× faster and closest point 1.7–2.4× faster.
-- **three-mesh-bvh, CPU:** refits 1.6–2× faster (it was 6–7× until our refit stopped sorting and allocating per node: ours went from 1,001 to 359 ms on Sponza; we still rewrite 48-byte records), and answers box queries 1.2–1.4× faster.
+- **Rapier** ties our closest point on the torus knot (0.99–1.04×). Until the CPU query pass of 2026-11-13 it answered box queries 2.3–2.7× and closest point 1.7–2.4× faster than ours; ours now leads both everywhere else (Rapier 0.56–0.88× on boxes, 0.64–0.77× on closest point). Both queries became flat walks over the typed arrays with no objects per node or triangle, giving the same answers bit for bit ([`compare/RESULTS.md`](https://github.com/pmndrs/bvh/blob/main/compare/RESULTS.md), "compare/queries").
+- **three-mesh-bvh, CPU:** refits Sponza (5.7M triangles) 1.3–1.5× faster. It was 6–7× faster until our refit stopped sorting and allocating per node, and 1.6–2× until the CPU query pass made it one pass. The knot and the room are now level (0.93–1.06×). We still write 48-byte triangle records and 3 million 64-byte nodes, where three-mesh-bvh writes 1.7 million 32-byte nodes over the app's positions. Its box queries (1.2–1.4× ours before) and closest point are 0.23–0.54× ours now. With SAH its sphere queries are a little faster than ours on the knot (1.05–1.13×) and Sponza (0.95–1.24×).
 - **three-mesh-bvh, GPU:** its closest-hit walk is 1.1–1.2× ours on the furnished room. Its any-hit from outside the room was 3.2× our default kernel's: our any-hit enters the farther child first (right for shadow rays from surfaces), and a few rays per SIMD group of 32 went deep into the far side's furniture. With `anyHitOrder: 'larger'` (enter the larger child first) ours is 1.73× theirs on those rays; it stays a setting because it costs 0.78× on merged surface rays on the M5 and 0.80–0.87× on the RTX 3060 ([trace design](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/trace.md)), and merged trees are the default.
 - **bvh.js** builds its scene tree about 3× faster.
 - **Memory:** our CPU trees (`CpuMeshBvh`, what the suite measures) hold about 9–10× more bytes beyond the app's geometry than three-mesh-bvh, because our triangle records copy the corners. On the GPU the default scene now has quantized nodes: Sponza 355.5 MiB beyond the geometry against three-mesh-bvh's 51.2, about 7×. Indexed leaves take it to 225.5 ([memory page](/performance/memory)). Building one huge mesh with tinybvh grows its WebAssembly memory to about 230 bytes per triangle while the build runs (Sponza as one mesh: 1.3 GiB); the builder now drops that memory afterwards and the worker pool ends such a worker, so the build leaves 391 MiB behind instead of 1.7 GiB ([workers](/workers/workers)).

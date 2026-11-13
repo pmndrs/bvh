@@ -64,10 +64,10 @@
  * and {@link CpuMeshBvh.serialize} writes `f32` nodes.
  */
 
-import { GPU_LAYOUT_EMPTY_CHILD, GPU_LAYOUT_MAX_LEAF_PRIMITIVES, GPU_LAYOUT_NO_PARENT, GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_NODE_WORD, GPU_LAYOUT_NODE_WORDS, GPU_LAYOUT_TRIANGLE_BYTES, GPU_LAYOUT_TRIANGLE_WORD, type GpuLayoutMeshBvh } from '../gpu-layout.ts';
+import { GPU_LAYOUT_CHILD_STRIDE_WORDS, GPU_LAYOUT_EMPTY_CHILD, GPU_LAYOUT_MAX_LEAF_PRIMITIVES, GPU_LAYOUT_NO_PARENT, GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_NODE_WORD, GPU_LAYOUT_NODE_WORDS, GPU_LAYOUT_TRIANGLE_BYTES, GPU_LAYOUT_TRIANGLE_WORD, type GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import type { MeshInput } from '../mesh-input.ts';
 import { dequantizeNodes } from '../quantized-nodes.ts';
-import { refitOrderOf, refitRecordsOnCpu } from '../refit-cpu.ts';
+import { BVH_FLOAT_MAX, refitOrderOf } from '../refit-cpu.ts';
 import { deserializeLayout, serializeLayout } from '../serialize.ts';
 import { recordsFromIndexed } from '../indexed-leaves.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
@@ -76,16 +76,20 @@ import { buildMeshBvhWithTinyBvh } from '../trace/mesh-bvh-topology.ts';
 import { buildTopLevel, IDENTITY_TRANSFORM, type TopLevelBvh } from '../trace/top-level.ts';
 import type { TriangleCandidate } from '../trace/triangle-filter.ts';
 import {
+    alignedPackedBoxIntersectsBox,
     BvhBox3,
     boxArraysIntersect,
     ExtendedTriangle,
     invertMatrix,
     matrixElements,
+    orientedBoxIntersectsBox,
+    packedBoxIntersectsTriangle,
+    packOrientedBox,
+    PACKED_ORIENTED_BOX_FLOATS,
     transformBoxArray,
     BvhMatrix4,
     OrientedBox,
     sphereIntersectsBox,
-    triangleClosestPointToPoint,
     triangleDistanceToTriangle,
     triangleIntersectsTriangle,
     transformPoint,
@@ -99,10 +103,16 @@ import {
 } from './shapes.ts';
 
 const TRIANGLE_WORDS = GPU_LAYOUT_TRIANGLE_BYTES / 4;
-/** Scratch for closestPointToPoint, which runs no user code (so it can't be re-entered mid-call). */
-const CLOSEST_QUERY = new BvhVector3();
-const CLOSEST_TEMP = new BvhVector3();
+/** Scratch for closestPointToPoint and intersectsBox, which run no user code (so they can't be re-entered mid-call). */
+/** The query point (0-2), the point found on a triangle (3-5) and its sliver flag (6): {@link closestOnTriangle}'s numbers. */
+const CLOSEST_NEAR = new Float64Array(7);
 const CLOSEST_BEST = new BvhVector3();
+const BOX_QUERY_OBB = new OrientedBox();
+const BOX_QUERY_PACKED = new Float64Array(PACKED_ORIENTED_BOX_FLOATS);
+const BOX_QUERY_NODE_BOX = new BvhBox3();
+/** Words from a left child's index and count to the right child's (3 to 7, 11 to 15). */
+const SIDE_REFERENCE_STRIDE = GPU_LAYOUT_NODE_WORD.rightIndex - GPU_LAYOUT_NODE_WORD.leftIndex;
+if (GPU_LAYOUT_NODE_WORD.rightCount - GPU_LAYOUT_NODE_WORD.leftCount !== SIDE_REFERENCE_STRIDE) throw new Error('CpuMeshBvh: the node layout changed');
 const CORNER_WORDS = [GPU_LAYOUT_TRIANGLE_WORD.vertex0, GPU_LAYOUT_TRIANGLE_WORD.vertex1, GPU_LAYOUT_TRIANGLE_WORD.vertex2] as const;
 const VERTEX0 = GPU_LAYOUT_TRIANGLE_WORD.vertex0;
 const VERTEX1 = GPU_LAYOUT_TRIANGLE_WORD.vertex1;
@@ -402,8 +412,11 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
     /** The current raycast's acceptance test and hit list (null: closest only). */
     private accept: BvhTriangleAccept | null = null;
     private collect: BvhRayIntersection[] | null = null;
-    /** {@link refit}'s node order (the shape's, fixed), kept between refits. */
+    /** {@link refit}'s node order (the shape's, fixed), kept between refits: {@link REVERSE_NODE_ORDER} when every child follows its parent. */
     private refitOrder: Uint32Array | null = null;
+    /** The flat queries' walk stacks (slots, and closest point's scores), made on first use. */
+    private slotStack: Uint32Array | null = null;
+    private scoreStack: Float64Array | null = null;
 
     constructor(input: GpuLayoutMeshBvh, options: CpuMeshBvhOptions = {}) {
         // Indexed trees are queried as records: the CPU queries, the depth-first reorder and the
@@ -885,11 +898,76 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
      * an {@link OrientedBox} shapecast. A three `Box3` and `Matrix4` pass.
      */
     intersectsBox(box: BvhBox3Like, boxToMesh?: BvhMatrix4Like | null): boolean {
-        const obb = new OrientedBox().set(box.min, box.max, boxToMesh);
-        return this.coreShapecast({
-            intersectsBounds: (bounds) => obb.intersectsBox(bounds),
-            intersectsTriangle: (triangle) => obb.intersectsTriangle(triangle),
-        });
+        // The shapecast above, flattened (it runs no user code): the same boxes tested in the same
+        // walk, with the oriented box's numbers packed once and each triangle tested from the
+        // records' corners (packedBoxIntersectsTriangle: the same axes and arithmetic). An
+        // axis-aligned box with finite corners tests node boxes on the aligned axes only
+        // (alignedPackedBoxIntersectsBox says why that is the same answer).
+        const obb = BOX_QUERY_OBB.set(box.min, box.max, boxToMesh);
+        const packed = packOrientedBox(obb, BOX_QUERY_PACKED);
+        const { min, max } = box;
+        const aligned = isIdentityMatrix(boxToMesh) && min.x - min.x + (min.y - min.y) + (min.z - min.z) + (max.x - max.x) + (max.y - max.y) + (max.z - max.z) === 0;
+        const words = this.nodeWords;
+        const floats = this.nodeFloats;
+        let root = 0;
+        while (words[root * GPU_LAYOUT_NODE_WORDS + GPU_LAYOUT_NODE_WORD.rightIndex] === GPU_LAYOUT_EMPTY_CHILD) {
+            const base = root * GPU_LAYOUT_NODE_WORDS;
+            const count = words[base + GPU_LAYOUT_NODE_WORD.leftCount];
+            // A one-leaf tree: its triangles are tested without a box test, as traverse reports the root leaf.
+            if (count > 0) return this.packedBoxMeetsRange(packed, words[base + GPU_LAYOUT_NODE_WORD.leftIndex], count);
+            root = words[base + GPU_LAYOUT_NODE_WORD.leftIndex];
+        }
+        const stack = this.walkSlots();
+        let top = 0;
+        stack[top++] = root * 2 + 1;
+        stack[top++] = root * 2;
+        const nodeBox = aligned ? null : BOX_QUERY_NODE_BOX;
+        while (top > 0) {
+            const slot = stack[--top];
+            const node = slot >> 1;
+            const side = slot & 1;
+            const boxWord = node * GPU_LAYOUT_NODE_WORDS + side * GPU_LAYOUT_CHILD_STRIDE_WORDS;
+            const minX = floats[boxWord], minY = floats[boxWord + 1], minZ = floats[boxWord + 2];
+            const maxX = floats[boxWord + 4], maxY = floats[boxWord + 5], maxZ = floats[boxWord + 6];
+            if (nodeBox) {
+                nodeBox.min.x = minX;
+                nodeBox.min.y = minY;
+                nodeBox.min.z = minZ;
+                nodeBox.max.x = maxX;
+                nodeBox.max.y = maxY;
+                nodeBox.max.z = maxZ;
+                if (!orientedBoxIntersectsBox(obb, nodeBox)) continue;
+            } else if (!alignedPackedBoxIntersectsBox(packed, minX, minY, minZ, maxX, maxY, maxZ)) {
+                continue;
+            }
+            const referenceWord = node * GPU_LAYOUT_NODE_WORDS + side * SIDE_REFERENCE_STRIDE;
+            const index = words[referenceWord + GPU_LAYOUT_NODE_WORD.leftIndex];
+            const count = words[referenceWord + GPU_LAYOUT_NODE_WORD.leftCount];
+            if (count > 0) {
+                if (this.packedBoxMeetsRange(packed, index, count)) return true;
+                continue;
+            }
+            // A typed array drops a write past its end without a word: never on a checked tree, but say so if it happens.
+            if (top + 2 > stack.length) throw walkStackError(stack.length);
+            if (words[index * GPU_LAYOUT_NODE_WORDS + GPU_LAYOUT_NODE_WORD.rightIndex] !== GPU_LAYOUT_EMPTY_CHILD) stack[top++] = index * 2 + 1;
+            stack[top++] = index * 2;
+        }
+        return false;
+    }
+
+    /** Whether a packed box meets any triangle at tree positions `offset` to `offset + count - 1`. */
+    private packedBoxMeetsRange(packed: Float64Array, offset: number, count: number): boolean {
+        const t = this.triangleFloats;
+        for (let position = offset, end = offset + count; position < end; position++) {
+            const b = position * TRIANGLE_WORDS;
+            if (packedBoxIntersectsTriangle(packed, t, b + VERTEX0, b + VERTEX1, b + VERTEX2)) return true;
+        }
+        return false;
+    }
+
+    /** This tree's walk stack for the flat queries (they run no user code, so one per tree is enough): `traverse`'s bound. */
+    private walkSlots(): Uint32Array {
+        return (this.slotStack ??= new Uint32Array(2 * (this.treeDepth + 2) + 2));
     }
 
     /** Whether any triangle touches the sphere (three-mesh-bvh's `intersectsSphere`). A three `Sphere` passes. */
@@ -1023,42 +1101,136 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
      *
      * As in three-mesh-bvh, `maxThreshold` culls boxes, not triangles: a
      * triangle in a box nearer than it may still be returned past it.
+     *
+     * One departure: on a sliver (the squared sine of its angle at `a` at
+     * most 1e-7) the nearer of three's point and the nearest point of its
+     * three edges is kept, as the GPU's `bvhClosestPointToTriangle` does,
+     * because three's regions cancel there (see `closestOnTriangle`).
      */
     closestPointToPoint(point: BvhVec3Like, target: BvhClosestPointTarget = {}, minThreshold = 0, maxThreshold = Infinity): BvhClosestPoint | null {
-        const [px, py, pz] = readVec3(point);
-        // Module scratch: nothing below calls user code, and writeClosestPoint copies `best` out.
-        const query = CLOSEST_QUERY.set(px, py, pz);
-        const temp = CLOSEST_TEMP;
-        const best = CLOSEST_BEST;
+        let px: number, py: number, pz: number;
+        if ('x' in point) {
+            px = point.x;
+            py = point.y;
+            pz = point.z;
+        } else {
+            px = point[0];
+            py = point[1];
+            pz = point[2];
+        }
+        // The shapecast described above, flattened (it runs no user code): the same walk, the same
+        // child order and scores, the same triangles in the same order, three's closest-point
+        // arithmetic on the records' corners (closestOnTriangle), so the same answer bit for bit.
+        // A child is pushed only if its score passes the test it would meet when popped: the best
+        // distance only shrinks, so a box that fails now fails then.
         const minThresholdSq = minThreshold * minThreshold;
         const maxThresholdSq = maxThreshold * maxThreshold;
-        let closestDistanceSq = Infinity;
-        let closestTriangle = -1;
-        this.coreShapecast({
-            boundsTraverseOrder: (box) => {
-                // three: temp.copy(point).clamp(box.min, box.max); temp.distanceToSquared(point)
-                const dx = Math.max(box.min.x, Math.min(box.max.x, px)) - px;
-                const dy = Math.max(box.min.y, Math.min(box.max.y, py)) - py;
-                const dz = Math.max(box.min.z, Math.min(box.max.z, pz)) - pz;
-                return dx * dx + dy * dy + dz * dz;
-            },
-            intersectsBounds: (_box, _isLeaf, score) => score! < closestDistanceSq && score! < maxThresholdSq,
-            intersectsTriangle: (triangle, triangleIndex) => {
-                triangleClosestPointToPoint(triangle.a, triangle.b, triangle.c, query, temp);
-                const dx = px - temp.x;
-                const dy = py - temp.y;
-                const dz = pz - temp.z;
-                const distanceSq = dx * dx + dy * dy + dz * dz;
-                if (distanceSq < closestDistanceSq) {
-                    best.copy(temp);
-                    closestDistanceSq = distanceSq;
-                    closestTriangle = triangleIndex;
+        const words = this.nodeWords;
+        const floats = this.nodeFloats;
+        const t = this.triangleFloats;
+        const triangleWords = this.triangleWords;
+        const near = CLOSEST_NEAR;
+        near[0] = px;
+        near[1] = py;
+        near[2] = pz;
+        let best = Infinity;
+        let bestTriangle = -1;
+        let bestX = 0, bestY = 0, bestZ = 0;
+        let root = 0;
+        let rootLeaf = -1;
+        let rootCount = 0;
+        while (words[root * GPU_LAYOUT_NODE_WORDS + GPU_LAYOUT_NODE_WORD.rightIndex] === GPU_LAYOUT_EMPTY_CHILD) {
+            const base = root * GPU_LAYOUT_NODE_WORDS;
+            const count = words[base + GPU_LAYOUT_NODE_WORD.leftCount];
+            if (count > 0) {
+                // A one-leaf tree: its triangles are tested without a box test, as traverse reports the root leaf.
+                rootLeaf = words[base + GPU_LAYOUT_NODE_WORD.leftIndex];
+                rootCount = count;
+                break;
+            }
+            root = words[base + GPU_LAYOUT_NODE_WORD.leftIndex];
+        }
+        const slots = this.walkSlots();
+        const scores = this.walkScores();
+        let top = 0;
+        // `next` is a node whose children go on the stack, `leaf`/`leafCount` a leaf to test.
+        let next = rootLeaf < 0 ? root : -1;
+        let leaf = rootLeaf;
+        let leafCount = rootCount;
+        for (;;) {
+            if (leaf >= 0) {
+                let stop = false;
+                for (let position = leaf, end = leaf + leafCount; position < end; position++) {
+                    const b = position * TRIANGLE_WORDS;
+                    closestOnTriangle(t, b, near);
+                    const dx = px - near[3];
+                    const dy = py - near[4];
+                    const dz = pz - near[5];
+                    const distanceSq = dx * dx + dy * dy + dz * dz;
+                    if (distanceSq < best) {
+                        bestX = near[3];
+                        bestY = near[4];
+                        bestZ = near[5];
+                        best = distanceSq;
+                        bestTriangle = triangleWords[b + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
+                    }
+                    if (distanceSq < minThresholdSq) {
+                        stop = true;
+                        break;
+                    }
                 }
-                return distanceSq < minThresholdSq;
-            },
-        });
-        if (closestDistanceSq === Infinity) return null;
-        return this.writeClosestPoint(target, best, Math.sqrt(closestDistanceSq), closestTriangle);
+                if (stop) break;
+                leaf = -1;
+            } else if (next >= 0) {
+                // traverse's pushChildren with boundsTraverseOrder: both scored, the lower visited first (ties: left).
+                const nodeWord = next * GPU_LAYOUT_NODE_WORDS;
+                if (top + 2 > slots.length) throw walkStackError(slots.length);
+                let first = next * 2;
+                let firstScore = boxDistanceSq(floats, nodeWord, px, py, pz);
+                if (words[nodeWord + GPU_LAYOUT_NODE_WORD.rightIndex] !== GPU_LAYOUT_EMPTY_CHILD) {
+                    let second = first + 1;
+                    let secondScore = boxDistanceSq(floats, nodeWord + GPU_LAYOUT_CHILD_STRIDE_WORDS, px, py, pz);
+                    if (secondScore < firstScore) {
+                        const slot = first;
+                        first = second;
+                        second = slot;
+                        const score = firstScore;
+                        firstScore = secondScore;
+                        secondScore = score;
+                    }
+                    if (secondScore < best && secondScore < maxThresholdSq) {
+                        slots[top] = second;
+                        scores[top++] = secondScore;
+                    }
+                }
+                if (firstScore < best && firstScore < maxThresholdSq) {
+                    slots[top] = first;
+                    scores[top++] = firstScore;
+                }
+                next = -1;
+            } else {
+                if (top === 0) break;
+                const score = scores[--top];
+                if (!(score < best && score < maxThresholdSq)) continue;
+                const slot = slots[top];
+                const referenceWord = (slot >> 1) * GPU_LAYOUT_NODE_WORDS + (slot & 1) * SIDE_REFERENCE_STRIDE;
+                const index = words[referenceWord + GPU_LAYOUT_NODE_WORD.leftIndex];
+                const count = words[referenceWord + GPU_LAYOUT_NODE_WORD.leftCount];
+                if (count > 0) {
+                    leaf = index;
+                    leafCount = count;
+                } else {
+                    next = index;
+                }
+            }
+        }
+        if (best === Infinity) return null;
+        return this.writeClosestPoint(target, CLOSEST_BEST.set(bestX, bestY, bestZ), Math.sqrt(best), bestTriangle);
+    }
+
+    /** Scores beside {@link walkSlots}, for the closest-point walk. */
+    private walkScores(): Float64Array {
+        return (this.scoreStack ??= new Float64Array(2 * (this.treeDepth + 2) + 2));
     }
 
     /**
@@ -1218,13 +1390,25 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
         const sourceTriangles = indices ? Math.floor(indices.length / 3) : Math.floor(positions.length / 9);
         if (sourceTriangles !== this.triangleCount) throw new RangeError(`CpuMeshBvh.refit: the source has ${sourceTriangles} triangles, the tree ${this.triangleCount}`);
         const vertexCount = Math.floor(positions.length / 3);
-        const words = this.triangleWords;
-        const floats = this.triangleFloats;
         const triangleCount = this.triangleCount;
-        // Pass 1 only reads: it checks every corner, so a refit that throws leaves the tree as it
-        // was. Pass 2 writes the corners into the records, and the boxes are refitted from the
-        // records in place (no per-triangle box array, nothing allocated but the node order,
-        // which depends on the shape only and is kept).
+        // Validation only reads, so a refit that throws leaves the tree as it was. Two straight
+        // scans (every index in range, every position finite) pass for nearly every mesh; only
+        // when one fails does the per-triangle check run, which throws for a used vertex only (an
+        // unused non-finite vertex is allowed, as before). Then one pass writes the corners into
+        // the records and refits the boxes (refitTreeFromSource).
+        if (!refitSourceLooksValid(positions, indices, triangleCount, vertexCount)) this.checkRefitSource(positions, indices, vertexCount);
+        this.source = source;
+        this.refitOrder ??= childrenFollowParents(this.nodeWords, this.nodeCount) ? REVERSE_NODE_ORDER : refitOrderOf(this.layout.parents, this.nodeCount);
+        refitTreeFromSource(this.nodeFloats, this.nodeWords, this.nodeCount, this.refitOrder === REVERSE_NODE_ORDER ? null : this.refitOrder, this.triangleFloats, this.triangleWords, positions, indices ?? null, this.layout.bounds);
+        this.topLevel = this.makeTopLevel();
+        this.tracer = this.makeTracer(false);
+        this.filterTracer = this.makeTracer(true);
+    }
+
+    /** The per-triangle check behind {@link refit}: throws for a triangle past the positions or a used vertex that isn't finite. */
+    private checkRefitSource(positions: Float32Array, indices: Uint16Array | Uint32Array | null | undefined, vertexCount: number): void {
+        const words = this.triangleWords;
+        const triangleCount = this.triangleCount;
         for (let position = 0; position < triangleCount; position++) {
             const triangle = words[position * TRIANGLE_WORDS + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
             const a = indices ? indices[triangle * 3] : triangle * 3;
@@ -1246,29 +1430,6 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
                 throw new RangeError(`CpuMeshBvh.refit: vertex ${vertex} has a non-finite position`);
             }
         }
-        for (let position = 0; position < triangleCount; position++) {
-            const base = position * TRIANGLE_WORDS;
-            const triangle = words[base + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
-            const a3 = (indices ? indices[triangle * 3] : triangle * 3) * 3;
-            const b3 = (indices ? indices[triangle * 3 + 1] : triangle * 3 + 1) * 3;
-            const c3 = (indices ? indices[triangle * 3 + 2] : triangle * 3 + 2) * 3;
-            floats[base + VERTEX0] = positions[a3];
-            floats[base + VERTEX0 + 1] = positions[a3 + 1];
-            floats[base + VERTEX0 + 2] = positions[a3 + 2];
-            floats[base + VERTEX1] = positions[b3];
-            floats[base + VERTEX1 + 1] = positions[b3 + 1];
-            floats[base + VERTEX1 + 2] = positions[b3 + 2];
-            floats[base + VERTEX2] = positions[c3];
-            floats[base + VERTEX2 + 1] = positions[c3 + 1];
-            floats[base + VERTEX2 + 2] = positions[c3 + 2];
-        }
-        this.source = source;
-        this.refitOrder ??= refitOrderOf(this.layout.parents, this.nodeCount);
-        const { rootBox } = refitRecordsOnCpu(this.nodeFloats, this.nodeWords, 0, this.nodeCount, this.layout.parents, floats, this.refitOrder);
-        for (let i = 0; i < 6; i++) this.layout.bounds[i] = rootBox[i];
-        this.topLevel = this.makeTopLevel();
-        this.tracer = this.makeTracer(false);
-        this.filterTracer = this.makeTracer(true);
     }
 
     /**
@@ -1418,6 +1579,305 @@ function readSlotBox(floats: Float32Array, slot: number, box: Float32Array): voi
 const trianglePool: ExtendedTriangle[] = [];
 
 const IDENTITY_MATRIX: readonly number[] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+/** {@link CpuMeshBvh.refit}'s order when every child's index is above its parent's: the nodes from last to first, no array. */
+const REVERSE_NODE_ORDER = new Uint32Array(0);
+
+/** Whether every inner child's node index is above its parent's (tinybvh's and the depth-first layouts), so last-to-first visits children first. */
+function childrenFollowParents(words: Uint32Array, nodeCount: number): boolean {
+    for (let node = 0; node < nodeCount; node++) {
+        const base = node * GPU_LAYOUT_NODE_WORDS;
+        const left = words[base + GPU_LAYOUT_NODE_WORD.leftIndex];
+        if (words[base + GPU_LAYOUT_NODE_WORD.leftCount] === 0 && left !== GPU_LAYOUT_EMPTY_CHILD && left <= node) return false;
+        const right = words[base + GPU_LAYOUT_NODE_WORD.rightIndex];
+        if (words[base + GPU_LAYOUT_NODE_WORD.rightCount] === 0 && right !== GPU_LAYOUT_EMPTY_CHILD && right <= node) return false;
+    }
+    return true;
+}
+
+/**
+ * {@link CpuMeshBvh.refit}'s quick validation: every index of the
+ * `triangleCount` triangles below `vertexCount`, and every position finite,
+ * in two straight scans. False sends the refit to the per-triangle check.
+ */
+function refitSourceLooksValid(positions: Float32Array, indices: Uint16Array | Uint32Array | null | undefined, triangleCount: number, vertexCount: number): boolean {
+    if (indices) {
+        for (let i = 0, n = triangleCount * 3; i < n; i++) if (indices[i] >= vertexCount) return false;
+    }
+    // v - v is NaN for NaN and both infinities, 0 otherwise.
+    for (let i = 0, n = vertexCount * 3; i < n; i++) {
+        const v = positions[i];
+        if (v - v !== 0) return false;
+    }
+    return true;
+}
+
+/**
+ * {@link CpuMeshBvh.refit}'s one pass, after validation: in `order` (null:
+ * the nodes from last to first), each leaf slot's records get their corners
+ * from `positions` and the slot their box, and each inner slot gets the box
+ * around its child's two slots, as stored a moment before. The values are
+ * `refitRecordsOnCpu`'s bit for bit (min and max of the same `f32` corners;
+ * with finite corners no box is empty, so a stored slot is the box itself),
+ * without its node-box array or a second read of the records. `bounds` gets
+ * the root's box.
+ */
+function refitTreeFromSource(
+    floats: Float32Array,
+    words: Uint32Array,
+    nodeCount: number,
+    order: Uint32Array | null,
+    records: Float32Array,
+    recordWords: Uint32Array,
+    positions: Float32Array,
+    indices: Uint16Array | Uint32Array | null,
+    bounds: Float32Array,
+): void {
+    for (let k = 0; k < nodeCount; k++) {
+        const nodeWord = (order ? order[k] : nodeCount - 1 - k) * GPU_LAYOUT_NODE_WORDS;
+        const left = words[nodeWord + GPU_LAYOUT_NODE_WORD.leftIndex];
+        const leftCount = words[nodeWord + GPU_LAYOUT_NODE_WORD.leftCount];
+        if (leftCount > 0) refitLeafSlot(floats, nodeWord, records, recordWords, left, leftCount, positions, indices);
+        else unionOfChild(floats, words, left * GPU_LAYOUT_NODE_WORDS, floats, nodeWord);
+        const right = words[nodeWord + GPU_LAYOUT_NODE_WORD.rightIndex];
+        if (right === GPU_LAYOUT_EMPTY_CHILD) continue;
+        const rightCount = words[nodeWord + GPU_LAYOUT_NODE_WORD.rightCount];
+        if (rightCount > 0) refitLeafSlot(floats, nodeWord + GPU_LAYOUT_CHILD_STRIDE_WORDS, records, recordWords, right, rightCount, positions, indices);
+        else unionOfChild(floats, words, right * GPU_LAYOUT_NODE_WORDS, floats, nodeWord + GPU_LAYOUT_CHILD_STRIDE_WORDS);
+    }
+    // The root's box: the union of node 0's slots.
+    unionOfChild(floats, words, 0, ROOT_BOX, 0);
+    bounds[0] = ROOT_BOX[0];
+    bounds[1] = ROOT_BOX[1];
+    bounds[2] = ROOT_BOX[2];
+    bounds[3] = ROOT_BOX[4];
+    bounds[4] = ROOT_BOX[5];
+    bounds[5] = ROOT_BOX[6];
+}
+
+/** {@link refitTreeFromSource}'s root box, as a slot (min at 0-2, max at 4-6). */
+const ROOT_BOX = new Float32Array(8);
+
+/**
+ * One leaf slot of {@link refitTreeFromSource}: its records' corners from
+ * `positions`, and the box around them (`refitInOrder`'s leaf box: min and
+ * max from the largest float, over the `f32` corners).
+ */
+function refitLeafSlot(floats: Float32Array, slot: number, records: Float32Array, recordWords: Uint32Array, first: number, count: number, positions: Float32Array, indices: Uint16Array | Uint32Array | null): void {
+    const max = BVH_FLOAT_MAX;
+    let c0 = max, c1 = max, c2 = max, d0 = -max, d1 = -max, d2 = -max;
+    for (let r = first * TRIANGLE_WORDS, end = (first + count) * TRIANGLE_WORDS; r < end; r += TRIANGLE_WORDS) {
+        const t3 = recordWords[r + GPU_LAYOUT_TRIANGLE_WORD.originalIndex] * 3;
+        const a3 = (indices ? indices[t3] : t3) * 3;
+        const b3 = (indices ? indices[t3 + 1] : t3 + 1) * 3;
+        const c3 = (indices ? indices[t3 + 2] : t3 + 2) * 3;
+        const ax = Math.fround(positions[a3]), ay = Math.fround(positions[a3 + 1]), az = Math.fround(positions[a3 + 2]);
+        const bx = Math.fround(positions[b3]), by = Math.fround(positions[b3 + 1]), bz = Math.fround(positions[b3 + 2]);
+        const cx = Math.fround(positions[c3]), cy = Math.fround(positions[c3 + 1]), cz = Math.fround(positions[c3 + 2]);
+        records[r + VERTEX0] = ax;
+        records[r + VERTEX0 + 1] = ay;
+        records[r + VERTEX0 + 2] = az;
+        records[r + VERTEX1] = bx;
+        records[r + VERTEX1 + 1] = by;
+        records[r + VERTEX1 + 2] = bz;
+        records[r + VERTEX2] = cx;
+        records[r + VERTEX2 + 1] = cy;
+        records[r + VERTEX2 + 2] = cz;
+        c0 = Math.min(c0, ax, bx, cx);
+        d0 = Math.max(d0, ax, bx, cx);
+        c1 = Math.min(c1, ay, by, cy);
+        d1 = Math.max(d1, ay, by, cy);
+        c2 = Math.min(c2, az, bz, cz);
+        d2 = Math.max(d2, az, bz, cz);
+    }
+    floats[slot] = c0;
+    floats[slot + 1] = c1;
+    floats[slot + 2] = c2;
+    floats[slot + 4] = d0;
+    floats[slot + 5] = d1;
+    floats[slot + 6] = d2;
+}
+
+/**
+ * The box around node `child`'s slots (`child` its first word), into `target`
+ * at `slot` (min at 0-2, max at 4-6): `refitInOrder`'s inner box, min and max
+ * from the largest float, read back from the slots stored a moment before.
+ */
+function unionOfChild(floats: Float32Array, words: Uint32Array, child: number, target: Float32Array, slot: number): void {
+    const max = BVH_FLOAT_MAX;
+    let c0 = Math.min(max, floats[child]), c1 = Math.min(max, floats[child + 1]), c2 = Math.min(max, floats[child + 2]);
+    let d0 = Math.max(-max, floats[child + 4]), d1 = Math.max(-max, floats[child + 5]), d2 = Math.max(-max, floats[child + 6]);
+    if (words[child + GPU_LAYOUT_NODE_WORD.rightIndex] !== GPU_LAYOUT_EMPTY_CHILD) {
+        const right = child + GPU_LAYOUT_CHILD_STRIDE_WORDS;
+        c0 = Math.min(c0, floats[right]);
+        c1 = Math.min(c1, floats[right + 1]);
+        c2 = Math.min(c2, floats[right + 2]);
+        d0 = Math.max(d0, floats[right + 4]);
+        d1 = Math.max(d1, floats[right + 5]);
+        d2 = Math.max(d2, floats[right + 6]);
+    }
+    target[slot] = c0;
+    target[slot + 1] = c1;
+    target[slot + 2] = c2;
+    target[slot + 4] = d0;
+    target[slot + 5] = d1;
+    target[slot + 6] = d2;
+}
+
+/** The flat walks' guard: a stack (sized from the checked tree's depth) about to overflow means the layout isn't the tree it was. */
+function walkStackError(length: number): RangeError {
+    return new RangeError(`CpuMeshBvh: the walk stack passed ${length} entries; the layout is not a tree (was it changed after the check?)`);
+}
+
+/** Whether a matrix is absent or exactly the identity (an axis-aligned query box). */
+function isIdentityMatrix(m: BvhMatrix4Like | null | undefined): boolean {
+    if (!m) return true;
+    const e = matrixElements(m);
+    for (let i = 0; i < 16; i++) if (e[i] !== IDENTITY_MATRIX[i]) return false;
+    return true;
+}
+
+/** Squared distance from a point to a child box (`minWord` its min, `minWord + 4` its max): three's `clamp` then `distanceToSquared`. */
+function boxDistanceSq(floats: Float32Array, minWord: number, px: number, py: number, pz: number): number {
+    const dx = Math.max(floats[minWord], Math.min(floats[minWord + 4], px)) - px;
+    const dy = Math.max(floats[minWord + 1], Math.min(floats[minWord + 5], py)) - py;
+    const dz = Math.max(floats[minWord + 2], Math.min(floats[minWord + 6], pz)) - pz;
+    return dx * dx + dy * dy + dz * dz;
+}
+
+/**
+ * Below this squared sine of a triangle's angle at `a` (about 3e-4, 1:3000) it is a
+ * sliver: the GPU's `BVH_SLIVER_SINE_SQ` (src/trace/wgsl.ts, `bvhClosestPointToTriangle`).
+ */
+const SLIVER_SINE_SQ = 1e-7;
+
+/**
+ * The point of the record at `base` closest to `io[0..2]`, into `io[3..5]`.
+ * Numbers go through `io`, not arguments: V8 doesn't inline a function this
+ * size, and every number argument of a call that isn't inlined is boxed.
+ *
+ * Three's `Triangle.closestPointToPoint` ({@link closestByRegions}), bit for
+ * bit, except on slivers (squared sine below {@link SLIVER_SINE_SQ}: a
+ * segment, a point, or nearly one), where its regions' differences of
+ * products cancel and can pick a wrong region even in doubles: measured on
+ * f32 slivers, up to 1.7 units too far on a unit triangle (the GPU query
+ * oracle found a point lying on one reported 2.2e-3 away). There the nearer
+ * of three's point and the nearest point of the three edges is kept. Three's
+ * point is on the triangle to rounding (never measured nearer than the true
+ * distance), so the nearer one is never worse; on the same test the error
+ * falls to 2e-6 at most. Ties keep three's point. The GPU takes the edges
+ * alone on slivers; the two agree to within the sliver's height.
+ */
+function closestOnTriangle(records: Float32Array, base: number, out: Float64Array): void {
+    closestByRegions(records, base, out);
+    if (out[6] !== 0) closestOnEdges(records, base, out);
+}
+
+/**
+ * Replaces `io[3..5]` with the nearest point of the triangle's three edges
+ * (`a-b`, `a-c`, `b-c`, the first strictly nearest) when that is strictly
+ * nearer to `io[0..2]`, or when `io[3..5]` isn't a number.
+ */
+function closestOnEdges(records: Float32Array, base: number, out: Float64Array): void {
+    const px = out[0], py = out[1], pz = out[2];
+    let dx = out[3] - px, dy = out[4] - py, dz = out[5] - pz;
+    let best = dx * dx + dy * dy + dz * dz;
+    if (best !== best) best = Infinity;
+    for (let side = 0; side < 3; side++) {
+        const s = base + (side === 2 ? VERTEX1 : VERTEX0);
+        const e = base + (side === 0 ? VERTEX1 : VERTEX2);
+        const sx = records[s], sy = records[s + 1], sz = records[s + 2];
+        const ex = records[e] - sx, ey = records[e + 1] - sy, ez = records[e + 2] - sz;
+        const lengthSq = ex * ex + ey * ey + ez * ez;
+        let t = lengthSq > 0 ? ((px - sx) * ex + (py - sy) * ey + (pz - sz) * ez) / lengthSq : 0;
+        t = t > 0 ? (t < 1 ? t : 1) : 0;
+        const qx = sx + ex * t, qy = sy + ey * t, qz = sz + ez * t;
+        dx = qx - px;
+        dy = qy - py;
+        dz = qz - pz;
+        const distanceSq = dx * dx + dy * dy + dz * dz;
+        if (distanceSq < best) {
+            best = distanceSq;
+            out[3] = qx;
+            out[4] = qy;
+            out[5] = qz;
+        }
+    }
+}
+
+/**
+ * Three's `Triangle.closestPointToPoint` (`triangleClosestPointToPoint`) on the
+ * record at `base`, plain numbers, the same operations in the same order: the
+ * same bits. `io[6]` is set to 1 when the triangle is a sliver (squared sine at
+ * `a` at most {@link SLIVER_SINE_SQ}), else 0.
+ */
+function closestByRegions(records: Float32Array, base: number, out: Float64Array): void {
+    const ax = records[base + VERTEX0], ay = records[base + VERTEX0 + 1], az = records[base + VERTEX0 + 2];
+    const bx = records[base + VERTEX1], by = records[base + VERTEX1 + 1], bz = records[base + VERTEX1 + 2];
+    const cx = records[base + VERTEX2], cy = records[base + VERTEX2 + 1], cz = records[base + VERTEX2 + 2];
+    const px = out[0], py = out[1], pz = out[2];
+    const abx = bx - ax, aby = by - ay, abz = bz - az;
+    const acx = cx - ax, acy = cy - ay, acz = cz - az;
+    const nx = aby * acz - abz * acy, ny = abz * acx - abx * acz, nz = abx * acy - aby * acx;
+    out[6] = nx * nx + ny * ny + nz * nz <= SLIVER_SINE_SQ * (abx * abx + aby * aby + abz * abz) * (acx * acx + acy * acy + acz * acz) ? 1 : 0;
+    const apx = px - ax, apy = py - ay, apz = pz - az;
+    const d1 = abx * apx + aby * apy + abz * apz;
+    const d2 = acx * apx + acy * apy + acz * apz;
+    if (d1 <= 0 && d2 <= 0) {
+        out[3] = ax;
+        out[4] = ay;
+        out[5] = az;
+        return;
+    }
+    const bpx = px - bx, bpy = py - by, bpz = pz - bz;
+    const d3 = abx * bpx + aby * bpy + abz * bpz;
+    const d4 = acx * bpx + acy * bpy + acz * bpz;
+    if (d3 >= 0 && d4 <= d3) {
+        out[3] = bx;
+        out[4] = by;
+        out[5] = bz;
+        return;
+    }
+    const vc = d1 * d4 - d3 * d2;
+    if (vc <= 0 && d1 >= 0 && d3 <= 0 && d1 - d3 > 0) {
+        const v = d1 / (d1 - d3);
+        out[3] = ax + abx * v;
+        out[4] = ay + aby * v;
+        out[5] = az + abz * v;
+        return;
+    }
+    const cpx = px - cx, cpy = py - cy, cpz = pz - cz;
+    const d5 = abx * cpx + aby * cpy + abz * cpz;
+    const d6 = acx * cpx + acy * cpy + acz * cpz;
+    if (d6 >= 0 && d5 <= d6) {
+        out[3] = cx;
+        out[4] = cy;
+        out[5] = cz;
+        return;
+    }
+    const vb = d5 * d2 - d1 * d6;
+    if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+        const w = d2 / (d2 - d6);
+        out[3] = ax + acx * w;
+        out[4] = ay + acy * w;
+        out[5] = az + acz * w;
+        return;
+    }
+    const va = d3 * d6 - d5 * d4;
+    if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+        const w = (d4 - d3) / (d4 - d3 + (d5 - d6));
+        out[3] = bx + (cx - bx) * w;
+        out[4] = by + (cy - by) * w;
+        out[5] = bz + (cz - bz) * w;
+        return;
+    }
+    const denom = 1 / (va + vb + vc);
+    const v = vb * denom;
+    const w = vc * denom;
+    out[3] = ax + abx * v + acx * w;
+    out[4] = ay + aby * v + acy * w;
+    out[5] = az + abz * v + acz * w;
+}
 
 const arrayBox = new BvhBox3();
 
