@@ -1,6 +1,6 @@
 # Examples
 
-A Vite multi-page site (BX.5, BX.9 in docs/internals/design/bvh-package-split.md). Each example is one page with its source beside it and the shared overlay.
+A Vite multi-page site (BX.5, BX.6, BX.9 in docs/internals/design/bvh-package-split.md). Each example is one page with its source beside it and the shared overlay.
 
 ```
 pnpm examples:dev                       # http://localhost:5310
@@ -52,6 +52,8 @@ Raw WebGPU and `@pmndrs/bvh` only: no three, no engine. They prove the "not a th
 | `vanilla/instances` | `SceneTrees` with 4,000 moving instances of four meshes (`?count=`): `setTransform` for each every frame and `update(encoder)` in the frame's own encoder before the ray-cast pass; GPU H-PLOC first trees, then tinybvh's from the `/worker` pool swapped in (the builder line, swaps and the last tree event); buttons add and remove instances and meshes at run time; the hovered instance picked from the view's hit records | first trees from the GPU (with subgroups); after 500 instances removed and a mesh added, every mesh on a tinybvh tree; 64 rays at live instances hit an instance near its current centre, never a removed one |
 | `vanilla/builders` | tinybvh, GPU H-PLOC and GPU LBVH on one mesh (a 100k-triangle knot, `?model=` or a drop, merged), one row each: build CPU ms and GPU timestamps (after a warm-up), SAH and SAH against tinybvh, depth, nodes, bytes, Mrays/s on the same seeded rays through `TraceBatchKernel` (median of timed dispatches), and the share of hits at tinybvh's distance; largest-leaf option; a row's tree in the ray-cast view on click. Without subgroups the GPU rows are built by tinybvh and say why | three rows; every tree's hits at tinybvh's distance for at least 99.9% of 65k rays |
 
+Measured on the Apple M5 (Chrome, headless, `pnpm examples:smoke`, a loaded machine), default scenes: `hello`'s 16k-ray batch at 60-95 Mrays/s (timestamps); `raytrace`'s 1280×577 view of the showcase scene in 0.4-1.3 ms per pass; `builders` on the 100k-triangle knot: tinybvh 40-44 ms, H-PLOC 5-6 ms CPU (0.84 ms GPU), LBVH 4-10 ms (0.46-3.2 ms GPU), SAH 56.2, 57.0 and 62.0, every tree's hits identical to tinybvh's; `instances` 3,800 instances moved and refit in 2-4 ms of CPU per frame.
+
 ## three.js examples
 
 | Page | Shows | Smoke check |
@@ -85,6 +87,10 @@ Each runs the suites of `compare/core/` (the same as `pnpm compare:node`) on the
 - `SceneTreesObject3DSync` doesn't list its mesh handles; the pages collect them from `onTree` events.
 - The GPU walk's step counters (the counted walk the benches use) aren't public, so the inspector's heat map is a CPU walk over the same tree.
 - `GpuRays` here (picking and batches over a `SceneTrees`: buffers, readback, hit decoding) is about 100 lines every app will write; a small helper in the package would do.
+- `createMeshLayoutBuilder` takes no timestamp writes and does its pipeline setup in the call that makes it, so `vanilla/hello` shows build CPU time only (setup apart); `vanilla/builders` drives `GpuHplocBuilder`/`GpuLbvhBuilder` batches itself for GPU times (`shared/builders.ts`).
+- `createMeshLayoutBuilder({ prefer: 'tinybvh' })` reports `fallbackReason: 'the CPU builder was asked for'`: an overlay has to know that's not a fallback.
+- An uploaded scene (`uploadTraceScene`) and a `SceneTrees` aren't one type: `traceSourceOf` (`shared/gpu-rays.ts`) wraps the first so one kernel and `GpuRays` take either.
+- The plan's `vanilla/raytrace` had ambient occlusion; it would need random directions (sampling), which the scope rule leaves to renderers above the package, so the page has hard any-hit shadows only.
 
 ## Library issues the examples ran into
 
