@@ -1,6 +1,6 @@
 # Examples
 
-A Vite multi-page site (BX.5, BX.9 in docs/internals/design/bvh-package-split.md). Each example is one page with its source beside it and the shared overlay.
+A Vite multi-page site (BX.5, BX.6, BX.9 in docs/internals/design/bvh-package-split.md). Each example is one page with its source beside it and the shared overlay.
 
 ```
 pnpm examples:dev                       # http://localhost:5310
@@ -19,6 +19,8 @@ The library is read from source through its public names only: `@pmndrs/bvh`, `@
 - `shared/loader.ts`: defaults from three's built-in geometries; `?model=<path>` loads a glTF from the assets base; drag and drop of a `.glb` (or a `.gltf` dropped together with its `.bin` and textures).
 - `shared/gpu-rays.ts`: picking and batch rays over a `SceneTrees` scene with `TraceBatchKernel`; `shared/gpu-timer.ts`: timestamp queries; `shared/stats.ts`: overlay numbers from a layout (`treeSahCost`) or a `SceneTrees` (`onTree` events, `counts`, `meshStatus`, `memory`).
 - `shared/smoke.ts`: smoke mode (below).
+- `shared/builders.ts`: one mesh's tree from a chosen builder, timed (CPU wall time, GPU timestamps), with the chooser's fallback; the inspector and the vanilla pages share it.
+- `shared/vanilla/`: the three-free shell of the vanilla pages (below). `overlay.ts`, `smoke.ts`, `stats.ts`, `gpu-rays.ts`, `gpu-timer.ts`, `builders.ts` and `assets.ts` are three-free too; `app.ts`, `loader.ts` and `compare.ts` are the three shell. ESLint refuses three, `@pmndrs/bvh/three` and the three shell in `vanilla/` and `shared/vanilla/`.
 
 ### Assets
 
@@ -34,6 +36,23 @@ BVH_ASSETS_DIR=../webgpu-ddgi/assets pnpm examples:dev
 ### Smoke runs
 
 `pnpm examples:smoke` is `node tests/gpu/run.ts --examples`: the runner serves this site with its own Vite config (plus the runner's preflight page), opens each example with `?token=`, and judges it like a test page. An example in smoke mode runs as it would for a person and, once it has shown what it is about, calls `ready()` (`shared/smoke.ts`), which leaves the report on `window.__gpuTestReport` with the overlay's numbers as `data`. Uncaught errors, unhandled rejections, WebGPU `uncapturederror`s, console errors and timeouts fail it. Each example also checks one thing it shows (for example, `acceleratedRaycast` agreeing with three's raycast, the GPU batch hitting).
+
+## Vanilla WebGPU examples (P4 item 1)
+
+Raw WebGPU and `@pmndrs/bvh` only: no three, no engine. They prove the "not a three library" claim.
+
+- `shared/vanilla/app.ts`: a `GPUDevice` asked for `subgroups` and `timestamp-query` when the adapter has them, plus the adapter's storage limits; a WebGPU canvas; an orbit camera (`camera.ts`: a view-projection matrix for raster passes, the ray basis for compute passes, packed camera rays); the shared overlay; a frame loop of `update` (may await a readback) then `render` (records into the frame's encoder; the loop submits).
+- `shared/vanilla/geometry.ts`: procedural meshes (torus knot, sphere, box, torus, ground) as plain `positions` and `indices`, scenes of meshes and column-major instances with a material number, `mergeToWorld`. `gltf.ts`: a minimal glTF reader (positions, indices, node transforms; `.glb` or `.gltf` with its `.bin`; no Draco, meshopt or quantized positions) for `?model=` and drag and drop.
+- `shared/vanilla/raycast-view.ts`: the ray-cast kernel the pages share: `traceModuleWgsl` in the page's own compute shader, one closest-hit ray per pixel, a colour from the hit alone (normal, material, instance, triangle, distance), optional any-hit hard shadows, each pixel's hit record kept for picking, and a blit pass. A demo of the walk, not a renderer: no sampling, BSDFs or accumulation (the scope rule in HANDOFF.md).
+
+| Page | Shows | Smoke check |
+| --- | --- | --- |
+| `vanilla/hello` | The smallest use: `createMeshLayoutBuilder(device)` picks the builder and says why, `assembleTraceScene` + `uploadTraceScene`, the tree's boxes at a depth in a line pass (`bvhHelperPositions`), the pointer's ray picks a triangle (`TraceBatchKernel`, read back), and a batch of 1k-262k rays every frame whose hit points a render pass draws straight from the hit buffer | 1,024 batch rays agree with the CPU port of the walk (`createCpuTracer`) on the same scene; the centre ray hits; then a model swap with a pick in flight, and the check again on the new mesh |
+| `vanilla/raytrace` | The WGSL walk in the page's own kernel over a scene of meshes and instances; switch tinybvh, H-PLOC and LBVH live (build ms, SAH, Mrays/s from timestamps, scene bytes); shadows through `bvhTraceAny`; the hovered pixel's hit record | with each builder, 1,024 pixels of the view agree with the CPU walk (a ray through a shared edge may name either triangle; a difference a nudge of the camera ray by 1e-6 reproduces counts as a silhouette graze; anything else fails) |
+| `vanilla/instances` | `SceneTrees` with 4,000 moving instances of four meshes (`?count=`): `setTransform` for each every frame and `update(encoder)` in the frame's own encoder before the ray-cast pass; GPU H-PLOC first trees, then tinybvh's from the `/worker` pool swapped in (the builder line, swaps and the last tree event); buttons add and remove instances and meshes at run time; the hovered instance picked from the view's hit records | the GPU built first trees (with subgroups; on a busy machine tinybvh's may still be placed first); after 500 instances removed and a mesh added, every mesh on a tinybvh tree; 64 rays at live instances hit an instance near its current centre, never a removed one |
+| `vanilla/builders` | tinybvh, GPU H-PLOC and GPU LBVH on one mesh (a 100k-triangle knot, `?model=` or a drop, merged), one row each: build CPU ms and GPU timestamps (after a warm-up), SAH and SAH against tinybvh, depth, nodes, bytes, Mrays/s on the same seeded rays through `TraceBatchKernel` (median of timed dispatches), and the share of hits at tinybvh's distance; largest-leaf option; a row's tree in the ray-cast view on click. Without subgroups the GPU rows are built by tinybvh and say why | three rows; at least half the rays hit; every tree's hits at tinybvh's distance for at least 99.9% of 65k rays; tinybvh's hits agree with the CPU walk on 1,024; with subgroups the GPU rows were built by their builders; then two rebuilds asked at once (largest leaf 2) run one after the other while frames trace, and the checks again |
+
+Measured on the Apple M5 (Chrome, headless, `pnpm examples:smoke`, a loaded machine), default scenes: `hello`'s 16k-ray batch at 60-95 Mrays/s (timestamps); `raytrace`'s 1280×577 view of the showcase scene in 0.4-1.3 ms per pass; `builders` on the 100k-triangle knot: tinybvh 40-44 ms, H-PLOC 5-6 ms CPU (0.84 ms GPU), LBVH 4-10 ms (0.46-3.2 ms GPU), SAH 56.2, 57.0 and 62.0, every tree's hits identical to tinybvh's; `instances` 3,800 instances moved and refit in 2-4 ms of CPU per frame.
 
 ## three.js examples
 
@@ -68,6 +87,10 @@ Each runs the suites of `compare/core/` (the same as `pnpm compare:node`) on the
 - `SceneTreesObject3DSync` doesn't list its mesh handles; the pages collect them from `onTree` events.
 - The GPU walk's step counters (the counted walk the benches use) aren't public, so the inspector's heat map is a CPU walk over the same tree.
 - `GpuRays` here (picking and batches over a `SceneTrees`: buffers, readback, hit decoding) is about 100 lines every app will write; a small helper in the package would do.
+- `createMeshLayoutBuilder` takes no timestamp writes and does its pipeline setup in the call that makes it, so `vanilla/hello` shows build CPU time only (setup apart); `vanilla/builders` drives `GpuHplocBuilder`/`GpuLbvhBuilder` batches itself for GPU times (`shared/builders.ts`).
+- `createMeshLayoutBuilder({ prefer: 'tinybvh' })` reports `fallbackReason: 'the CPU builder was asked for'`: an overlay has to know that's not a fallback.
+- An uploaded scene (`uploadTraceScene`) and a `SceneTrees` aren't one type: `traceSourceOf` (`shared/gpu-rays.ts`) wraps the first so one kernel and `GpuRays` take either.
+- The plan's `vanilla/raytrace` had ambient occlusion; it would need random directions (sampling), which the scope rule leaves to renderers above the package, so the page has hard any-hit shadows only.
 
 ## Library issues the examples ran into
 

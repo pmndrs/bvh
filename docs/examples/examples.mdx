@@ -14,6 +14,17 @@ pnpm examples:build     # examples/dist, a static site
 pnpm examples:smoke     # every example in headless Chrome, each checking one thing it shows
 ```
 
+## Vanilla WebGPU
+
+Raw WebGPU and `@pmndrs/bvh` only: no three, no engine.
+
+| Page | Shows |
+| --- | --- |
+| [`vanilla/hello`](https://github.com/pmndrs/bvh/tree/main/examples/vanilla/hello) | The smallest use: `createMeshLayoutBuilder` picks the builder and says why, the tree's boxes in a line pass, a picking ray, and a batch of rays whose hits are drawn straight from the GPU buffer. |
+| [`vanilla/raytrace`](https://github.com/pmndrs/bvh/tree/main/examples/vanilla/raytrace) | The WGSL walk in the page's own compute kernel: one ray per pixel, shown by normal, material, instance or distance, any-hit shadows; switch tinybvh, H-PLOC and LBVH live. |
+| [`vanilla/instances`](https://github.com/pmndrs/bvh/tree/main/examples/vanilla/instances) | `SceneTrees` with thousands of moving instances, runtime adds and removals, GPU first trees swapped for tinybvh's, and picking. |
+| [`vanilla/builders`](https://github.com/pmndrs/bvh/tree/main/examples/vanilla/builders) | tinybvh, H-PLOC and LBVH side by side on one mesh: build ms, SAH, depth, bytes, Mrays/s on the same rays. |
+
 ## three.js
 
 | Page | Shows |
@@ -27,8 +38,7 @@ pnpm examples:smoke     # every example in headless Chrome, each checking one th
 
 ## Planned
 
-- **Vanilla WebGPU:** `hello` (the smallest build), `raytrace` (a compute ray caster), `builders` (the builders side by
-  side), `workers-cpu`, `workers-gpu`, `fast-first` and `refit`.
+- **Vanilla WebGPU:** `workers-cpu`, `workers-gpu`, `fast-first` and `refit` (a deforming mesh).
 - **Node:** `bake` (build in Node, load with no build).
 - **Comparisons with three-mesh-bvh** (`compare/`): raycast, async builds, path tracer, skinned, tree quality.
 - **three:** `sdf`, once GPU closest-point queries exist.

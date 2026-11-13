@@ -5,9 +5,10 @@
  * light rig, the overlay, and a frame loop that feeds the overlay's graph.
  */
 
-import { AmbientLight, Color, DirectionalLight, PerspectiveCamera, Scene } from 'three';
+import { AmbientLight, Color, DirectionalLight, PerspectiveCamera, Raycaster, Scene, type Camera, type Vector2 } from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { WebGPURenderer } from 'three/webgpu';
+import { RAY_FLOATS } from '@pmndrs/bvh';
 import { deviceFromRendererAsync } from '@pmndrs/bvh/three';
 import { Overlay } from './overlay.ts';
 import { fail, watchDevice } from './smoke.ts';
@@ -93,4 +94,14 @@ export async function createApp(title: string, folder: string, options: { readon
             });
         },
     };
+}
+
+const raycaster = new Raycaster();
+
+/** The camera ray through `ndc` (-1..1), packed for `GpuRays.traceClosest` (gpu-rays.ts). */
+export function cameraRay(camera: Camera, ndc: Vector2, out = new Float32Array(RAY_FLOATS), at = 0): Float32Array {
+    raycaster.setFromCamera(ndc, camera);
+    const { origin, direction } = raycaster.ray;
+    out.set([origin.x, origin.y, origin.z, 0, direction.x, direction.y, direction.z, 1e30], at * RAY_FLOATS);
+    return out;
 }

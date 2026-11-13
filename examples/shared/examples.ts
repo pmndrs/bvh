@@ -17,6 +17,34 @@ export interface ExampleEntry {
 
 export const EXAMPLES: readonly ExampleEntry[] = [
     {
+        name: 'vanilla-hello',
+        path: 'vanilla/hello',
+        title: 'Hello',
+        description: 'The smallest use, raw WebGPU and no engine: createMeshLayoutBuilder picks the builder and says why, the tree\'s boxes in a line pass, a picking ray and a batch of thousands whose hits are drawn straight from the GPU buffer.',
+        timeoutMs: 60_000,
+    },
+    {
+        name: 'vanilla-raytrace',
+        path: 'vanilla/raytrace',
+        title: 'Ray-cast view',
+        description: 'One ray per pixel through the WGSL walk in the page\'s own compute kernel, shown by normal, material, instance or distance, any-hit shadows; switch tinybvh, H-PLOC and LBVH live and watch build ms, SAH and Mrays/s.',
+        timeoutMs: 120_000,
+    },
+    {
+        name: 'vanilla-instances',
+        path: 'vanilla/instances',
+        title: 'Instances',
+        description: 'SceneTrees with thousands of moving instances, a top-level refit in every frame\'s encoder, runtime adds and removals of instances and meshes, GPU H-PLOC first trees swapped for tinybvh\'s, and picking from the ray-cast view.',
+        timeoutMs: 120_000,
+    },
+    {
+        name: 'vanilla-builders',
+        path: 'vanilla/builders',
+        title: 'Builders',
+        description: 'tinybvh, GPU H-PLOC and GPU LBVH on the same mesh, side by side: build ms (CPU and GPU timestamps), SAH against tinybvh, depth, nodes, bytes, Mrays/s on the same rays, and agreement of the hits. The builder guide in a page.',
+        timeoutMs: 120_000,
+    },
+    {
         name: 'three-raycast',
         path: 'three/raycast',
         title: 'Raycast',
