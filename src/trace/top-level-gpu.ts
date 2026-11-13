@@ -462,7 +462,7 @@ export class GpuTopLevel {
 
     /** Compiles the gather and the refit, and starts the shape worker (so its module loads while they compile). */
     prepare(): Promise<void> {
-        this.builder ??= createTopLevelBuilder({ worker: this.buildIn === 'main' ? 'never' : 'auto' });
+        this.builder ??= createTopLevelBuilder({ worker: this.buildIn === 'main' ? 'never' : 'auto', warn: this.warn });
         this.compiling ??= (async () => {
             const module = this.device.createShaderModule({ label: `${this.label} top level gather`, code: topLevelGatherWgsl() });
             const [gather] = await Promise.all([
@@ -738,7 +738,7 @@ export class GpuTopLevel {
 
         const generation = this.nextGeneration++;
         this.inFlight = mode;
-        this.builder ??= createTopLevelBuilder({ worker: this.buildIn === 'main' ? 'never' : 'auto' });
+        this.builder ??= createTopLevelBuilder({ worker: this.buildIn === 'main' ? 'never' : 'auto', warn: this.warn });
         this.builder.request(mode, input, this.rebuildCostRatio, { current: this.current.generation, next: generation }).then(
             (result) => this.finish(mode, generation, result),
             (error: unknown) => {

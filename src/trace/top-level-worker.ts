@@ -10,6 +10,7 @@
  * (`TopLevelShapeKeeper`).
  */
 
+import type { WorkerReady } from './mesh-bvh-worker.ts';
 import { topLevelShapeTransferables, TopLevelShapeKeeper, type TopLevelBuildInput, type TopLevelShape } from './top-level-shape.ts';
 
 export interface TopLevelRequest {
@@ -31,7 +32,7 @@ export type TopLevelResponse =
 /** The few worker-scope members we use. The project's tsconfig only has the DOM library. */
 interface WorkerScope {
     onmessage: ((event: MessageEvent<TopLevelRequest>) => void) | null;
-    postMessage(message: TopLevelResponse, transfer: Transferable[]): void;
+    postMessage(message: TopLevelResponse | WorkerReady, transfer: Transferable[]): void;
 }
 
 const scope = self as unknown as WorkerScope;
@@ -48,3 +49,6 @@ scope.onmessage = (event) => {
         scope.postMessage({ id, error: error instanceof Error ? error.message : String(error) }, []);
     }
 };
+
+// Last: the handler is in place (see WorkerReady in mesh-bvh-worker.ts).
+scope.postMessage({ ready: true }, []);

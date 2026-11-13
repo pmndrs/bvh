@@ -16,10 +16,19 @@ export type BuildResponse =
     | { readonly id: number; readonly bvh: MeshBvh; readonly heapBytes?: number }
     | { readonly id: number; readonly error: string; readonly heapBytes?: number };
 
+/**
+ * Posted once, as soon as this module has run: the worker loaded. Senders hold
+ * every request (and so never move an input into the worker) until it comes, so
+ * a worker that can't load costs no build (pool.ts, `worker: 'auto'`).
+ */
+export interface WorkerReady {
+    readonly ready: true;
+}
+
 /** The few worker-scope members we use. The project's tsconfig only has the DOM library. */
 interface WorkerScope {
     onmessage: ((event: MessageEvent<BuildRequest>) => void) | null;
-    postMessage(message: BuildResponse, transfer: Transferable[]): void;
+    postMessage(message: BuildResponse | WorkerReady, transfer: Transferable[]): void;
 }
 
 const scope = self as unknown as WorkerScope;
@@ -39,3 +48,6 @@ scope.onmessage = (event) => {
         }
     });
 };
+
+// Last: the handler is in place, so requests sent after this find it.
+scope.postMessage({ ready: true }, []);

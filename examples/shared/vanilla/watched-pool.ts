@@ -14,6 +14,9 @@ export function watchPool(pool: BvhWorkerPool, onAnswered: (geometry: MeshGeomet
         get usesWorkers() {
             return pool.usesWorkers;
         },
+        get inlineReason() {
+            return pool.inlineReason;
+        },
         get size() {
             return pool.size;
         },
