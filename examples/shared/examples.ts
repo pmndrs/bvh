@@ -38,6 +38,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         timeoutMs: 120_000,
     },
     {
+        name: 'vanilla-builders',
+        path: 'vanilla/builders',
+        title: 'Builders',
+        description: 'tinybvh, GPU H-PLOC and GPU LBVH on the same mesh, side by side: build ms (CPU and GPU timestamps), SAH against tinybvh, depth, nodes, bytes, Mrays/s on the same rays, and agreement of the hits. The builder guide in a page.',
+        timeoutMs: 120_000,
+    },
+    {
         name: 'three-raycast',
         path: 'three/raycast',
         title: 'Raycast',
