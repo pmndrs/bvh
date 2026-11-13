@@ -1,2 +1,4 @@
 # The native sources are compiled in CI on Linux and macOS; keep their bytes the same on every checkout.
 native/** text eol=lf
+# The docs checks (docs/snippets/snippets.test.ts) compare page text with the samples and read frontmatter line by line; keep LF on Windows checkouts too.
+docs/** text eol=lf

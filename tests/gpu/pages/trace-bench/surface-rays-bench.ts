@@ -248,6 +248,7 @@ export interface SurfaceRaysData {
     hitRecord?: HitRecordResult;
     triangleLeaves?: LeafLayoutResult;
     nodeFormat?: NodeFormatResult;
+    anyHitOrder?: AnyHitOrderResult;
 }
 
 function summarizeTree(data: TraceSceneData, buildMs: number): TreeSummary {

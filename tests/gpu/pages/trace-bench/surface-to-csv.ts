@@ -36,6 +36,11 @@
  *   the rates; `surface-rays/node_format/<tree>/<set>/<mode>/{same,ties,different}` the answers
  *   against f32 (different must be 0), `.../<format>/{steps,mesh_nodes,triangle_tests}` the counted
  *   walk per ray, and `surface-rays/node_format/<format>/<tree>/bytes_nodes`;
+ * - `surface-rays/paired/any_{larger,near}_over_far/<tree>/<set>/any/{median,min,max}_of_rounds`
+ *   (and `.../round<k>`): any-hit with `anyHitOrder: 'larger'` or `'near'` over the default `'far'`,
+ *   within a round (above 1: that order is faster); `surface-rays/paired/any_hit_order/<tree>/<set>/any/<order>_mrays_per_s_*`
+ *   the rates, `.../<order>/agreement_with_far` the share of identical answers, and
+ *   `surface-rays/any_hit_order/<tree>/<set>/any/<order>/{steps,mesh_nodes,triangle_tests}` the counted walk per ray;
  * - `surface-rays/<tree>/<set>/<mode>/{steps,instances_entered,instances_entered_without_hit,...}`:
  *   the counted walk's mean work per ray;
  * - `surface-rays/<tree>/<set>/<mode>/agreement_with_instanced`: merged tree only;
@@ -209,6 +214,36 @@ export function surfaceRaysRows(data: SurfaceRaysData): { timed: MetricRow[]; co
         for (const [name, value] of Object.entries(nodes.bytes)) {
             const [format, tree] = name.split('/');
             counted.push({ scene, metric: `surface-rays/node_format/${format}/${tree}/bytes_nodes`, value });
+        }
+    }
+    const orders = data.anyHitOrder;
+    if (orders) {
+        for (const entry of orders.entries) {
+            const prefix = `surface-rays/paired/any_hit_order/${entry.tree}/${entry.set}/any/${entry.order}`;
+            const loaded = [...entry.mraysPerRound].sort((a, b) => a - b);
+            timed.push(
+                { scene, metric: `${prefix}_mrays_per_s_median_of_rounds`, value: middle(loaded) },
+                { scene, metric: `${prefix}_mrays_per_s_min_of_rounds`, value: loaded[0] },
+                { scene, metric: `${prefix}_mrays_per_s_max_of_rounds`, value: loaded[loaded.length - 1] },
+            );
+        }
+        for (const ratio of orders.ratios) {
+            const prefix = `surface-rays/paired/${ratio.name}`;
+            timed.push(
+                { scene, metric: `${prefix}/median_of_rounds`, value: ratio.median },
+                { scene, metric: `${prefix}/min_of_rounds`, value: ratio.min },
+                { scene, metric: `${prefix}/max_of_rounds`, value: ratio.max },
+            );
+            ratio.perRound.forEach((value, round) => timed.push({ scene, metric: `${prefix}/round${round + 1}`, value }));
+        }
+        for (const entry of orders.agreement) counted.push({ scene, metric: `surface-rays/paired/any_hit_order/${entry.tree}/${entry.set}/any/${entry.order}/agreement_with_far`, value: entry.same / entry.rays });
+        for (const entry of orders.counts) {
+            const prefix = `surface-rays/any_hit_order/${entry.tree}/${entry.set}/any/${entry.order}`;
+            counted.push(
+                { scene, metric: `${prefix}/steps`, value: entry.counts.meanSteps },
+                { scene, metric: `${prefix}/mesh_nodes`, value: entry.counts.meanMeshNodes },
+                { scene, metric: `${prefix}/triangle_tests`, value: entry.counts.meanTriangleTests },
+            );
         }
     }
     return { timed, counted };

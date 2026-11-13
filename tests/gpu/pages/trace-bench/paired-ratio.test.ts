@@ -90,6 +90,13 @@ describe('surface-ray csv rows', () => {
                 ratios: [{ name: 'hit_record_40_over_24/merged/surface/closest', perRound: [0.97, 0.99], median: 0.98, min: 0.97, max: 0.99 }],
                 agreement: [{ tree: 'merged', set: 'surface', rays: 10, same: 10 }],
             },
+            anyHitOrder: {
+                rounds: 2,
+                entries: [{ tree: 'merged', set: 'surface', order: 'larger', mraysPerRound: [500, 520] }],
+                ratios: [{ name: 'any_larger_over_far/merged/surface/any', perRound: [0.8, 0.76], median: 0.78, min: 0.76, max: 0.8 }],
+                agreement: [{ tree: 'merged', set: 'surface', order: 'larger', rays: 10, same: 10 }],
+                counts: [{ tree: 'merged', set: 'surface', order: 'larger', counts: { ...counts, meanSteps: 42 }, countedAgreement: 1 }],
+            },
         } as unknown as SurfaceRaysData;
         const { timed, counted } = surfaceRaysRows(data);
         const metric = (name: string) => [...timed, ...counted].find((row) => row.metric === name)?.value;
@@ -104,5 +111,10 @@ describe('surface-ray csv rows', () => {
         expect(metric('surface-rays/paired/hit_record_40_over_24/merged/surface/closest/round1')).toBe(0.97);
         expect(metric('surface-rays/paired/hit_record/merged/surface/closest/record40_mrays_per_s_max_of_rounds')).toBe(300);
         expect(metric('surface-rays/paired/hit_record/merged/surface/closest/compact_agreement')).toBe(1);
+        expect(metric('surface-rays/paired/any_larger_over_far/merged/surface/any/median_of_rounds')).toBe(0.78);
+        expect(metric('surface-rays/paired/any_larger_over_far/merged/surface/any/round2')).toBe(0.76);
+        expect(metric('surface-rays/paired/any_hit_order/merged/surface/any/larger_mrays_per_s_max_of_rounds')).toBe(520);
+        expect(metric('surface-rays/paired/any_hit_order/merged/surface/any/larger/agreement_with_far')).toBe(1);
+        expect(metric('surface-rays/any_hit_order/merged/surface/any/larger/steps')).toBe(42);
     });
 });

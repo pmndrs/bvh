@@ -5,7 +5,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { BufferGeometry, DoubleSide, Float32BufferAttribute, Mesh, MeshBasicMaterial, PerspectiveCamera, Raycaster, Scene, SphereGeometry, Vector2, Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
 import { buildMeshBvhWithTinyBvh, createTinyBvhBuilder, deserializeLayout, IDENTITY_TRANSFORM, traceModuleWgsl, type MeshGeometry } from '@pmndrs/bvh';
@@ -43,7 +43,7 @@ describe('docs pages', () => {
     it('link only to pages and headings that exist', () => {
         const pages = new Map<string, Set<string>>();
         for (const page of docPages()) {
-            const route = '/' + relative(DOCS_DIR, page).replace(/\.mdx$/, '');
+            const route = '/' + relative(DOCS_DIR, page).split(sep).join('/').replace(/\.mdx$/, '');
             const headings = [...readFileSync(page, 'utf8').matchAll(/^#{2,4} (.+)$/gm)].map((match) => slug(match[1]));
             pages.set(route, new Set(headings));
         }
