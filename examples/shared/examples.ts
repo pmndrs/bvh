@@ -66,6 +66,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         timeoutMs: 180_000,
     },
     {
+        name: 'vanilla-workers-gpu',
+        path: 'vanilla/workers-gpu',
+        title: 'Workers (GPU)',
+        description: 'Three ways to run a GPU build on the same meshes: on the render device with no copy, on a worker\'s own device and transferred through the CPU, or everything in a worker with an OffscreenCanvas; against tinybvh\'s worker pool alone, the time to a first usable scene against the time to the best trees.',
+        timeoutMs: 180_000,
+    },
+    {
         name: 'three-raycast',
         path: 'three/raycast',
         title: 'Raycast',
