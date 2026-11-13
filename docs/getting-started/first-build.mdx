@@ -40,6 +40,8 @@ What happens:
 
 - `SceneTrees.create` compiles the GPU builder's kernels (when the device has `subgroups`).
 - The first `update` builds the mesh with H-PLOC on the GPU, and also starts a tinybvh build in a worker.
+- Builds start only in `update`, so the first `update()` must come before `await trees.whenBuilt()`; without it the
+  promise never resolves.
 - The next `update` after `whenBuilt()` places the tree. When tinybvh's tree arrives, a later `update` swaps it in.
   See [Fast first trees](/scenes/scene-trees#fast-first-trees-and-swaps).
 

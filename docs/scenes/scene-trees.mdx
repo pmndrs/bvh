@@ -58,6 +58,10 @@ await trees.whenRefined(); // every GPU tree has been replaced by tinybvh's
 frame();
 ```
 
+Builds start in `update`, never in `addMesh`: a mesh added since the last update counts as waiting, so `whenBuilt()`
+and `whenRefined()` never resolve if no update comes. Call `update` once after adding meshes, as `frame()` does above,
+then await. A frame loop that already runs needs nothing extra; a page that awaits before its first frame hangs.
+
 `onTree` reports every placement: the mesh, `builtBy` (`'gpu'` or `'tinybvh'`), `replaced` (`'gpu'` for a swap),
 `fallbackReason` and the milliseconds since the update that started it.
 

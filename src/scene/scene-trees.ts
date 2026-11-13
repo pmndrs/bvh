@@ -1221,17 +1221,29 @@ export class SceneTrees {
     /**
      * Resolves once every mesh with instances has its first tree (or none is
      * coming) and no top-level shape is building. They reach the GPU at the
-     * next {@link update}. Needs no update to get there, with
-     * `gpuMaxBatchBytes` too (its batches go on between updates). Only when a
-     * capped batch has to wait for an update (see the file comment) do the
-     * meshes behind it count once tinybvh's tree is in.
+     * next {@link update}.
+     *
+     * **Builds start in {@link update}, not in `addMesh`.** A mesh added since
+     * the last update counts as waiting, so awaiting this with no update to
+     * come never resolves. Call `update` once after adding meshes (and keep
+     * calling it once per frame), then await:
+     *
+     *     frame();                  // update(encoder) + submit: starts the builds
+     *     await trees.whenBuilt();  // every mesh with instances has a tree
+     *     frame();                  // places them
+     *
+     * After that one update it needs no more, with `gpuMaxBatchBytes` too (its
+     * batches go on between updates). Only when a capped batch has to wait for
+     * an update (see the file comment) do the meshes behind it count once
+     * tinybvh's tree is in. A frame loop that is already running needs nothing
+     * extra: its next update starts the builds.
      */
     async whenBuilt(): Promise<void> {
         if (this.meshesWaitingForFirstTree() > 0 || this.newMeshes.length > 0) await new Promise<void>((resolve) => this.builtWaiters.push(resolve));
         await this.gpuTopLevel?.whenIdle();
     }
 
-    /** Resolves once every tinybvh build has finished (held trees still wait for {@link releaseRefinements}). */
+    /** Resolves once every tinybvh build has finished (held trees still wait for {@link releaseRefinements}). Like {@link whenBuilt}, it needs an {@link update} after `addMesh` to start them. */
     async whenRefined(): Promise<void> {
         if (this.pendingTinybvh > 0 || this.newMeshes.length > 0) await new Promise<void>((resolve) => this.refinedWaiters.push(resolve));
         await this.whenBuilt();
