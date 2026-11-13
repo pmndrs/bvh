@@ -11,7 +11,8 @@
  * - On the GPU the filter is `fn bvhTrianglePasses(candidate: BvhCandidate) -> bool`
  *   (see {@link DEFAULT_TRIANGLE_FILTER_WGSL}). `traceModuleWgsl` and
  *   `batchKernelWgsl` take it as their `triangleFilter` option; the walk in
- *   `wgsl.ts` calls it.
+ *   `wgsl.ts` calls it. It must not call a walk (`bvhTrace*`, the spatial
+ *   queries): the nested walk overwrites the outer one's quantized node frame.
  * - On the CPU, `createCpuTracer(scene, { triangleFilter })` takes a
  *   {@link TrianglePasses} with the same fields.
  * - The brute-force reference (`buildReferenceScene(..., { triangleFilter })`)

@@ -49,6 +49,11 @@ foliage, glass that casts no shadow, or one-sided surfaces.
 The candidate holds `instance`, `triangle` (the original index), `t`, `barycentrics`, `frontFace`, `query`
 (`BVH_QUERY_CLOSEST` or `BVH_QUERY_ANY`) and `rayMask`. It is a struct, so fields can be added without breaking filters.
 
+The filter must not trace or query (`bvhTraceAny`, `bvhClosestPoint`, `bvhIntersects*`, `bvhShapecast`): a nested walk
+overwrites state the outer walk keeps in private variables (the node frame of quantized nodes), and the outer walk would
+read the rest of its instance wrongly. A shapecast's triangle hook may nest; see
+[Spatial queries on the GPU](/tracing/gpu-queries).
+
 {/* snippet: filter */}
 ```ts
     // Asked only for triangles with TRIANGLE_FLAG_FILTER set. true: the ray passes through.

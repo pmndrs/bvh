@@ -30,11 +30,21 @@
  * world space and the scene comes to it: on entering an instance the walk
  * inverts its world-to-object rows once (by the adjugate), each mesh box
  * becomes the world box around the moved box (centre moved, half size by the
- * absolute matrix, grown by {@link QUERY_BOX_PADDING} so rounding never cuts
- * a corner off), and each triangle's corners are moved to world space before
- * the hook sees them. A merged mesh is in world space already and is read as
- * it is. The boxes a hook sees can be a little larger than the exact world
- * boxes, never smaller; the triangles are exact up to the f32 transform.
+ * absolute matrix, grown by {@link QUERY_BOX_PADDING} of the magnitudes the
+ * f32 transform adds, so the corners it moves stay inside), and each
+ * triangle's corners are moved to world space before the hook sees them. A
+ * merged mesh is in world space already and is read as it is. The boxes a
+ * hook sees are a little larger than the exact world boxes, by that padding;
+ * the triangles are exact up to the f32 transform.
+ *
+ * **Nesting.** A caller's `bvhShapecastTriangle` may call the module's other
+ * walks (`bvhTraceAny`, `bvhClosestPoint`, `bvhIntersects*`): those enter
+ * instances of their own and overwrite the private node frame of quantized
+ * nodes (`bvhEnterMeshNodes`), so the caller's walk re-reads its instance's
+ * frame after each leaf's hook calls. `bvhShapecastBounds` and
+ * `bvhShapecastKeep` must not call a walk (a node is decoded right after
+ * them), nor may the ray walk's `bvhTrianglePasses`. The library's own hook
+ * sets call no walk.
  *
  * The walk itself is the ray walk's shape (one loop, one stack of child
  * references shared by both levels, an instance marker on entry), with a
@@ -42,9 +52,11 @@
  */
 
 /**
- * How much a moved mesh box is grown, as a share of its distance from the
- * origin plus its size: about 8 f32 steps, so the corners moved by the f32
- * matrix never fall outside it.
+ * How much a moved mesh box is grown, as a share of the magnitudes the f32
+ * transform adds up (the moved box centre's terms, the translation and the
+ * half size): about 8 f32 steps of them, so the corners moved by the f32
+ * matrix stay inside even where large terms cancel (an instance far from the
+ * origin whose geometry is offset back near it).
  */
 export const QUERY_BOX_PADDING = 1e-6;
 
@@ -67,7 +79,14 @@ export interface ShapecastHookNames {
  * an instance whose `(instanceMask & mask) == 0`, as the masked ray walk does;
  * without, it takes no arguments. Returns true when the triangle hook stopped it.
  */
-export function shapecastWalkWgsl(name: string, hooks: ShapecastHookNames, rayMasks: boolean): string {
+export function shapecastWalkWgsl(name: string, hooks: ShapecastHookNames, rayMasks: boolean, nestable = false): string {
+    // A caller's hooks may run another walk, which leaves another mesh's quantized frame behind.
+    const restoreFrame = nestable
+        ? `
+            // The hooks may have run another walk (bvhTraceAny, bvhClosestPoint, ...), which reads
+            // the frames of the meshes it enters: read this instance's again before its next node.
+            bvhEnterMeshNodes(instance.rootNodeOffset);`
+        : '';
     return /* wgsl */ `
 fn ${name}(${rayMasks ? 'mask: u32' : ''}) -> bool {
     let header = bvhTraceTopLevel[0];
@@ -171,7 +190,7 @@ fn ${name}(${rayMasks ? 'mask: u32' : ''}) -> bool {
                 if (${hooks.triangle}(candidate)) {
                     return true;
                 }
-            }
+            }${restoreFrame}
         }
 
         // Take the next entry off the stack that the query still wants.
@@ -202,7 +221,7 @@ const SHAPECAST_COMMON_WGSL = /* wgsl */ `
 // ---- Spatial queries: the shapecast walk's types (query-wgsl.ts) --------------
 
 // A box the walk asks about, in world space: a top-level box as stored, a mesh
-// box as the world box around it moved by its instance (a little larger, never smaller).
+// box as the world box around it moved by its instance, padded for the f32 transform's rounding.
 struct BvhShapecastBounds {
     min: vec3f,
     max: vec3f,
@@ -267,9 +286,11 @@ fn bvhQueryWorldBounds(placement: BvhQueryPlacement, boxMin: vec3f, boxMax: vec3
     if (!placement.transformed) {
         return BvhShapecastBounds(boxMin, boxMax);
     }
-    let center = placement.linear * ((boxMin + boxMax) * 0.5) + placement.translation;
+    let local = (boxMin + boxMax) * 0.5;
+    let center = placement.linear * local + placement.translation;
     let half = placement.absolute * ((boxMax - boxMin) * 0.5);
-    let grown = half + (abs(center) + half) * BVH_QUERY_BOX_PADDING;
+    // Padded by the terms' sizes, not the result's: far-off terms that cancel round as large numbers.
+    let grown = half + (placement.absolute * abs(local) + abs(placement.translation) + half) * BVH_QUERY_BOX_PADDING;
     return BvhShapecastBounds(center - grown, center + grown);
 }
 
@@ -498,10 +519,12 @@ function userShapecastWgsl(rayMasks: boolean, hooks: string): string {
     return /* wgsl */ `
 // ---- Spatial queries: the caller's shapecast (bvhShapecast) ----------------------
 
-${shapecastWalkWgsl('bvhShapecastWalk', { bounds: 'bvhShapecastBounds', keep: 'bvhShapecastKeep', triangle: 'bvhShapecastTriangle' }, rayMasks)}
+${shapecastWalkWgsl('bvhShapecastWalk', { bounds: 'bvhShapecastBounds', keep: 'bvhShapecastKeep', triangle: 'bvhShapecastTriangle' }, rayMasks, true)}
 
 // Walks the scene with the caller's bvhShapecastBounds, bvhShapecastKeep and
-// bvhShapecastTriangle; true when bvhShapecastTriangle stopped it.
+// bvhShapecastTriangle; true when bvhShapecastTriangle stopped it. bvhShapecastTriangle
+// may call the module's other walks (bvhTraceAny, bvhClosestPoint, bvhIntersects*);
+// bvhShapecastBounds and bvhShapecastKeep must not.
 ${entryPoints(rayMasks, 'bvhShapecast', '', '', 'bvhShapecastWalk', '', 'bool')}
 
 ${hooks === '' ? '// bvhShapecastBounds, bvhShapecastKeep and bvhShapecastTriangle are supplied by the kernel.' : hooks}

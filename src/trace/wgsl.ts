@@ -230,12 +230,55 @@ struct BvhTrianglePoint {
     barycentrics: vec2f,
 }
 
+// The parameter (0 to 1) of the point of segment start-end nearest to 'point'; 0 for a zero-length segment.
+fn bvhSegmentParameter(point: vec3f, start: vec3f, end: vec3f) -> f32 {
+    let edge = end - start;
+    let lengthSq = dot(edge, edge);
+    if (lengthSq <= 0.0) {
+        return 0.0;
+    }
+    return clamp(dot(point - start, edge) / lengthSq, 0.0, 1.0);
+}
+
+// The nearest point on a triangle's three edges: what a triangle degenerate in f32
+// (a segment or a point) has instead of a face.
+fn bvhClosestPointOnEdges(point: vec3f, a: vec3f, b: vec3f, c: vec3f) -> BvhTrianglePoint {
+    let onAB = bvhSegmentParameter(point, a, b);
+    let onAC = bvhSegmentParameter(point, a, c);
+    let onBC = bvhSegmentParameter(point, b, c);
+    var best = BvhTrianglePoint(a + (b - a) * onAB, vec2f(onAB, 0.0));
+    let fromAC = BvhTrianglePoint(a + (c - a) * onAC, vec2f(0.0, onAC));
+    let fromBC = BvhTrianglePoint(b + (c - b) * onBC, vec2f(1.0 - onBC, onBC));
+    let offset = best.point - point;
+    var bestSq = dot(offset, offset);
+    let offsetAC = fromAC.point - point;
+    if (dot(offsetAC, offsetAC) < bestSq) {
+        best = fromAC;
+        bestSq = dot(offsetAC, offsetAC);
+    }
+    let offsetBC = fromBC.point - point;
+    if (dot(offsetBC, offsetBC) < bestSq) {
+        best = fromBC;
+    }
+    return best;
+}
+
 // The point of triangle a, b, c nearest to 'point' (three's Triangle.closestPointToPoint,
 // Ericson's "Real-Time Collision Detection" 5.1.5: the corner, edge or face region
-// 'point' projects into). A degenerate triangle can give NaN, as three's does.
+// 'point' projects into), in its order. A sliver, thinner than about 1:3000 (the sine of
+// its angle at a below about 3e-4: BVH_SLIVER_SINE_SQ), and a segment or a point, give the nearest point
+// of their three edges instead: in f32 the regions' differences of products cancel for
+// them and pick a wrong region (or divide by zero), while the edges are off by at most
+// the sliver's height. Never NaN.
+const BVH_SLIVER_SINE_SQ: f32 = 1.0e-7;
+
 fn bvhClosestPointToTriangle(point: vec3f, a: vec3f, b: vec3f, c: vec3f) -> BvhTrianglePoint {
     let ab = b - a;
     let ac = c - a;
+    let normal = cross(ab, ac);
+    if (dot(normal, normal) <= BVH_SLIVER_SINE_SQ * dot(ab, ab) * dot(ac, ac)) {
+        return bvhClosestPointOnEdges(point, a, b, c);
+    }
     let ap = point - a;
     let d1 = dot(ab, ap);
     let d2 = dot(ac, ap);
@@ -260,14 +303,18 @@ fn bvhClosestPointToTriangle(point: vec3f, a: vec3f, b: vec3f, c: vec3f) -> BvhT
         return BvhTrianglePoint(c, vec2f(0.0, 1.0));
     }
     let vb = d5 * d2 - d1 * d6;
-    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 && d2 - d6 > 0.0) {
         let w = d2 / (d2 - d6);
         return BvhTrianglePoint(a + ac * w, vec2f(0.0, w));
     }
     let va = d3 * d6 - d5 * d4;
-    if (va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0) {
+    if (va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0 && (d4 - d3) + (d5 - d6) > 0.0) {
         let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
         return BvhTrianglePoint(b + (c - b) * w, vec2f(1.0 - w, w));
+    }
+    // va + vb + vc is |ab x ac|^2 (Lagrange's identity), positive for any triangle past the sliver test; kept as a guard.
+    if (va + vb + vc <= 0.0) {
+        return bvhClosestPointOnEdges(point, a, b, c);
     }
     let denominator = 1.0 / (va + vb + vc);
     let v = vb * denominator;
@@ -848,7 +895,10 @@ export interface TraceModuleOptions {
      * The triangle filter, `fn bvhTrianglePasses(candidate: BvhCandidate) -> bool`,
      * included in the module. Default: {@link DEFAULT_TRIANGLE_FILTER_WGSL}
      * (every triangle blocks). `null` leaves it out, for a kernel that
-     * declares `bvhTrianglePasses` itself.
+     * declares `bvhTrianglePasses` itself. It must not call a walk
+     * (`bvhTrace*`, `bvhClosestPoint`, `bvhIntersects*`, `bvhShapecast`): a
+     * nested walk overwrites the private node frame of quantized nodes that
+     * the outer walk is still reading.
      */
     readonly triangleFilter?: string | null;
     /**

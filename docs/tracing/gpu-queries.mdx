@@ -45,8 +45,8 @@ device.queue.submit([encoder.finish()]);
   1 `instance`, 2 `triangle`, 3 `material`, 4-5 `barycentrics`, 6-8 `point`, 9-11 `normal`. A miss has `distance` -1
   and `material` `NO_MATERIAL`.
 - **Masks:** one instance mask per batch, as for rays; `rayMasks: false` compiles masks out.
-- The kernel refuses a scene whose formats differ from the ones it was made for. `closestPointKernelWgsl(options)` gives
-  its WGSL, for a pipeline of your own.
+- The kernel refuses a scene whose formats differ from the ones it was made for, and a queries or results buffer too
+  small for `count`. `closestPointKernelWgsl(options)` gives its WGSL, for a pipeline of your own.
 
 ## In your own kernel
 
@@ -86,7 +86,11 @@ fn bvhIntersectsOrientedBox(center: vec3f, halfSize: vec3f, rotation: mat3x3f) -
   merged scenes included; `normal` is the triangle's authored front side in world space.
 - Touching counts as intersecting in the sphere and box tests. `bvhIntersectsOrientedBox` takes the box's axes as the
   columns of `rotation`; fold a scale into `halfSize`.
-- The triangle filter is not asked: every triangle counts. Instances with mask 0 are left out, as for rays.
+- The triangle filter is not asked: every triangle counts. Instances with mask 0 are left out, as for rays; with
+  `rayMasks: false` masks are compiled out and every instance counts, mask 0 included.
+- `maxDistance` of 0 or less finds nothing; infinity is clamped to 1e18 and finds the nearest point.
+- Degenerate triangles (segments, points) and slivers thinner than about 1:3000 are measured to their three edges: three's
+  region arithmetic cancels in f32 there. A sliver's answer is off by at most its own height.
 - They are `CpuMeshBvh`'s `closestPointToPoint`, `intersectsSphere` and `intersectsBox` on the GPU, and the
   `query-oracle` GPU page checks them against those (below).
 
@@ -137,10 +141,16 @@ fn countNear(p: vec3f, radius: f32) -> u32 {
 - `bvhShapecastTriangle(triangle)` gets each triangle of an entered leaf: corners `a`, `b`, `c` in world space,
   `instance` and `triangle` as in `BvhHit`, `mirrored` (the world winding is the reverse of the authored one), and
   `record` and `slot` for `bvhShapecastMaterial(triangle)` and `bvhShapecastNormal(triangle)`.
-- Mesh boxes reach your hook as the world box around the instance's moved box, grown a little (`QUERY_BOX_PADDING`) so
-  rounding never cuts a corner off: a little larger than the exact world box, never smaller.
+- Mesh boxes reach your hook as the world box around the instance's moved box, grown by `QUERY_BOX_PADDING` (1e-6) of
+  the sizes of the terms the f32 transform adds (the moved centre's terms, the translation and the half size), so the
+  corners the walk hands to your triangle hook lie inside, also for an instance far from the origin whose geometry is
+  offset back near it. They are a little larger than the exact world boxes.
 - WGSL has no closures, so hooks keep their state in `var<private>` variables. Pass `shapecast: ''` to declare the hooks
   in your kernel instead.
+- `bvhShapecastTriangle` may call the module's other walks (`bvhTraceAny`, `bvhClosestPoint`, `bvhIntersects*`): the
+  shapecast re-reads its instance's quantized node frame after each leaf, which a nested walk overwrites.
+  `bvhShapecastBounds` and `bvhShapecastKeep` must not call a walk (a node is decoded right after them), and neither may
+  the ray walk's triangle filter, `bvhTrianglePasses`.
 - The library's queries are shapecasts of their own, so `queries` and `shapecast` can be used together.
 
 ## Triangle helpers
@@ -166,7 +176,7 @@ fn snap(p: vec3f, a: vec3f, b: vec3f, c: vec3f) -> vec3f {
 
 `bvhIntersectRayTriangle` is the walk's own test (`bvhMakeRaySetup` and `bvhIntersectWatertight`), not a copy: a ray
 through an edge two triangles share hits one of them. `bvhClosestPointToTriangle` is three's
-`Triangle.closestPointToPoint`. Use one or the other text in a kernel, never both: the trace module already contains it.
+`Triangle.closestPointToPoint`, except that segments, points and slivers are measured to their edges. Use one or the other text in a kernel, never both: the trace module already contains it.
 
 ## /three
 
@@ -177,11 +187,14 @@ through an edge two triangles share hits one of them. `bvhClosestPointToTriangle
 ## How they are checked
 
 The `query-oracle` GPU page runs the queries on the oracle's scenes (thin walls, instancing, mirrored and non-uniformly
-scaled boxes, random soups under random rotations, scales and mirrors, 200 instances, a 30,000-triangle mesh) in `f32` and
-quantized nodes, records and indexed leaves, instanced and merged, with masks on and off and per-triangle materials, and
-compares with `CpuMeshBvh` built over each instance in world space. A tie (another triangle at the same distance, within
-the tolerance) agrees; a shape within the tolerance of touching is not counted. On the Apple M5 every query agrees.
-The `three-trace` page checks that `closestPoint` gives exactly the batch kernel's records.
+scaled boxes, random soups under random rotations, scales and mirrors, 200 instances, a 30,000-triangle mesh), plus
+instances 1000-1500 from the origin with their geometry offset back near it, degenerate triangles, and a mask-0
+instance, in `f32` and quantized nodes, records and indexed leaves, instanced and merged, with masks on and off and
+per-triangle materials, and compares with `CpuMeshBvh` built over each instance in world space. A tie (another triangle
+at the same distance, within the tolerance) agrees; a shape within the tolerance of touching is not counted. It also
+checks nesting (a shapecast hook tracing `bvhTraceAny` per triangle, against the CPU walk) and the box padding (every
+corner as the walk moves it, queried at radius 0, must be found with culling as without). On the Apple M5 every query
+agrees. The `three-trace` page checks that `closestPoint` gives exactly the batch kernel's records.
 
 ## Not here
 

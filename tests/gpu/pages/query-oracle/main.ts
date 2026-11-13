@@ -39,12 +39,25 @@
  * - a caller's shapecast (`shapecast: hooks`) counting the triangles a sphere
  *   touches, against `shapecast` with the same tests: the count must lie
  *   between the reference's for the sphere shrunk and grown by the tolerance;
+ * - nesting: that hook also runs `bvhTraceAny` from the query point for each
+ *   triangle it counts (a direction made from the triangle's ids), which enters
+ *   other instances and overwrites the quantized node frame; the blocked count
+ *   must equal the CPU walk's (`createCpuTracer`) over the same triangles, and the
+ *   triangle count must stay right;
+ * - box padding: on three scenes (one far from the origin, its geometry offset back
+ *   near it, so large terms cancel) the shapecast runs again with no culling: both
+ *   counts use the same GPU corners, so they must be equal, or a corner fell
+ *   outside its padded world box;
+ * - closest point with `maxDistance` Infinity, 0 and -1; a scene of degenerate
+ *   triangles (collinear, repeated corners, single points); a scene with a mask-0
+ *   instance, left out with ray masks and included with `rayMasks: false`;
  * - the standalone helpers (`triangleGeometryWgsl()`): `bvhClosestPointToTriangle`
  *   against `triangleClosestPointToPoint`, `bvhIntersectRayTriangle` on rays aimed
  *   inside and outside random triangles.
  *
  * `?profile=ci` (SwiftShader in CI, `BVH_PAGE_QUERY=profile=ci`): every variant,
  * case and check, with a tenth of the queries. The pass rules are the same.
+ * `?queries=N` sets the query points per case.
  */
 
 import {
@@ -69,7 +82,8 @@ import {
 import { createTinyBvhBuilder, CpuMeshBvh, type TinyBvhBuilder } from '../../../../src/index.ts';
 import { sphereIntersectsBox, triangleClosestPointToPoint, BvhVector3 } from '../../../../src/query/shapes.ts';
 import { TRIANGLE_MATERIAL_NONE } from '../../../../src/mesh-input.ts';
-import { createRandom, randomUnitVector, type Random, type Vector3 } from '../../../../src/trace/oracle-fixtures.ts';
+import { createRandom, randomTriangleSoup, randomUnitVector, type Random, type Vector3 } from '../../../../src/trace/oracle-fixtures.ts';
+import { createCpuTracer, type CpuTracer } from '../../../../src/trace/cpu-traversal.ts';
 import { assert, runGpuTest } from '../../client.ts';
 import { buildOracleCases, SMALL_SIZES, type OracleCase } from '../trace-oracle/cases.ts';
 import { withTriangleMaterials } from '../trace-oracle/materials.ts';
@@ -100,7 +114,7 @@ const pageQuery = new URLSearchParams(location.search);
 const profile = pageQuery.get('profile') ?? 'full';
 assert(profile === 'full' || profile === 'ci', `unknown profile "${profile}" (use full or ci)`);
 /** Query points per case, and helper triangles. */
-const QUERIES = profile === 'ci' ? 200 : 2000;
+const QUERIES = Number(pageQuery.get('queries')) || (profile === 'ci' ? 200 : 2000);
 const HELPER_CASES = profile === 'ci' ? 2000 : 20000;
 
 /** The masked pass's mask: instances with bit 0. */
@@ -114,9 +128,109 @@ const NORMAL_COSINE = 0.9999;
 
 // ---- The scene's instances, for the reference ----------------------------------------
 
-/** The case's instances with masks: bit k % 3, and bit 3 on every seventh. */
+/** The case's instances with masks: bit k % 3, and bit 3 on every seventh; a mask given as 0 stays 0. */
 function withMasks(oracleCase: OracleCase): OracleCase {
-    return { ...oracleCase, instances: oracleCase.instances.map((instance, k) => ({ ...instance, mask: (1 << k % 3) | (k % 7 === 0 ? 8 : 0) })) };
+    return { ...oracleCase, instances: oracleCase.instances.map((instance, k) => ({ ...instance, mask: instance.mask === 0 ? 0 : (1 << k % 3) | (k % 7 === 0 ? 8 : 0) })) };
+}
+
+/** A page case: only meshes and instances are read here. */
+function pageCase(name: string, description: string, meshes: MeshGeometry[], instances: TraceSceneInstance[]): OracleCase {
+    return { name, description, meshes, instances, rays: new Float32Array(0), maxAmbiguousShare: { closest: 0, any: 0 } };
+}
+
+/** Column-major translation * rotation * scale, in doubles. */
+function trs(random: Random, translation: Vector3, scale: Vector3): number[] {
+    const [qx, qy, qz] = randomUnitVector(random);
+    const angle = random() * Math.PI * 2;
+    const sin = Math.sin(angle / 2);
+    const x = qx * sin, y = qy * sin, z = qz * sin, w = Math.cos(angle / 2);
+    const r = [
+        [1 - 2 * (y * y + z * z), 2 * (x * y + z * w), 2 * (x * z - y * w)],
+        [2 * (x * y - z * w), 1 - 2 * (x * x + z * z), 2 * (y * z + x * w)],
+        [2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y)],
+    ];
+    return [...r[0].map((v) => v * scale[0]), 0, ...r[1].map((v) => v * scale[1]), 0, ...r[2].map((v) => v * scale[2]), 0, ...translation, 1];
+}
+
+/**
+ * Instances translated 1000-1500 from the origin and rotated, each with its own
+ * mesh stored offset back so the world geometry sits near the origin: large
+ * object coordinates and a large translation cancel (the box padding's hard case).
+ */
+function farFromOriginCase(): OracleCase {
+    const random = createRandom(4711);
+    const meshes: MeshGeometry[] = [];
+    const instances: TraceSceneInstance[] = [];
+    for (let k = 0; k < 5; k++) {
+        const world = randomTriangleSoup(random, 150, 4, 0.5).positions;
+        const translation = [0, 1, 2].map(() => (random() < 0.5 ? -1 : 1) * (1000 + random() * 500)) as Vector3;
+        const scale = [0.6 + random(), 0.6 + random(), (k === 2 ? -1 : 1) * (0.6 + random())] as Vector3;
+        const m = trs(random, translation, scale);
+        // object = (R S)^-1 (world - t): the columns of R S are orthogonal, so its inverse is its transpose over each column's squared length.
+        const positions = new Float32Array(world.length);
+        for (let v = 0; v < world.length / 3; v++) {
+            const d = [0, 1, 2].map((a) => world[v * 3 + a] - translation[a]);
+            for (let c = 0; c < 3; c++) {
+                const column = [m[c * 4], m[c * 4 + 1], m[c * 4 + 2]];
+                positions[v * 3 + c] = (column[0] * d[0] + column[1] * d[1] + column[2] * d[2]) / (column[0] ** 2 + column[1] ** 2 + column[2] ** 2);
+            }
+        }
+        meshes.push({ positions });
+        instances.push({ meshIndex: k, instanceIndex: 500 + k, objectToWorld: m, material: k });
+    }
+    return pageCase('far-from-origin', 'Five rotated, scaled (one mirrored) instances 1000-1500 from the origin whose meshes are offset back near it.', meshes, instances);
+}
+
+/** Every third triangle degenerate: collinear corners, a repeated corner, or one point three times. */
+function degenerateCase(): OracleCase {
+    const random = createRandom(2718);
+    const positions = randomTriangleSoup(random, 300, 3, 0.6).positions;
+    for (let t = 0; t < 300; t += 3) {
+        const at = (corner: number, axis: number) => t * 9 + corner * 3 + axis;
+        for (let axis = 0; axis < 3; axis++) {
+            const kind = (t / 3) % 3;
+            // Corners on a 1/64 grid, so a midpoint is exact: exactly collinear (see the instances below).
+            positions[at(0, axis)] = Math.round(positions[at(0, axis)] * 64) / 64;
+            positions[at(1, axis)] = Math.round(positions[at(1, axis)] * 64) / 64;
+            if (kind === 0) positions[at(2, axis)] = (positions[at(0, axis)] + positions[at(1, axis)]) * 0.5; // collinear, exactly
+            else if (kind === 1) positions[at(1, axis)] = positions[at(0, axis)]; // a repeated corner
+            else positions[at(1, axis)] = positions[at(2, axis)] = positions[at(0, axis)]; // a point
+        }
+    }
+    // The second instance's transform is exact in f32 (a quarter turn, a mirror, a scale of 2, a dyadic translation),
+    // so its degenerate triangles stay exactly degenerate in world space on both sides. Under a general transform
+    // they become slivers degenerate only up to rounding, where the CPU reference (three's algorithm, in doubles)
+    // can pick a wrong region; the GPU treats slivers as their edges (bvhClosestPointToTriangle).
+    return pageCase('degenerate-triangles', 'A soup in which every third triangle is a segment or a point, plain and under an exact mirrored quarter turn.', [{ positions }], [
+        { meshIndex: 0, instanceIndex: 0, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
+        { meshIndex: 0, instanceIndex: 1, objectToWorld: [0, 2, 0, 0, -1, 0, 0, 0, 0, 0, -1, 0, 4, 1, -2.5, 1] },
+    ]);
+}
+
+/** Two soups overlapping, one of them on an instance with mask 0: left out with ray masks, there with `rayMasks: false`. */
+function maskZeroCase(): OracleCase {
+    const random = createRandom(31337);
+    const meshes = [randomTriangleSoup(random, 200, 3, 0.5), randomTriangleSoup(random, 200, 3, 0.5)];
+    return pageCase('mask-zero', 'An instance with mask 0 over another with mask 1.', meshes, [
+        { meshIndex: 0, instanceIndex: 0, objectToWorld: trs(random, [0, 0, 0], [1, 1, 1]), mask: 1 },
+        { meshIndex: 1, instanceIndex: 1, objectToWorld: trs(random, [0.5, 0, 0], [1.2, 0.9, 1]), mask: 0, material: 77 },
+    ]);
+}
+
+/** Cases whose shapecast also runs with no culling, to check the padded world boxes (small enough to walk whole). */
+const UNCULLED_CASES = new Set(['far-from-origin', 'random-instanced', 'mirrored-box']);
+/** Cases whose every corner is queried at radius 0, each walking the whole scene unculled too: small scenes only. */
+const CORNER_CASES = new Set(['far-from-origin', 'mirrored-box']);
+/** Nested any-hit rays are checked against the CPU walk for counts up to this many triangles. */
+const MAX_NESTED_CHECK = 16;
+
+/** The nested ray's direction for a counted triangle: small half-integers made from its ids, the same bits in WGSL. */
+function nestedDirection(instance: number, triangle: number): Vector3 {
+    let h = (Math.imul(instance, 0x9e3779b1) ^ Math.imul(triangle + 1, 0x85ebca77)) >>> 0;
+    h = (h ^ (h >>> 13)) >>> 0;
+    h = Math.imul(h, 0xc2b2ae35) >>> 0;
+    h = (h ^ (h >>> 16)) >>> 0;
+    return [(h & 1023) - 511.5, ((h >>> 10) & 1023) - 511.5, ((h >>> 20) & 1023) - 511.5];
 }
 
 function triangleCount(mesh: MeshGeometry): number {
@@ -140,13 +254,17 @@ interface WorldInstance {
     readonly box: Float64Array;
 }
 
-/** The reference's instances: what the top level keeps (visible, contributing, mask not 0, invertible), each in world space. */
-function worldInstances(oracleCase: OracleCase, tiny: TinyBvhBuilder): WorldInstance[] {
+/**
+ * The reference's instances: what the top level keeps (visible, contributing, invertible), each in world space,
+ * and with ray masks only those whose mask is not 0. `magnitude` is the largest size of the terms the f32 transform adds.
+ */
+function worldInstances(oracleCase: OracleCase, tiny: TinyBvhBuilder, rayMasks = true): { instances: WorldInstance[]; magnitude: number } {
     const out: WorldInstance[] = [];
+    let magnitude = 0;
     for (const instance of oracleCase.instances) {
         if (instance.visible === false || instance.contributesToGi === false) continue;
         const mask = instance.mask ?? 0xff;
-        if (mask === 0) continue;
+        if (rayMasks && mask === 0) continue;
         const e = instance.objectToWorld;
         const det = determinant3(e);
         if (det === 0) continue;
@@ -161,6 +279,7 @@ function worldInstances(oracleCase: OracleCase, tiny: TinyBvhBuilder): WorldInst
                 const x = mesh.positions[v * 3], y = mesh.positions[v * 3 + 1], z = mesh.positions[v * 3 + 2];
                 for (let k = 0; k < 3; k++) {
                     const w = e[k] * x + e[4 + k] * y + e[8 + k] * z + e[12 + k];
+                    magnitude = Math.max(magnitude, Math.abs(e[k] * x) + Math.abs(e[4 + k] * y) + Math.abs(e[8 + k] * z) + Math.abs(e[12 + k]));
                     corners[t * 9 + c * 3 + k] = Math.fround(w);
                     positions[t * 9 + c * 3 + k] = w;
                     box[k] = Math.min(box[k], Math.fround(w));
@@ -171,7 +290,7 @@ function worldInstances(oracleCase: OracleCase, tiny: TinyBvhBuilder): WorldInst
         const tree = CpuMeshBvh.build({ positions }, tiny);
         out.push({ instance, mesh, tree, corners, mirrored: det < 0, mask, box });
     }
-    return out;
+    return { instances: out, magnitude };
 }
 
 function boxDistanceSq(box: ArrayLike<number>, p: Vector3): number {
@@ -190,8 +309,9 @@ interface ReferenceClosest {
 }
 
 /** The scene's closest point: the best of each instance's `closestPointToPoint`, instances nearest box first. */
-function referenceClosest(instances: readonly WorldInstance[], p: Vector3, mask = 0xffffffff): ReferenceClosest | null {
-    const order = instances.filter((entry) => (entry.mask & mask) !== 0).map((entry) => ({ entry, boxSq: boxDistanceSq(entry.box, p) })).sort((a, b) => a.boxSq - b.boxSq);
+function referenceClosest(instances: readonly WorldInstance[], p: Vector3, mask?: number): ReferenceClosest | null {
+    // No mask: every instance given (with masks compiled out that includes mask 0).
+    const order = instances.filter((entry) => mask === undefined || (entry.mask & mask) !== 0).map((entry) => ({ entry, boxSq: boxDistanceSq(entry.box, p) })).sort((a, b) => a.boxSq - b.boxSq);
     let best: ReferenceClosest | null = null;
     for (const { entry, boxSq } of order) {
         if (best && boxSq > best.distance * best.distance) break;
@@ -224,21 +344,21 @@ function referenceBox(instances: readonly WorldInstance[], center: Vector3, half
     });
 }
 
-/** Triangles a sphere touches, over the scene: each instance's `shapecast` with three-mesh-bvh's sphere tests. */
-function referenceCount(instances: readonly WorldInstance[], center: Vector3, radius: number): number {
+/** Triangles a sphere touches, over the scene (instance index, triangle): each instance's `shapecast` with three-mesh-bvh's sphere tests. */
+function referenceTouched(instances: readonly WorldInstance[], center: Vector3, radius: number): [number, number][] {
     const sphere = { center: { x: center[0], y: center[1], z: center[2] }, radius };
-    let count = 0;
+    const touched: [number, number][] = [];
     for (const entry of instances) {
         if (boxDistanceSq(entry.box, center) > radius * radius) continue;
         entry.tree.shapecast({
             intersectsBounds: (box) => sphereIntersectsBox(sphere, box),
-            intersectsTriangle: (triangle) => {
-                if (triangle.intersectsSphere(sphere)) count++;
+            intersectsTriangle: (triangle, index) => {
+                if (triangle.intersectsSphere(sphere)) touched.push([entry.instance.instanceIndex, index]);
                 return false;
             },
         });
     }
-    return count;
+    return touched;
 }
 
 // ---- Query generation ---------------------------------------------------------------------
@@ -259,6 +379,10 @@ interface QueryCase {
     readonly orientedBox: boolean | null;
     readonly countRadius: number;
     readonly countRange: readonly [number, number];
+    /** The triangles the count sphere touches when the range is one number (else null): the nested rays' check. */
+    readonly touched: readonly [number, number][] | null;
+    /** maxDistance of the special pass: Infinity, 0 or -1. */
+    readonly special: number;
 }
 
 function randomRotation(random: Random): Vector3[] {
@@ -279,7 +403,7 @@ function unambiguous(shrunk: boolean, grown: boolean): boolean | null {
     return shrunk === grown ? shrunk : null;
 }
 
-function buildQueries(instances: readonly WorldInstance[], seed: number, count: number): { queries: QueryCase[]; scale: number } {
+function buildQueries(instances: readonly WorldInstance[], magnitude: number, seed: number, count: number): { queries: QueryCase[]; scale: number } {
     const random = createRandom(seed);
     const box = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
     for (const entry of instances) for (let k = 0; k < 3; k++) {
@@ -307,7 +431,8 @@ function buildQueries(instances: readonly WorldInstance[], seed: number, count: 
             point = [0, 1, 2].map((k) => c[k] + e1[k] * u + e2[k] * v + (n[k] / length) * offset) as Vector3;
         }
         point = point.map(Math.fround) as Vector3;
-        const tolerance = RELATIVE_TOLERANCE * (scale + Math.hypot(...point));
+        // The f32 transform rounds at the size of its terms (large for the far-from-origin case).
+        const tolerance = RELATIVE_TOLERANCE * (scale + Math.hypot(...point) + magnitude);
         const closest = referenceClosest(instances, point);
         const closestMasked = referenceClosest(instances, point, QUERY_MASK);
         const distance = closest?.distance ?? scale;
@@ -324,8 +449,12 @@ function buildQueries(instances: readonly WorldInstance[], seed: number, count: 
         const axes = randomRotation(random);
         const orientedBox = unambiguous(referenceBox(instances, point, shrunk, axes), referenceBox(instances, point, grown, axes));
         const countRadius = Math.fround((0.05 + random() * 0.25) * scale);
-        const countRange = [countRadius > tolerance ? referenceCount(instances, point, countRadius - tolerance) : 0, referenceCount(instances, point, countRadius + tolerance)] as const;
-        queries.push({ point, closest, closestMasked, tolerance, limit, limitExpect, radius, sphere, half, box: boxAnswer, axes, orientedBox, countRadius, countRange });
+        const countRange = [countRadius > tolerance ? referenceTouched(instances, point, countRadius - tolerance).length : 0, referenceTouched(instances, point, countRadius + tolerance).length] as const;
+        // Nested rays start at the point: one on (or nearly on) a surface may or may not hit it at t = 0, so those are left out.
+        const nestable = countRange[0] === countRange[1] && countRange[0] <= MAX_NESTED_CHECK && distance > 1e-3 * scale;
+        const touched = nestable ? referenceTouched(instances, point, countRadius) : null;
+        const special = [Infinity, 0, -1][q % 3];
+        queries.push({ point, closest, closestMasked, tolerance, limit, limitExpect, radius, sphere, half, box: boxAnswer, axes, orientedBox, countRadius, countRange, touched: touched?.length === countRange[0] ? touched : null, special });
     }
     return { queries, scale };
 }
@@ -361,8 +490,25 @@ const COUNT_HOOKS_WGSL = /* wgsl */ `
 var<private> pageCountCenter: vec3f;
 var<private> pageCountRadiusSq: f32;
 var<private> pageCount: u32;
+var<private> pageCull: bool;      // false: enter every box (the padding check)
+var<private> pageNested: bool;    // trace a ray per counted triangle (the nesting check)
+var<private> pageRecord: bool;    // write every triangle's world corners instead (the padding check's points)
+var<private> pageRecorded: u32;
+var<private> pageBlocked: u32;
+
+// The nested ray's direction (nestedDirection in main.ts, the same bits).
+fn pageDirection(instance: u32, triangle: u32) -> vec3f {
+    var h = (instance * 0x9e3779b1u) ^ ((triangle + 1u) * 0x85ebca77u);
+    h = h ^ (h >> 13u);
+    h = h * 0xc2b2ae35u;
+    h = h ^ (h >> 16u);
+    return vec3f(f32(h & 1023u), f32((h >> 10u) & 1023u), f32((h >> 20u) & 1023u)) - vec3f(511.5);
+}
 
 fn bvhShapecastBounds(bounds: BvhShapecastBounds) -> f32 {
+    if (!pageCull) {
+        return 0.0;
+    }
     let distanceSq = bvhPointBoxDistanceSq(pageCountCenter, bounds.min, bounds.max);
     return select(-1.0, distanceSq, distanceSq <= pageCountRadiusSq);
 }
@@ -372,9 +518,22 @@ fn bvhShapecastKeep(score: f32) -> bool {
 }
 
 fn bvhShapecastTriangle(triangle: BvhShapecastTriangle) -> bool {
+    if (pageRecord) {
+        if (pageRecorded * 3u + 2u < arrayLength(&pageCorners)) {
+            pageCorners[pageRecorded * 3u] = vec4f(triangle.a, 0.0);
+            pageCorners[pageRecorded * 3u + 1u] = vec4f(triangle.b, 0.0);
+            pageCorners[pageRecorded * 3u + 2u] = vec4f(triangle.c, 0.0);
+        }
+        pageRecorded += 1u;
+        return false;
+    }
     let offset = bvhClosestPointToTriangle(pageCountCenter, triangle.a, triangle.b, triangle.c).point - pageCountCenter;
     if (dot(offset, offset) <= pageCountRadiusSq) {
         pageCount += 1u;
+        // A walk inside the walk: it enters other instances (and their quantized frames).
+        if (pageNested && bvhTraceAny(BvhRay(pageCountCenter, 0.0, pageDirection(triangle.instance, triangle.triangle), 1.0e30))) {
+            pageBlocked += 1u;
+        }
     }
     return false;
 }
@@ -391,7 +550,8 @@ struct PageQuery {
 }
 
 @group(1) @binding(0) var<storage, read> pageQueries: array<PageQuery>;
-@group(1) @binding(1) var<storage, read_write> pageResults: array<vec4u>;
+@group(1) @binding(1) var<storage, read_write> pageResults: array<vec4u>;   // two per query
+@group(1) @binding(2) var<storage, read_write> pageCorners: array<vec4f>;   // record mode: three per triangle
 
 @compute @workgroup_size(${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -399,6 +559,17 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
         return;
     }
     let query = pageQueries[id.x];
+    // axis1.w = 1 (one query, one thread): walk the whole scene and write each triangle's corners as the walk
+    // moves them to world space. In this entry point so that it costs no pipeline of its own.
+    if (query.axis1.w > 0.0) {
+        pageCull = false;
+        pageRecord = true;
+        pageNested = false;
+        pageRecorded = 0u;
+        _ = bvhShapecast();
+        pageResults[0] = vec4u(pageRecorded, 0u, 0u, 0u);
+        return;
+    }
     let center = query.centerRadius.xyz;
     let half = query.halfCountRadius.xyz;
     let sphere = bvhIntersectsSphere(center, query.centerRadius.w);
@@ -407,8 +578,23 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     pageCountCenter = center;
     pageCountRadiusSq = query.halfCountRadius.w * query.halfCountRadius.w;
     pageCount = 0u;
+    pageBlocked = 0u;
+    pageCull = true;
+    pageNested = true;
+    pageRecord = false;
     _ = bvhShapecast();
-    pageResults[id.x] = vec4u(select(0u, 1u, sphere), select(0u, 1u, box), select(0u, 1u, oriented), pageCount);
+    let culled = pageCount;
+    // axis0.w = 1: walk again entering every box; the same corners, so the same count.
+    var unculled = culled;
+    if (query.axis0.w > 0.0) {
+        pageCount = 0u;
+        pageCull = false;
+        pageNested = false;
+        _ = bvhShapecast();
+        unculled = pageCount;
+    }
+    pageResults[id.x * 2u] = vec4u(select(0u, 1u, sphere), select(0u, 1u, box), select(0u, 1u, oriented), culled);
+    pageResults[id.x * 2u + 1u] = vec4u(pageBlocked, unculled, 0u, 0u);
 }
 `;
 
@@ -416,26 +602,51 @@ interface ShapeAnswers {
     readonly words: Uint32Array;
 }
 
-async function runShapes(device: GPUDevice, pipeline: GPUComputePipeline, buffers: ReturnType<typeof uploadTraceScene>, queries: readonly QueryCase[]): Promise<ShapeAnswers> {
+async function runShapes(device: GPUDevice, pipeline: GPUComputePipeline, buffers: ReturnType<typeof uploadTraceScene>, queries: readonly QueryCase[], unculled: boolean): Promise<ShapeAnswers> {
     const data = new Float32Array(queries.length * 20);
     queries.forEach((query, q) => {
-        data.set([...query.point, query.radius, ...query.half, query.countRadius, ...query.axes[0], 0, ...query.axes[1], 0, ...query.axes[2], 0], q * 20);
+        data.set([...query.point, query.radius, ...query.half, query.countRadius, ...query.axes[0], unculled ? 1 : 0, ...query.axes[1], 0, ...query.axes[2], 0], q * 20);
     });
     const input = storageBuffer(device, 'query-oracle shapes in', data);
-    const output = storageBuffer(device, 'query-oracle shapes out', queries.length * 16);
+    const output = storageBuffer(device, 'query-oracle shapes out', queries.length * 32);
+    const corners = storageBuffer(device, 'query-oracle corners (unused here)', 16);
     const scene = [buffers.nodes, buffers.triangles, buffers.topLevel, ...(buffers.positions ? [buffers.positions] : [])];
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: scene.map((buffer, binding) => ({ binding, resource: { buffer } })) }));
-    pass.setBindGroup(1, device.createBindGroup({ layout: pipeline.getBindGroupLayout(1), entries: [input, output].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
+    pass.setBindGroup(1, device.createBindGroup({ layout: pipeline.getBindGroupLayout(1), entries: [input, output, corners].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
     pass.dispatchWorkgroups(Math.ceil(queries.length / WORKGROUP));
     pass.end();
     device.queue.submit([encoder.finish()]);
-    const words = new Uint32Array(await readBuffer(device, output, queries.length * 16));
+    const words = new Uint32Array(await readBuffer(device, output, queries.length * 32));
     input.destroy();
     output.destroy();
+    corners.destroy();
     return { words };
+}
+
+/** Every triangle's world corners as the GPU walk moves them (`recordCorners`), up to `capacity` triangles. */
+async function recordCorners(device: GPUDevice, pipeline: GPUComputePipeline, buffers: ReturnType<typeof uploadTraceScene>, capacity: number): Promise<Vector3[]> {
+    const record = new Float32Array(20);
+    record[15] = 1; // axis1.w (vec4 3, w): record mode
+    const input = storageBuffer(device, 'query-oracle record in', record);
+    const output = storageBuffer(device, 'query-oracle record count', 32);
+    const corners = storageBuffer(device, 'query-oracle corners', capacity * 48);
+    const scene = [buffers.nodes, buffers.triangles, buffers.topLevel, ...(buffers.positions ? [buffers.positions] : [])];
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: scene.map((buffer, binding) => ({ binding, resource: { buffer } })) }));
+    pass.setBindGroup(1, device.createBindGroup({ layout: pipeline.getBindGroupLayout(1), entries: [input, output, corners].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    const count = new Uint32Array(await readBuffer(device, output, 32))[0];
+    assert(count <= capacity, `recordCorners: ${count} triangles, room for ${capacity}`);
+    const floats = new Float32Array(await readBuffer(device, corners, capacity * 48));
+    for (const buffer of [input, output, corners]) buffer.destroy();
+    return Array.from({ length: count * 3 }, (_, k) => [floats[k * 4], floats[k * 4 + 1], floats[k * 4 + 2]] as Vector3);
 }
 
 async function runClosest(device: GPUDevice, kernel: ClosestPointBatchKernel, buffers: ReturnType<typeof uploadTraceScene>, points: readonly Vector3[], limits: readonly number[], mask?: number) {
@@ -506,7 +717,8 @@ function triangleAnswer(instances: readonly WorldInstance[], instanceIndex: numb
         answers.push({
             distance: Math.hypot(nearest.x - p[0], nearest.y - p[1], nearest.z - p[2]),
             corners: c,
-            normal: length > 0 ? n.map((x) => (sign * x) / length) : null,
+            // A sliver's normal is rounding noise (degenerate and collinear-up-to-rounding triangles): not checked.
+            normal: length > 1e-4 * Math.hypot(...e1) * Math.hypot(...e2) ? n.map((x) => (sign * x) / length) : null,
             material,
         });
     }
@@ -704,42 +916,74 @@ await runGpuTest(async ({ device, log }) => {
     endPhase('helpers');
 
     // The reference answers, once per case (they do not depend on the format).
-    const plainCases = buildOracleCases(SMALL_SIZES).map(withMasks);
+    const plainCases = [...buildOracleCases(SMALL_SIZES), farFromOriginCase(), degenerateCase(), maskZeroCase()].map(withMasks);
+    type Reference = { instances: WorldInstance[]; queries: QueryCase[]; scale: number };
+    const reference = (oracleCase: OracleCase, index: number, rayMasks: boolean): Reference => {
+        const { instances, magnitude } = worldInstances(oracleCase, tiny, rayMasks);
+        return { instances, ...buildQueries(instances, magnitude, 1000 + index, QUERIES) };
+    };
+    // With ray masks compiled out a mask-0 instance is there: such a case has a second reference.
     const references = plainCases.map((oracleCase, index) => {
-        const instances = worldInstances(oracleCase, tiny);
-        return { instances, ...buildQueries(instances, 1000 + index, QUERIES) };
+        const masked = reference(oracleCase, index, true);
+        const unmasked = oracleCase.instances.some((instance) => instance.mask === 0) ? reference(oracleCase, index, false) : masked;
+        return { masked, unmasked };
     });
     const materialCases = plainCases.map(withTriangleMaterials);
     // With triangle materials only the expected material changes: the same world trees, other meshes.
-    const materialInstances = references.map((reference, index) => reference.instances.map((entry) => ({ ...entry, mesh: materialCases[index].meshes[entry.instance.meshIndex] })));
+    const withMaterials = (instances: WorldInstance[], index: number) => instances.map((entry) => ({ ...entry, mesh: materialCases[index].meshes[entry.instance.meshIndex] }));
     endPhase('references');
 
     const report: Record<string, unknown> = {};
+    // Where a variant's time goes (pipeline compiles dominate on SwiftShader), for the CI budget.
+    const split = { compileSeconds: 0, buildSeconds: 0, dispatchAndCheckSeconds: 0 };
+    const timed = async <T,>(key: keyof typeof split, work: () => Promise<T>): Promise<T> => {
+        const start = performance.now();
+        try {
+            return await work();
+        } finally {
+            split[key] += (performance.now() - start) / 1000;
+        }
+    };
+    const pipelines = new Map<string, { kernel: ClosestPointBatchKernel; shapes: GPUComputePipeline }>();
     for (const variant of VARIANTS) {
         const rayMasks = variant.rayMasks ?? true;
         const formats = { triangleLeaves: variant.triangleLeaves, positionLayout: variant.positionLayout, nodeFormat: variant.nodeFormat };
-        const kernel = await ClosestPointBatchKernel.create(device, { label: variant.name, rayMasks, ...formats });
+        // Variants with the same formats and masks compile the same WGSL: their pipelines are made once (compiles are
+        // most of the page's time on SwiftShader).
+        const pipelineKey = JSON.stringify({ ...formats, rayMasks });
+        const compileStart = performance.now();
+        let compiled = pipelines.get(pipelineKey);
+        if (!compiled) {
+            const kernel = await ClosestPointBatchKernel.create(device, { label: variant.name, rayMasks, ...formats });
+            const sceneLayout = device.createBindGroupLayout({ entries: traceModuleEntries(formats).map((entry, binding) => ({ ...entry, binding })) });
+            const ioLayout = device.createBindGroupLayout({
+                entries: [
+                    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                    { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                    { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                ],
+            });
+            const code = `${traceModuleWgsl({ ...formats, rayMasks, queries: true, shapecast: COUNT_HOOKS_WGSL })}\n${SHAPES_KERNEL_WGSL}`;
+            const module = device.createShaderModule({ label: `${variant.name} shapes`, code });
+            const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [sceneLayout, ioLayout] });
+            const shapes = await device.createComputePipelineAsync({ label: `${variant.name} shapes`, layout: pipelineLayout, compute: { module, entryPoint: 'main' } });
+            compiled = { kernel, shapes };
+            pipelines.set(pipelineKey, compiled);
+        }
+        const { kernel, shapes } = compiled;
         assert(kernel.nodeFormat === variant.nodeFormat && kernel.triangleLeaves === variant.triangleLeaves, 'the kernel names the formats it was made for');
-        const sceneLayout = device.createBindGroupLayout({ entries: traceModuleEntries(formats).map((entry, binding) => ({ ...entry, binding })) });
-        const ioLayout = device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-            ],
-        });
-        const code = `${traceModuleWgsl({ ...formats, rayMasks, queries: true, shapecast: COUNT_HOOKS_WGSL })}\n${SHAPES_KERNEL_WGSL}`;
-        const shapes = await device.createComputePipelineAsync({
-            label: `${variant.name} shapes`,
-            layout: device.createPipelineLayout({ bindGroupLayouts: [sceneLayout, ioLayout] }),
-            compute: { module: device.createShaderModule({ label: `${variant.name} shapes`, code }), entryPoint: 'main' },
-        });
+        split.compileSeconds += (performance.now() - compileStart) / 1000;
 
-        const tallies = { closest: tally(), limited: tally(), masked: tally(), sphere: tally(), box: tally(), orientedBox: tally(), shapecast: tally() };
+        const tallies = { closest: tally(), limited: tally(), masked: tally(), special: tally(), sphere: tally(), box: tally(), orientedBox: tally(), shapecast: tally(), nested: tally(), unculled: tally(), corners: tally() };
         for (const [caseIndex, plainCase] of plainCases.entries()) {
             const oracleCase = variant.triangleMaterials ? materialCases[caseIndex] : plainCase;
-            const { queries } = references[caseIndex];
-            const instances = variant.triangleMaterials ? materialInstances[caseIndex] : references[caseIndex].instances;
-            const scene = await buildScene(builder, oracleCase, variant);
+            const caseReference = rayMasks ? references[caseIndex].masked : references[caseIndex].unmasked;
+            const { queries } = caseReference;
+            const instances = variant.triangleMaterials ? withMaterials(caseReference.instances, caseIndex) : caseReference.instances;
+            const scene = await timed('buildSeconds', () => buildScene(builder, oracleCase, variant));
+            const checkStart = performance.now();
+            // The CPU walk over the same scene, for the nested rays.
+            const cpuWalk: CpuTracer = createCpuTracer(scene, { rayMasks });
             const buffers = uploadTraceScene(device, scene, `${variant.name} ${oracleCase.name}`);
             const where = `[${variant.name}] ${oracleCase.name}`;
             try {
@@ -747,12 +991,47 @@ await runGpuTest(async ({ device, log }) => {
                 const unlimited = await runClosest(device, kernel, buffers, points, points.map(() => UNLIMITED));
                 const limited = await runClosest(device, kernel, buffers, points, queries.map((query) => query.limit));
                 const masked = rayMasks ? await runClosest(device, kernel, buffers, points, points.map(() => UNLIMITED), QUERY_MASK) : null;
-                const answers = await runShapes(device, shapes, buffers, queries);
+                const special = await runClosest(device, kernel, buffers, points, queries.map((query) => query.special));
+                const unculledCase = UNCULLED_CASES.has(oracleCase.name);
+                const answers = await runShapes(device, shapes, buffers, queries, unculledCase);
+                if (CORNER_CASES.has(oracleCase.name)) {
+                    // Every corner as the walk moved it, as a point query of radius 0: its triangle is at distance 0,
+                    // so the culled walk must find it, unless the padded world box around its leaf left the corner out.
+                    const corners = await recordCorners(device, shapes, buffers, instances.reduce((sum, entry) => sum + entry.corners.length / 9, 0));
+                    const cornerQueries = corners.map((point) => ({ ...queries[0], point, countRadius: 0 }));
+                    const cornerAnswers = await runShapes(device, shapes, buffers, cornerQueries, true);
+                    cornerQueries.forEach((_, k) => {
+                        const [count, unculled] = [cornerAnswers.words[k * 8 + 3], cornerAnswers.words[k * 8 + 5]];
+                        if (count === unculled && count > 0) tallies.corners.agree++;
+                        else {
+                            tallies.corners.mismatches++;
+                            if (failures.length < 40) failures.push(`${where} corner ${k} at [${corners[k]}]: the culled walk found ${count} triangles, the unculled one ${unculled}: a padded world box left the corner out`);
+                        }
+                    });
+                }
                 queries.forEach((query, q) => {
                     checkClosest(failures, `${where} closest`, tallies.closest, instances, query, query.closest, query.closest !== null, unlimited.floats, unlimited.words, q);
                     checkClosest(failures, `${where} limited`, tallies.limited, instances, query, query.closest, query.limitExpect, limited.floats, limited.words, q);
                     if (masked) checkClosest(failures, `${where} masked`, tallies.masked, instances, query, query.closestMasked, query.closestMasked !== null, masked.floats, masked.words, q);
-                    const [sphere, box, orientedBox, count] = answers.words.subarray(q * 4, q * 4 + 4);
+                    // Infinity finds the reference's point; 0 and -1 find nothing.
+                    checkClosest(failures, `${where} maxDistance ${query.special}`, tallies.special, instances, query, query.closest, query.special > 0 && query.closest !== null, special.floats, special.words, q);
+                    const [sphere, box, orientedBox, count] = answers.words.subarray(q * 8, q * 8 + 4);
+                    const [blocked, unculled] = answers.words.subarray(q * 8 + 4, q * 8 + 6);
+                    if (unculledCase) {
+                        if (unculled === count) tallies.unculled.agree++;
+                        else {
+                            tallies.unculled.mismatches++;
+                            if (failures.length < 40) failures.push(`${where} padding query ${q}: the culled shapecast counted ${count}, the unculled one ${unculled}`);
+                        }
+                    }
+                    if (query.touched) {
+                        const expected = query.touched.filter(([instance, triangle]) => cpuWalk.any({ origin: query.point, direction: nestedDirection(instance, triangle), tMin: 0, tMax: 1e30 })).length;
+                        if (blocked === expected) tallies.nested.agree++;
+                        else {
+                            tallies.nested.mismatches++;
+                            if (failures.length < 40) failures.push(`${where} nested query ${q}: ${blocked} of ${count} nested rays blocked, the CPU walk ${expected}`);
+                        }
+                    }
                     checkBoolean(failures, `${where} sphere`, tallies.sphere, query.sphere, sphere !== 0, q, () => `radius ${query.radius}, closest ${query.closest?.distance}`);
                     checkBoolean(failures, `${where} box`, tallies.box, query.box, box !== 0, q, () => `half [${query.half}]`);
                     checkBoolean(failures, `${where} oriented box`, tallies.orientedBox, query.orientedBox, orientedBox !== 0, q, () => `half [${query.half}], axes ${JSON.stringify(query.axes)}`);
@@ -767,9 +1046,9 @@ await runGpuTest(async ({ device, log }) => {
                 });
             } finally {
                 buffers.destroy();
+                split.dispatchAndCheckSeconds += (performance.now() - checkStart) / 1000;
             }
         }
-        kernel.destroy();
         report[variant.name] = tallies;
         log(
             `[${variant.name}] ` +
@@ -780,21 +1059,28 @@ await runGpuTest(async ({ device, log }) => {
         endPhase(variant.name);
     }
     builder.dispose();
+    for (const { kernel } of pipelines.values()) kernel.destroy();
 
     // The checks must have had something to check.
     const first = report[VARIANTS[0].name] as Record<string, Tally>;
     for (const [name, t] of Object.entries(first)) assert(t.agree > 0, `${name}: no query agreed, so nothing was checked`);
     // Each shape test must have expected both answers, and the shapecast both empty and non-empty counts.
-    const all = references.flatMap((reference) => reference.queries);
+    const all = references.flatMap((entry) => entry.masked.queries);
     const balance = {
         sphere: [all.filter((query) => query.sphere === true).length, all.filter((query) => query.sphere === false).length],
         box: [all.filter((query) => query.box === true).length, all.filter((query) => query.box === false).length],
         orientedBox: [all.filter((query) => query.orientedBox === true).length, all.filter((query) => query.orientedBox === false).length],
         shapecast: [all.filter((query) => query.countRange[0] > 0).length, all.filter((query) => query.countRange[1] === 0).length],
         limited: [all.filter((query) => query.limitExpect === true).length, all.filter((query) => query.limitExpect === false).length],
+        nested: [all.filter((query) => query.touched && query.touched.length > 0).length, all.filter((query) => query.touched?.length === 0).length],
     };
+    // The nesting check must have traced nested rays on quantized nodes, and blocked some and not others.
+    const quantized = report['quantized-records'] as Record<string, Tally>;
+    assert(quantized.nested.agree > 0 && quantized.unculled.agree > 0 && quantized.corners.agree > 0, 'the nested-ray and padding checks ran on quantized nodes');
     for (const [name, [yes, no]] of Object.entries(balance)) assert(yes > 0 && no > 0, `${name}: the reference must expect both answers (${yes} / ${no})`);
     assert(failures.length === 0, failures.slice(0, 12).join('\n'));
     log(`profile ${profile}: ${QUERIES} queries per case, ${HELPER_CASES} helper cases; expected true / false: ${JSON.stringify(balance)}`);
-    return { profile, phaseSeconds, queriesPerCase: QUERIES, helperCases: HELPER_CASES, helpers: { ray: helpers.ray, nearest: helpers.nearest }, byVariant: report, balance };
+    const variantSplit = Object.fromEntries(Object.entries(split).map(([key, value]) => [key, Math.round(value * 10) / 10]));
+    log(`variant time: ${JSON.stringify(variantSplit)}`);
+    return { profile, phaseSeconds, variantSplit, queriesPerCase: QUERIES, helperCases: HELPER_CASES, helpers: { ray: helpers.ray, nearest: helpers.nearest }, byVariant: report, balance };
 });
