@@ -154,7 +154,7 @@ async function refitAcrossFrames(device: GPUDevice, name: string, geometry: Mesh
     }
     const refit = new GpuMeshRefit(device, { label: `${name} refit`, diagnostics: true });
     await refit.prepare();
-    refit.setTree(layout, { nodeWordOffset: nodeOffsetBytes / 4, triangleWordOffset: triangleOffsetBytes / 4 });
+    refit.setTree(layout, { nodeWordOffset: nodeOffsetBytes / 4, triangleWordOffset: triangleOffsetBytes / 4, nodeFormat: 'f32' });
     let vertexBuffer: GPUBuffer | null = null;
     try {
         for (let frame = 1; frame <= 5; frame++) {
@@ -334,7 +334,7 @@ async function refitIndexedAcrossFrames(
     const positions = storage(device, `${name} positions`, placed(new ArrayBuffer(positionBytes), positionOffsetBytes));
     const refit = new GpuMeshRefit(device, { label: `${name} refit`, diagnostics: true });
     await refit.prepare();
-    refit.setTree(layout, { nodeWordOffset: nodeOffsetBytes / 4, triangleWordOffset: triangleOffsetBytes / 4, vertexBase: VERTICES_BEFORE, positionLayout });
+    refit.setTree(layout, { nodeWordOffset: nodeOffsetBytes / 4, triangleWordOffset: triangleOffsetBytes / 4, vertexBase: VERTICES_BEFORE, positionLayout, nodeFormat: 'f32' });
     let vertexBuffer: GPUBuffer | null = null;
     try {
         for (let frame = 1; frame <= 3; frame++) {
@@ -409,7 +409,7 @@ async function refitIndexedSceneMesh(
 
     const indexed = (geometry: MeshGeometry) => buildMeshBvhWithTinyBvh(geometry, tinyBvh, { triangleLeaves: 'indexed' });
     const records = (geometry: MeshGeometry) => buildMeshBvhWithTinyBvh(geometry, tinyBvh);
-    const welded = await buildTraceScene(meshes, instances, { build: indexed, triangleLeaves: 'indexed', positionLayout });
+    const welded = await buildTraceScene(meshes, instances, { build: indexed, triangleLeaves: 'indexed', positionLayout, nodeFormat });
     try {
         meshRefitPlacement(welded, refitMesh);
         failures.push(`${name}: meshRefitPlacement accepted a welded mesh`);
@@ -428,7 +428,7 @@ async function refitIndexedSceneMesh(
         await refit.prepare();
         const layout = { ...tree, triangleLeaves: 'indexed' as const };
         try {
-            refit.setTree(layout, { nodeWordOffset: placement.nodeWordOffset, triangleWordOffset: placement.triangleWordOffset });
+            refit.setTree(layout, { nodeWordOffset: placement.nodeWordOffset, triangleWordOffset: placement.triangleWordOffset, nodeFormat: placement.nodeFormat });
             failures.push(`${name}: setTree took an indexed tree without a vertexBase`);
         } catch {
             // Expected: an indexed tree needs its vertex base.
@@ -441,7 +441,7 @@ async function refitIndexedSceneMesh(
         device.queue.submit([encoder.finish()]);
         const refitScene = { ...scene, nodes: await read(device, nodes), triangles: await read(device, triangles), positions: await read(device, positions) };
 
-        const reference = await buildTraceScene(meshes.map((mesh, index) => (index === refitMesh ? { ...mesh, positions: pose } : mesh)), instances, { build: records });
+        const reference = await buildTraceScene(meshes.map((mesh, index) => (index === refitMesh ? { ...mesh, positions: pose } : mesh)), instances, { build: records, nodeFormat: 'f32' });
         const actual = createCpuTracer(refitScene);
         const expected = createCpuTracer(reference);
         const rays = randomRays(createRandom(31), 4000, [-8, -4, -8, 8, 4, 8], 1);

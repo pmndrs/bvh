@@ -214,6 +214,48 @@ export interface MeshRefitTarget {
 }
 
 /**
+ * Where a tree sits for {@link GpuMeshRefit.setTree}. A tree inside other
+ * buffers (`nodeWordOffset`, a scene's say) must name the target's
+ * `nodeFormat`: the scene's format is not the layout's. `meshRefitPlacement`
+ * gives both for a scene mesh.
+ */
+export type GpuMeshRefitPlacement = {
+    triangleWordOffset?: number;
+    generation?: number;
+    /**
+     * Indexed trees, required: the mesh's first vertex in the target's
+     * positions buffer (0 for a tree in its own buffers;
+     * `meshRefitPlacement` for a scene mesh).
+     */
+    vertexBase?: number;
+    /** Indexed trees: the mesh's vertices there; `encode` then refuses a posed buffer of another size. */
+    vertexCount?: number;
+    /** Indexed trees: the positions buffer's layout. Default `'vec4'`. */
+    positionLayout?: 'vec4' | 'packed';
+} & (
+    | {
+          /** The tree in its own buffers (word 0; with quantized nodes, its root after the frame slot). */
+          nodeWordOffset?: undefined;
+          /**
+           * The target's node format. Required with `nodeWordOffset` (a
+           * tree inside other buffers, such as a scene's: the target's
+           * format is not the layout's; `meshRefitPlacement` gives it).
+           * Without `nodeWordOffset` (the tree in its own buffers) it
+           * defaults to the layout's. With `'quantized'`, `nodeWordOffset`
+           * is the root's (its frame slot is the 8 words before; default 8),
+           * and the refit runs on an `f32` copy then packs it into the target.
+           */
+          nodeFormat?: 'f32' | 'quantized';
+      }
+    | {
+          /** Where the mesh's root sits in the target node buffer, in words. */
+          nodeWordOffset: number;
+          /** The target's node format, required here. */
+          nodeFormat: 'f32' | 'quantized';
+      }
+);
+
+/**
  * The mesh refit's pipelines (the triangle step and the B1a refit), compiled
  * once and shared by any number of {@link GpuMeshRefit}s on one device. A
  * caller with several deforming meshes needs one `GpuMeshRefit` per mesh
@@ -321,29 +363,13 @@ export class GpuMeshRefit {
      */
     setTree(
         layout: GpuLayoutMeshBvh,
-        placement: {
-            nodeWordOffset?: number;
-            triangleWordOffset?: number;
-            generation?: number;
-            /**
-             * Indexed trees, required: the mesh's first vertex in the target's
-             * positions buffer (0 for a tree in its own buffers;
-             * `meshRefitPlacement` for a scene mesh).
-             */
-            vertexBase?: number;
-            /** Indexed trees: the mesh's vertices there; `encode` then refuses a posed buffer of another size. */
-            vertexCount?: number;
-            /** Indexed trees: the positions buffer's layout. Default `'vec4'`. */
-            positionLayout?: 'vec4' | 'packed';
-            /**
-             * The target's node format. Default: the layout's. With
-             * `'quantized'`, `nodeWordOffset` is the root's (its frame slot is
-             * the 8 words before; default 8, a tree in its own buffer), and
-             * the refit runs on an `f32` copy then packs it into the target.
-             */
-            nodeFormat?: 'f32' | 'quantized';
-        } = {},
+        placement: GpuMeshRefitPlacement = {},
     ): void {
+        if (placement.nodeWordOffset !== undefined && placement.nodeFormat !== 'f32' && placement.nodeFormat !== 'quantized') {
+            throw new RangeError(
+                `GpuMeshRefit.setTree: a tree placed at nodeWordOffset ${placement.nodeWordOffset} needs placement.nodeFormat, the target's ('f32' or 'quantized'; scenes are quantized by default). meshRefitPlacement(scene, mesh) gives it`,
+            );
+        }
         if (layout.triangleLeaves === 'indexed' && placement.vertexBase === undefined) {
             throw new RangeError('GpuMeshRefit.setTree: an indexed tree needs placement.vertexBase (0 for a tree in its own buffers; meshRefitPlacement gives a scene mesh\'s)');
         }

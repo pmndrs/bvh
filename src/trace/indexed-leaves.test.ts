@@ -303,7 +303,9 @@ describe('an indexed scene against the records scene', () => {
 
     it('needs the geometries, and refuses indexed trees in a records scene', () => {
         expect(() => assembleTraceScene(meshes.map(indexed), instances, {}, { triangleLeaves: 'indexed' })).toThrow(/geometries\[0\]/);
-        expect(() => assembleTraceScene(meshes.map(indexed), instances)).toThrow(/is indexed/);
+        // No format named: the trees' (indexed), which needs the geometries; records named: indexed trees are refused.
+        expect(() => assembleTraceScene(meshes.map(indexed), instances)).toThrow(/geometries\[0\]/);
+        expect(() => assembleTraceScene(meshes.map(indexed), instances, {}, { triangleLeaves: 'records' })).toThrow(/is indexed/);
         expect(() => assembleTraceScene(meshes.map(records), instances, {}, { geometries: meshes })).toThrow(/triangleLeaves/);
     });
 });
@@ -348,11 +350,12 @@ describe('refitting a mesh of an indexed static scene', () => {
     it('refuses a welded mesh, exact or tolerance, and says to assemble with weld: false', async () => {
         const welded = assembleTraceScene(meshes.map(indexed), instances, {}, { triangleLeaves: 'indexed', geometries: meshes });
         expect(() => meshRefitPlacement(welded, 4)).toThrow(/welded.*weld: false/);
-        const tolerance = await buildTraceScene(meshes, instances, { build: indexed, triangleLeaves: 'indexed', weld: false, weldTolerance: 1e-6 });
+        const tolerance = await buildTraceScene(meshes, instances, { build: indexed, triangleLeaves: 'indexed', weld: false, weldTolerance: 1e-6, mergeStaticInstances: false });
         expect(() => meshRefitPlacement(tolerance, 4)).toThrow(/welded.*weld: false/);
-        const unwelded = assembleTraceScene(meshes.map(indexed), instances, {}, { triangleLeaves: 'indexed', geometries: meshes, weld: false, positionLayout: 'packed' });
+        const unwelded = assembleTraceScene(meshes.map(indexed), instances, {}, { triangleLeaves: 'indexed', geometries: meshes, weld: false, positionLayout: 'packed', nodeFormat: 'f32' });
         expect(meshRefitPlacement(unwelded, 4)).toEqual({
             nodeWordOffset: unwelded.meshes[4].nodeOffset * 16,
+            nodeFormat: 'f32',
             triangleWordOffset: unwelded.meshes[4].triangleOffset * INDEXED_TRIANGLE_WORDS,
             vertexBase: unwelded.meshes[4].vertexBase,
             vertexCount: meshes[4].positions.length / 3,
@@ -371,7 +374,7 @@ describe('refitting a mesh of an indexed static scene', () => {
             const posed = meshes.map((mesh, index) => (index === meshIndex ? { ...mesh, positions: pose } : mesh));
 
             const trees = meshes.map(indexed);
-            const scene = await buildTraceScene(meshes, instances, { build: indexed, triangleLeaves: 'indexed', weld: false, positionLayout });
+            const scene = await buildTraceScene(meshes, instances, { build: indexed, triangleLeaves: 'indexed', weld: false, positionLayout, mergeStaticInstances: false, nodeFormat: 'f32' });
             refitIndexedSceneMesh(scene, meshIndex, trees[meshIndex], pose);
             const reference = assembleTraceScene(posed.map(records), instances);
             const expected = closest(reference);

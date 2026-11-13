@@ -27,6 +27,9 @@ word 12-14 rightMax  (f32 x 3)   15  rightCount
 A child with count 0 is an inner node at `index`. A child with a count is a leaf: `count` triangles (1 to 8) starting
 at triangle `index`. A tree of one triangle has an empty right child (`GPU_LAYOUT_EMPTY_CHILD`).
 
+Builders write these 64-byte nodes unless asked for quantized ones. A scene (`SceneTrees`, `buildTraceScene`) stores
+its nodes quantized by default: 32 bytes each, see [Variants](#variants).
+
 **Triangles: 48 bytes each, in tree order.** Leaves point at contiguous runs, so there is no index indirection.
 
 ```text
@@ -87,21 +90,38 @@ would only show up as wrong rays.
 
 ## Variants
 
-Two variants of version 2 trade speed for memory. Both are **off by default** until they are measured on the RTX 3060.
-Each is compiled into the walk, so the walk and the scene must agree.
+Two variants of version 2 trade speed for memory. Each is compiled into the walk, so the walk and the scene must agree.
 
 | Option | Default | Other value | What changes |
 | --- | --- | --- | --- |
+| `nodeFormat` | `'quantized'` (32 B per node) | `'f32'` (64 B per node) | 32-byte nodes with 16-bit planes on a per-mesh grid, and a 32-byte frame slot before each mesh's root. Boxes round outward, so a decoded box always holds the exact one. The top level stays `f32`. |
 | `triangleLeaves` | `'records'` (48 B per triangle) | `'indexed'` | 16-byte triangles `vec4u(i0, i1, i2, id + flags)`, a 16-byte header per mesh, and the scene's own copy of the positions (a fourth binding), welded by exact bits. `positionLayout: 'vec4'` (16 B per vertex) or `'packed'` (12). |
-| `nodeFormat` | `'f32'` (64 B per node) | `'quantized'` | 32-byte nodes with 16-bit planes on a per-mesh grid, and a 32-byte frame slot before each mesh's root. Boxes round outward, so a decoded box always holds the exact one. The top level stays `f32`. |
 
-Pass them to `SceneTrees.create`, `buildTraceScene`, the builders' options, `traceModuleWgsl` and `TraceBatchKernel`.
-`SceneTrees` exposes the values it was made with (`trees.triangleLeaves`, `trees.positionLayout`, `trees.nodeFormat`).
+Quantized nodes became the default on 2026-11-13, after the RTX 3060 run. **Options default to quantized; data must
+say what it is.** Where the package makes both sides (`SceneTrees`, `buildTraceScene`, `assembleTraceScene`,
+`traceModuleWgsl`, `TraceBatchKernel.create`), a missing `nodeFormat` means quantized, so a scene and a walk made
+without the option agree. Buffers handed to a walk name their own formats: `uploadTraceScene` and
+`trees.traceBuffers` do, and a `TraceBatchKernel` or `BvhTraceNodes` given buffers that don't is refused. The mesh
+builders still write 64-byte trees unless asked, and a scene quantizes them as it places them. Indexed leaves stay
+off: they wait for an RTX 3060 run with both variants on together.
 
-Measured on Sponza (5.74 million triangles), bytes beyond the app's own geometry: 448.1 MiB in the default layout,
-318.0 MiB indexed, 355.5 MiB quantized, 225.5 MiB with both. Trace speed against the default on the Apple M5
-(indicative): indexed 0.83-0.99x with `vec4` positions, quantized 0.93-0.97x. Details in
-[Memory](/performance/memory).
+Pass the options to `SceneTrees.create`, `buildTraceScene`, the builders' options, `traceModuleWgsl` and
+`TraceBatchKernel`. `SceneTrees` exposes the values it was made with (`trees.triangleLeaves`, `trees.positionLayout`,
+`trees.nodeFormat`): compile your own walk from them.
+
+Measured on Sponza (5.74 million triangles), bytes beyond the app's own geometry: 355.5 MiB in the default layout
+(quantized nodes, records), 448.1 MiB with `f32` nodes, 225.5 MiB with indexed leaves as well.
+
+Trace speed, each variant against `f32` nodes and records (above 1 is faster):
+
+| Variant | RTX 3060 Laptop | Apple M5 (indicative) |
+| --- | --- | --- |
+| Quantized nodes | closest hit 1.02-1.22x, any hit 0.98-1.03x | 0.93-0.97x |
+| Indexed leaves, `vec4` positions | 0.92-0.97x | 0.83-0.99x |
+| Indexed leaves, packed positions | 0.82-0.95x | 0.75-0.92x |
+
+RTX 3060 Laptop: Windows, headless Chrome 157, 2026-11-13, Sponza and Bistro interior surface-ray benches, the median
+of three runs. Each variant was timed alone. Details in [Memory](/performance/memory).
 
 ## Size limits
 

@@ -36,7 +36,8 @@ await runGpuTest(
         const tinyBvh = await createTinyBvhBuilder();
         const geometries = [tessellatedQuad(12, 1), randomTriangleSoup(random, 200, 1, 0.3), randomTriangleSoup(random, 50, 0.5, 0.4), tessellatedQuad(3, 0.7)];
         const meshes = geometries.map((geometry) => buildMeshBvhWithTinyBvh(geometry, tinyBvh));
-        const placed = assembleTraceScene(meshes, []);
+        // f32 nodes throughout (the scene default is quantized): the page checks the top level, not the node format.
+        const placed = assembleTraceScene(meshes, [], {}, { nodeFormat: 'f32' });
         const storage = (name: string, data: ArrayBuffer) => {
             const buffer = device.createBuffer({ label: name, size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
             device.queue.writeBuffer(buffer, 0, data);
@@ -46,7 +47,7 @@ await runGpuTest(
         const triangles = storage('triangles', placed.triangles);
 
         const top = new GpuTopLevel(device, { label: 'page', diagnostics: true });
-        const kernel = await TraceBatchKernel.create(device);
+        const kernel = await TraceBatchKernel.create(device, { nodeFormat: 'f32' });
         await top.prepare();
         meshes.forEach((mesh, index) => top.setMeshTree(index, { nodeOffset: placed.meshes[index].nodeOffset, triangleOffset: placed.meshes[index].triangleOffset, bounds: mesh.bounds }));
 
@@ -84,6 +85,8 @@ await runGpuTest(
                         material: instance.material,
                     }),
                 ),
+                {},
+                { nodeFormat: 'f32' },
             );
         const rays = randomRays(random, RAYS, [-25, -25, -25, 25, 25, 25], 2);
 
@@ -92,7 +95,7 @@ await runGpuTest(
         const check = async (stage: string, checkRecords: boolean) => {
             await device.queue.onSubmittedWorkDone();
             const expected = reference();
-            const gpuScene = await readScene(device, { nodes, triangles, topLevel: top.buffer });
+            const gpuScene = await readScene(device, { nodes, triangles, topLevel: top.buffer }, { nodeFormat: 'f32' });
             if (checkRecords) {
                 // Records by instance index: the CPU top level's (only traced instances) against the gathered ones.
                 const recordsOf = (buffer: ArrayBuffer, count: number) => {
@@ -121,7 +124,7 @@ await runGpuTest(
                     if (!ok && recordProblems++ < 4) failures.push(`${stage}: instance ${instanceIndex}'s record differs: GPU ${gpu ? Array.from(gpu).join(',') : 'none'} CPU ${Array.from(cpu).join(',')}`);
                 }
             }
-            const buffers: TraceSceneBuffers = { nodes, triangles, topLevel: top.buffer, byteLength: 0, destroy() {} };
+            const buffers: TraceSceneBuffers = { nodes, triangles, topLevel: top.buffer, nodeFormat: 'f32', triangleLeaves: 'records', positionLayout: 'vec4', byteLength: 0, destroy() {} };
             for (const mask of [undefined, 0x0e]) {
                 const gpu = await traceOnGpu(device, kernel, buffers, rays, mask);
                 const comparison = compareWithReference(rays, gpu, gpuScene, expected, { mask });

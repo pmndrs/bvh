@@ -144,7 +144,8 @@ fn benchFinishAny(countsIn: BenchCounts, blocked: bool) -> BenchCounts {
  */
 export function countedKernelWgsl(mode: 'closest' | 'any', format: { readonly nodeFormat?: 'f32' | 'quantized'; readonly anyHitOrder?: AnyHitOrder } = {}): string {
     // The walk's text is the same in every node format (wgsl.ts), so the counted copy applies to all.
-    return /* wgsl */ `${traceModuleWgsl({ rayMasks: true, nodeFormat: format.nodeFormat, anyHitOrder: format.anyHitOrder })}
+    // No format given is f32 here, the bench's baseline (the module's own default is quantized).
+    return /* wgsl */ `${traceModuleWgsl({ rayMasks: true, nodeFormat: format.nodeFormat ?? 'f32', anyHitOrder: format.anyHitOrder })}
 ${BENCH_HELPERS_WGSL}
 ${countedWalkWgsl({ kind: mode, name: 'benchCountedWalk', counters: true, anyHitOrder: format.anyHitOrder })}
 

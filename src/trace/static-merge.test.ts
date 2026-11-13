@@ -342,7 +342,8 @@ describe('mergeStaticInstances off', () => {
             meshes.push(i % 3 === 0 ? tessellatedQuad(5, 1) : randomTriangleSoup(random, 100, 3, 0.5));
             instances.push({ meshIndex: i % 25, instanceIndex: 1000 - i, objectToWorld: randomAffine(random, { extent: 10, mirror: i % 4 === 0 }), mask: i % 2 ? 0x0f : undefined, static: true });
         }
-        const scene = await buildTraceScene(meshes, instances, { build });
+        // The layout main had then: instanced, f32 nodes (both defaults changed on 2026-11-13).
+        const scene = await buildTraceScene(meshes, instances, { build, mergeStaticInstances: false, nodeFormat: 'f32' });
         const hash = createHash('sha256');
         for (const buffer of [scene.nodes, scene.triangles, scene.topLevel.buffer]) hash.update(new Uint8Array(buffer));
         hash.update(new Uint8Array(scene.topLevel.recordOrder.buffer));
@@ -352,12 +353,16 @@ describe('mergeStaticInstances off', () => {
     it('builds exactly the instanced scene, static or not', async () => {
         const { meshes, instances } = mixedScene(3);
         const today = assembleTraceScene(meshes.map(build), instances.map(({ static: _, ...rest }) => rest));
-        const off = await buildTraceScene(meshes, instances, { build });
+        const off = await buildTraceScene(meshes, instances, { build, mergeStaticInstances: false });
         expect(bytes(off)).toEqual(bytes(today));
         expect(Array.from(off.topLevel.recordOrder)).toEqual(Array.from(today.topLevel.recordOrder));
         expect(off.mergedGroups).toEqual([]);
-        const on = await buildTraceScene(meshes, instances, { build, mergeStaticInstances: true });
+        // Unmarked instances: merging, on by default, changes nothing.
+        const unmarked = instances.map(({ static: _, ...rest }) => rest);
+        expect(bytes(await buildTraceScene(meshes, unmarked, { build }))).toEqual(bytes(today));
+        const on = await buildTraceScene(meshes, instances, { build });
         expect(on.mergedGroups.length).toBe(3);
+        expect(bytes(on)).toEqual(bytes(await buildTraceScene(meshes, instances, { build, mergeStaticInstances: true })));
     });
 });
 
@@ -572,10 +577,10 @@ describe('merged meshes are never refit targets', () => {
             meshes.map((mesh, index) => (plan.meshNeeded[index] ? build(mesh) : null)),
             instances,
             {},
-            { merged: { plan, meshes: plan.groups.map((group) => build(group.geometry)) } },
+            { merged: { plan, meshes: plan.groups.map((group) => build(group.geometry)) }, nodeFormat: 'f32' },
         );
         const mergedMesh = scene.meshes.findIndex((range) => range.mergedInto !== undefined);
         expect(() => meshRefitPlacement(scene, mergedMesh)).toThrow(new RegExp(`mesh ${mergedMesh} was merged into static group \\d+.*must not be refit`));
-        expect(meshRefitPlacement(scene, 18)).toEqual({ nodeWordOffset: scene.meshes[18].nodeOffset * 16, triangleWordOffset: scene.meshes[18].triangleOffset * TRIANGLE_WORDS });
+        expect(meshRefitPlacement(scene, 18)).toEqual({ nodeWordOffset: scene.meshes[18].nodeOffset * 16, nodeFormat: 'f32', triangleWordOffset: scene.meshes[18].triangleOffset * TRIANGLE_WORDS });
     });
 });

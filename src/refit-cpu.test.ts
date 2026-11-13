@@ -79,6 +79,20 @@ describe('refitOnCpu', () => {
     });
 });
 
+describe('refitOnCpu on quantized nodes', () => {
+    it('throws instead of overwriting 32-byte nodes read with the 64-byte stride', async () => {
+        const tinyBvh = await createTinyBvhBuilder();
+        const geometry = randomTriangleSoup(createRandom(12), 300, 4, 0.5);
+        const quantized = tinyBvh.buildLayout(geometry, { nodeFormat: 'quantized' }).layout;
+        const before = new Uint8Array(quantized.nodes.slice(0));
+        const primitiveBoxes = new Float32Array(quantized.triangleCount * PRIMITIVE_BOX_FLOATS);
+        const words = new Uint32Array(quantized.nodes);
+        expect(() => refitOnCpu(new Float32Array(quantized.nodes), words, 0, quantized.nodeCount, quantized.parents, primitiveBoxes)).toThrow(/not a 64-byte f32 node/);
+        // It checks every node before it writes one: the quantized words are untouched.
+        expect(new Uint8Array(quantized.nodes)).toEqual(before);
+    });
+});
+
 describe('refitRecordsOnCpu', () => {
     it("is refitOnCpu over boxes made from the records' corners, bit for bit, with or without a kept order", async () => {
         const builder = await createTinyBvhBuilder();

@@ -72,9 +72,10 @@ try {
     log(`sponza: ${scene.meshes.length} meshes, ${scene.instances.length} instances, ${scene.uniqueTriangles} triangles (load ${Math.round(scene.loadMs)} ms)`);
     // `indexed` variants (docs/internals/design/indexed-leaves.md): triangleLeaves 'indexed', with `packed` positions when the name says so.
     const kernels = {
-        records: await TraceBatchKernel.create(device),
-        vec4: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4' }),
-        packed: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed' }),
+        // Variants without `quantized-` are f32 (named: the default node format is quantized).
+        records: await TraceBatchKernel.create(device, { nodeFormat: 'f32' }),
+        vec4: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4', nodeFormat: 'f32' }),
+        packed: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'f32' }),
         // `quantized-` variants (docs/internals/design/compressed-nodes.md): nodeFormat 'quantized', the rest of the name as above.
         'quantized-records': await TraceBatchKernel.create(device, { nodeFormat: 'quantized' }),
         'quantized-vec4': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4', nodeFormat: 'quantized' }),
@@ -87,6 +88,8 @@ try {
     let reference: TraceSceneData | null = assembleTraceScene(
         scene.meshes.map((mesh) => buildMeshBvhWithTinyBvh(mesh, tinyBvh)),
         scene.instances.map((instance, index) => ({ meshIndex: instance.meshIndex, instanceIndex: index, objectToWorld: instance.objectToWorld })),
+        {},
+        { nodeFormat: 'f32' },
     );
     const referenceTracer = createCpuTracer(reference);
     const expected = rays.map((ray) => referenceTracer.closest(ray));
@@ -136,7 +139,7 @@ try {
             mergeStaticInstances: variant.includes('merged'),
             workers: pool,
             ...(indexed ? { triangleLeaves: 'indexed' as const, positionLayout } : {}),
-            ...(quantized ? { nodeFormat: 'quantized' as const } : {}),
+            nodeFormat: quantized ? 'quantized' : 'f32',
         });
         const meshes = scene.meshes.map((mesh) => trees.addMesh(mesh));
         scene.instances.forEach((instance, index) => trees.addInstance({ mesh: meshes[instance.meshIndex], instanceIndex: index, objectToWorld: instance.objectToWorld, static: true }));

@@ -103,13 +103,13 @@ Masks and the filter are on [Masks, the triangle filter and materials](/concepts
 | `traceSlot` | `{ group: 0, firstBinding: 0 }` | Where the bindings land: nodes, triangles, top level, in order (and positions, for indexed leaves). |
 | `triangleFilter` | `DEFAULT_TRIANGLE_FILTER_WGSL` (every triangle blocks) | Your `bvhTrianglePasses`, or `null` to declare it yourself. |
 | `rayMasks` | `true` | `false` compiles masks out. |
-| `triangleLeaves`, `positionLayout`, `nodeFormat` | records, `vec4`, `f32` | Must match the scene. |
+| `triangleLeaves`, `positionLayout`, `nodeFormat` | records, `vec4`, `'quantized'` | Must match the scene. A scene's defaults are the same, so a scene and a walk made without these options agree. |
 
 Compile the walk for the scene it reads:
 
 {/* snippet: match-scene */}
 ```ts
-// Compile the walk for the scene's formats (all three are off by default).
+// Compile the walk for the scene's formats (the defaults: records, vec4 positions, quantized nodes).
 const options = { triangleLeaves: trees.triangleLeaves, positionLayout: trees.positionLayout, nodeFormat: trees.nodeFormat };
 const walk = traceModuleWgsl({ traceSlot: { group: 0, firstBinding: 0 }, ...options });
 const entries = traceModuleEntries(options); // a fourth binding, the positions, for indexed leaves
@@ -125,6 +125,9 @@ without binding numbers. A kernel refuses buffers of the other format.
 - **Both child boxes are tested** with a precomputed inverse direction. Closest hit goes to the nearer child first;
   any hit goes to the **farther** child first. A shadow ray starts on a surface, so the nearer child is mostly the
   geometry it starts on. That made any-hit 1.1-2.8x faster on the bench scenes, with the same answers.
+  `anyHitOrder: 'larger'` enters the larger child first instead, for occlusion rays from outside the model or across
+  open space: 1.11-1.48x far-first on instanced trees on the RTX 3060 Laptop, but 0.80-0.87x on merged trees with rays
+  from surfaces (Windows, headless Chrome 157, 2026-11-13, Sponza and Bistro interior).
 - **Boxes beyond the current closest hit are skipped.**
 
 ## The stack size

@@ -26,6 +26,7 @@ export {
 // The GPU layout every builder writes and every walk reads. It is part of the
 // API: changing it bumps GPU_LAYOUT_VERSION.
 export {
+    DEFAULT_NODE_FORMAT,
     GPU_LAYOUT_CHILD_STRIDE_WORDS,
     GPU_LAYOUT_EMPTY_CHILD,
     GPU_LAYOUT_MAX_LEAF_PRIMITIVES,
@@ -126,7 +127,7 @@ export {
     type BvhRefitStats,
     type GpuBvhRefitOptions,
 } from './gpu-refit.ts';
-export { GpuMeshRefit, GpuMeshRefitKernels, type GpuMeshRefitOptions, type MeshRefitTarget, type MeshRefitVertices } from './gpu-mesh-refit.ts';
+export { GpuMeshRefit, GpuMeshRefitKernels, type GpuMeshRefitOptions, type GpuMeshRefitPlacement, type MeshRefitTarget, type MeshRefitVertices } from './gpu-mesh-refit.ts';
 export { BVH_INSTANCE_BOX_PADDING, BVH_INSTANCE_BOX_WGSL } from './gpu-instance-box.ts';
 export {
     BVH_FLOAT_MAX,

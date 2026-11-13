@@ -29,7 +29,7 @@ import type { Mesh, Object3D } from 'three';
 
 export async function sync(device: GPUDevice, scene: Object3D, materialIndexOf: (mesh: Mesh) => number): Promise<SceneTreesObject3DSync> {
     // #region sync
-    const trees = await SceneTrees.create(device, { mergeStaticInstances: true });
+    const trees = await SceneTrees.create(device); // static instances merge by default (mergeStaticInstances)
     scene.updateMatrixWorld(); // the world matrices are read as they are
     const sync = new SceneTreesObject3DSync(trees, scene, {
         static: (object) => !object.userData.moves, // static instances can merge, and are never pushed again

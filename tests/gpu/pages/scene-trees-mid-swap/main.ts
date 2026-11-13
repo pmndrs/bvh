@@ -115,9 +115,10 @@ await runGpuTest(
         const cases: OracleCase[] = [...buildOracleCases(FULL_SIZES), sharedEdgeCase(sharedRays, false), sharedEdgeCase(sharedRays, true)];
         const tinyBvh = await createTinyBvhBuilder();
         const kernels = {
-            records: await TraceBatchKernel.create(device),
-            vec4: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4' }),
-            packed: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed' }),
+            // The plain variants are f32 (named: the default node format is quantized).
+            records: await TraceBatchKernel.create(device, { nodeFormat: 'f32' }),
+            vec4: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4', nodeFormat: 'f32' }),
+            packed: await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'f32' }),
             'quantized-records': await TraceBatchKernel.create(device, { nodeFormat: 'quantized' }),
             'quantized-vec4': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4', nodeFormat: 'quantized' }),
             'quantized-packed': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'quantized' }),
@@ -138,6 +139,8 @@ await runGpuTest(
             const reference = assembleTraceScene(
                 oracleCase.meshes.map((mesh) => buildMeshBvhWithTinyBvh(mesh, tinyBvh)),
                 oracleCase.instances,
+                {},
+                { nodeFormat: 'f32' },
             );
             for (const variant of VARIANTS) {
                 const { meshes, instances } = variant.merged ? forMerge(oracleCase.meshes, oracleCase.instances) : { meshes: oracleCase.meshes, instances: oracleCase.instances };
@@ -150,7 +153,7 @@ await runGpuTest(
                     workers: pool,
                     firstTreeBuilder: variant.indexed ? indexedFirstTrees : firstTrees,
                     ...(variant.indexed ? { triangleLeaves: 'indexed' as const, positionLayout: variant.indexed } : {}),
-                    ...(variant.quantized ? { nodeFormat: 'quantized' as const } : {}),
+                    nodeFormat: variant.quantized ? 'quantized' : 'f32',
                 });
                 const kernel = kernels[`${variant.quantized ? 'quantized-' : ''}${variant.indexed ?? 'records'}` as keyof typeof kernels];
                 const handles = meshes.map((mesh) => scene.addMesh(mesh));

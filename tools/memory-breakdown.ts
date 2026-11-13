@@ -301,7 +301,8 @@ async function main(): Promise<void> {
         perMesh.push({ nodeCount: tree.nodeCount, triangleCount: tree.triangleCount, leafCount: tree.leafCount, maxDepth: tree.maxDepth });
         return tree;
     };
-    let scene = await buildTraceScene(geometries, sceneInstances, { build: (g) => record(buildMeshBvhWithTinyBvh(g, tinyBvh)) });
+    // Records, f32 nodes, instanced: the layout every section below is a variant of (named: the defaults became merged and quantized on 2026-11-13).
+    let scene = await buildTraceScene(geometries, sceneInstances, { build: (g) => record(buildMeshBvhWithTinyBvh(g, tinyBvh)), mergeStaticInstances: false, nodeFormat: 'f32' });
     const ours = {
         nodes: scene.nodes.byteLength,
         triangles: scene.triangles.byteLength,
@@ -315,7 +316,7 @@ async function main(): Promise<void> {
         maxMeshDepth: scene.maxMeshDepth,
     };
     out.ours = ours;
-    console.log(`  ours (tinybvh, leaves of up to 8): nodes ${mib(ours.nodes)} MiB (${ours.nodeCount} nodes, ${ours.averageLeafTriangles.toFixed(2)} triangles per leaf), triangle records ${mib(ours.triangles)}, parents (CPU only) ${mib(ours.parentsCpu)}, top level ${mib(ours.topLevel)}`);
+    console.log(`  ours, records and f32 nodes (tinybvh, leaves of up to 8): nodes ${mib(ours.nodes)} MiB (${ours.nodeCount} nodes, ${ours.averageLeafTriangles.toFixed(2)} triangles per leaf), triangle records ${mib(ours.triangles)}, parents (CPU only) ${mib(ours.parentsCpu)}, top level ${mib(ours.topLevel)}`);
     scene = undefined as never;
 
     // Indexed leaves (docs/internals/design/indexed-leaves.md): the same tinybvh trees with 16-byte triangles and the scene's own
@@ -333,6 +334,7 @@ async function main(): Promise<void> {
             positionLayout: options.positionLayout,
             weld: options.weld,
             mergeStaticInstances: options.merge,
+            nodeFormat: 'f32',
         });
         const entry = {
             nodes: built.nodes.byteLength,
@@ -394,6 +396,7 @@ async function main(): Promise<void> {
             return tree;
         },
         mergeStaticInstances: true,
+        nodeFormat: 'f32',
     });
     const mergedGroups = merged.mergedGroups.length;
     const mergedGroupTriangles = sum(merged.mergedGroups.map((group) => group.triangleCount));

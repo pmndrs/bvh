@@ -55,19 +55,48 @@
 import { CodeNode, REVISION, StorageBufferAttribute, StructTypeNode, type Node, type NodeBuilder } from 'three/webgpu';
 import { float, storage, wgslFn } from 'three/tsl';
 import { traceModuleWgsl, type AnyHitOrder } from '../trace/wgsl.ts';
+import { traceSourceFormats, type TraceSceneBuffers } from '../trace/trace-gpu.ts';
 
-/** Where the trace buffers come from: a `SceneTrees` (buffers and version), or fixed buffers (`uploadTraceScene`). */
-export interface BvhTraceBufferSource {
-    /** `positions`: an indexed scene's fourth buffer (docs/internals/design/indexed-leaves.md); null or absent for records. */
-    readonly buffers: { readonly nodes: GPUBuffer; readonly triangles: GPUBuffer; readonly topLevel: GPUBuffer; readonly positions?: GPUBuffer | null };
-    /** Changes whenever a buffer is replaced. Fixed buffers may omit it. */
-    readonly version?: number;
-    /** The source's triangle format (`SceneTrees.triangleLeaves`, `TraceSceneBuffers.triangleLeaves`); absent means records. */
-    readonly triangleLeaves?: 'records' | 'indexed';
-    /** An indexed source's position layout; absent means `'vec4'`. */
-    readonly positionLayout?: 'vec4' | 'packed';
-    /** The source's node format (`SceneTrees.nodeFormat`, `TraceSceneBuffers.nodeFormat`); absent means `'f32'`. */
-    readonly nodeFormat?: 'f32' | 'quantized';
+/** The buffers a source binds. `positions`: an indexed scene's fourth buffer (docs/internals/design/indexed-leaves.md); null or absent for records. */
+export interface BvhTraceBuffers {
+    readonly nodes: GPUBuffer;
+    readonly triangles: GPUBuffer;
+    readonly topLevel: GPUBuffer;
+    readonly positions?: GPUBuffer | null;
+}
+
+/**
+ * Where the trace buffers come from, and what format they are in. Data says
+ * what it is: the formats are never guessed.
+ *
+ * - A `SceneTrees` (buffers, version and its formats), or any object of that
+ *   shape that names `nodeFormat`, `triangleLeaves` and `positionLayout`.
+ * - `{ buffers: uploadTraceScene(device, scene) }`: the uploaded buffers carry
+ *   their own formats.
+ */
+export type BvhTraceBufferSource =
+    | {
+          readonly buffers: BvhTraceBuffers;
+          /** Changes whenever a buffer is replaced. Fixed buffers may omit it. */
+          readonly version?: number;
+          /** The source's triangle format (`SceneTrees.triangleLeaves`). */
+          readonly triangleLeaves: 'records' | 'indexed';
+          /** The position layout (read for indexed sources). */
+          readonly positionLayout: 'vec4' | 'packed';
+          /** The source's node format (`SceneTrees.nodeFormat`). */
+          readonly nodeFormat: 'f32' | 'quantized';
+      }
+    | {
+          /** Uploaded buffers (`uploadTraceScene`), which name their formats. */
+          readonly buffers: TraceSceneBuffers;
+          readonly version?: number;
+      };
+
+/** The source's formats: its own, else its buffers' (an upload); a RangeError when neither names them. */
+function sourceFormats(source: BvhTraceBufferSource): ReturnType<typeof traceSourceFormats> {
+    const own = source as { nodeFormat?: unknown; triangleLeaves?: unknown; positionLayout?: unknown };
+    const named = own.nodeFormat !== undefined || own.triangleLeaves !== undefined ? own : (source.buffers as Partial<TraceSceneBuffers>);
+    return traceSourceFormats(named, '@pmndrs/bvh/three: BvhTraceNodes');
 }
 
 export interface BvhTraceNodesOptions {
@@ -346,9 +375,10 @@ export class BvhTraceNodes {
         }
         threeInternals.check(this.renderer);
         this.rayMasks = options.rayMasks ?? true;
-        this.triangleLeaves = source.triangleLeaves ?? 'records';
-        this.positionLayout = source.positionLayout ?? 'vec4';
-        this.nodeFormat = source.nodeFormat ?? 'f32';
+        const formats = sourceFormats(source);
+        this.triangleLeaves = formats.triangleLeaves;
+        this.positionLayout = formats.positionLayout;
+        this.nodeFormat = formats.nodeFormat;
         this.specs = buffersOf(this.triangleLeaves, this.positionLayout, this.nodeFormat);
         this.bound = source.buffers;
         this.boundVersion = source.version;

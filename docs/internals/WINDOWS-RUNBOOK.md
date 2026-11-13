@@ -97,7 +97,7 @@ Run on Windows in headless Chrome 157.0.8103.51. Sponza and Bistro interior, sec
 
 | Lever | Sponza | Bistro interior | M5 (earlier) | Memory |
 | --- | --- | --- | --- | --- |
-| `mergeStaticInstances` (merged over instanced) | closest 1.44-1.67, any 1.24-1.48 | closest 1.19-1.20, any 1.17-1.35 | 1.85 closest, 1.36 any (Sponza surface) | top level 16.5 KiB to 192 B |
+| `mergeStaticInstances` (merged over instanced) | closest 1.44-1.67, any 1.24-1.48 | closest 1.19-1.20, any 1.16-1.35 | 1.85 closest, 1.36 any (Sponza surface) | top level 16.5 KiB to 192 B |
 | `nodeFormat: 'quantized'` over `f32` | closest 1.04-1.22, any 0.98-1.03 | closest 1.02-1.08, any 0.98-1.01 | 0.93-0.97 | nodes 185 to 93 MiB (Bistro 29.5 to 14.8) |
 | `triangleLeaves: 'indexed'`, `vec4` | 0.92-0.97 | 0.92-0.97 | 0.83-0.99 | triangles 263 to 133 MiB, positions included (Bistro 47.7 to 24.8) |
 | indexed, `positionLayout: 'packed'` | 0.89-0.95 | 0.82-0.88 | 0.75-0.92 | about 11 MiB less than `vec4` on Sponza |
@@ -105,7 +105,7 @@ Run on Windows in headless Chrome 157.0.8103.51. Sponza and Bistro interior, sec
 | `anyHitOrder: 'larger'` over `'far'` | instanced 1.11-1.45; merged air 1.07, merged surface 0.87 | instanced 1.18-1.48; merged air 1.03, merged surface 0.80 | 1.15-1.42 instanced, 0.78 merged surface | none |
 | `anyHitOrder: 'near'` over `'far'` | 0.59-1.18 | 0.75-1.21 | n/a | none |
 
-The bench checked correctness as it ran. Every paired agreement was 1: merged against instanced, compact against full hit record, indexed against records, and every any-hit order against far. Quantized node `t` values differed from `f32` on no ray.
+The bench checked correctness as it ran. Compact against full hit record, indexed against records, and every any-hit order against far agreed on every ray. Merged against instanced: closest hits named the instanced tree's instance and triangle on 99.949-99.996% of rays (the page requires 99.9%). The rest are near-ties at a shared distance, where `t` agrees to rounding and the merged walk can pick another instance or triangle. Any hits blocked exactly the same rays. Quantized node `t` values differed from `f32` on no ray.
 
 Not in this push, and not seen in this session:
 - section 1 correctness pages (`trace-oracle`, `trace-inline` and the rest);
@@ -113,3 +113,7 @@ Not in this push, and not seen in this session:
 - D3D12 compile times;
 - the Intel UHD;
 - the quantized and indexed variants together (each was timed alone against the default).
+
+**Decided from this run (Dennis, 2026-11-13):** `mergeStaticInstances` on by default (it merges only instances marked `static`); `nodeFormat: 'quantized'` the default for every scene and walk; `triangleLeaves` stays `'records'` until a run of quantized nodes and indexed leaves together; the 40-byte hit record stays the default (shadow-only users pass `hitNormal: false`); `anyHitOrder` stays `'far'`. The bench pages keep their baselines by name (instanced, `f32` nodes, records), so their rows mean what they meant before the defaults changed.
+
+Next pass: the section 1 correctness pages on the new defaults, section 3 (`scene-trees-sponza`, now quantized by default), D3D12 compile times, the Intel UHD, and quantized nodes with indexed leaves together. The surface-ray pages time each variant alone today; the combined comparison needs a section added to `tests/gpu/pages/trace-bench/surface-rays-bench.ts` first.

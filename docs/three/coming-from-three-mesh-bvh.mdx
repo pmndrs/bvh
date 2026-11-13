@@ -4,8 +4,8 @@ description: The API mapping from three-mesh-bvh 0.9, what is missing here, what
 nav: 86
 ---
 
-This compares `@pmndrs/bvh` with three-mesh-bvh 0.9.18. Of the 51 features audited, 31 have an equivalent here, 7 have
-part of one, 10 are missing and 3 won't be done. The full audit, with the code behind each row, is
+This compares `@pmndrs/bvh` with three-mesh-bvh 0.9.18. Of the 52 features audited, 31 have an equivalent here, 7 have
+part of one, 9 are missing and 5 won't be done. The full audit, with the code behind each row, is
 [`docs/internals/PARITY.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/PARITY.md).
 
 ## CPU: MeshBVH and friends
@@ -68,9 +68,8 @@ Without three, the same queries are on the core's `CpuMeshBvh` with plain points
 - `PointsBVH` and the line BVHs (`LineSegmentsBVH`, `LineLoopBVH`, `LineBVH`): leaves hold triangles only.
 - `ObjectBVH.shapecast`.
 - `getJSONStructure`.
-- On the GPU: `closestPointToPoint`, shapecasts (`getShapecastFn`), `sampleTrianglePoint`, the WGSL helpers
-  (`intersectRayTriangle`, `closestPointToTriangle`, `ndcToCameraRay`; our triangle test sits inside the walk),
-  `ClusteredBVH`, and SDF generation.
+- On the GPU: `closestPointToPoint`, shapecasts (`getShapecastFn`), the WGSL helpers `intersectRayTriangle` and
+  `closestPointToTriangle` (our triangle test sits inside the walk), `ClusteredBVH`, and SDF generation.
 
 ## Won't be done
 
@@ -79,6 +78,8 @@ Without three, the same queries are on the core's `CpuMeshBvh` with plain points
 - **`ParallelMeshBVHWorker`:** it needs `SharedArrayBuffer` and cross-origin isolation. A large mesh goes to the GPU
   H-PLOC builder instead.
 - **`useSharedArrayBuffer`:** our trees are copied to the GPU, and the worker pool needs no shared memory.
+- **`sampleTrianglePoint` and `ndcToCameraRay`:** the package ends at the hit. A hit gives the triangle and its
+  barycentrics; interpolating attributes and making camera rays belong to the renderer above it.
 
 ## What you get that three-mesh-bvh doesn't have
 
@@ -91,7 +92,8 @@ Without three, the same queries are on the core's `CpuMeshBvh` with plain points
 
 - You need WebGL2 GPU traversal, or GLSL.
 - You need points or lines as primitives, or GPU shapecasts and closest points (SDF generation).
-- Memory matters more than ray speed. Our trees use 8-9 times three-mesh-bvh's bytes beyond the geometry on Sponza and
-  Bistro (448 MiB against 51 MiB on Sponza with defaults on both sides). The off-by-default layout variants bring that to
-  226 MiB. See [Memory](/performance/memory).
+- Memory matters more than ray speed. Our GPU scenes use about 7 times three-mesh-bvh's bytes beyond the geometry on
+  Sponza (356 MiB against 51 MiB with defaults on both sides; 6.5 times on Bistro exterior). Indexed leaves, off by
+  default, bring Sponza to 226 MiB. Our CPU trees (`computeBoundsTree`) keep 64-byte nodes: 8-9 times. See
+  [Memory](/performance/memory).
 - You rely on years of other people's use: this package is new.

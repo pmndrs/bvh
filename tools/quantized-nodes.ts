@@ -113,9 +113,9 @@ for (const sceneId of sceneIds) {
     const groupTrees = plan.groups.map((group) => buildMeshBvhWithTinyBvh(group.geometry, tinyBvh));
     const sourceTrees = trees.map((tree, index) => (plan.meshNeeded[index] ? tree : null));
     const scenes = {
-        instanced: { f32: assembleTraceScene(trees, instances), quantized: assembleTraceScene(trees, instances, {}, { nodeFormat: 'quantized' }), trees },
+        instanced: { f32: assembleTraceScene(trees, instances, {}, { nodeFormat: 'f32' }), quantized: assembleTraceScene(trees, instances, {}, { nodeFormat: 'quantized' }), trees },
         merged: {
-            f32: assembleTraceScene(sourceTrees, instances, {}, { merged: { plan, meshes: groupTrees } }),
+            f32: assembleTraceScene(sourceTrees, instances, {}, { merged: { plan, meshes: groupTrees }, nodeFormat: 'f32' }),
             quantized: assembleTraceScene(sourceTrees, instances, {}, { merged: { plan, meshes: groupTrees }, nodeFormat: 'quantized' }),
             trees: [...sourceTrees.filter((tree): tree is MeshBvh => tree !== null), ...groupTrees],
         },

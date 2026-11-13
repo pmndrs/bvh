@@ -70,6 +70,7 @@ import {
     type TriangleLeaves,
 } from './layout.ts';
 import { DEFAULT_TRIANGLE_FILTER_WGSL } from './triangle-filter.ts';
+import { DEFAULT_NODE_FORMAT } from '../gpu-layout.ts';
 
 /** Where the trace module's bindings land inside a kernel (structurally the same as ddgi's `BindingSlot`). */
 export interface BindingSlot {
@@ -636,8 +637,11 @@ export interface TraceModuleOptions {
     readonly positionLayout?: PositionLayout;
     /**
      * The scene's node format (docs/internals/design/compressed-nodes.md), compiled in
-     * like `rayMasks`: `'f32'` (the default, 64-byte nodes) or `'quantized'`
-     * (32-byte nodes decoded on the frame read once per instance entered).
+     * like `rayMasks`: `'quantized'` (the default, `DEFAULT_NODE_FORMAT`:
+     * 32-byte nodes decoded on the frame read once per instance entered) or
+     * `'f32'` (64-byte nodes). It must match the buffers: a scene assembled or
+     * a `SceneTrees` made without a `nodeFormat` is quantized too; pass
+     * `SceneTrees.nodeFormat` or `TraceSceneData.nodeFormat` to be sure.
      * Only `bvhLoadMeshNode` and the instance entry's frame read differ; it is
      * the same walk, with the same bindings.
      */
@@ -696,7 +700,7 @@ export function traceModuleWgsl(options: TraceModuleOptions = {}): string {
         throw new RangeError(`traceModuleWgsl: triangleLeaves must be 'records' or 'indexed', got ${String(options.triangleLeaves)}`);
     }
     const packed = options.positionLayout === 'packed';
-    const nodeFormat = options.nodeFormat ?? 'f32';
+    const nodeFormat = options.nodeFormat ?? DEFAULT_NODE_FORMAT;
     if (nodeFormat !== 'f32' && nodeFormat !== 'quantized') throw new RangeError(`traceModuleWgsl: nodeFormat must be 'f32' or 'quantized', got ${String(nodeFormat)}`);
     const quantized = nodeFormat === 'quantized';
     const anyHitOrder = options.anyHitOrder ?? 'far';
@@ -1217,7 +1221,7 @@ export interface BatchKernelOptions {
     readonly triangleLeaves?: TriangleLeaves;
     /** Indexed only: `'vec4'` (the default) or `'packed'` positions. */
     readonly positionLayout?: PositionLayout;
-    /** The trace module's node format (`TraceModuleOptions.nodeFormat`). Default `'f32'`. */
+    /** The trace module's node format (`TraceModuleOptions.nodeFormat`). Default `'quantized'`. */
     readonly nodeFormat?: NodeFormat;
     /** The any-hit walk's child order (`TraceModuleOptions.anyHitOrder`). Default `'far'`. */
     readonly anyHitOrder?: AnyHitOrder;

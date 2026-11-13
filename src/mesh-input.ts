@@ -149,7 +149,8 @@ export interface GpuBuildOptions {
      */
     readonly triangleLeaves?: 'records' | 'indexed';
     /**
-     * The node format the tree is written in: `'f32'` (64 bytes, the default)
+     * The node format the tree is written in: `'f32'` (64 bytes, the default
+     * for a mesh tree; a scene quantizes it as it places it, `DEFAULT_NODE_FORMAT`)
      * or `'quantized'` (32-byte nodes on a per-mesh grid, the frame slot
      * first; docs/internals/design/compressed-nodes.md).
      * A coordinate of magnitude 2^100 or more, or a non-finite one, makes a quantized box empty on that axis (hits there are lost).

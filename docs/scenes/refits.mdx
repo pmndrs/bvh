@@ -51,9 +51,10 @@ import { GpuMeshRefit } from '@pmndrs/bvh';
 
 const meshRefit = new GpuMeshRefit(device, { diagnostics: true });
 await meshRefit.prepare();
-// Once, from a CPU copy of the tree (any builder's). For a tree inside shared buffers,
-// say where it sits: setTree(layout, { nodeWordOffset, triangleWordOffset }).
+// Once, from a CPU copy of the tree (any builder's), in its own buffers:
 meshRefit.setTree(layout);
+// For a mesh inside a scene's buffers, the placement says where, and in what node format:
+// meshRefit.setTree(layout, meshRefitPlacement(scene, meshIndex));
 
 // Every frame, after the pass that writes the moved vertices:
 meshRefit.pollStats(); // maps an earlier frame's stats copy, without waiting
@@ -72,8 +73,10 @@ const cost = meshRefit.latestStats?.relativeCost;
   the LBVH is read back once with the builder's `readLayouts(trees)`.
 - Several deforming meshes need one `GpuMeshRefit` each, and can share compiled pipelines:
   `new GpuMeshRefit(device, { kernels: new GpuMeshRefitKernels(device) })`.
-- For a mesh inside a scene's shared buffers, `meshRefitPlacement(scene, meshIndex)` gives the offsets `setTree`
-  needs, and refuses merged meshes.
+- For a mesh inside a scene's shared buffers, pass `meshRefitPlacement(scene, meshIndex)` to `setTree`. It gives the
+  word offsets and the scene's node format, and refuses merged meshes. Scenes store quantized nodes by default while
+  builders write 64-byte trees, so a placement by hand must say `nodeFormat` too: `setTree` throws without it. With
+  quantized nodes the refit runs on an `f32` copy and packs it into the scene.
 
 ## When to rebuild
 
@@ -82,4 +85,6 @@ half-area over the root's), a frame or two late. Nothing else is read back. Rebu
 built tree's cost (`relativeSahCost(floats, words, 0, layout.nodeCount)` over the built tree's nodes, on the CPU):
 `SceneTrees` rebuilds after 60 updates above 1.1 times.
 
-The CPU twin, `refitOnCpu`, gives the same boxes in TypeScript, for tests and for CPU trees (`CpuMeshBvh.refit`).
+The CPU twin, `refitOnCpu`, gives the same boxes in TypeScript, for tests and for CPU trees (`CpuMeshBvh.refit`). It
+reads 64-byte `f32` nodes only and throws for quantized ones: refit those through an `f32` copy (`dequantizeNodes`,
+then `quantizeNodeWords` back), as `SceneTrees.setPoseCpu` does.

@@ -406,11 +406,12 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                 return tree;
             };
             let started = performance.now();
-            const instancedData = await buildTraceScene(geometries, instances, { build });
+            // The baseline is the layout before 2026-11-13's defaults (instanced, f32 nodes), named so its rows keep their meaning.
+            const instancedData = await buildTraceScene(geometries, instances, { build, mergeStaticInstances: false, nodeFormat: 'f32' });
             const instancedMs = performance.now() - started;
             await yieldToBrowser();
             started = performance.now();
-            const mergedData = await buildTraceScene(geometries, instances, { build, mergeStaticInstances: true });
+            const mergedData = await buildTraceScene(geometries, instances, { build, mergeStaticInstances: true, nodeFormat: 'f32' });
             const mergedMs = performance.now() - started;
             await yieldToBrowser();
             const trees: Record<Tree, TreeSummary> = { instanced: summarizeTree(instancedData, instancedMs), merged: summarizeTree(mergedData, mergedMs) };
@@ -424,8 +425,8 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                 merged: uploadTraceScene(device, mergedData, 'surface merged'),
             };
             sceneBuffers.push(scenes.instanced, scenes.merged);
-            kernel = await TraceBatchKernel.create(device, { label: 'surface' });
-            compactKernel = await TraceBatchKernel.create(device, { label: 'surface compact', hitNormal: false });
+            kernel = await TraceBatchKernel.create(device, { label: 'surface', nodeFormat: 'f32' });
+            compactKernel = await TraceBatchKernel.create(device, { label: 'surface compact', hitNormal: false, nodeFormat: 'f32' });
             const counted = await CountedKernel.create(device);
 
             // Placement, as RC1.5: one primary ray per 16x16 tile from the first bookmark, through the instanced tree.
@@ -643,7 +644,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                 const recordsData = tree === 'instanced' ? instancedData : mergedData;
                 leafBytes[`records/${tree}`] = { nodes: recordsData.nodes.byteLength, triangles: recordsData.triangles.byteLength, positions: 0, topLevel: recordsData.topLevel.buffer.byteLength };
                 for (const [layout, positionLayout] of [['indexed', 'vec4'], ['indexed-packed', 'packed']] as const) {
-                    const indexed = await buildTraceScene(geometries, instances, { build, mergeStaticInstances: tree === 'merged', triangleLeaves: 'indexed', positionLayout });
+                    const indexed = await buildTraceScene(geometries, instances, { build, mergeStaticInstances: tree === 'merged', triangleLeaves: 'indexed', positionLayout, nodeFormat: 'f32' });
                     leafBytes[`${layout}/${tree}`] = { nodes: indexed.nodes.byteLength, triangles: indexed.triangles.byteLength, positions: indexed.positions.byteLength, topLevel: indexed.topLevel.buffer.byteLength };
                     const buffers = uploadTraceScene(device, indexed, `surface ${layout} ${tree}`);
                     sceneBuffers.push(buffers);
@@ -653,8 +654,8 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             }
             const leafKernels: Record<LeafLayout, TraceBatchKernel> = {
                 records: fullKernel,
-                indexed: await TraceBatchKernel.create(device, { label: 'surface indexed', triangleLeaves: 'indexed' }),
-                'indexed-packed': await TraceBatchKernel.create(device, { label: 'surface indexed packed', triangleLeaves: 'indexed', positionLayout: 'packed' }),
+                indexed: await TraceBatchKernel.create(device, { label: 'surface indexed', triangleLeaves: 'indexed', nodeFormat: 'f32' }),
+                'indexed-packed': await TraceBatchKernel.create(device, { label: 'surface indexed packed', triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'f32' }),
             };
             extraKernels.push(leafKernels.indexed, leafKernels['indexed-packed']);
             const leafLayouts: LeafLayout[] = ['records', 'indexed', 'indexed-packed'];
@@ -819,8 +820,8 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             const orders: AnyHitOrderName[] = ['far', 'larger', 'near'];
             const orderKernels: Record<AnyHitOrderName, TraceBatchKernel> = {
                 far: fullKernel,
-                larger: await TraceBatchKernel.create(device, { label: 'surface any larger', anyHitOrder: 'larger' }),
-                near: await TraceBatchKernel.create(device, { label: 'surface any near', anyHitOrder: 'near' }),
+                larger: await TraceBatchKernel.create(device, { label: 'surface any larger', anyHitOrder: 'larger', nodeFormat: 'f32' }),
+                near: await TraceBatchKernel.create(device, { label: 'surface any near', anyHitOrder: 'near', nodeFormat: 'f32' }),
             };
             extraKernels.push(orderKernels.larger, orderKernels.near);
             const orderCases: LeafLayoutCase[] = runOrders ? (['instanced', 'merged'] as const).flatMap((tree) => sets.map((set) => ({ tree, set: set.name, mode: 'any' as const }))) : [];

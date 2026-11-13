@@ -38,7 +38,28 @@ by up to about 30% within a run, so those benches report ratios taken within one
 | GPU top-level refit, 10,000 moving instances | about **0.09 ms** (0.086-0.091) | The refit's own page, two measurements |
 
 three-mesh-bvh's trees converted to our layout traced at 96.7 Mrays/s and took 7.4 s to build, against 101.6 Mrays/s and
-5.3 s for tinybvh's, in the same session.
+5.3 s for tinybvh's, in the same session. These runs predate the 2026-11 levers: instanced trees, `f32` nodes.
+
+## The 2026-11 levers on the RTX 3060 Laptop
+
+Sponza and Bistro interior surface-ray pages (`trace-bench-surface-*`), Windows, headless Chrome 157, 2026-11-13, three
+runs each. Each lever is timed in paired rounds against the layout before it (instanced, `f32` nodes, records, the
+40-byte record, `anyHitOrder: 'far'`), with the order reversed every other round. A figure is the median over the runs of
+each run's median-of-rounds ratio; the range covers surface and air rays, instanced and merged trees. Above 1 is faster.
+
+| Lever | Sponza | Bistro interior | Default now |
+| --- | --- | --- | --- |
+| Merged static instances, over instanced | closest 1.44-1.67x, any 1.24-1.48x | closest 1.19-1.20x, any 1.16-1.35x | **on** |
+| Quantized nodes, over `f32` | closest 1.04-1.22x, any 0.98-1.03x | closest 1.02-1.08x, any 0.98-1.01x | **on** |
+| Indexed leaves, `vec4`, over records | 0.92-0.97x | 0.92-0.97x | off |
+| Indexed leaves, packed, over records | 0.89-0.95x | 0.82-0.88x | off |
+| 40-byte hit record, over 24-byte | 0.88-0.92x | 0.93-0.94x | 40-byte |
+| `anyHitOrder: 'larger'`, over `'far'` | instanced 1.11-1.45x, merged air 1.07x, merged surface 0.87x | instanced 1.18-1.48x, merged air 1.03x, merged surface 0.80x | `'far'` |
+
+Compact against full record, indexed against records and every any-hit order against far agreed on every ray. No
+quantized `t` differed from the `f32` one. Merged against instanced: closest hits named the instanced tree's instance and
+triangle on 99.949-99.996% of rays; the rest are near-ties at a shared distance, where the merged walk can pick another
+instance or triangle. Any hits blocked exactly the same rays.
 
 ## On the Apple M5 (indicative)
 
@@ -51,14 +72,16 @@ three-mesh-bvh's trees converted to our layout traced at 96.7 Mrays/s and took 7
 | Path tracer | about 120 Mrays/s | `three/pathtracer` example, wall time of one dispatch |
 | CPU raycast, 100k triangles | 692,630 per second `firstHitOnly` | [Raycast](/cpu-queries/raycast#speed), Node 22 |
 
-The variants' trace speed against the default layout (surface-ray pages, paired rounds with the order reversed):
-indexed leaves 0.83-0.99x with `vec4` positions and 0.75-0.92x packed; quantized nodes 0.93-0.97x.
+The variants' trace speed on the M5 (surface-ray pages, paired rounds with the order reversed, against `f32` nodes and
+records): indexed leaves 0.83-0.99x with `vec4` positions and 0.75-0.92x packed; quantized nodes 0.93-0.97x. The 40-byte
+hit record measured 0.96-1.15x the 24-byte one.
 
 ## Not measured yet
 
-The RTX 3060 and the Intel UHD have not run the 2026-11 work: `SceneTrees`, the build-peak cap, merged static
-instances, the layout variants and the 40-byte hit record. Their defaults wait on those runs. A side-by-side
-comparison suite against three-mesh-bvh (`compare/`) is in progress.
+- On the RTX 3060: the correctness pages for the 2026-11 work, `SceneTrees` memory and the build-peak cap on D3D12,
+  shader compile times, and quantized nodes and indexed leaves together.
+- The Intel UHD has not run the 2026-11 work at all.
+- The comparison suite against three-mesh-bvh and others (`compare/`) has run on the Apple M5 only.
 
 ## Reproducing
 

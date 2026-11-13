@@ -19,27 +19,31 @@ Two numbers per library:
 
 | Sponza (5.74M triangles) | Beyond geometry | Total |
 | --- | ---: | ---: |
-| **Ours**, default layout (nodes 185.1 + triangles 263.0 + top level) | **448.1** | **549.4** |
-| Ours, indexed leaves and quantized nodes (off by default) | 225.5 | 326.8 |
+| **Ours**, default layout (quantized nodes 92.6 + triangles 263.0 + top level) | **355.5** | **456.8** |
+| Ours, `f32` nodes (the default before 2026-11-13) | 448.1 | 549.4 |
+| Ours, quantized nodes and indexed leaves (indexed is off by default) | 225.5 | 326.8 |
 | three-mesh-bvh 0.9.18, defaults (CENTER, leaf 10) | 51.2 | 152.6 |
 | three-mesh-bvh, SAH, leaf 4 | 109.3 | 210.7 |
 
 | Bistro exterior (2.83M triangles) | Beyond geometry | Total |
 | --- | ---: | ---: |
-| **Ours**, default layout | **210.1** | **275.9** |
-| Ours, indexed and quantized | 115.3 | 181.1 |
+| **Ours**, default layout | **169.9** | **235.7** |
+| Ours, `f32` nodes | 210.1 | 275.9 |
+| Ours, quantized and indexed | 115.3 | 181.1 |
 | three-mesh-bvh, defaults | 26.3 | 92.1 |
 | three-mesh-bvh, SAH, leaf 4 | 53.4 | 119.2 |
 
-- Per triangle, we add 81.8 bytes (33.8 of nodes, 48 of record); three-mesh-bvh adds 9.3 (CENTER) to 20.0 (SAH leaf 4).
-- Our nodes are 64 bytes with two child boxes and leaves of about 1.9 triangles (tinybvh's SAH); three-mesh-bvh's are
-  32 bytes with one box and leaves of about 7. Small leaves are part of why the walk is fast.
+- Per triangle, we add 64.9 bytes (16.9 of nodes, 48 of record; 81.8 with `f32` nodes); three-mesh-bvh adds 9.3
+  (CENTER) to 20.0 (SAH leaf 4).
+- Our quantized nodes are 32 bytes with two child boxes and leaves of about 1.9 triangles (tinybvh's SAH);
+  three-mesh-bvh's are 32 bytes with one box and leaves of about 7. Small leaves are part of why the walk is fast.
 - The comparison counts what each library adds. An app that also keeps the geometry on the GPU for rendering holds it
   either way.
 
 ## Where ours go
 
-Sponza, `SceneTrees` settled (all tinybvh trees, `copy` mode): 470.0 MiB on the GPU.
+Sponza, `SceneTrees` settled (all tinybvh trees, `copy` mode, uncapped), with `f32` nodes, the default before
+2026-11-13: 470.0 MiB on the GPU.
 
 | | MiB | Share |
 | --- | ---: | ---: |
@@ -48,33 +52,44 @@ Sponza, `SceneTrees` settled (all tinybvh trees, `copy` mode): 470.0 MiB on the 
 | Node buffer growth room | 21.8 | 4.6% |
 | Top level | 0.1 | |
 
+With the default quantized nodes, the nodes take half: `scene-trees-sponza` measured 360.8 MiB settled against 458.6
+with `f32` nodes, both under the default 256 MiB cap (Apple M5).
+
 ## The load's peak
 
 The GPU build is the biggest number. One H-PLOC batch of all of Sponza holds 1,482.4 MiB (inputs 101.3, scratch 745.6,
 outputs 635.5), and `SceneTrees.memory.peak` measured 1,482.7. The default [build-peak cap](/builders/fallbacks-and-limits#the-build-peak-cap)
-(256 MiB batches, one after another) takes the peak to 711.0 MiB, with the first trees no later (Apple M5, indicative).
+(256 MiB batches, one after another) takes the peak to 613.2 MiB with the default quantized nodes (711.0 with `f32`
+nodes), with the first trees no later (Apple M5, indicative). GPU batches still write 64-byte nodes and pack them on the
+way into storage, so the batches are the same size either way.
 
 ## Other memory
 
 - **Workers:** each tinybvh worker keeps a 64 MiB WebAssembly heap; the default pool of up to 4 holds 256 MiB of CPU
   memory while it lives. Inputs are copied in (one mesh per worker at a time), results transferred out.
 - **Deforming meshes:** the GPU refit's buffers (32 bytes of box per triangle, plus topology and scratch) and, with
-  quantized nodes, a 64-byte `f32` copy of the nodes. Static scenes pay none of it.
-- **Merged static instances:** the same resident bytes as instanced, plus a CPU plan of 161.6 MiB on Sponza while the
-  merged mesh builds.
+  the default quantized nodes, a 64-byte `f32` copy of the mesh's nodes that the refit runs on (a pass packs it into
+  the scene). So a deforming mesh holds 96 bytes per node: its 32 in the scene and the 64-byte copy. Static scenes pay
+  none of it.
+- **Merged static instances** (on by default, for instances added with `static: true`): the same resident bytes as
+  instanced, plus a CPU plan of 161.6 MiB on Sponza while the merged mesh builds.
 - **`gpuTreeOutputs: 'adopt'`:** no copy at load, but the node buffer keeps one node per triangle: 613.6 MiB settled on
-  Sponza against 470.0.
+  Sponza against 470.0 (both `f32`). It needs `nodeFormat: 'f32'`.
 
 ## Levers
 
-| Lever | Default | Saves on Sponza | Cost (Apple M5, indicative) |
+| Lever | Default | Saves on Sponza | Trace speed: RTX 3060 Laptop; Apple M5 (indicative) |
 | --- | --- | --- | --- |
-| Build-peak cap (`gpuMaxBatchBytes`) | **on**, 256 MiB | 771 MiB of peak | none measured on first trees |
-| Indexed leaves (`triangleLeaves: 'indexed'`) | off | 130.1 MiB resident (141.4 with packed positions) | trace 0.83-0.99x (`vec4`), 0.75-0.92x (packed) |
-| Quantized nodes (`nodeFormat: 'quantized'`) | off | 92.6 MiB resident | trace 0.93-0.97x; SAH +0.01-0.66% |
-| Both | off | 222.6 MiB resident | |
-| Compact hit records (`hitNormal: false`) | off | 16 bytes per ray in a batch | none: the 40-byte record measured as fast |
+| Build-peak cap (`gpuMaxBatchBytes`) | **on**, 256 MiB | 771 MiB of peak | none measured on first trees (M5) |
+| Quantized nodes (`nodeFormat: 'quantized'`) | **on** | 92.6 MiB resident | closest 1.02-1.22x, any 0.98-1.03x; M5 0.93-0.97x. SAH +0.01-0.66% |
+| Indexed leaves (`triangleLeaves: 'indexed'`) | off | 130 MiB resident (141 with packed positions) | 0.92-0.97x (`vec4`), 0.82-0.95x (packed); M5 0.83-0.99x, 0.75-0.92x |
+| Both | quantized only | 222.6 MiB resident against `f32` records | not measured together yet |
+| Compact hit records (`hitNormal: false`) | off | 16 bytes per ray in a batch | the 40-byte record costs 6-12% (0.88-0.94x); M5 0.96-1.15x |
 | Smaller leaves (`maxLeafPrimitives`) | 8 | nothing: tinybvh picks about 1.9 per leaf anyway (8 against 4 saved 0.5 MiB) | |
 
-The two layout variants stay off until the RTX 3060 is measured. Design notes and every table behind this page:
+Speeds are against `f32` nodes, records and the 40-byte record. RTX 3060 Laptop: Windows, headless Chrome 157,
+2026-11-13, Sponza and Bistro interior surface-ray benches, the median of three runs, each lever timed alone.
+Quantized nodes became the default after that run (faster closest hits on NVIDIA, half the node bytes). Indexed leaves
+wait for a run with both on together. A shadow or occlusion pass that reads no material or normal should pass
+`hitNormal: false` (or trace any-hit rays, which write one word). Design notes and every table behind this page:
 [`docs/internals/design/memory.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/memory.md).

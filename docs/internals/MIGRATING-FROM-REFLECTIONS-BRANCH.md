@@ -73,7 +73,10 @@ Version 2 adds an 8-bit instance mask in instance flags bits 8-15. A masked trac
 - Code that writes instance records itself must set bits 8-15, or no ray sees those instances. A GPU top level is one example.
 - `traceModuleWgsl({ traceSlot, rayMasks: false })` compiles the mask code out. The walk then has no `*Masked` functions and no mask test, and it ignores the bits. Reflections doesn't use masks, so this is an option. It is the same walk with the mask code removed, and the quick bench showed no measurable difference.
 
-## 5. Merging static instances (optional, off by default)
+## 5. Merging static instances (optional)
+
+`assembleTraceScene`, which reflections calls, merges only when given a plan, so nothing changes until reflections asks. (`buildTraceScene` and `SceneTrees` merge instances marked `static: true` by default since 2026-11-13.)
+
 
 `mergeStaticInstances` puts static instances whose mesh no other instance uses into one world-space tree. Rays that start on surfaces, such as reflection rays, then walk one tree instead of entering many overlapping instance boxes. Measured in webgpu-ddgi-radiance-cache on an M5 Pro, closest hit was 1.86x faster on Sponza and 1.24x on Bistro interior. Hits are unchanged:
 
@@ -91,7 +94,7 @@ What it takes in reflections:
    - meshes with `plan.meshNeeded[i] === 0` need no tree (pass `null`);
    - `assembleTraceScene(layouts, instances, {}, { merged: { plan, meshes: groupLayouts } })`.
 
-   Alternatively, `buildTraceScene(geometries, instances, { build, mergeStaticInstances: true })` does all of it.
+   Alternatively, `buildTraceScene(geometries, instances, { build })` does all of it (merging is on by default there).
 3. **`setTransforms` must change.** A merged mesh's entry in `scene.meshes` is empty, and the merged groups need their own records, so `buildTopLevel` over every instance is wrong. Assemble again with the same plan and trees, and upload only `topLevel.buffer`, because nodes and triangles come out the same. Assembly throws if a merged instance's transform, mask, visibility or material changed. Only re-assembly checks this.
 4. Merged instances need distinct `instanceIndex` values. Reflections uses the position, so they are.
 
@@ -103,7 +106,8 @@ Leaving it off changes nothing: the scene is byte for byte the instanced one.
 
 - **Instance flags:** bits 0-2 are unchanged. Bit 3 is `merged`, bits 8-15 the mask, and bits 16-31 the material + 1.
 - **Triangle records:** flags bit 1 flips `frontFace` on merged triangles, the padding word (word 11) holds a merged triangle's source instance, and flags bits 16-31 its material. A mesh input's `triangleFlags` may still set bit 0 only.
-- **Sizes:** nothing moved. Nodes are 64 bytes, triangles 48 and instance records 64.
+- **Sizes:** nothing moved in a mesh's tree: builders write 64-byte nodes, triangles are 48 bytes and instance records 64.
+- **Quantized nodes by default (2026-11-13).** `assembleTraceScene` now stores a scene's nodes quantized: 32 bytes each, with a 32-byte frame slot before each mesh's root (docs/internals/design/compressed-nodes.md). `traceModuleWgsl` compiles the matching walk by default, so reflections' provider, which assembles and builds its module with the defaults, keeps working after a `pnpm build` of this repo. Code that reads the scene's `nodes` itself with the 64-byte stride must pass `{ nodeFormat: 'f32' }` to `assembleTraceScene` and `traceModuleWgsl`, or read the quantized node.
 
 In reflections, set `PMNDRS_BVH_LAYOUT_VERSION = 2`, or `loadPmndrsBvh` refuses `main`. Serialized trees from version 1 are refused by `deserializeLayout`. Reflections builds its trees at startup, so it has none.
 
@@ -117,5 +121,6 @@ In reflections, set `PMNDRS_BVH_LAYOUT_VERSION = 2`, or `loadPmndrsBvh` refuses 
 2. `bvh.traceModuleWgsl({ traceSlot: slot })`, and update the `PmndrsBvhModule` type.
 3. In `providerWgsl`, rename `giTraceClosest`, `giTraceAny` and `GiRay` to `bvhTraceClosest`, `bvhTraceAny` and `BvhRay`.
 4. Keep materials at 65534 or below.
-5. Optional: `rayMasks: false`. Also optional: `mergeStaticInstances` for static scenes, with the `setTransforms` change in section 5.
-6. Run reflections' `pnpm check` against `main`.
+5. Optional: `rayMasks: false`. Also optional: merging static instances, with the `setTransforms` change in section 5.
+6. Check that nothing in reflections reads the scene's `nodes` with a 64-byte stride (quantized nodes are the default, section 6).
+7. Run reflections' `pnpm check` against `main`.

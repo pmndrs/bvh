@@ -139,7 +139,7 @@ interface OracleVariant {
     positionLayout?: 'vec4' | 'packed';
     /** Weld each mesh's vertices within this distance before building (`weldPositions`); default 0, off. */
     weldTolerance?: number;
-    /** The trees', scene's and kernel's node format (docs/internals/design/compressed-nodes.md); default f32. */
+    /** The trees', scene's and kernel's node format (docs/internals/design/compressed-nodes.md); absent here means f32 (passed explicitly: the scene and kernel default is quantized). */
     nodeFormat?: 'f32' | 'quantized';
     /** The kernel's any-hit child order (`anyHitOrder`); default `'far'`. */
     anyHitOrder?: 'far' | 'near' | 'larger';
@@ -366,7 +366,7 @@ async function buildTrees(builder: MeshBvhBuilder, meshes: readonly MeshGeometry
 
 /** The assembly options of a variant's format: indexed scenes take the geometry for their positions. */
 function formatOptions(variant: OracleVariant, geometries: readonly (MeshGeometry | null)[]) {
-    const nodes = variant.nodeFormat === 'quantized' ? { nodeFormat: 'quantized' as const } : {};
+    const nodes = { nodeFormat: variant.nodeFormat ?? ('f32' as const) };
     return variant.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const, positionLayout: variant.positionLayout, geometries, ...nodes } : nodes;
 }
 
@@ -543,7 +543,7 @@ await runGpuTest(async ({ device, log }) => {
             hitNormal: variant.hitNormal ?? true,
             triangleLeaves: variant.triangleLeaves,
             positionLayout: variant.positionLayout,
-            nodeFormat: variant.nodeFormat,
+            nodeFormat: variant.nodeFormat ?? 'f32',
             anyHitOrder: variant.anyHitOrder,
         });
         const results = { cases: {} as Record<string, unknown>, sharedEdges: [] as SharedEdgeReport[] };
@@ -641,7 +641,7 @@ await runGpuTest(async ({ device, log }) => {
     for (const [rayMasks, merged, indexed, quantized] of hookPasses) {
         const format = quantized ? (indexed ? QUANTIZED_INDEXED_HOOK_VARIANT : QUANTIZED_HOOK_VARIANT) : indexed ? INDEXED_HOOK_VARIANT : VARIANTS[0];
         for (const hook of buildHookCases(hookSizes)) {
-            const kernel = await TraceBatchKernel.create(device, { label: hook.name, triangleFilter: hook.filterWgsl, rayMasks, triangleLeaves: format.triangleLeaves, nodeFormat: format.nodeFormat });
+            const kernel = await TraceBatchKernel.create(device, { label: hook.name, triangleFilter: hook.filterWgsl, rayMasks, triangleLeaves: format.triangleLeaves, nodeFormat: format.nodeFormat ?? 'f32' });
             let scene: TraceSceneData;
             let flagged: number;
             if (merged) {

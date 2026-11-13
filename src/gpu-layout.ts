@@ -71,9 +71,12 @@ export const GPU_LAYOUT_NODE_WORD = {
  * and scene is one or the other, and the walk is compiled for one
  * (`traceModuleWgsl({ nodeFormat })`):
  *
- * - `'f32'` (the default): 64-byte nodes with `f32` child boxes,
- *   {@link GPU_LAYOUT_NODE_WORD}.
- * - `'quantized'`: 32-byte nodes, {@link GPU_LAYOUT_QUANTIZED_NODE_WORD}: each
+ * - `'f32'`: 64-byte nodes with `f32` child boxes,
+ *   {@link GPU_LAYOUT_NODE_WORD}. The format of a single mesh's tree from
+ *   every builder unless asked otherwise (refits run on it), and of data
+ *   that names no format.
+ * - `'quantized'` (the default for scenes and walks,
+ *   {@link DEFAULT_NODE_FORMAT}): 32-byte nodes, {@link GPU_LAYOUT_QUANTIZED_NODE_WORD}: each
  *   child box as 16-bit planes on a grid (the frame) that covers the mesh, and
  *   each child as one stack reference. The buffer starts with the frame slot
  *   (32 bytes, {@link GPU_LAYOUT_NODE_FRAME_WORD}), then the nodes: node `i`
@@ -82,6 +85,21 @@ export const GPU_LAYOUT_NODE_WORD = {
  *   rounded outward, so a decoded box always contains the exact one.
  */
 export type GpuLayoutNodeFormat = 'f32' | 'quantized';
+
+/**
+ * The node format of every option that isn't given one, where the library
+ * makes both sides: `SceneTrees`, `assembleTraceScene`, `buildTraceScene`,
+ * `traceModuleWgsl`, `batchKernelWgsl` and `TraceBatchKernel.create` (Dennis,
+ * 2026-11-13, after the RTX 3060 bench: docs/internals/design/compressed-nodes.md).
+ * Mesh builders still write `'f32'` trees unless asked; a scene quantizes
+ * them as it places them.
+ *
+ * Options default to quantized; data must say what it is. Buffers handed to a
+ * walk (`TraceSceneBuffers`, a `BvhTraceNodes` source) must name their format
+ * and are refused when they don't; CPU data that names none (`MeshBvh`,
+ * layouts, `TraceSceneData`) is `f32`, as before the option existed.
+ */
+export const DEFAULT_NODE_FORMAT: GpuLayoutNodeFormat = 'quantized';
 
 /** One quantized node: two child boxes as 16-bit planes and two references, 32 bytes (two `vec4u`). */
 export const GPU_LAYOUT_QUANTIZED_NODE_BYTES = 32;

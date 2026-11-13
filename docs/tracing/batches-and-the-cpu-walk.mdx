@@ -41,9 +41,14 @@ device.queue.submit([encoder.finish()]);
 - **Masks:** one ray mask per batch (`mask`), a uniform; there is no per-ray mask buffer.
 - **Timing:** pass `timestampWrites` to time the dispatch's pass.
 
-The 40-byte record cost nothing measurable against the 24-byte one on the Apple M5 (surface-ray pages, 5 paired rounds
-per case with the order reversed every other round, Sponza and Bistro interior; indicative): medians 1.02 to 1.11 in
-favour of the bigger record, range 0.96 to 1.15. It has not been measured on the RTX 3060 or Intel.
+The 40-byte record is the default: a hit carries its material and normal unless you say otherwise. It has a cost on
+NVIDIA. Against the 24-byte record, closest-hit rays traced at 0.88-0.92x on Sponza and 0.93-0.94x on Bistro interior
+on the RTX 3060 Laptop, a 6-12% cost (Windows, headless Chrome 157, 2026-11-13, surface and air rays, instanced and
+merged trees, the median of three runs of 5 paired rounds). On the Apple M5 it cost nothing measurable: 0.96-1.15x,
+medians 1.02-1.11 in favour of the bigger record (indicative). Intel has not run it.
+
+So a shadow or occlusion pass that reads neither material nor normal should pass `hitNormal: false`, or trace any-hit
+rays, which write one word per ray.
 
 `batchKernelWgsl(mode, options)` gives the kernel's WGSL, for a pipeline of your own.
 

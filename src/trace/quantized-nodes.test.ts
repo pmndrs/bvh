@@ -9,6 +9,7 @@ import {
     checkGpuLayout,
     CpuMeshBvh,
     createTinyBvhBuilder,
+    DEFAULT_NODE_FORMAT,
     deserializeLayout,
     GPU_LAYOUT_NODE_BYTES,
     GPU_LAYOUT_NODE_WORDS,
@@ -66,8 +67,11 @@ function hardMeshes(): MeshGeometry[] {
 
 describe('the quantized walk module', () => {
     it('reads nodes as vec4u and the frame on instance entry, around the same walk with the same bindings', () => {
-        const f32Module = traceModuleWgsl();
+        const f32Module = traceModuleWgsl({ nodeFormat: 'f32' });
         const quantizedModule = traceModuleWgsl({ nodeFormat: 'quantized' });
+        // Quantized is the default (DEFAULT_NODE_FORMAT), as it is for scenes.
+        expect(traceModuleWgsl()).toBe(quantizedModule);
+        expect(batchKernelWgsl('any')).toBe(batchKernelWgsl('any', { nodeFormat: 'quantized' }));
         expect(f32Module).toContain('var<storage, read> bvhTraceNodes: array<vec4f>;');
         expect(quantizedModule).toContain('var<storage, read> bvhTraceNodes: array<vec4u>;');
         expect(quantizedModule).toContain('var<private> bvhMeshFrameOrigin: vec3f;');
@@ -76,7 +80,7 @@ describe('the quantized walk module', () => {
         expect(walk(f32Module)).toContain('node = bvhLoadMeshNode(instance.rootNodeOffset + index);');
         expect(walk(f32Module)).toContain('bvhEnterMeshNodes(instance.rootNodeOffset);');
         const both = traceModuleWgsl({ nodeFormat: 'quantized', triangleLeaves: 'indexed', positionLayout: 'packed', rayMasks: false });
-        expect(walk(both)).toBe(walk(traceModuleWgsl({ triangleLeaves: 'indexed', positionLayout: 'packed', rayMasks: false })));
+        expect(walk(both)).toBe(walk(traceModuleWgsl({ triangleLeaves: 'indexed', positionLayout: 'packed', rayMasks: false, nodeFormat: 'f32' })));
         expect(traceModuleEntries({ triangleLeaves: 'records' })).toHaveLength(3);
         expect(batchKernelWgsl('closest', { nodeFormat: 'quantized' })).toContain('array<vec4u>;');
         expect(() => traceModuleWgsl({ nodeFormat: 'f16' as never })).toThrow(RangeError);
@@ -292,9 +296,52 @@ function traceAll(scene: TraceSceneData, traced: readonly TraceRay[], stats = ne
 describe('a quantized scene', () => {
     const traced = rays(21, 4000);
 
+    it('is the default: assembly and buildTraceScene quantize unless asked for f32', async () => {
+        const { meshes, instances } = mixedScene(5);
+        expect(DEFAULT_NODE_FORMAT).toBe('quantized');
+        const byDefault = assembleTraceScene(meshes.map(f32), instances);
+        expect(byDefault.nodeFormat).toBe('quantized');
+        expect(new Uint8Array(byDefault.nodes)).toEqual(new Uint8Array(assembleTraceScene(meshes.map(f32), instances, {}, { nodeFormat: 'quantized' }).nodes));
+        expect((await buildTraceScene(meshes, instances, { build: f32 })).nodeFormat).toBe('quantized');
+        expect(assembleTraceScene(meshes.map(f32), instances, {}, { nodeFormat: 'f32' }).nodeFormat).toBe('f32');
+    });
+
+    it('builds with defaults and assembles with defaults: the formats agree, and only a real mix throws', async () => {
+        const { meshes, instances } = mixedScene(9);
+        const few = traced.slice(0, 400);
+        const bytes = (buffer: ArrayBuffer) => new Uint8Array(buffer);
+        // Builders' defaults (f32 nodes, records), assembly's defaults: a quantized records scene, the walk's own defaults.
+        const byDefault = meshes.map((mesh) => buildMeshBvhWithTinyBvh(mesh, tinyBvh));
+        const scene = assembleTraceScene(byDefault, instances);
+        expect([scene.nodeFormat, scene.triangleLeaves]).toEqual([DEFAULT_NODE_FORMAT, 'records']);
+        expect(traceModuleWgsl()).toBe(traceModuleWgsl({ nodeFormat: scene.nodeFormat, triangleLeaves: scene.triangleLeaves }));
+        expect(traceAll(scene, few)).toEqual(traceAll(assembleTraceScene(byDefault, instances, {}, { nodeFormat: 'f32' }), few));
+        // The CPU twins' defaults too.
+        const twins = meshes.map((mesh) => buildLbvhOnCpu(mesh));
+        expect(assembleTraceScene(twins, instances).nodeFormat).toBe(DEFAULT_NODE_FORMAT);
+        // Trees built quantized are placed as they are: the same bytes.
+        const quantized = meshes.map((mesh) => buildMeshBvhWithTinyBvh(mesh, tinyBvh, { nodeFormat: 'quantized' }));
+        expect(bytes(assembleTraceScene(quantized, instances).nodes)).toEqual(bytes(scene.nodes));
+        // Indexed trees: an assembly that names no format takes theirs.
+        const indexed = meshes.map((mesh) => buildMeshBvhWithTinyBvh(mesh, tinyBvh, { triangleLeaves: 'indexed' }));
+        const indexedScene = assembleTraceScene(indexed, instances, {}, { geometries: meshes });
+        expect(indexedScene.triangleLeaves).toBe('indexed');
+        expect(bytes(indexedScene.triangles)).toEqual(bytes(assembleTraceScene(indexed, instances, {}, { triangleLeaves: 'indexed', geometries: meshes }).triangles));
+        // Real conflicts throw: a mix of records and indexed trees with no format named, quantized trees in an f32 scene.
+        const mixed = [indexed[0], ...byDefault.slice(1)];
+        expect(() => assembleTraceScene(mixed, instances, {}, { geometries: meshes })).toThrow(/pass triangleLeaves: 'indexed'/);
+        expect(assembleTraceScene(mixed, instances, {}, { triangleLeaves: 'indexed', geometries: meshes }).triangleLeaves).toBe('indexed');
+        expect(() => assembleTraceScene(quantized, instances, {}, { nodeFormat: 'f32' })).toThrow(/nodeFormat: 'quantized'/);
+        // Indexed trees without their geometries, or from buildTraceScene's build without triangleLeaves: the error names the way out.
+        expect(() => assembleTraceScene(indexed, instances)).toThrow(/the trees are indexed.*pass geometries/);
+        await expect(buildTraceScene(meshes, instances, { build: (mesh) => buildMeshBvhWithTinyBvh(mesh, tinyBvh, { triangleLeaves: 'indexed' }) })).rejects.toThrow(
+            /returned an indexed tree.*pass triangleLeaves: 'indexed'/,
+        );
+    });
+
     it('reads a hand-built scene without nodeFormat as f32', async () => {
         const { meshes, instances } = mixedScene(17);
-        const assembled = await buildTraceScene(meshes, instances, { build: f32 });
+        const assembled = await buildTraceScene(meshes, instances, { build: f32, nodeFormat: 'f32' });
         const { nodeFormat, ...rest } = assembled;
         expect(nodeFormat).toBe('f32');
         // As a caller would write it before nodeFormat existed: the field is optional.
@@ -308,7 +355,7 @@ describe('a quantized scene', () => {
             it(`gives the f32 scene's hits, bit for bit (${mergeStaticInstances ? 'merged' : 'instanced'}, ${triangleLeaves})`, async () => {
                 const { meshes, instances } = mixedScene(17);
                 const options = { build: f32, mergeStaticInstances, triangleLeaves };
-                const exact = await buildTraceScene(meshes, instances, options);
+                const exact = await buildTraceScene(meshes, instances, { ...options, nodeFormat: 'f32' });
                 const packed = await buildTraceScene(meshes, instances, { ...options, nodeFormat: 'quantized' });
                 expect(packed.nodeFormat).toBe('quantized');
                 expect(exact.nodeFormat).toBe('f32');
@@ -339,7 +386,7 @@ describe('a quantized scene', () => {
         const fromTrees = assembleTraceScene(quantized, instances, {}, { nodeFormat: 'quantized' });
         const fromF32 = assembleTraceScene(meshes.map(f32), instances, {}, { nodeFormat: 'quantized' });
         expect(new Uint8Array(fromTrees.nodes)).toEqual(new Uint8Array(fromF32.nodes));
-        expect(() => assembleTraceScene(quantized, instances)).toThrow(/nodeFormat: 'quantized'/);
+        expect(() => assembleTraceScene(quantized, instances, {}, { nodeFormat: 'f32' })).toThrow(/nodeFormat: 'quantized'/);
         expect(() => assembleTraceScene(quantized, instances, {}, { nodeFormat: 'packed' as never })).toThrow(RangeError);
     });
 

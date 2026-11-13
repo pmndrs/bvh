@@ -31,7 +31,7 @@ import {
     writeIndexedMeshHeader,
 } from './layout.ts';
 import { checkNodeFormat, quantizeNodes } from '../quantized-nodes.ts';
-import { gpuLayoutNodeBytes, gpuLayoutNodeSlots, type GpuLayoutNodeFormat } from '../gpu-layout.ts';
+import { DEFAULT_NODE_FORMAT, gpuLayoutNodeBytes, gpuLayoutNodeSlots, type GpuLayoutNodeFormat } from '../gpu-layout.ts';
 import { checkTriangleLeaves, indexedFromRecords, weldExactBits, weldPositions } from '../indexed-leaves.ts';
 import { checkTriangleFlags, triangleMaterialCodes } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
@@ -59,7 +59,7 @@ export interface TraceSceneInstance {
      */
     readonly material?: number;
     /**
-     * The instance never moves. With `mergeStaticInstances` on, a static
+     * The instance never moves. With `mergeStaticInstances` on (the default in `buildTraceScene`), a static
      * instance whose mesh no other instance uses is merged into a world-space
      * mesh with others of the same flags and mask (static-merge.ts). Ignored
      * otherwise. Default false.
@@ -99,7 +99,7 @@ export interface TraceSceneMeshPlacement {
 export interface TraceSceneData {
     /** Every mesh's nodes, one after another (quantized: each mesh's frame slot, then its nodes). */
     readonly nodes: ArrayBuffer;
-    /** How `nodes` stores them. Default (absent) `'f32'`; assembly sets it, `'quantized'` when assembled with `nodeFormat: 'quantized'`. */
+    /** How `nodes` stores them. Assembly always sets it: `'quantized'` by default, `'f32'` when assembled with `nodeFormat: 'f32'`. Absent (a scene written by other code) means `'f32'`. */
     readonly nodeFormat?: GpuLayoutNodeFormat;
     /**
      * Every mesh's triangles, one after another. Indexed scenes: 16-byte
@@ -174,10 +174,14 @@ export interface TraceSceneAssemblyOptions {
      */
     readonly merged?: MergedStaticTrees;
     /**
-     * The scene's triangle format (docs/internals/design/indexed-leaves.md). Default
-     * `'records'`: the scene is byte for byte what it was before the option
-     * existed. `'indexed'` needs {@link geometries}; trees built as records
-     * are converted (`indexedFromRecords`), indexed trees are placed as they are.
+     * The scene's triangle format (docs/internals/design/indexed-leaves.md).
+     * Default: the trees' own format, so a scene assembled with defaults from
+     * trees built with defaults agrees with them. Records trees (the builders'
+     * default) give `'records'`: the scene is byte for byte what it was before
+     * the option existed. Indexed trees give `'indexed'`, which needs
+     * {@link geometries}. A mix of records and indexed trees throws unless the
+     * option is given. `'indexed'` converts records trees
+     * (`indexedFromRecords`) and places indexed trees as they are.
      */
     readonly triangleLeaves?: TriangleLeaves;
     /** Indexed scenes: `'vec4'` (the default) or `'packed'` positions. */
@@ -199,13 +203,30 @@ export interface TraceSceneAssemblyOptions {
      */
     readonly weld?: boolean;
     /**
-     * The scene's node format (docs/internals/design/compressed-nodes.md). Default
-     * `'f32'`: the scene is byte for byte what it was before the option
-     * existed. `'quantized'`: 32-byte nodes, each mesh's frame slot before its
-     * root; `f32` trees are quantized (`quantizeNodes`), quantized trees are
-     * placed as they are. Independent of {@link triangleLeaves}.
+     * The scene's node format (docs/internals/design/compressed-nodes.md).
+     * Default `'quantized'` ({@link DEFAULT_NODE_FORMAT}): 32-byte nodes, each
+     * mesh's frame slot before its root; `f32` trees are quantized
+     * (`quantizeNodes`), quantized trees are placed as they are. `'f32'`:
+     * 64-byte nodes, the scene byte for byte what it was before the option
+     * existed. The walk must be compiled for the same format. Independent of
+     * {@link triangleLeaves}.
      */
     readonly nodeFormat?: GpuLayoutNodeFormat;
+}
+
+/**
+ * The triangle format the trees agree on, for an assembly that names none:
+ * `'indexed'` when every tree is indexed, `'records'` when none is (or there
+ * are no trees). A mix throws: only `triangleLeaves: 'indexed'` can place both.
+ */
+function treesTriangleLeaves(trees: readonly (MeshBvh | null)[]): TriangleLeaves {
+    const present = trees.filter((tree): tree is MeshBvh => tree !== null);
+    const indexed = present.filter((tree) => tree.triangleLeaves === 'indexed').length;
+    if (indexed === 0) return 'records';
+    if (indexed === present.length) return 'indexed';
+    throw new RangeError(
+        `assembleTraceScene: ${indexed} of ${present.length} trees are indexed and the rest records; pass triangleLeaves: 'indexed' (records trees are converted) with their geometries`,
+    );
 }
 
 export function assembleTraceScene(
@@ -222,21 +243,27 @@ export function assembleTraceScene(
         for (const source of group.sources) if (!merged.plan.meshNeeded[source.meshIndex]) mergedInto.set(source.meshIndex, groupIndex);
     });
 
-    const leaves = checkTriangleLeaves(options.triangleLeaves, 'assembleTraceScene');
+    const leaves = checkTriangleLeaves(options.triangleLeaves ?? treesTriangleLeaves(placed), 'assembleTraceScene');
     const indexed = leaves === 'indexed';
     const positionLayout: PositionLayout = options.positionLayout ?? 'vec4';
     if (positionLayout !== 'vec4' && positionLayout !== 'packed') throw new RangeError(`assembleTraceScene: positionLayout must be 'vec4' or 'packed', got ${String(positionLayout)}`);
     const geometryOf = (index: number): MeshGeometry => {
         if (index >= meshes.length) return merged!.plan.groups[index - meshes.length].geometry;
         const geometry = options.geometries?.[index];
-        if (!geometry) throw new RangeError(`assembleTraceScene: an indexed scene needs geometries[${index}], the positions of mesh ${index}`);
+        if (!geometry) {
+            throw new RangeError(
+                options.triangleLeaves === undefined
+                    ? `assembleTraceScene: the trees are indexed, so the scene is too, and it needs each mesh's positions: pass geometries (geometries[${index}] is missing), or build records trees`
+                    : `assembleTraceScene: an indexed scene needs geometries[${index}], the positions of mesh ${index}`,
+            );
+        }
         return geometry;
     };
     if (!indexed && (options.geometries || options.weld !== undefined || options.positionLayout !== undefined)) {
         throw new RangeError("assembleTraceScene: geometries, weld and positionLayout are for triangleLeaves: 'indexed'");
     }
 
-    const nodeFormat = checkNodeFormat(options.nodeFormat, 'assembleTraceScene');
+    const nodeFormat = checkNodeFormat(options.nodeFormat, 'assembleTraceScene', DEFAULT_NODE_FORMAT);
     const quantized = nodeFormat === 'quantized';
     const nodeBytes = gpuLayoutNodeBytes(nodeFormat);
     let totalNodes = 0;
@@ -517,9 +544,10 @@ export interface TraceSceneBuildOptions extends StaticMergeOptions {
     readonly build: (geometry: MeshGeometry) => MeshBvh | Promise<MeshBvh>;
     /**
      * Merge static instances whose mesh is used once into world-space meshes
-     * (static-merge.ts; docs/internals/design/trace.md). Default false: every instance
-     * is a normal instance, and the scene is exactly what building each mesh
-     * and calling `assembleTraceScene` gives.
+     * (static-merge.ts; docs/internals/design/trace.md). Default true; it only
+     * touches instances marked `static: true`. With none (or with `false`),
+     * every instance is a normal instance, and the scene is exactly what
+     * building each mesh and calling `assembleTraceScene` gives.
      */
     readonly mergeStaticInstances?: boolean;
     readonly topLevel?: Partial<SahBuildOptions>;
@@ -529,7 +557,7 @@ export interface TraceSceneBuildOptions extends StaticMergeOptions {
     readonly positionLayout?: PositionLayout;
     /** Indexed scenes: the exact-bit weld at assembly. Default true. */
     readonly weld?: boolean;
-    /** The scene's node format (see `TraceSceneAssemblyOptions.nodeFormat`). Default `'f32'`; trees are built `f32` and quantized at assembly. */
+    /** The scene's node format (see `TraceSceneAssemblyOptions.nodeFormat`). Default `'quantized'`; trees are built `f32` and quantized at assembly. */
     readonly nodeFormat?: GpuLayoutNodeFormat;
     /**
      * Opt-in: weld each mesh's vertices closer than this on every axis before
@@ -543,8 +571,9 @@ export interface TraceSceneBuildOptions extends StaticMergeOptions {
 
 /**
  * Builds every mesh tree with `options.build` and assembles the scene. With
- * `mergeStaticInstances`, meshes only merged instances use get no tree of
- * their own, and each merged group's geometry is built instead.
+ * `mergeStaticInstances` (on by default) and instances marked `static`,
+ * meshes only merged instances use get no tree of their own, and each merged
+ * group's geometry is built instead.
  *
  * Every mesh's `triangleFlags` may set bit 0 only; a reserved bit throws,
  * naming the mesh and triangle.
@@ -566,20 +595,32 @@ export async function buildTraceScene(
     const tolerance = options.weldTolerance ?? 0;
     const geometries = tolerance > 0 ? inputs.map((geometry) => weldPositions(geometry, { tolerance })) : inputs;
     const indexed = checkTriangleLeaves(options.triangleLeaves, 'buildTraceScene') === 'indexed';
-    const nodeOptions: TraceSceneAssemblyOptions = checkNodeFormat(options.nodeFormat, 'buildTraceScene') === 'quantized' ? { nodeFormat: 'quantized' } : {};
+    const nodeOptions: TraceSceneAssemblyOptions = { nodeFormat: checkNodeFormat(options.nodeFormat, 'buildTraceScene', DEFAULT_NODE_FORMAT) };
     const layoutOptions: TraceSceneAssemblyOptions = indexed
         ? { triangleLeaves: 'indexed', geometries, positionLayout: options.positionLayout, weld: options.weld, ...nodeOptions }
         : nodeOptions;
     // A tolerance weld renumbers vertices too: the scene's are not the app's, so no refit (meshRefitPlacement).
     const markWelded = (scene: TraceSceneData): TraceSceneData =>
         indexed && tolerance > 0 ? { ...scene, meshes: scene.meshes.map((placement) => ({ ...placement, welded: true })) } : scene;
-    if (!options.mergeStaticInstances) {
+    // options.build may return indexed trees; this function takes the scene's format from its options only.
+    const checkBuilt = (trees: readonly (MeshBvh | null)[]): void => {
+        if (indexed) return;
+        const at = trees.findIndex((tree) => tree?.triangleLeaves === 'indexed');
+        if (at >= 0) {
+            throw new RangeError(
+                `buildTraceScene: options.build returned an indexed tree (mesh ${at}) for a records scene; pass triangleLeaves: 'indexed' (the scene then takes its positions from the geometries), or build records trees`,
+            );
+        }
+    };
+    if (options.mergeStaticInstances === false || !instances.some((instance) => instance.static)) {
         const meshes = await Promise.all(geometries.map((geometry) => options.build(geometry)));
+        checkBuilt(meshes);
         return markWelded(assembleTraceScene(meshes, instances, options.topLevel, layoutOptions));
     }
     const plan = mergeStaticGeometry(geometries, instances, options);
     const meshes = await Promise.all(geometries.map((geometry, index) => (plan.meshNeeded[index] ? options.build(geometry) : null)));
     const mergedMeshes = await Promise.all(plan.groups.map((group) => options.build(group.geometry)));
+    checkBuilt([...meshes, ...mergedMeshes]);
     return markWelded(assembleTraceScene(meshes, instances, options.topLevel, { ...layoutOptions, merged: { plan, meshes: mergedMeshes } }));
 }
 
@@ -587,8 +628,8 @@ export async function buildTraceScene(
 export interface MeshRefitPlacement {
     /** The mesh's root, in words (quantized scenes: its frame slot is the 8 words before). */
     readonly nodeWordOffset: number;
-    /** The scene's node format: `GpuMeshRefit` refits an `f32` copy and packs it into a quantized scene. */
-    readonly nodeFormat?: GpuLayoutNodeFormat;
+    /** The scene's node format, always given: `GpuMeshRefit` refits an `f32` copy and packs it into a quantized scene. */
+    readonly nodeFormat: GpuLayoutNodeFormat;
     readonly triangleWordOffset: number;
     /** Indexed scenes: the mesh's first vertex in the scene's positions. */
     readonly vertexBase?: number;
@@ -624,7 +665,7 @@ export function meshRefitPlacement(
     }
     if (placement.triangleCount === 0) throw new RangeError(`meshRefitPlacement: mesh ${meshIndex} has no tree in this scene`);
     const nodeWordOffset = placement.nodeOffset * (gpuLayoutNodeBytes(scene.nodeFormat) / 4);
-    const nodes = scene.nodeFormat === 'quantized' ? { nodeFormat: 'quantized' as const } : {};
+    const nodes = { nodeFormat: scene.nodeFormat ?? ('f32' as const) }; // scene data with no format is f32
     if (scene.triangleLeaves !== 'indexed') return { nodeWordOffset, ...nodes, triangleWordOffset: placement.triangleOffset * TRIANGLE_WORDS };
     if (placement.welded) {
         throw new RangeError(
