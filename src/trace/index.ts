@@ -4,8 +4,9 @@
 export * from './layout.ts';
 export * from './rays.ts';
 export * from './wgsl.ts';
-export { CLOSEST_POINT_MAX_DISTANCE, CLOSEST_POINT_RECORD_BYTES, CLOSEST_POINT_RECORD_WORD, POINT_QUERY_BYTES, QUERY_BOX_PADDING } from './query-wgsl.ts';
+export { CLOSEST_POINT_MAX_DISTANCE, CLOSEST_POINT_RECORD_BYTES, CLOSEST_POINT_RECORD_WORD, INSIDE_TEST_DIRECTIONS, INSIDE_TEST_MAJORITY, POINT_QUERY_BYTES, QUERY_BOX_PADDING, type InsideRule } from './query-wgsl.ts';
 export * from './trace-gpu.ts';
+export * from './sdf.ts';
 export * from './triangle-packing.ts';
 export * from './triangle-filter.ts';
 export * from './mesh-bvh.ts';
