@@ -18,7 +18,7 @@ import type { MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
 import { randomTriangleSoup, createRandom, randomRays } from './oracle-fixtures.ts';
 import { packRays } from './rays.ts';
-import { assembleTraceScene, buildTraceScene, type TraceSceneData, type TraceSceneInstance } from './scene-assembly.ts';
+import { assembleTraceScene, buildTraceScene, meshRefitPlacement, type TraceSceneData, type TraceSceneInstance } from './scene-assembly.ts';
 import type { TracedHit } from './oracle-compare.ts';
 
 let tiny: TinyBvhBuilder;
@@ -160,30 +160,38 @@ describe('clusterTraceScene', () => {
         expect(() => clusterTraceScene(scene, { primitiveLimit: -1 })).toThrow(RangeError);
     });
 
-    it('splits unshared meshes by default, copies each subtree once, and keeps the scene\'s own nodes', async () => {
+    it('splits unshared meshes by default, copies each subtree once, and drops the trees only split records trace', async () => {
         const random = createRandom(9);
-        const shared = randomTriangleSoup(random, 400, 3, 0.5);
         const alone = randomTriangleSoup(random, 400, 3, 0.5);
+        const shared = randomTriangleSoup(random, 400, 3, 0.5);
         const instances: TraceSceneInstance[] = [
-            { meshIndex: 0, instanceIndex: 0, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
-            { meshIndex: 0, instanceIndex: 1, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 0, 0, 1] },
-            { meshIndex: 1, instanceIndex: 2, objectToWorld: [0, 1, 0, 0, -2, 0, 0, 0, 0, 0, 1, 0, 0, 5, 0, 1] },
+            { meshIndex: 0, instanceIndex: 2, objectToWorld: [0, 1, 0, 0, -2, 0, 0, 0, 0, 0, 1, 0, 0, 5, 0, 1] },
+            { meshIndex: 1, instanceIndex: 0, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
+            { meshIndex: 1, instanceIndex: 1, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 0, 0, 1] },
         ];
         for (const format of FORMATS.slice(0, 4)) {
-            const scene = await assemble([shared, alone], instances, format);
+            const scene = await assemble([alone, shared], instances, format);
+            const lead = format.nodeFormat === 'quantized' ? 1 : 0;
+            const slotBytes = scene.nodes.byteLength / (scene.meshes[1].nodeOffset + scene.meshes[1].nodeCount);
             const clustered = clusterTraceScene(scene, { primitiveLimit: 16 });
-            const cut = meshClusters(scene, scene.meshes[1].nodeOffset, 16);
-            expect(clustered.clusters.splitRecords).toBe(1);
-            expect(clustered.clusters.clusterRecords).toBe(2 + cut.length);
-            expect(clustered.clusters.copiedSubtrees).toBe(cut.length);
-            // The scene's own nodes come first, unchanged; the instanced mesh keeps its root.
-            expect(new Uint8Array(clustered.nodes, 0, scene.nodes.byteLength)).toEqual(new Uint8Array(scene.nodes));
-            expect(recordRoots(clustered).filter((root) => root === scene.meshes[0].nodeOffset)).toHaveLength(2);
+            const cut = meshClusters(scene, scene.meshes[0].nodeOffset, 16);
+            expect(clustered.clusters).toMatchObject({ splitRecords: 1, clusterRecords: 2 + cut.length, copiedSubtrees: cut.length, droppedTrees: 1, droppedNodeSlots: lead + scene.meshes[0].nodeCount });
+            // Mesh 0's own tree is gone, its triangles stay; mesh 1 moved to the front, its nodes as they were.
+            expect(clustered.meshes[0]).toEqual({ ...scene.meshes[0], nodeCount: 0, clustered: true });
+            expect(() => meshRefitPlacement(clustered, 0)).toThrow(/clusters/);
+            expect(clustered.meshes[1]).toEqual({ ...scene.meshes[1], nodeOffset: lead });
+            // (Indexed scenes weld by default, which meshRefitPlacement refuses for its own reason.)
+            if (format.triangleLeaves === 'records') expect(meshRefitPlacement(clustered, 1)).toEqual({ ...meshRefitPlacement(scene, 1), nodeWordOffset: (lead * slotBytes) / 4 });
+            const bytes = (data: TraceSceneData, placement: TraceSceneData['meshes'][number]) =>
+                new Uint8Array(data.nodes, (placement.nodeOffset - lead) * slotBytes, (lead + placement.nodeCount) * slotBytes);
+            expect(bytes(clustered, clustered.meshes[1])).toEqual(bytes(scene, scene.meshes[1]));
+            expect(recordRoots(clustered).filter((root) => root === lead)).toHaveLength(2);
             expect(clustered.triangles).toBe(scene.triangles);
             expect(clustered.clusters.addedBytes).toBe(clustered.byteLength - scene.byteLength);
-            // Splitting every record shares the copies between the two instances of mesh 0.
+            // Splitting every record shares the copies between the two instances of mesh 1, and drops both trees.
             const all = clusterTraceScene(scene, { primitiveLimit: 16, split: () => true });
-            expect(all.clusters.copiedSubtrees).toBe(cut.length + meshClusters(scene, scene.meshes[0].nodeOffset, 16).length);
+            expect(all.clusters.copiedSubtrees).toBe(cut.length + meshClusters(scene, scene.meshes[1].nodeOffset, 16).length);
+            expect(all.clusters.droppedTrees).toBe(2);
             const rays = randomRays(createRandom(10), 3000, [-6, -6, -6, 11, 11, 6], 4, { randomInterval: true });
             const packed = packRays(rays);
             for (const result of [clustered, all]) {
@@ -191,6 +199,19 @@ describe('clusterTraceScene', () => {
                 expect(compared.failures, `${format.name}: ${compared.failures.join('\n')}`).toEqual([]);
             }
         }
+    });
+
+    it('keeps a tree that a whole-mesh cluster or a hidden instance still uses', async () => {
+        const random = createRandom(13);
+        const small = randomTriangleSoup(random, 10, 2, 0.5);
+        const hidden = randomTriangleSoup(random, 200, 2, 0.5);
+        const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+        const scene = await assemble([small, hidden], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: identity }, { meshIndex: 1, instanceIndex: 1, objectToWorld: identity, visible: false }], FORMATS[1]);
+        // The small mesh is under the limit: one cluster, its whole tree, entered where it is.
+        const clustered = clusterTraceScene(scene, { primitiveLimit: 64, split: () => true });
+        expect(clustered.clusters).toMatchObject({ splitRecords: 1, clusterRecords: 1, copiedSubtrees: 0, droppedTrees: 0 });
+        expect(clustered.meshes).toEqual(scene.meshes);
+        expect(new Uint8Array(clustered.nodes)).toEqual(new Uint8Array(scene.nodes));
     });
 
     it('tells the split option which mesh or merged group each record traces', async () => {

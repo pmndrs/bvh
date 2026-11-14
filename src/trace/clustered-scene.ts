@@ -36,11 +36,14 @@
  * visits them in another order.
  *
  * **What it costs:** one 64-byte record and about two top-level nodes per
- * cluster, plus the copied nodes (the mesh's nodes below the cut, and a frame
- * slot per quantized cluster). The scene's own nodes stay where they are, so
- * `TraceSceneData.meshes` and `meshRefitPlacement` still describe them; a
- * refit of a mesh does not reach its cluster copies, so split only meshes
- * that never deform (`split`).
+ * cluster, and a frame slot per quantized cluster. A mesh tree that only
+ * split records trace is dropped, as `ClusteredBVH` uploads only the subtrees
+ * its leaves enter: its nodes above the cut go, the ones below move into the
+ * copies. Its `TraceSceneData.meshes` entry keeps its triangles (filter flags
+ * are written there as before) with `nodeCount` 0 and `clustered: true`, and
+ * `meshRefitPlacement` refuses it: a refit would not reach the copies, so
+ * leave meshes you refit out of the split (`split`). The other trees move up
+ * to close the gaps, and their entries say where.
  */
 
 import { DEFAULT_SAH_OPTIONS, buildSahTree, type SahBuildOptions } from './sah-builder.ts';
@@ -65,7 +68,7 @@ import {
 import { decodeMaxPlane, decodeMinPlane, readNodeFrame, type NodeFrame } from '../quantized-nodes.ts';
 import { GPU_LAYOUT_QUANTIZED_NODE_WORD } from '../gpu-layout.ts';
 import { invertAffine, transformBounds, type TopLevelBvh } from './top-level.ts';
-import type { TraceSceneData } from './scene-assembly.ts';
+import type { TraceSceneData, TraceSceneMeshPlacement } from './scene-assembly.ts';
 
 /** three-mesh-bvh's `ClusteredBVH` default: a subtree of fewer triangles than this is one top-level leaf. */
 export const DEFAULT_CLUSTER_PRIMITIVE_LIMIT = 64;
@@ -120,7 +123,11 @@ export interface TraceClusterStats {
     readonly copiedSubtrees: number;
     /** Node slots copied, frame slots of quantized subtrees included. */
     readonly copiedNodeSlots: number;
-    /** Bytes the scene grew by: copied nodes and the larger top level. */
+    /** The scene's own trees left out because only split records traced them (their placements say `clustered`). */
+    readonly droppedTrees: number;
+    /** Node slots those trees held, frame slots included. */
+    readonly droppedNodeSlots: number;
+    /** Bytes the scene grew by (negative when it shrank): copied nodes and the larger top level, less the dropped trees. */
     readonly addedBytes: number;
 }
 
@@ -380,8 +387,9 @@ function recordObjectToWorld(floats: Float32Array, record: number): number[] {
 /**
  * Cuts the meshes of an assembled scene into clusters, each its own top-level
  * leaf (three-mesh-bvh's `ClusteredBVH`; see the file comment). Returns a new
- * scene: the same triangles and positions, the scene's nodes followed by the
- * copied subtrees, and a new top level; `scene` is not changed. Every walk
+ * scene: the same triangles and positions, the scene's trees that are still
+ * entered at their roots followed by the copied subtrees, the placements to
+ * match, and a new top level; `scene` is not changed. Every walk
  * traces it as it is (the WGSL, `createCpuTracer`, the batch kernels, the
  * queries and `SdfGenerator`), compiled for the scene's formats.
  *
@@ -436,7 +444,7 @@ export function clusterTraceScene(scene: TraceSceneData, options: TraceClusterOp
             }
         }
     }
-    const unchanged: TraceClusterStats = { records: recordCount, splitRecords: 0, clusterRecords: recordCount, copiedSubtrees: 0, copiedNodeSlots: 0, addedBytes: 0 };
+    const unchanged: TraceClusterStats = { records: recordCount, splitRecords: 0, clusterRecords: recordCount, copiedSubtrees: 0, copiedNodeSlots: 0, droppedTrees: 0, droppedNodeSlots: 0, addedBytes: 0 };
     if (splitRecords === 0) return { ...scene, clusters: unchanged };
 
     // Each mesh is summarized and cut once; each cluster's subtree is copied once.
@@ -449,22 +457,19 @@ export function clusterTraceScene(scene: TraceSceneData, options: TraceClusterOp
         }
         return summary;
     };
-    const cuts = new Map<number, { clusters: MeshCluster[]; roots: number[] }>();
+    // A root is the scene's own tree at `tree` (its old offset), or copy `copy`.
+    type Root = { readonly tree: number; readonly copy: -1 } | { readonly tree: -1; readonly copy: number };
+    const cuts = new Map<number, { clusters: MeshCluster[]; roots: Root[] }>();
     const copies: Uint32Array[] = [];
-    let nextSlot = scene.nodes.byteLength / nodeBytes;
-    const firstCopySlot = nextSlot;
     const cutOf = (nodeOffset: number) => {
         let cut = cuts.get(nodeOffset);
         if (!cut) {
             const summary = summaryOf(nodeOffset);
             const clusters = clustersOf(summary, primitiveLimit);
-            const roots = clusters.map((cluster) => {
-                if (cluster.node === 0) return nodeOffset; // the whole tree: no copy
-                const copy = copyCluster(scene, nodeOffset, summary.reader, cluster);
-                copies.push(copy);
-                const root = nextSlot + (quantized ? 1 : 0);
-                nextSlot += copy.length / slotWords;
-                return root;
+            const roots = clusters.map((cluster): Root => {
+                if (cluster.node === 0) return { tree: nodeOffset, copy: -1 }; // the whole tree: no copy
+                copies.push(copyCluster(scene, nodeOffset, summary.reader, cluster));
+                return { tree: -1, copy: copies.length - 1 };
             });
             cut = { clusters, roots };
             cuts.set(nodeOffset, cut);
@@ -474,30 +479,64 @@ export function clusterTraceScene(scene: TraceSceneData, options: TraceClusterOp
 
     // One entry per new record: the source record, the root it enters, its world box, the tree's depth.
     const sources: number[] = [];
-    const roots: number[] = [];
+    const roots: Root[] = [];
     const depths: number[] = [];
     const worldBoxes: number[] = [];
+    const enteredWhole = new Set<number>();
     const box = new Float32Array(6);
     for (let record = 0; record < recordCount; record++) {
         const base = recordWord(record);
         const nodeOffset = topWords[base + INSTANCE_WORD.rootNodeOffset];
         const objectToWorld = recordObjectToWorld(topFloats, base);
         const summary = summaryOf(nodeOffset);
-        let entries: { root: number; bounds: Float64Array; depth: number }[];
+        let entries: { root: Root; bounds: Float64Array; depth: number }[];
         if (splits[record]) {
             const cut = cutOf(nodeOffset);
             entries = cut.clusters.map((cluster, k) => ({ root: cut.roots[k], bounds: cluster.bounds, depth: cluster.depth }));
         } else {
-            entries = [{ root: nodeOffset, bounds: unionOfChildren(summary.reader, 0), depth: summary.depths.get(0)! }];
+            entries = [{ root: { tree: nodeOffset, copy: -1 }, bounds: unionOfChildren(summary.reader, 0), depth: summary.depths.get(0)! }];
         }
         for (const entry of entries) {
             transformBounds(entry.bounds, objectToWorld, box, 0);
+            if (entry.root.tree >= 0) enteredWhole.add(entry.root.tree);
             sources.push(record);
             roots.push(entry.root);
             depths.push(entry.depth);
             for (let k = 0; k < 6; k++) worldBoxes.push(box[k]);
         }
     }
+
+    // The new node buffer: the scene's trees some record still enters at the root (and those no
+    // record traces), then the copies. A tree only split records trace is dropped, as
+    // ClusteredBVH uploads only the referenced subtrees. A scene whose records enter a root no
+    // placement describes keeps its node buffer whole.
+    const lead = quantized ? 1 : 0;
+    const placements = [...scene.meshes, ...scene.mergedGroups].filter((placement) => placement.nodeCount > 0);
+    const described = new Set(placements.map((placement) => placement.nodeOffset));
+    const compact = [...sharedBy.keys()].every((root) => described.has(root));
+    const dropped = new Set<number>();
+    if (compact) for (const root of cuts.keys()) if (!enteredWhole.has(root)) dropped.add(root);
+    const moved = new Map<number, number>();
+    const pieces: { from: number; slots: number; to: number }[] = [];
+    let slot = 0;
+    if (compact) {
+        for (const placement of [...placements].sort((a, b) => a.nodeOffset - b.nodeOffset)) {
+            if (dropped.has(placement.nodeOffset) || moved.has(placement.nodeOffset)) continue;
+            pieces.push({ from: placement.nodeOffset - lead, slots: lead + placement.nodeCount, to: slot });
+            moved.set(placement.nodeOffset, slot + lead);
+            slot += lead + placement.nodeCount;
+        }
+    } else {
+        pieces.push({ from: 0, slots: scene.nodes.byteLength / nodeBytes, to: 0 });
+        slot = scene.nodes.byteLength / nodeBytes;
+    }
+    const keptSlots = slot;
+    const copyRoots = copies.map((copy) => {
+        const root = slot + lead;
+        slot += copy.length / slotWords;
+        return root;
+    });
+    const resolve = (root: Root): number => (root.copy >= 0 ? copyRoots[root.copy] : compact ? moved.get(root.tree)! : root.tree);
 
     const tree = buildSahTree(new Float32Array(worldBoxes), { ...DEFAULT_SAH_OPTIONS, ...options.topLevel, maxLeafPrimitives: 1 });
     const clusterRecords = sources.length;
@@ -515,7 +554,7 @@ export function clusterTraceScene(scene: TraceSceneData, options: TraceClusterOp
         const from = recordWord(sources[entry]);
         const to = recordWord(at);
         words.set(topWords.subarray(from, from + INSTANCE_RECORD_WORDS), to);
-        words[to + INSTANCE_WORD.rootNodeOffset] = roots[entry];
+        words[to + INSTANCE_WORD.rootNodeOffset] = resolve(roots[entry]);
         recordOrder[at] = top.recordOrder[sources[entry]];
         maxMeshDepth = Math.max(maxMeshDepth, depths[entry]);
     }
@@ -529,21 +568,29 @@ export function clusterTraceScene(scene: TraceSceneData, options: TraceClusterOp
         );
     }
 
-    const nodes = new ArrayBuffer(nextSlot * nodeBytes);
+    const nodes = new ArrayBuffer(Math.max(1, slot) * nodeBytes);
     const nodeWords = new Uint32Array(nodes);
-    nodeWords.set(new Uint32Array(scene.nodes));
-    let slot = firstCopySlot;
-    for (const copy of copies) {
-        nodeWords.set(copy, slot * slotWords);
-        slot += copy.length / slotWords;
-    }
+    const sceneWords = new Uint32Array(scene.nodes);
+    for (const piece of pieces) nodeWords.set(sceneWords.subarray(piece.from * slotWords, (piece.from + piece.slots) * slotWords), piece.to * slotWords);
+    copies.forEach((copy, k) => nodeWords.set(copy, (copyRoots[k] - lead) * slotWords));
+
+    // Placements follow their trees; a dropped tree's entry keeps its triangles and says so.
+    const place = <T extends TraceSceneMeshPlacement>(placement: T): T => {
+        if (placement.nodeCount === 0 || !compact) return placement;
+        if (dropped.has(placement.nodeOffset)) return { ...placement, nodeCount: 0, clustered: true };
+        return { ...placement, nodeOffset: moved.get(placement.nodeOffset)! };
+    };
 
     const topLevel: TopLevelBvh = { buffer, instanceCount: clusterRecords, nodeCount: tree.nodeCount, maxDepth: tree.maxDepth, skippedSingular: top.skippedSingular, recordOrder };
     const byteLength = nodes.byteLength + scene.triangles.byteLength + buffer.byteLength + scene.positions.byteLength;
+    let droppedNodeSlots = 0;
+    for (const placement of placements) if (dropped.has(placement.nodeOffset)) droppedNodeSlots += lead + placement.nodeCount;
     return {
         ...scene,
         nodes,
         topLevel,
+        meshes: scene.meshes.map(place),
+        mergedGroups: scene.mergedGroups.map(place),
         maxMeshDepth,
         requiredStackSize,
         byteLength,
@@ -552,7 +599,9 @@ export function clusterTraceScene(scene: TraceSceneData, options: TraceClusterOp
             splitRecords,
             clusterRecords,
             copiedSubtrees: copies.length,
-            copiedNodeSlots: nextSlot - firstCopySlot,
+            copiedNodeSlots: slot - keptSlots,
+            droppedTrees: dropped.size,
+            droppedNodeSlots,
             addedBytes: byteLength - scene.byteLength,
         },
     };

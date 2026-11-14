@@ -94,6 +94,12 @@ export interface TraceSceneMeshPlacement {
      * the app's and `meshRefitPlacement` refuses the mesh.
      */
     readonly welded?: boolean;
+    /**
+     * Set by `clusterTraceScene` on a mesh whose own tree it dropped (only its
+     * cluster copies are traced; `nodeCount` is 0). The triangles are where
+     * they were; `meshRefitPlacement` refuses the mesh.
+     */
+    readonly clustered?: true;
 }
 
 export interface TraceSceneData {
@@ -662,6 +668,9 @@ export function meshRefitPlacement(
             `meshRefitPlacement: mesh ${meshIndex} was merged into static group ${placement.mergedInto} (TraceSceneData.mergedGroups); merged meshes never move and must not be refit. ` +
                 'To deform it, leave its instance out of the merge (static: false)',
         );
+    }
+    if (placement.clustered) {
+        throw new RangeError(`meshRefitPlacement: mesh ${meshIndex} was cut into clusters (clusterTraceScene) and its own tree dropped; a refit would not reach the copies. Leave meshes you refit out of the split (split option)`);
     }
     if (placement.triangleCount === 0) throw new RangeError(`meshRefitPlacement: mesh ${meshIndex} has no tree in this scene`);
     const nodeWordOffset = placement.nodeOffset * (gpuLayoutNodeBytes(scene.nodeFormat) / 4);
