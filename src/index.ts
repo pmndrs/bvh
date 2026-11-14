@@ -263,11 +263,14 @@ export {
     traceBuffersOf,
     type GpuAnyHits,
     type GpuClosestHits,
+    type GpuCountOptions,
     type GpuPickOptions,
     type GpuRayHit,
     type GpuRaysOptions,
     type GpuRaysTiming,
     type GpuTraceOptions,
+    type GpuWalkCount,
+    type GpuWalkCounts,
     type TraceSource,
 } from './scene/gpu-rays.ts';
 export { GpuFirstTrees, GpuTreeOutputs, type FirstTreeBuilder, type GpuBuiltTree, type GpuTreeBatchResult, type GpuTreeBuilds, type GpuTreeRequest } from './scene/gpu-first-trees.ts';

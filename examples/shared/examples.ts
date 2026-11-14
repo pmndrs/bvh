@@ -111,7 +111,7 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         name: 'three-inspector',
         path: 'three/inspector',
         title: 'Inspector',
-        description: 'MeshBVHHelper boxes by depth, stats per builder (tinybvh, H-PLOC, LBVH), leaf size and layout options, and a heat map of nodes visited per ray.',
+        description: 'MeshBVHHelper boxes by depth, stats per builder (tinybvh, H-PLOC, LBVH), leaf size and layout options, and a heat map of steps per ray from the GPU walk (its counted walk).',
         timeoutMs: 90_000,
     },
     {

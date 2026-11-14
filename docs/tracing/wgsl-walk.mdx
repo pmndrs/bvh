@@ -118,6 +118,39 @@ const entries = traceModuleEntries(options); // a fourth binding, the positions,
 All three buffers are `read-only-storage` in the compute stage; `traceModuleEntries(options)` gives the layout entries
 without binding numbers. A kernel refuses buffers of the other format.
 
+## The counted walk
+
+`counters: true` adds the walk with step counters, for heat maps and tools that ask why one tree is faster than
+another: `bvhTraceClosestCounted(ray)` and `bvhTraceAnyCounted(ray)` (and `*Masked(ray, mask)` unless
+`rayMasks: false`) return a `BvhWalkCounts`: the hit (`t`, `instance`, `triangle`; any hit: `t` 1.0 blocked, -1.0
+clear) and the work: `steps` (loop iterations, both levels), `meshNodes` and `topLevelNodes` (inner nodes whose
+children were tested), `instanceEntries`, `triangleTests` and `instancesWithHit`. `TraceBatchKernel.create(device,
+{ counters: true })` writes one record per ray (`WALK_COUNTS_BYTES`, words in `WALK_COUNTS_WORD`), and
+`GpuRays.countWalk(rays)` reads them back.
+
+{/* snippet: counted-walk */}
+```ts
+import { traceModuleWgsl } from '@pmndrs/bvh';
+
+    // In your own kernel: the walk with its work counted, compiled in only when asked.
+    const code = /* wgsl */ `
+${traceModuleWgsl({ counters: true })}
+@group(1) @binding(0) var<storage, read_write> heat: array<u32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+    let counts = bvhTraceClosestCounted(BvhRay(vec3f(0.0, 1.0, 5.0), 0.0, vec3f(0.0, 0.0, -1.0), 1e30));
+    heat[id.x] = counts.steps; // also meshNodes, topLevelNodes, instanceEntries, triangleTests, instancesWithHit
+}`;
+    // Or through GpuRays: the counted kernel over the same source, read back.
+    const counted = await rays.countWalk(cameraRays);
+    console.log(`${counted.meanSteps.toFixed(1)} steps per ray, at most ${counted.maxSteps}`, counted.counts(0));
+```
+
+The counted functions are cut from the walk's own text with counters inserted at fixed places, as the benches' copy
+is, so the traversal and the hits are the production walk's (a change to the walk that the insertions no longer fit
+throws). The default walk is untouched: without the option the module is the same text, and with it the module only
+gains the counted declarations. Its times mean little (it carries and writes more per ray): time the plain walk.
+
 ## How the walk works
 
 - **One loop, one stack per thread** (`array<u32, 64>` in private memory) for both levels. Entering an instance pushes a

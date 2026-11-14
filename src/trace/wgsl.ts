@@ -72,6 +72,9 @@ import {
 import { DEFAULT_TRIANGLE_FILTER_WGSL } from './triangle-filter.ts';
 import { DEFAULT_NODE_FORMAT } from '../gpu-layout.ts';
 import { closestPointBatchEntryWgsl, queriesWgsl } from './query-wgsl.ts';
+import { countedWalkWgsl, walkCountsTypesWgsl, WALK_COUNTS_BYTES, WALK_COUNTS_WORD } from './walk-counters.ts';
+
+export { WALK_COUNTS_BYTES, WALK_COUNTS_WORD };
 
 /** Where the trace module's bindings land inside a kernel (structurally the same as ddgi's `BindingSlot`). */
 export interface BindingSlot {
@@ -960,6 +963,18 @@ export interface TraceModuleOptions {
      * Default: no shapecast.
      */
     readonly shapecast?: string;
+    /**
+     * The counted walk (walk-counters.ts), compiled in beside the walk:
+     * `bvhTraceClosestCounted(ray)` and `bvhTraceAnyCounted(ray)` (and their
+     * `*Masked(ray, mask)` forms unless `rayMasks: false`) return a
+     * `BvhWalkCounts`: the hit (`t`, `instance`, `triangle`) and the walk's
+     * work (`steps`, `meshNodes`, `topLevelNodes`, `instanceEntries`,
+     * `triangleTests`, `instancesWithHit`), for heat maps and tools. The same
+     * walk with counters added, so the same hits. Default false: nothing is
+     * added, and the module is the same text; with it, every other
+     * declaration is the same text too.
+     */
+    readonly counters?: boolean;
 }
 
 /**
@@ -1154,7 +1169,15 @@ ${walkWgsl('closest', rayMasks)}
 ${walkWgsl('any', rayMasks, anyHitOrder)}
 ${rayMasks ? MASKED_TRACE_WGSL : UNMASKED_TRACE_WGSL}
 ${triangleFilter ?? '// bvhTrianglePasses is supplied by the kernel.'}
-${queriesWgsl({ rayMasks, queries: options.queries ?? false, shapecast: options.shapecast })}`;
+${queriesWgsl({ rayMasks, queries: options.queries ?? false, shapecast: options.shapecast })}${options.counters ? countersWgsl(rayMasks, anyHitOrder) : ''}`;
+}
+
+/** The counted walk's declarations (walk-counters.ts): cut from this module's own walk text, so they never drift from it. */
+function countersWgsl(rayMasks: boolean, anyHitOrder: AnyHitOrder): string {
+    return `
+${walkCountsTypesWgsl(rayMasks)}
+${countedWalkWgsl(walkWgsl('closest', rayMasks), 'closest', rayMasks)}
+${countedWalkWgsl(walkWgsl('any', rayMasks, anyHitOrder), 'any', rayMasks)}`;
 }
 
 /**
@@ -1299,7 +1322,8 @@ export const BATCH_WORKGROUP_SIZE = 64;
  * with material and normal) or, with `hitNormal: false`,
  * `BvhHitRecordCompact` ({@link HIT_RECORD_COMPACT_BYTES}, 24 bytes).
  */
-export function batchEntryWgsl(mode: 'closest' | 'any', group: number, rayMasks = true, hitNormal = true): string {
+export function batchEntryWgsl(mode: 'closest' | 'any', group: number, rayMasks = true, hitNormal = true, counters = false): string {
+    if (counters) return countedBatchEntryWgsl(mode, group, rayMasks);
     const recordType = hitNormal ? 'BvhHitRecord' : 'BvhHitRecordCompact';
     const recordStruct = hitNormal
         ? `struct BvhHitRecord {
@@ -1368,6 +1392,43 @@ fn bvhBatch(
 `;
 }
 
+/**
+ * The counted batch entry (`counters: true`): the same bindings, with one
+ * `BvhWalkCounts` ({@link WALK_COUNTS_BYTES}) written per ray in either mode.
+ * The module must be built with `counters: true` and the same `rayMasks`.
+ */
+function countedBatchEntryWgsl(mode: 'closest' | 'any', group: number, rayMasks: boolean): string {
+    const walk = mode === 'closest' ? 'bvhTraceClosestCounted' : 'bvhTraceAnyCounted';
+    const call = rayMasks ? `${walk}Masked(bvhBatchRays[rayIndex], bvhBatchParams.rayMask)` : `${walk}(bvhBatchRays[rayIndex])`;
+    const params = rayMasks
+        ? `
+struct BvhBatchParams {
+    rayMask: u32,
+}
+
+@group(${group}) @binding(2) var<uniform> bvhBatchParams: BvhBatchParams;`
+        : '';
+    return /* wgsl */ `
+@group(${group}) @binding(0) var<storage, read> bvhBatchRays: array<BvhRay>;
+// One BvhWalkCounts per ray: the hit and the walk's work.
+@group(${group}) @binding(1) var<storage, read_write> bvhBatchResults: array<BvhWalkCounts>;
+${params}
+
+@compute @workgroup_size(${BATCH_WORKGROUP_SIZE})
+fn bvhBatch(
+    @builtin(workgroup_id) workgroup: vec3u,
+    @builtin(num_workgroups) workgroupCount: vec3u,
+    @builtin(local_invocation_index) localIndex: u32,
+) {
+    let rayIndex = (workgroup.y * workgroupCount.x + workgroup.x) * ${BATCH_WORKGROUP_SIZE}u + localIndex;
+    if (rayIndex >= arrayLength(&bvhBatchRays)) {
+        return;
+    }
+    bvhBatchResults[rayIndex] = ${call};
+}
+`;
+}
+
 /** Options of {@link batchKernelWgsl}. */
 export interface BatchKernelOptions {
     /** Where the trace module's bindings land. Default: group 0, bindings 0-2. The batch's own bindings are group 1. */
@@ -1397,6 +1458,13 @@ export interface BatchKernelOptions {
     readonly nodeFormat?: NodeFormat;
     /** The any-hit walk's child order (`TraceModuleOptions.anyHitOrder`). Default `'far'`. */
     readonly anyHitOrder?: AnyHitOrder;
+    /**
+     * The counted walk (`TraceModuleOptions.counters`): each ray's result is a
+     * `BvhWalkCounts` ({@link WALK_COUNTS_BYTES}, words in
+     * {@link WALK_COUNTS_WORD}) in either mode, instead of a hit record or a
+     * blocked word. Default false.
+     */
+    readonly counters?: boolean;
 }
 
 /** Bytes of the batch kernel's uniform (`BvhBatchParams`, group 1 binding 2, only with ray masks). Padded to 16. */
@@ -1418,8 +1486,9 @@ export function batchKernelWgsl(mode: 'closest' | 'any', options: BatchKernelOpt
     }
     rejectOldPositionalCall('batchKernelWgsl', options);
     const rayMasks = options.rayMasks ?? true;
-    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat, anyHitOrder: options.anyHitOrder })}
-${batchEntryWgsl(mode, 1, rayMasks, options.hitNormal ?? true)}`;
+    const counters = options.counters ?? false;
+    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat, anyHitOrder: options.anyHitOrder, counters })}
+${batchEntryWgsl(mode, 1, rayMasks, options.hitNormal ?? true, counters)}`;
 }
 
 /** Options of {@link closestPointKernelWgsl}: the trace module's format options and `rayMasks`. */

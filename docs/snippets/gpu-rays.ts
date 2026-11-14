@@ -29,3 +29,26 @@ export async function gpuRays(trees: SceneTrees, data: TraceSceneData): Promise<
     uploaded.destroy();
     return closest.hits;
 }
+
+// #region counted-walk
+import { traceModuleWgsl } from '@pmndrs/bvh';
+
+// #endregion
+
+export async function countedWalk(rays: GpuRays, cameraRays: Float32Array): Promise<string> {
+    // #region counted-walk
+    // In your own kernel: the walk with its work counted, compiled in only when asked.
+    const code = /* wgsl */ `
+${traceModuleWgsl({ counters: true })}
+@group(1) @binding(0) var<storage, read_write> heat: array<u32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+    let counts = bvhTraceClosestCounted(BvhRay(vec3f(0.0, 1.0, 5.0), 0.0, vec3f(0.0, 0.0, -1.0), 1e30));
+    heat[id.x] = counts.steps; // also meshNodes, topLevelNodes, instanceEntries, triangleTests, instancesWithHit
+}`;
+    // Or through GpuRays: the counted kernel over the same source, read back.
+    const counted = await rays.countWalk(cameraRays);
+    console.log(`${counted.meanSteps.toFixed(1)} steps per ray, at most ${counted.maxSteps}`, counted.counts(0));
+    // #endregion
+    return code;
+}

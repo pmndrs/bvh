@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { createFakeGpu, type FakeBinding, type FakeBuffer, type FakeKernel } from '../../tests/support/fake-gpu.ts';
-import { createCpuTracer, type CpuHit } from '../trace/cpu-traversal.ts';
+import { createCpuTracer, newTraceStats, type CpuHit } from '../trace/cpu-traversal.ts';
 import { TOP_HEADER_WORD } from '../trace/layout.ts';
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
 import { createRandom, randomRays, tessellatedQuad } from '../trace/oracle-fixtures.ts';
@@ -17,7 +17,7 @@ import { packRays, RAY_FLOATS, unpackRay } from '../trace/rays.ts';
 import { assembleTraceScene, type TraceSceneData } from '../trace/scene-assembly.ts';
 import type { TopLevelBvh } from '../trace/top-level.ts';
 import { uploadTraceScene } from '../trace/trace-gpu.ts';
-import { HIT_RECORD_BYTES, HIT_RECORD_WORD } from '../trace/wgsl.ts';
+import { HIT_RECORD_BYTES, HIT_RECORD_WORD, WALK_COUNTS_BYTES, WALK_COUNTS_WORD } from '../trace/wgsl.ts';
 import { GpuRays, traceBuffersOf, type GpuRayHit } from './gpu-rays.ts';
 import { SceneTrees } from './scene-trees.ts';
 
@@ -76,9 +76,38 @@ function batchStandIn(mode: 'closest' | 'any'): FakeKernel {
     };
 }
 
+/** The counted `bvhBatch` on the CPU: the hit, and the CPU walk's own counters where the record has steps and triangle tests. */
+function countedStandIn(mode: 'closest' | 'any'): FakeKernel {
+    return (bindings, _x, _y, groups) => {
+        const tracer = createCpuTracer(sceneOf(bindings));
+        const batch = groups.get(1)!;
+        const rays = batch.get(0)!;
+        const results = batch.get(1)!.buffer;
+        const packed = new Float32Array(rays.buffer.bytes.buffer, rays.offset, rays.size / 4);
+        const floats = new Float32Array(results.bytes.buffer);
+        const words = new Uint32Array(results.bytes.buffer);
+        const stride = WALK_COUNTS_BYTES / 4;
+        for (let index = 0; index < packed.length / RAY_FLOATS; index++) {
+            const stats = newTraceStats();
+            const base = index * stride;
+            if (mode === 'any') floats[base + WALK_COUNTS_WORD.t] = tracer.any(unpackRay(packed, index), { stats }) ? 1 : -1;
+            else {
+                const hit = tracer.closest(unpackRay(packed, index), { stats });
+                floats[base + WALK_COUNTS_WORD.t] = hit ? hit.t : -1;
+                words[base + WALK_COUNTS_WORD.instance] = hit?.instanceIndex ?? 0;
+                words[base + WALK_COUNTS_WORD.triangle] = hit?.triangleIndex ?? 0;
+            }
+            words[base + WALK_COUNTS_WORD.steps] = stats.nodesVisited;
+            words[base + WALK_COUNTS_WORD.triangleTests] = stats.trianglesTested;
+        }
+    };
+}
+
 /** A fake GPU whose readbacks complete (the plain fake's never do) and whose batch pipelines run {@link batchStandIn}. */
 function gpuForRays() {
-    const gpu = createFakeGpu({}, { kernels: { 'bvhBatch:closest': batchStandIn('closest'), 'bvhBatch:any': batchStandIn('any') } });
+    const gpu = createFakeGpu({}, {
+        kernels: { 'bvhBatch:closest': batchStandIn('closest'), 'bvhBatch:any': batchStandIn('any'), 'bvhBatch:counted closest': countedStandIn('closest'), 'bvhBatch:counted any': countedStandIn('any') },
+    });
     const device = gpu.device as unknown as Record<string, unknown> & GPUDevice;
     const createBuffer = device.createBuffer.bind(device);
     device.createBuffer = (descriptor: GPUBufferDescriptor) => {
@@ -92,7 +121,7 @@ function gpuForRays() {
     // Each batch pipeline's entry point names its mode, so the stand-in knows what to write.
     const createAsync = device.createComputePipelineAsync.bind(device);
     device.createComputePipelineAsync = (descriptor: GPUComputePipelineDescriptor) => {
-        const mode = descriptor.label?.endsWith(' any') ? 'any' : 'closest';
+        const mode = `${descriptor.label?.includes('counted') ? 'counted ' : ''}${descriptor.label?.endsWith(' any') ? 'any' : 'closest'}`;
         return createAsync({ ...descriptor, compute: { ...descriptor.compute, entryPoint: `${descriptor.compute.entryPoint}:${mode}` } });
     };
     return gpu;
@@ -155,6 +184,21 @@ describe('GpuRays', () => {
         expect(await rays.pick([0.3, 0.2, 5], [0, 0, 1])).toBeNull();
         expect(await rays.pick([0.3, 0.2, 5], [0, 0, -1], { tMax: 4 })).toBeNull();
         await expect(rays.pick([0, 0, 0], [0, 0, 0])).rejects.toThrow(RangeError);
+
+        // The counted walk: its own kernel (compiled at the first call), the same hits, the work per ray.
+        const counted = await rays.countWalk(packed);
+        list.forEach((ray, index) => {
+            const want = cpu.closest(ray);
+            const got = counted.counts(index);
+            expect(got.hit).toBe(want !== null);
+            if (want) expect(`${got.instance}/${got.triangle}`).toBe(key(want));
+        });
+        expect(counted.maxSteps).toBeGreaterThan(0);
+        expect(counted.meanSteps).toBeGreaterThan(0);
+        expect(counted.meanSteps).toBeLessThanOrEqual(counted.maxSteps);
+        expect(counted.records.length).toBe(200 * (WALK_COUNTS_BYTES / 4));
+        const countedAny = await rays.countWalk(packed, { mode: 'any' });
+        list.forEach((ray, index) => expect(countedAny.counts(index).hit).toBe(cpu.any(ray)));
         rays.destroy();
         await expect(rays.traceClosest(packed)).rejects.toThrow('destroyed');
     });

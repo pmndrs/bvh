@@ -39,6 +39,9 @@ rays.destroy();
 - **Results:** `traceClosest` gives `hits`, `hit(i)` (`{ t, instance, triangle, frontFace, barycentrics, material,
   normal }` or null) and the raw `records`; `traceAny` gives `blockedCount`, `blocked(i)` and the words. Both say
   `gpuMs` (timestamps, where the device has `timestamp-query`, else null) and `wallMs` (submit to results on the CPU).
+- **The walk's work:** `countWalk(rays, { mode })` traces with the [counted walk](/tracing/wgsl-walk#the-counted-walk)
+  (its own kernel, compiled at the first call) and gives `counts(i)` (the hit, steps, nodes, instance entries, triangle
+  tests), `meanSteps` and `maxSteps`: a heat map's numbers.
 - **One trace at a time** per `GpuRays`: calls queue up, and `pending` says one is in flight, so a frame loop can skip
   a trace rather than build a backlog. `retire()` frees it once the queued traces are done (a page swapping scenes);
   `destroy()` at once.
@@ -83,6 +86,8 @@ device.queue.submit([encoder.finish()]);
 - **Any-hit results:** one `u32` per ray, 1 when blocked.
 - **Masks:** one ray mask per batch (`mask`), a uniform; there is no per-ray mask buffer.
 - **Timing:** pass `timestampWrites` to time the dispatch's pass.
+- **Counters:** a kernel made with `counters: true` runs the [counted walk](/tracing/wgsl-walk#the-counted-walk) and writes
+  one `BvhWalkCounts` (`WALK_COUNTS_BYTES`) per ray in either mode.
 - **Sizes:** `encode` throws a `RangeError` when `rays` or `results` holds fewer than `count` items.
 
 The 40-byte record is the default: a hit carries its material and normal unless you say otherwise. It has a cost on
