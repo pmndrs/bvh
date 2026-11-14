@@ -13,8 +13,8 @@
  * page has (a baked `records` tree carries them), so nothing else is drawn.
  */
 
-import { createCpuTracer, createTinyBvhBuilder, deserializeLayout, GPU_LAYOUT_VERSION, IDENTITY_TRANSFORM, SERIALIZED_FORMAT_VERSION, uploadTraceScene, type GpuLayoutMeshBvh, type TraceSceneBuffers, type TraceSceneData } from '@pmndrs/bvh';
-import { assembleLayouts, traceSourceOf, type TraceSource } from '../../shared/gpu-rays.ts';
+import { createCpuTracer, createTinyBvhBuilder, deserializeLayout, GPU_LAYOUT_VERSION, IDENTITY_TRANSFORM, SERIALIZED_FORMAT_VERSION, uploadTraceScene, type GpuLayoutMeshBvh, type TraceSceneBuffers, type TraceSceneData, type TraceSource } from '@pmndrs/bvh';
+import { assembleLayouts } from '../../shared/builders.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 import { bytes as formatBytes } from '../../shared/overlay.ts';
 import { layoutInfo } from '../../shared/stats.ts';
@@ -57,7 +57,7 @@ async function useBake(bytes: ArrayBuffer, name: string, fetchMs: number): Promi
 
     const data = assembleLayouts([layout], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }], []);
     const buffers = uploadTraceScene(device, data, 'bake');
-    const source = traceSourceOf(device, buffers);
+    const source: TraceSource = buffers; // an uploaded scene is a TraceSource as it is
     await view.prepare(source);
     const old = current;
     const b = layout.bounds;
