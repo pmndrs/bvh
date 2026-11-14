@@ -53,6 +53,7 @@ export {
     snapshotGeometry,
     type BvhBoundsTreeHit,
     type BvhBoundsTreeOptions,
+    type BvhBoundsTreeType,
     type BvhClosestPointInfo,
     // three-mesh-bvh's name for it.
     type BvhClosestPointInfo as HitPointInfo,
@@ -61,6 +62,19 @@ export {
     type BvhHitPointInfoTarget,
     type BvhSplitStrategy,
 } from './raycast.ts';
+// Points and lines as primitives (three-mesh-bvh's PointsBVH and line BVHs): computeBoundsTree({ type }) and acceleratedRaycast take them.
+export {
+    BvhLineBoundsTree,
+    BvhLineBoundsTree as LineBVH,
+    BvhLineLoopBoundsTree,
+    BvhLineLoopBoundsTree as LineLoopBVH,
+    BvhLineSegmentsBoundsTree,
+    BvhLineSegmentsBoundsTree as LineSegmentsBVH,
+    BvhPointsBoundsTree,
+    BvhPointsBoundsTree as PointsBVH,
+    pointsInputFromGeometry,
+    type BvhPrimitiveBoundsTreeOptions,
+} from './points-lines.ts';
 // A ray against the whole scene on the CPU (three-mesh-bvh's ObjectBVH.raycast), and frustum culling over the top level.
 export { BvhSceneRaycaster, raycastScene, type BvhSceneRaycasterOptions, type BvhSceneShapecastCallbacks } from './scene-raycast.ts';
 // Shapecast and bvhcast (Q2): three-mesh-bvh's shape classes with three's types, over the core's math.

@@ -26,7 +26,7 @@ same `GPUDevice`.
 | `SceneTrees` | A scene's trees on one device: GPU trees first, tinybvh's swapped in, the GPU top level, runtime changes | [SceneTrees](/scenes/scene-trees) |
 | Refits | Top-level refit over moving instances, per-mesh refit for deforming meshes, both on the GPU | [Refits](/scenes/refits) |
 | The WGSL walk | `bvhTraceClosest` and `bvhTraceAny`, masks, a triangle filter, a watertight triangle test | [Tracing in WGSL](/tracing/wgsl-walk) |
-| CPU queries | Raycast, shapecast, bvhcast and closest point over the same layout | [Raycast](/cpu-queries/raycast) |
+| CPU queries | Raycast, shapecast, bvhcast and closest point over the same layout; points and lines with three's thresholds | [Raycast](/cpu-queries/raycast) |
 | three.js | Scenes from `Object3D`, GPU skinning, TSL nodes, and three-mesh-bvh's CPU API | [three.js](/three/overview) |
 | Babylon.js | Picking with `scene.pick`'s result, scenes from meshes, the walk in a `ComputeShader` (basic) | [Babylon.js](/engines/babylon) |
 | Workers | A pool of tinybvh workers that needs no cross-origin isolation | [Workers](/workers/workers) |
@@ -37,7 +37,8 @@ same `GPUDevice`.
 - Babylon.js support is "it works", not polish: `/babylon` has picking that returns `scene.pick`'s `PickingInfo`, a
   mesh conversion, and the walk in a `ComputeShader` on the `WebGPUEngine`'s device, reached through the engine's
   internals ([Babylon.js](/engines/babylon)). It has no scene sync or skinning.
-- Points and lines are not primitives. Leaves hold triangles only.
+- Points and lines are primitives on the CPU only ([Points and lines](/cpu-queries/points-and-lines)): the GPU walk and
+  `SceneTrees` take triangles.
 
 ## Where to start
 

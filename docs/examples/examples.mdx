@@ -54,6 +54,7 @@ Each of these is one of three-mesh-bvh's examples (MIT) running on `@pmndrs/bvh/
 | [`three/triangleIntersect`](https://github.com/pmndrs/bvh/tree/main/examples/three/triangleIntersect) | `ExtendedTriangle.intersectsTriangle` on its own: two triangles with draggable corners and the segment where they cross. From `triangleIntersect`. |
 | [`three/voxelize`](https://github.com/pmndrs/bvh/tree/main/examples/three/voxelize) | `tree.intersectsBox(box, boxToMesh)` for the voxels on a surface and `tree.raycastFirst(ray, DoubleSide)` for the ones inside, filled a few milliseconds per frame; a dropped glTF builds its tree in `GenerateMeshBvhWorker`. From `voxelize`. |
 | [`three/batchedMesh`](https://github.com/pmndrs/bvh/tree/main/examples/three/batchedMesh) | `computeBatchedBoundsTree` and `acceleratedRaycast` on a `BatchedMesh` of three geometries with hundreds of raycasters firing every frame, against three's own `BatchedMesh.raycast`. From `batchedMesh`. |
+| [`three/point-cloud`](https://github.com/pmndrs/bvh/tree/main/examples/three/point-cloud) | three-mesh-bvh's `pointCloudIntersection`, ported: a [`PointsBVH`](/three/points-and-lines) over a scanned point cloud, the pointer picked through `acceleratedRaycast` with `Raycaster.params.Points.threshold`, and `BVHHelper` boxes. |
 
 ## Babylon.js
 

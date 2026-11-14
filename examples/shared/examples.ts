@@ -241,6 +241,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         description: 'computeBatchedBoundsTree and acceleratedRaycast on a BatchedMesh of three geometries, with hundreds of raycasters firing every frame and a switch to three\'s own raycast; three-mesh-bvh\'s batchedMesh. The smoke run checks the nearest hits against three\'s.',
         timeoutMs: 240_000,
     },
+    {
+        name: 'three-point-cloud',
+        path: 'three/point-cloud',
+        title: 'Point cloud',
+        description: "three-mesh-bvh's pointCloudIntersection, ported: a PointsBVH over a scanned point cloud, the pointer picked every frame through acceleratedRaycast with Raycaster.params.Points.threshold, BVHHelper boxes, and three's own Points.raycast when the tree is off.",
+        timeoutMs: 90_000,
+    },
 ];
 
 /** Where an example's source is browsed. */

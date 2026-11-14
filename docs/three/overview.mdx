@@ -25,6 +25,7 @@ before the range widens.
 | --- | --- | --- |
 | Faster `Mesh.raycast` | `computeBoundsTree`, `acceleratedRaycast` | [CPU raycast](/three/cpu-raycast) |
 | A ray against the whole scene, frustum culling | `BvhSceneRaycaster`, `raycastScene` | [CPU raycast](/three/cpu-raycast#a-whole-scene) |
+| Faster `Points` and line raycasts | `computeBoundsTree({ type: PointsBVH })`, `LineSegmentsBVH`, `LineLoopBVH`, `LineBVH` | [Points and lines](/three/points-and-lines) |
 | three-mesh-bvh's `MeshBVH` API: shapecast, bvhcast, closest point, refit, serialize | `geometry.boundsTree` (`BvhBoundsTree`, also exported as `MeshBVH`) | [The tree object](/three/bounds-tree) |
 | A tree built off the main thread | `GenerateMeshBvhWorker` | [CPU raycast](/three/cpu-raycast#off-the-main-thread) |
 | The tree's boxes drawn | `MeshBVHHelper`, `BVHHelper` | [The tree object](/three/bounds-tree#the-helper) |

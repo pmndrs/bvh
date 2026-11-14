@@ -149,3 +149,31 @@ export async function scene(meshes: readonly MeshGeometry[], instances: readonly
     // #endregion
     return hits.length + visible.length;
 }
+
+// #region points
+import { CpuPointsBvh, CpuSegmentsBvh } from '@pmndrs/bvh';
+
+// #endregion
+
+export function points(positions: Float32Array, indices: Uint32Array | null): number {
+    // #region points
+    const cloud = CpuPointsBvh.build({ positions, indices }, { maxLeafPrimitives: 8 }); // synchronous, no WebAssembly
+    const ray = { origin: [0, 0, 5], direction: [0, 0, -1] }; // a unit direction, as three's rays are
+    const hits = cloud.raycast(ray, { threshold: 0.01, near: 0, far: 100 }); // three's Points.raycast test
+    const first = cloud.raycastFirst(ray, { threshold: 0.01 }); // or null
+    if (first) console.log(first.index, first.distance, first.distanceToRay, first.pointOnRay, first.pointOnPrimitive);
+    const nearest = cloud.closestPointToPoint([0, 1, 0]); // { point, distance, index } or null
+
+    // Lines: 'segments' pairs entries (LineSegments), 'strip' joins each to the next (Line), 'loop' closes it (LineLoop).
+    const lines = CpuSegmentsBvh.build({ positions, indices, mode: 'strip', start: 0, count: 1000 });
+    const below: number[] = [];
+    lines.shapecast({
+        intersectsBounds: (box) => box.min.y < 0.5, // false skips the box
+        intersectsLine: (line, index) => {
+            if (line.start.y < 0.5 && line.end.y < 0.5) below.push(index); // the segment's first entry
+            return false; // true stops the cast
+        },
+    });
+    // #endregion
+    return hits.length + (nearest ? 1 : 0) + below.length;
+}

@@ -106,6 +106,7 @@ import { ExtendedTriangle } from './shapes.ts';
 import { deserializeLayout } from '../serialize.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
 import { invertAffineInto } from '../trace/top-level.ts';
+import { raycastPointsOrLines } from './points-lines.ts';
 import { positionsOf, threeTriangleRanges } from './scene.ts';
 
 let sharedBuilder: TinyBvhBuilder | null = null;
@@ -180,6 +181,13 @@ export interface BvhBoundsTreeOptions {
     readonly verbose?: boolean;
     /** Accepted and ignored: no SharedArrayBuffer is needed (docs/internals/PARITY.md, 4.8). */
     readonly useSharedArrayBuffer?: boolean;
+    /**
+     * three-mesh-bvh's `ComputeBVHOptions.type`, for {@link computeBoundsTree}:
+     * the tree class to build. Default {@link BvhBoundsTree} (`MeshBVH`);
+     * `PointsBVH`, `LineSegmentsBVH`, `LineLoopBVH` and `LineBVH` build trees
+     * for `Points` and the line objects (`src/three/points-lines.ts`).
+     */
+    readonly type?: BvhBoundsTreeType<unknown>;
     /** Not supported: the tree holds every triangle, and raycasts follow the draw range instead. Throws when set. */
     readonly range?: unknown;
     /**
@@ -1011,12 +1019,25 @@ export function setBoundsTree(geometry: BufferGeometry, tree: BvhBoundsTree): vo
     treesByPosition.set(tree.position, tree);
 }
 
+/** A tree class {@link computeBoundsTree} can build (three-mesh-bvh's `type` option): constructed as `new type(geometry, options)` with the options given. */
+export type BvhBoundsTreeType<T> = new (geometry: BufferGeometry, options?: never) => T;
+
 /**
  * `BufferGeometry.prototype.computeBoundsTree`: builds `this.boundsTree`, a
  * {@link BvhBoundsTree} (the core `CpuMeshBvh` with three's types). Takes
- * three-mesh-bvh's options ({@link BvhBoundsTreeOptions}).
+ * three-mesh-bvh's options ({@link BvhBoundsTreeOptions}); with `type`, builds
+ * that class instead (`PointsBVH` for `Points`, `LineSegmentsBVH`,
+ * `LineLoopBVH` or `LineBVH` for the line objects) and returns it. The
+ * geometry's `boundsTree` is typed as a `BvhBoundsTree`; for those it holds the other class.
  */
-export function computeBoundsTree(this: BufferGeometry, options: BvhBoundsTreeOptions = {}): BvhBoundsTree {
+export function computeBoundsTree<T>(this: BufferGeometry, options: BvhBoundsTreeOptions & { readonly type: BvhBoundsTreeType<T> }): T;
+export function computeBoundsTree(this: BufferGeometry, options?: BvhBoundsTreeOptions): BvhBoundsTree;
+export function computeBoundsTree(this: BufferGeometry, options: BvhBoundsTreeOptions = {}): unknown {
+    if (options.type && options.type !== BvhBoundsTree) {
+        const other = new (options.type as unknown as new (geometry: BufferGeometry, options: BvhBoundsTreeOptions) => unknown)(this, options);
+        (this as unknown as WithBoundsTree).boundsTree = other;
+        return other;
+    }
     const tree = new BvhBoundsTree(this, options);
     setBoundsTree(this, tree);
     return tree;
@@ -1171,8 +1192,18 @@ const rows = new Float64Array(12);
 const worldPoint = new Vector3();
 const localPoint = new Vector3();
 
-/** `Mesh.prototype.raycast` over the geometry's {@link BvhBoundsTree}, or three's own without one. */
+/**
+ * `Mesh.prototype.raycast` over the geometry's {@link BvhBoundsTree}, or three's own without one. Also
+ * `Points.prototype.raycast` and `Line.prototype.raycast` (which `LineSegments` and `LineLoop` inherit):
+ * those use the geometry's `PointsBVH` or line tree (`src/three/points-lines.ts`), else three's raycast.
+ */
 export function acceleratedRaycast(this: Mesh, raycaster: Raycaster, intersects: Intersection[]): void {
+    // Points and the line objects (three-mesh-bvh sets their raycast to this too): their own trees, else three's raycast.
+    const kind = this as unknown as { isPoints?: boolean; isLine?: boolean };
+    if (kind.isPoints === true || kind.isLine === true) {
+        raycastPointsOrLines(this, raycaster, intersects);
+        return;
+    }
     // A BatchedMesh (three-mesh-bvh sets BatchedMesh.prototype.raycast too): three's own, whose stand-in mesh comes back here.
     if ((this as unknown as BatchedMesh).isBatchedMesh) {
         threeBatchedRaycast.call(this as unknown as BatchedMesh, raycaster, intersects);

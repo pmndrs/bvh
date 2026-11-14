@@ -16,7 +16,7 @@ for (const [subpath, conditions] of Object.entries(manifest.exports)) {
         if (!existsSync(resolve(root, target))) problems.push(`exports["${subpath}"] points at missing ${target}`);
     }
 }
-for (const file of ['README.md', 'THIRD_PARTY.md', 'licenses/tinybvh.txt', 'licenses/emscripten-runtime.txt', 'licenses/hiprt.txt', 'licenses/three-mesh-bvh.txt']) {
+for (const file of ['README.md', 'THIRD_PARTY.md', 'licenses/tinybvh.txt', 'licenses/emscripten-runtime.txt', 'licenses/hiprt.txt', 'licenses/three-mesh-bvh.txt', 'licenses/three.txt']) {
     if (!existsSync(resolve(root, file))) problems.push(`missing ${file}`);
 }
 
@@ -27,6 +27,9 @@ const requiredLicenseText = {
     'gpu-hploc-wgsl.js': ['tinybvh', 'Permission is hereby granted, free of charge'],
     'three/static-geometry.js': ['three-mesh-bvh', 'Copyright (c) 2018 Garrett Johnson', 'Permission is hereby granted, free of charge'],
     'trace/clustered-scene.js': ['Copyright (c) 2018 Garrett Johnson', 'Permission is hereby granted, free of charge'],
+    'query/primitive-bvh.js': ['three-mesh-bvh', 'Copyright (c) 2018 Garrett Johnson', 'Permission is hereby granted, free of charge'],
+    'query/ray-primitives.js': ['three.js', 'three.js authors', 'Permission is hereby granted, free of charge'],
+    'three/points-lines.js': ['three.js', 'three.js authors', 'Permission is hereby granted, free of charge'],
 };
 for (const [name, lines] of Object.entries(requiredLicenseText)) {
     const file = resolve(dist, name);
@@ -108,4 +111,4 @@ if (problems.length) {
     console.error(problems.join('\n'));
     process.exit(1);
 }
-console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl, gpu-hploc-wgsl, three/static-geometry and trace/clustered-scene, no .ts imports, no tests, worker entries built (' + workerEntries.size + '), /three and /babylon import in Node, engines only in their own folders.');
+console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl, gpu-hploc-wgsl, three/static-geometry, trace/clustered-scene, query/primitive-bvh, query/ray-primitives and three/points-lines, no .ts imports, no tests, worker entries built (' + workerEntries.size + '), /three and /babylon import in Node, engines only in their own folders.');

@@ -203,7 +203,27 @@ export {
 // three-mesh-bvh's debug functions on a CpuMeshBvh.
 // Scene-level CPU queries (three-mesh-bvh's ObjectBVH): a ray against every instance, frustum and box culling over the top level.
 export { CpuSceneBvh, type CpuFrustumPlanes, type CpuSceneHit, type CpuSceneRaycastOptions, type CpuSceneShapecastCallbacks } from './query/cpu-scene.ts';
-export { BVH_PRIMITIVE_INTERSECT_COST, BVH_TRAVERSAL_COST, bvhHelperIndices, bvhHelperPositions, estimateMemoryInBytes, getBVHExtremes, validateBounds, type BvhExtremes } from './query/debug.ts';
+export { BVH_PRIMITIVE_INTERSECT_COST, BVH_TRAVERSAL_COST, bvhHelperIndices, bvhHelperPositions, estimateMemoryInBytes, getBVHExtremes, validateBounds, type BvhDebugTree, type BvhExtremes } from './query/debug.ts';
+// Points and line segments as primitives (three-mesh-bvh's PointsBVH and line BVHs), with three's raycast thresholds.
+export {
+    CpuPointsBvh,
+    CpuPrimitiveBvh,
+    CpuSegmentsBvh,
+    buildPrimitiveLayout,
+    raySegmentHit,
+    type BvhPointsInput,
+    type BvhPointsShapecastCallbacks,
+    type BvhPrimitiveBuildOptions,
+    type BvhPrimitiveClosestPoint,
+    type BvhPrimitiveKind,
+    type BvhPrimitiveLayout,
+    type BvhPrimitiveRaycastHit,
+    type BvhPrimitiveRaycastOptions,
+    type BvhPrimitiveTreeOptions,
+    type BvhSegmentMode,
+    type BvhSegmentsInput,
+    type BvhSegmentsShapecastCallbacks,
+} from './query/primitive-bvh.ts';
 // three-mesh-bvh's serialized format and getJSONStructure, engine-free.
 export { getJSONStructure, meshBvhFromThreeMeshBvh, serializeThreeMeshBvh, topologyFromThreeMeshBvh, type BvhJsonNode, type SerializeThreeMeshBvhOptions, type ThreeMeshBvhSerialized } from './query/three-mesh-bvh-format.ts';
 
