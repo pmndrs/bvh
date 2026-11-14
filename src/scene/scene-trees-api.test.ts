@@ -13,7 +13,8 @@ import { addFakeTimestamps } from '../../tests/support/fake-timestamps.ts';
 import { quantizeNodeWords } from '../quantized-nodes.ts';
 import { tessellatedQuad } from '../trace/oracle-fixtures.ts';
 import { GpuFirstTrees } from './gpu-first-trees.ts';
-import { SceneTrees, type SceneTreesOptions } from './scene-trees.ts';
+import { createBvhWorkerPool, type BvhPoolBuildEvent } from '../worker/pool.ts';
+import { SceneTrees, type SceneBuildEvent, type SceneTreesOptions } from './scene-trees.ts';
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
@@ -48,6 +49,69 @@ async function setUp(options: Partial<SceneTreesOptions> & { timestampMs?: numbe
     };
     return { gpu, hploc, scene, frame };
 }
+
+describe('SceneTrees build events', () => {
+    const line = (event: SceneBuildEvent) => `${event.mesh ?? `g${event.group}`} ${event.builder} ${event.phase}${event.outcome ? ` ${event.outcome}` : ''}`;
+
+    it('reports each mesh requested, started and finished, per builder, through the worker pool to the placement', async () => {
+        const events: SceneBuildEvent[] = [];
+        const poolEvents: BvhPoolBuildEvent[] = [];
+        const pool = createBvhWorkerPool({ worker: 'never', onBuild: (event) => poolEvents.push(event) });
+        const { scene, frame } = await setUp({ workers: pool, onBuild: (event) => events.push(event), timestamps: true, timestampMs: 2 });
+        const a = scene.addMesh(tessellatedQuad(4, 1));
+        const b = scene.addMesh(tessellatedQuad(6, 1));
+        scene.addInstance({ mesh: a, objectToWorld: IDENTITY });
+        scene.addInstance({ mesh: b, objectToWorld: IDENTITY });
+        expect(events).toEqual([]); // builds start in update
+        frame();
+        // The GPU batch (submitted at once) and both tinybvh builds were asked for in the update.
+        expect(events.slice(0, 4).map(line)).toEqual([`${a} gpu requested`, `${b} gpu requested`, `${a} gpu started`, `${b} gpu started`]);
+        expect(events.slice(4).map(line)).toEqual([`${b} tinybvh requested`, `${a} tinybvh requested`]); // biggest first
+        await scene.whenRefined();
+        await until(() => events.filter((event) => event.phase === 'finished').length === 4, 'four finished builds');
+        for (const mesh of [a, b]) {
+            for (const builder of ['gpu', 'tinybvh'] as const) {
+                const phases = events.filter((event) => event.mesh === mesh && event.builder === builder);
+                expect(phases.map((event) => event.phase)).toEqual(['requested', 'started', 'finished']);
+                expect(phases[2].outcome).toBe('built');
+                expect(phases[0].ms).toBe(0);
+                expect(phases[2].ms).toBeGreaterThanOrEqual(phases[1].ms);
+                expect(phases[2].triangleCount).toBe(mesh === a ? 32 : 72);
+                expect(phases[2].rebuild).toBe(false);
+                if (builder === 'gpu') expect(phases[2].gpuMs).toBeCloseTo(2, 6);
+                else expect(phases[2].gpuMs).toBeUndefined();
+            }
+        }
+        // The pool saw the same builds, with the geometry objects it was given.
+        expect(poolEvents.map((event) => event.phase).filter((phase) => phase === 'finished')).toHaveLength(2);
+        scene.dispose();
+        pool.dispose();
+    });
+
+    it('finishes builds as refused (too deep) and cancelled (the mesh removed)', async () => {
+        const events: SceneBuildEvent[] = [];
+        const { scene, frame } = await setUp({ onBuild: (event) => events.push(event), gpuMaxDepth: 1, warn: () => {} });
+        const mesh = scene.addMesh(tessellatedQuad(4, 1));
+        frame(); // no instance needed: builds start for every new mesh
+        scene.removeMesh(mesh);
+        await until(() => events.filter((event) => event.phase === 'finished').length === 2, 'both builds finished');
+        const finished = events.filter((event) => event.phase === 'finished');
+        expect(finished.find((event) => event.builder === 'tinybvh')).toMatchObject({ outcome: 'cancelled', mesh });
+        // The GPU batch was already on its way: removed before its stats came, its tree is dropped.
+        expect(finished.find((event) => event.builder === 'gpu')?.outcome).toMatch(/cancelled|refused/);
+
+        events.length = 0;
+        const deep = scene.addMesh(tessellatedQuad(4, 1));
+        scene.addInstance({ mesh: deep, objectToWorld: IDENTITY });
+        frame();
+        await until(() => events.filter((event) => event.phase === 'finished').length === 2, 'both builds finished');
+        for (const event of events.filter((candidate) => candidate.phase === 'finished')) {
+            expect(event.outcome).toBe('refused');
+            expect(event.reason).toMatch(/gpuMaxDepth/);
+        }
+        scene.dispose();
+    });
+});
 
 describe('SceneTrees timing', () => {
     it('brackets an update with timestamp passes (begin first, end last), also when it throws', async () => {

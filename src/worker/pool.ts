@@ -35,6 +35,7 @@
  */
 
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
+import { countTriangles } from '../trace/triangle-packing.ts';
 import type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from '../trace/mesh-bvh.ts';
 import type { BuildRequest, BuildResponse, WorkerReady } from '../trace/mesh-bvh-worker.ts';
 
@@ -70,6 +71,33 @@ export interface BvhWorkerPoolOptions {
      * instance the same way (`createTinyBvhBuilder`'s `releaseAboveBytes`).
      */
     readonly recycleAboveBytes?: number;
+    /**
+     * Called for every build as it is queued, started on a worker (or
+     * inline) and finished: built, failed or cancelled (see
+     * {@link BvhPoolBuildEvent}). For tools that time builds per mesh. A
+     * listener that throws doesn't break the pool (the error is rethrown
+     * on a later turn).
+     */
+    readonly onBuild?: (event: BvhPoolBuildEvent) => void;
+}
+
+/** One build's progress through a pool ({@link BvhWorkerPoolOptions.onBuild}). */
+export interface BvhPoolBuildEvent {
+    /** `'queued'` when asked for, `'started'` when a worker (or the calling thread) takes it, `'finished'` when its promise settles. */
+    readonly phase: 'queued' | 'started' | 'finished';
+    /** The build's number in this pool, from 1: the same in its events. */
+    readonly id: number;
+    /** The geometry passed to {@link BvhWorkerPool.build} (the same object, to tell meshes apart; its arrays may have moved into a worker). */
+    readonly geometry: MeshGeometry;
+    readonly triangleCount: number;
+    /** Started on a worker (true) or inline on the calling thread (false); for `'queued'`, whether the pool uses workers now; for a build cancelled before it started, false. */
+    readonly inWorker: boolean;
+    /** Milliseconds since the build was queued (0 for `'queued'`). */
+    readonly ms: number;
+    /** `'finished'` only: a tree came back, the build failed, or it was cancelled (its signal, or the pool's `dispose`). */
+    readonly outcome?: 'built' | 'failed' | 'cancelled';
+    /** `'finished'` with `'failed'` or `'cancelled'`: why. */
+    readonly error?: string;
 }
 
 /** {@link BvhWorkerPoolOptions.recycleAboveBytes}'s default: 256 MiB. */
@@ -86,6 +114,8 @@ export interface BvhBuildRequest {
     readonly signal?: AbortSignal;
     /** Overrides the pool's `transferInput` for this build. */
     readonly transferInput?: boolean;
+    /** Called once when a worker (or the calling thread) takes this build, after it waited in the queue. */
+    readonly onStart?: () => void;
 }
 
 /** Counts for tools and tests. */
@@ -127,6 +157,13 @@ export function defaultWorkerPoolSize(): number {
 }
 
 interface Job {
+    readonly id: number;
+    readonly queuedAt: number;
+    readonly triangleCount: number;
+    readonly onStart?: () => void;
+    /** Where it started; false until it does. */
+    inWorker: boolean;
+    started: boolean;
     readonly geometry: MeshGeometry;
     readonly options: MeshBvhBuildOptions;
     readonly transferInput: boolean;
@@ -227,13 +264,47 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
     const inlineJobs = new Set<Job>();
     let finished = 0;
     let disposed = false;
+    let nextId = 1;
+
+    /** Calls the pool's listener; one that throws is reported on a later turn, never into the pool's own flow. */
+    const notify = (job: Job, phase: BvhPoolBuildEvent['phase'], extra: Partial<BvhPoolBuildEvent> = {}): void => {
+        if (!options.onBuild) return;
+        const event: BvhPoolBuildEvent = { phase, id: job.id, geometry: job.geometry, triangleCount: job.triangleCount, inWorker: job.inWorker, ms: phase === 'queued' ? 0 : performance.now() - job.queuedAt, ...extra };
+        try {
+            options.onBuild(event);
+        } catch (error) {
+            setTimeout(() => {
+                throw error;
+            }, 0);
+        }
+    };
+
+    /** A worker or the calling thread takes `job`. */
+    const markStarted = (job: Job, inWorker: boolean): void => {
+        job.started = true;
+        job.inWorker = inWorker;
+        notify(job, 'started');
+        try {
+            job.onStart?.();
+        } catch (error) {
+            setTimeout(() => {
+                throw error;
+            }, 0);
+        }
+    };
 
     const settle = (job: Job, outcome: { bvh: MeshBvh } | { error: Error }): void => {
         if (job.settled) return;
         job.settled = true;
         if (job.onAbort) job.signal?.removeEventListener('abort', job.onAbort);
-        if ('bvh' in outcome) job.resolve(outcome.bvh);
-        else job.reject(outcome.error);
+        if ('bvh' in outcome) {
+            notify(job, 'finished', { outcome: 'built' });
+            job.resolve(outcome.bvh);
+        } else {
+            const cancelled = outcome.error.name === 'AbortError' || disposed;
+            notify(job, 'finished', { outcome: cancelled ? 'cancelled' : 'failed', error: outcome.error.message });
+            job.reject(outcome.error);
+        }
     };
 
     const runInline = (job: Job): void => {
@@ -248,6 +319,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
                 pump();
                 return;
             }
+            markStarted(job, false);
             buildMeshBvhAsync(job.geometry, job.options).then(
                 (bvh) => settle(job, { bvh }),
                 (error: unknown) => settle(job, { error: toError(error) }),
@@ -338,6 +410,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
             const posted = postable(job.geometry, job.transferInput);
             const request: BuildRequest = { id: entry.nextId++, geometry: posted.geometry, options: job.options };
             entry.worker.postMessage(request, posted.transfer);
+            markStarted(job, true);
         } catch (error) {
             // A detached input, a buffer that can't be cloned: this build fails, the worker stays free.
             entry.job = null;
@@ -403,8 +476,21 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
         build(geometry, buildOptions = {}, request = {}) {
             if (disposed) return Promise.reject(new Error('@pmndrs/bvh/worker: the pool was disposed'));
             if (request.signal?.aborted) return Promise.reject(abortError());
+            // For the events only: geometry that isn't triangles fails in the build, as it always did.
+            let triangleCount = 0;
+            try {
+                triangleCount = countTriangles(geometry);
+            } catch {
+                triangleCount = 0;
+            }
             return new Promise<MeshBvh>((resolve, reject) => {
                 const job: Job = {
+                    id: nextId++,
+                    queuedAt: performance.now(),
+                    triangleCount,
+                    onStart: request.onStart,
+                    inWorker: false,
+                    started: false,
                     geometry,
                     options: buildOptions,
                     transferInput: request.transferInput ?? options.transferInput ?? false,
@@ -418,6 +504,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
                     request.signal.addEventListener('abort', job.onAbort, { once: true });
                 }
                 queue.push(job);
+                notify(job, 'queued', { inWorker: !inline });
                 pump();
             });
         },

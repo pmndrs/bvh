@@ -244,6 +244,7 @@ export {
     type GpuTreeOutputsMode,
     type SceneInstanceChange,
     type SceneInstanceDescriptor,
+    type SceneBuildEvent,
     type SceneInstanceStatus,
     type SceneMeshOptions,
     type SceneMeshStatus,

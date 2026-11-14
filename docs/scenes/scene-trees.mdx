@@ -65,6 +65,36 @@ then await. A frame loop that already runs needs nothing extra; a page that awai
 `onTree` reports every placement: the mesh, `builtBy` (`'gpu'` or `'tinybvh'`), `replaced` (`'gpu'` for a swap),
 `fallbackReason` and the milliseconds since the update that started it.
 
+## Build events
+
+`onTree` says when a tree is placed. `onBuild` says what happens before: for each mesh (or merged group) and each
+builder (`'gpu'`, `'tinybvh'`), the build is `'requested'` in the update that brings the mesh, `'started'` when its GPU
+batch is submitted (a capped batch can wait in the queue first) or a worker takes the tinybvh build, and `'finished'`
+with an `outcome`:
+
+- `'built'`: a tree came back. It is placed at a later update (`onTree`), unless a better one came first (tinybvh's
+  before the GPU's).
+- `'refused'`: no usable tree (too big for a GPU batch, deeper than `gpuMaxDepth`, a batch that failed), with a `reason`.
+- `'failed'`: tinybvh threw. `'cancelled'`: the mesh was removed while it built.
+
+Each event has the milliseconds since the request, the triangle count, and `rebuild` for a deforming mesh's rebuild. A
+finished GPU build has `gpuMs`: the batch's pass from timestamps with `timestamps: true`, shared by the batch's meshes,
+else null. A build that ends before it starts skips `'started'`. Nothing is reported after `dispose()`.
+
+{/* snippet: build-events */}
+```ts
+const trees = await SceneTrees.create(device, {
+    // Each mesh's build, per builder: 'requested' (in an update), 'started', 'finished' (with its outcome).
+    onBuild: (event) => {
+        const who = event.mesh !== null ? `mesh ${event.mesh}` : `merged group ${event.group}`;
+        if (event.phase !== 'finished') console.log(who, event.builder, event.phase);
+        else console.log(who, event.builder, event.outcome, `${event.ms.toFixed(0)} ms`, event.reason ?? '', event.gpuMs ?? '');
+    },
+    // Placed: what rays see from the next frame.
+    onTree: (event) => console.log(`mesh ${event.mesh}: ${event.builtBy} tree placed`),
+});
+```
+
 ## GPU time
 
 Two numbers, both from timestamp queries (the device needs `timestamp-query`):
@@ -144,7 +174,7 @@ const trees = await SceneTrees.create(device, {
 | `triangleLeaves`, `positionLayout`, `nodeFormat`, `weld` | records, `vec4`, `'quantized'`, `true` | [Layout variants](/concepts/gpu-layout#variants). Indexed and quantized need `gpuTreeOutputs: 'copy'`. Compile your walk from `trees.nodeFormat` (or leave the walk's default, also quantized). |
 | `diagnostics` | `false` | Read the top level's refit stats back. |
 | `timestamps` | `false` | Time each GPU build batch with timestamp queries (`counts.gpuBuildTimestampMs`; see [GPU time](#gpu-time)). |
-| `onTree`, `warn`, `label` | | Events, where problems are reported, GPU object labels. |
+| `onTree`, `onBuild`, `warn`, `label` | | Events (trees placed; [builds](#build-events)), where problems are reported, GPU object labels. |
 
 ## What it holds
 

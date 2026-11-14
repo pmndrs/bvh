@@ -230,6 +230,13 @@ export interface SceneTreesOptions {
     readonly warn?: (message: string) => void;
     /** Called when a tree is placed (a mesh's first, or a swap). */
     readonly onTree?: (event: SceneTreeEvent) => void;
+    /**
+     * Called as each mesh's builds go: a build requested, started (a GPU
+     * batch submitted, a worker taking the tinybvh build) and finished, per
+     * mesh and builder (see {@link SceneBuildEvent}). `onTree` says when a
+     * finished tree is placed.
+     */
+    readonly onBuild?: (event: SceneBuildEvent) => void;
     /** Builds the first trees instead of the GPU H-PLOC, whatever the device's features: for unit tests in Node. */
     readonly firstTreeBuilder?: FirstTreeBuilder;
     /**
@@ -279,6 +286,44 @@ export interface SceneTreeEvent {
     readonly triangleCount: number;
     /** Milliseconds from the update that started the mesh's builds to this placement. */
     readonly ms: number;
+}
+
+/**
+ * One build of one mesh (or merged group) by one builder ({@link SceneTreesOptions.onBuild}).
+ * Each build reports `'requested'`, then `'started'`, then `'finished'`, in that order, and a
+ * build that ends before it starts (too big for a GPU batch, cancelled while queued) skips `'started'`.
+ */
+export interface SceneBuildEvent {
+    /**
+     * `'requested'`: the update that brings the mesh asked for the build (a
+     * drift rebuild: the update that found it due). `'started'`: the GPU
+     * batch holding the mesh was submitted (a capped batch can wait in the
+     * queue), or a worker (or the calling thread) took the tinybvh build.
+     * `'finished'`: the build ended (see `outcome`); a built tree is placed
+     * at a later update (`onTree`), unless a better one came first.
+     */
+    readonly phase: 'requested' | 'started' | 'finished';
+    /** The mesh handle, or null for a merged group. */
+    readonly mesh: number | null;
+    /** The merged group's index, or null. */
+    readonly group: number | null;
+    readonly builder: TreeBuilder;
+    /** A deforming mesh's rebuild from its pose (drift, or {@link SceneTrees.rebuild}) rather than one of its first builds. */
+    readonly rebuild: boolean;
+    readonly triangleCount: number;
+    /** Milliseconds since the build was requested (0 for `'requested'`). */
+    readonly ms: number;
+    /**
+     * `'finished'` only: `'built'` (a tree came back), `'refused'` (the
+     * builder gave no usable tree: too big, too deep, a GPU batch that
+     * failed), `'failed'` (tinybvh threw) or `'cancelled'` (the mesh was
+     * removed, or the build dropped).
+     */
+    readonly outcome?: 'built' | 'refused' | 'failed' | 'cancelled';
+    /** `'finished'` and not built: why. */
+    readonly reason?: string;
+    /** `'finished'` GPU builds with `timestamps: true` (and `timestamp-query`): the batch's pass in milliseconds, shared by its meshes; else null. */
+    readonly gpuMs?: number | null;
 }
 
 /** One mesh's (or merged group's) tree, for tools and tests. */
@@ -606,6 +651,7 @@ export class SceneTrees {
     private readonly label: string;
     private readonly warn: (message: string) => void;
     private readonly onTree: ((event: SceneTreeEvent) => void) | null;
+    private readonly onBuild: ((event: SceneBuildEvent) => void) | null;
     private readonly pool: BvhWorkerPool;
     private readonly ownsPool: boolean;
     private readonly transferGeometry: boolean;
@@ -710,6 +756,7 @@ export class SceneTrees {
         this.label = options.label ?? 'bvh';
         this.warn = options.warn ?? ((message) => console.warn(message));
         this.onTree = options.onTree ?? null;
+        this.onBuild = options.onBuild ?? null;
         this.gpuTreeOutputs = options.gpuTreeOutputs ?? 'copy';
         const maxBatchBytes = options.gpuMaxBatchBytes ?? DEFAULT_GPU_MAX_BATCH_BYTES;
         if (!(maxBatchBytes > 0)) throw new RangeError(`gpuMaxBatchBytes must be a positive number of bytes (Infinity: no cap), got ${maxBatchBytes}`);
@@ -1522,7 +1569,9 @@ export class SceneTrees {
 
     /** Starts GPU builds. `rebuild` marks a deforming mesh's drift rebuild: refused, the mesh keeps refitting its tree. Returns whether anything started. */
     private startGpuBuilds(builder: FirstTreeBuilder, requests: readonly GpuTreeRequest[], kind: { readonly readLayouts: boolean; readonly rebuild: boolean }): boolean {
+        const report = this.buildReporter('gpu', kind.rebuild, requests);
         const refuse = (slot: number, generation: number, reason: string): void => {
+            report.finished(slot, generation, 'refused', reason);
             if (kind.rebuild) this.deforming?.rebuildRefused(slot);
             else this.gpuRefused(slot, generation, reason);
         };
@@ -1534,6 +1583,9 @@ export class SceneTrees {
                 cancelled: () => this.disposed,
                 onMemoryChange: () => this.samplePeak(),
                 timestamps: this.timestamps,
+                onBatchStart: (members) => {
+                    for (const { slot, generation } of members) report.started(slot, generation);
+                },
             });
         } catch (error) {
             this.warn(`@pmndrs/bvh: the GPU mesh tree build failed, so ${kind.rebuild ? 'the mesh keeps its refit tree' : 'the meshes wait for tinybvh'}: ${describe(error)}`);
@@ -1551,10 +1603,48 @@ export class SceneTrees {
                     this.samplePeak();
                     this.buildsRunning.delete(builds);
                 }
-                this.gpuBatchFinished(result, kind.rebuild, this.maxBatchBytes !== undefined);
+                this.gpuBatchFinished(result, kind.rebuild, this.maxBatchBytes !== undefined, report);
             });
         }
         return builds.batches.length > 0;
+    }
+
+    /**
+     * The `onBuild` events of one call's builds: `'requested'` for each now,
+     * then `'started'` and `'finished'` as they come, once each. A builder
+     * that never says a build started (a custom first-tree builder or worker
+     * pool) gets the build's `'started'` just before a `'finished'` that
+     * built a tree. The mesh is named as it was asked for, so a removed
+     * mesh's builds still finish (as `'cancelled'`). Nothing after `dispose`.
+     */
+    private buildReporter(builder: TreeBuilder, rebuild: boolean, requests: readonly { readonly slot: number; readonly generation: number }[]): BuildReporter {
+        const listener = this.onBuild;
+        if (!listener) return { started: () => {}, finished: () => {} };
+        const requestedAt = performance.now();
+        const builds = new Map<number, { readonly generation: number; readonly mesh: number | null; readonly group: number | null; readonly triangleCount: number; phase: SceneBuildEvent['phase'] }>();
+        const emit = (slot: number, generation: number, event: Pick<SceneBuildEvent, 'phase'> & Partial<SceneBuildEvent>): void => {
+            const build = builds.get(slot);
+            if (!build || build.generation !== generation || this.disposed) return;
+            build.phase = event.phase;
+            listener({ mesh: build.mesh, group: build.group, builder, rebuild, triangleCount: build.triangleCount, ms: event.phase === 'requested' ? 0 : performance.now() - requestedAt, ...event });
+        };
+        for (const { slot, generation } of requests) {
+            const state = this.currentState(slot, generation);
+            if (!state) continue;
+            builds.set(slot, { generation, mesh: state.group >= 0 ? null : slot, group: state.group >= 0 ? state.group : null, triangleCount: state.triangleCount, phase: 'requested' });
+            emit(slot, generation, { phase: 'requested' });
+        }
+        const started = (slot: number, generation: number): void => {
+            if (builds.get(slot)?.phase === 'requested') emit(slot, generation, { phase: 'started' });
+        };
+        return {
+            started,
+            finished: (slot, generation, outcome, reason, gpuMs) => {
+                if (builds.get(slot)?.phase === 'finished') return;
+                if (outcome === 'built') started(slot, generation);
+                emit(slot, generation, { phase: 'finished', outcome, ...(reason !== undefined ? { reason } : {}), ...(builder === 'gpu' ? { gpuMs: gpuMs ?? null } : {}) });
+            },
+        };
     }
 
     /** Starts the drift rebuild of the deforming mesh whose refit has drifted longest, from its latest pose. */
@@ -1572,7 +1662,7 @@ export class SceneTrees {
         deforming.rebuildStarted(slot, started);
     }
 
-    private gpuBatchFinished(result: GpuTreeBatchResult, rebuild: boolean, capped: boolean): void {
+    private gpuBatchFinished(result: GpuTreeBatchResult, rebuild: boolean, capped: boolean, report: BuildReporter): void {
         this.lastGpuBuildMs = result.buildMs;
         if (result.failure === null) {
             this.gpuBatches++;
@@ -1587,7 +1677,9 @@ export class SceneTrees {
             else this.liveOutputs.add(outputs);
         }
         if (this.disposed) return;
+        const gpuMs = result.gpuMs ?? null;
         const refuse = (slot: number, generation: number, reason: string): void => {
+            report.finished(slot, generation, 'refused', reason, gpuMs);
             if (rebuild) this.deforming?.rebuildRefused(slot);
             else this.gpuRefused(slot, generation, reason);
         };
@@ -1607,10 +1699,12 @@ export class SceneTrees {
             const state = this.currentState(built.slot, built.generation);
             if (!state || built.tree.maxDepth > this.gpuMaxDepth) {
                 if (state) refuse(built.slot, built.generation, `the GPU tree is ${built.tree.maxDepth} levels deep, more than gpuMaxDepth (${this.gpuMaxDepth})`);
+                else report.finished(built.slot, built.generation, 'cancelled', 'the mesh was removed', gpuMs);
                 // Never copied: let go at once (a capped build's next batch waits for it).
                 this.releaseOutputs(built.outputs);
                 continue;
             }
+            report.finished(built.slot, built.generation, 'built', undefined, gpuMs);
             // A rebuild's mesh already had its first tree: its state stays as the first builds left it.
             if (!rebuild) state.gpu = 'built';
             this.gpuTreesBuilt++;
@@ -1637,6 +1731,7 @@ export class SceneTrees {
         state.geometry = null;
         state.abort = new AbortController();
         this.pendingTinybvh++;
+        const report = this.buildReporter('tinybvh', false, [{ slot: state.slot, generation }]);
         // A capped GPU build that hasn't uploaded this mesh yet still reads its arrays: copy them into the worker instead.
         // Deleted first, whatever the rest says: an entry left behind would outlive the build.
         const readsLater = this.gpuReadsGeometryLater.delete(state.slot);
@@ -1651,16 +1746,21 @@ export class SceneTrees {
                     const reason = `tinybvh's tree is ${bvh.maxDepth} levels deep, more than gpuMaxDepth (${this.gpuMaxDepth})`;
                     current.fallbackReason = current.fallbackReason ? `${current.fallbackReason}; ${reason}` : reason;
                     this.warn(`@pmndrs/bvh: ${reason}, so it is not used`);
+                    report.finished(state.slot, generation, 'refused', reason);
                     bvh = null;
-                }
+                } else if (bvh) report.finished(state.slot, generation, 'built');
                 current.tinybvh = bvh ? 'built' : 'failed';
                 if (bvh) this.arrived.push({ source: 'tinybvh', slot: state.slot, generation, bvh });
+            } else {
+                report.finished(state.slot, generation, 'cancelled', 'the mesh was removed');
             }
             this.notifyWaiters();
         };
-        this.pool.build(geometry, this.tinybvhOptions(state.slot), { signal: state.abort.signal, transferInput }).then(finished, (error: unknown) => {
+        const onStart = () => report.started(state.slot, generation);
+        this.pool.build(geometry, this.tinybvhOptions(state.slot), { signal: state.abort.signal, transferInput, onStart }).then(finished, (error: unknown) => {
             const cancelled = error instanceof Error && error.name === 'AbortError';
             if (!this.disposed && !cancelled) this.buildFailure = new Error(`@pmndrs/bvh: building a mesh tree with tinybvh failed: ${describe(error)}`);
+            report.finished(state.slot, generation, cancelled ? 'cancelled' : 'failed', describe(error));
             finished(null);
         });
     }
@@ -2560,6 +2660,12 @@ export class SceneTrees {
 
 function checkMaterial(material: number | undefined): void {
     materialCode(material, -1);
+}
+
+/** Reports one call's builds to `onBuild` ({@link SceneTrees.buildReporter}). */
+interface BuildReporter {
+    started(slot: number, generation: number): void;
+    finished(slot: number, generation: number, outcome: NonNullable<SceneBuildEvent['outcome']>, reason?: string, gpuMs?: number | null): void;
 }
 
 interface TreeSize {

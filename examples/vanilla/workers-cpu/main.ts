@@ -13,7 +13,8 @@
  * - **Each tree is placed as it arrives:** the pool is handed to `SceneTrees`
  *   (`workers`, GPU first trees off), which writes each tree into the scene's
  *   buffers as its build answers; the timeline (bottom) has a row per mesh:
- *   the pool's span from asked to answered and a tick when the tree was placed.
+ *   the build's span from asked to answered (`SceneTrees`' `onBuild` events)
+ *   and a tick when the tree was placed (`onTree`).
  * - **What the main thread paid:** per run, the time to every tree, the
  *   longest gap between frames while building, and the long tasks
  *   (`PerformanceObserver`, over 50 ms) in that time.
@@ -34,7 +35,6 @@ import { enableSceneDrop, loadGltfScene } from '../../shared/vanilla/gltf.ts';
 import { mat4, vec3 } from '../../shared/vanilla/math.ts';
 import { RayCastView, VIEW_MODES, type ViewMode } from '../../shared/vanilla/raycast-view.ts';
 import { Timeline } from '../../shared/vanilla/timeline.ts';
-import { watchPool } from '../../shared/vanilla/watched-pool.ts';
 
 const app = await createVanillaApp('Workers (CPU)', 'vanilla/workers-cpu');
 const { device, camera, overlay, canvas } = app;
@@ -115,11 +115,7 @@ let time = 0;
 
 async function createRun(target: VanillaScene, mode: Mode): Promise<Run> {
     let run: Run | null = null;
-    const positions = new Map<Float32Array, number>(target.meshes.map((mesh, index) => [mesh.positions, index]));
-    const pool = watchPool(poolFor(mode), (geometry, asked) => {
-        const lane = positions.get(geometry.positions);
-        if (run?.live && lane !== undefined) timeline.span(lane, 'built', asked);
-    });
+    const pool = poolFor(mode);
     const log = new SceneTreesLog();
     let trees: SceneTrees;
     try {
@@ -131,6 +127,12 @@ async function createRun(target: VanillaScene, mode: Mode): Promise<Run> {
                 log.onTree(event);
                 const lane = event.mesh === null ? undefined : run?.lanes.get(event.mesh);
                 if (run?.live && lane !== undefined) timeline.mark(lane, 'placed');
+            },
+            // Each build that came back: a span from its request to its answer.
+            onBuild: (event) => {
+                if (event.phase !== 'finished' || event.outcome !== 'built' || event.mesh === null) return;
+                const lane = run?.lanes.get(event.mesh);
+                if (run?.live && lane !== undefined) timeline.span(lane, 'built', performance.now() - event.ms);
             },
         });
     } catch (error) {

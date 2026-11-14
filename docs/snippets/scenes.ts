@@ -40,6 +40,22 @@ export async function waitForTrees(trees: SceneTrees, frame: () => void): Promis
     // #endregion
 }
 
+export async function buildEvents(device: GPUDevice): Promise<SceneTrees> {
+    // #region build-events
+    const trees = await SceneTrees.create(device, {
+        // Each mesh's build, per builder: 'requested' (in an update), 'started', 'finished' (with its outcome).
+        onBuild: (event) => {
+            const who = event.mesh !== null ? `mesh ${event.mesh}` : `merged group ${event.group}`;
+            if (event.phase !== 'finished') console.log(who, event.builder, event.phase);
+            else console.log(who, event.builder, event.outcome, `${event.ms.toFixed(0)} ms`, event.reason ?? '', event.gpuMs ?? '');
+        },
+        // Placed: what rays see from the next frame.
+        onTree: (event) => console.log(`mesh ${event.mesh}: ${event.builtBy} tree placed`),
+    });
+    // #endregion
+    return trees;
+}
+
 export async function timing(device: GPUDevice): Promise<void> {
     // #region timing
     // timestamps: each GPU build batch's pass, summed in counts.gpuBuildTimestampMs (needs timestamp-query).

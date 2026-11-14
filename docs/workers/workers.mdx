@@ -58,6 +58,26 @@ console.log(pool.stats); // { queued, running, workers, finished }
 pool.dispose(); // stops the workers; unfinished builds reject
 ```
 
+### Per-build events
+
+For a tool that shows when each mesh's build waited, ran and answered: `onBuild` on the pool reports every build
+`'queued'`, `'started'` (with `inWorker`: on a worker, or inline) and `'finished'` (`outcome`: `'built'`, `'failed'` or
+`'cancelled'`, with `error`), with the geometry object it was given (to tell meshes apart) and the milliseconds since it
+was queued. A build cancelled before it started skips `'started'`. One request's `onStart` says only when that build is
+taken. A listener that throws doesn't stop the pool; its error comes on a later turn. With `SceneTrees`, its own
+[`onBuild`](/scenes/scene-trees#build-events) names the mesh handles instead.
+
+{/* snippet: pool-events */}
+```ts
+const names = new Map(meshes.map((mesh, index) => [mesh, `mesh ${index}`]));
+const pool = createBvhWorkerPool({
+    // Every build: 'queued', 'started' (on a worker, or inline) and 'finished' (built, failed or cancelled).
+    onBuild: (event) => console.log(names.get(event.geometry), event.phase, event.inWorker ? 'worker' : 'inline', event.outcome ?? '', `${event.ms.toFixed(1)} ms`),
+});
+// Or per build: onStart when a worker takes it.
+await pool.build(meshes[0], {}, { onStart: () => console.log('mesh 0 is building') });
+```
+
 ## What moves and what is copied
 
 - **Inputs are copied** into the worker (structured clone), unless `transferInput` is set. Then the caller's arrays are

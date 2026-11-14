@@ -39,3 +39,16 @@ export async function cancel(meshes: readonly MeshGeometry[]): Promise<void> {
     pool.dispose(); // stops the workers; unfinished builds reject
     // #endregion
 }
+
+export async function poolEvents(meshes: readonly MeshGeometry[]): Promise<void> {
+    // #region pool-events
+    const names = new Map(meshes.map((mesh, index) => [mesh, `mesh ${index}`]));
+    const pool = createBvhWorkerPool({
+        // Every build: 'queued', 'started' (on a worker, or inline) and 'finished' (built, failed or cancelled).
+        onBuild: (event) => console.log(names.get(event.geometry), event.phase, event.inWorker ? 'worker' : 'inline', event.outcome ?? '', `${event.ms.toFixed(1)} ms`),
+    });
+    // Or per build: onStart when a worker takes it.
+    await pool.build(meshes[0], {}, { onStart: () => console.log('mesh 0 is building') });
+    // #endregion
+    pool.dispose();
+}
