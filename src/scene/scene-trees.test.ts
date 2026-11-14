@@ -926,8 +926,8 @@ describe('SceneTrees with quantized nodes', () => {
 describe('SceneTrees with wide nodes', () => {
     for (const nodeFormat of ['bvh4', 'cwbvh8'] as const) {
         for (const triangleLeaves of ['records', 'indexed'] as const) {
-            it(`${nodeFormat}: tinybvh's trees collapsed on arrival, merged groups, runtime adds and removals: the same hits as f32 (${triangleLeaves})`, async () => {
-                const { scene, stand, frame } = await setUp({ mergeStaticInstances: true, triangleLeaves, nodeFormat });
+            it(`${nodeFormat}: tinybvh's trees collapsed in the worker, merged groups, runtime adds and removals: the same hits as f32 (${triangleLeaves})`, async () => {
+                const { scene, stand, frame } = await setUp({ mergeStaticInstances: true, triangleLeaves, nodeFormat, warn: () => {} });
                 expect(scene.nodeFormat).toBe(nodeFormat);
                 expect(scene.traceBuffers.nodeFormat).toBe(nodeFormat);
                 const { geometries, instances, rays } = sceneOf(5);
@@ -937,9 +937,9 @@ describe('SceneTrees with wide nodes', () => {
                 frame();
                 await scene.whenRefined();
                 frame();
-                // No GPU collapse yet: every tree is tinybvh's, collapsed on this thread.
+                // A stand-in first-tree builder has no GPU to collapse on: every tree is tinybvh's, collapsed in the worker.
                 expect(stand!.requests).toHaveLength(0);
-                expect(scene.meshStatus(meshes[4]).fallbackReason).toMatch(/GPU first trees are off/);
+                expect(scene.meshStatus(meshes[4]).fallbackReason).toMatch(/built-in H-PLOC builder/);
                 expect(scene.counts).toMatchObject({ onGpuTrees: 0, onTinybvhTrees: 2 });
                 const expected = await reference(geometries, all);
                 expect(disagreements(readScene(scene), expected, rays)).toEqual([]);

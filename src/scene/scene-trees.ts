@@ -119,6 +119,7 @@ import { nodeQuantizerFor, type QuantizeJob } from '../gpu-quantize.ts';
 import { quantizeNodes } from '../quantized-nodes.ts';
 import { convertToWide, isWideNodeFormat, refitWide, reorderTriangles, wideNodeBytes, type WideMeshTree, type WideNodeFormat } from '../wide-nodes.ts';
 import { WIDE_MESH_STACK_SIZE } from '../trace/wgsl-wide.ts';
+import { GpuWideCollapse, type WideCollapseOutput, type WideCollapseRun } from '../gpu-wide-collapse.ts';
 import { weldPositions } from '../indexed-leaves.ts';
 import { meshRefitPlacement, type TraceSceneMeshPlacement } from '../trace/scene-assembly.ts';
 import type { MeshRefitVertices } from '../gpu-mesh-refit.ts';
@@ -482,6 +483,8 @@ type ArrivedTree =
           readonly rebuild: boolean;
           /** Already in the scene's buffers at these offsets (a capped batch copied out, or adopted, between updates); the next update only places it. */
           readonly stored?: StoredAt;
+          /** Wide scenes: the tree collapsed on the GPU (its batch's collapse job, and where the tree sits in its output). */
+          readonly wide?: { readonly run: WideCollapseRun; readonly count: WideCollapseOutput };
       };
 type GpuArrivedTree = Extract<ArrivedTree, { source: 'gpu' }>;
 
@@ -617,6 +620,10 @@ export class SceneTrees {
     private readonly nodeBytes: number;
     /** `nodeFormat` when it is a wide format (trees collapsed on arrival), else null. */
     private readonly wideFormat: WideNodeFormat | null;
+    /** Wide scenes: the GPU collapse of the first trees (made in prepare), or null. */
+    private wideCollapse: GpuWideCollapse | null = null;
+    /** Wide scenes: each batch's collapse job, freed with the batch's outputs. */
+    private readonly wideRuns = new Map<GpuTreeOutputs, WideCollapseRun>();
     private readonly nodeLeading: number;
     /** Quantize passes recorded into the caller's encoder (GPU trees placed), freed at the next update. */
     private quantizeJobsToRelease: QuantizeJob[] = [];
@@ -715,17 +722,15 @@ export class SceneTrees {
             this.ownsPool = true;
         }
         const wideFormat = isWideNodeFormat(options.nodeFormat) ? options.nodeFormat : null;
-        if (wideFormat) {
-            this.firstTrees = null;
-            this.noGpuReason = `nodeFormat '${wideFormat}' collapses tinybvh's trees on the CPU (there is no GPU collapse yet), so GPU first trees are off`;
-        } else if (options.gpuFirstTrees === false) {
+        if (options.gpuFirstTrees === false) {
             this.firstTrees = null;
             this.noGpuReason = 'GPU first trees are off (gpuFirstTrees: false)';
         } else if (options.firstTreeBuilder) {
             this.firstTrees = options.firstTreeBuilder;
             this.noGpuReason = null;
         } else if (GpuFirstTrees.isSupported(device)) {
-            this.firstTrees = new GpuFirstTrees(device, { label: this.label, triangleLeaves: options.triangleLeaves });
+            // Wide scenes: H-PLOC's trees are collapsed on the GPU (gpu-wide-collapse.ts); CWBVH's leaves are at most 3 triangles.
+            this.firstTrees = new GpuFirstTrees(device, { label: this.label, triangleLeaves: options.triangleLeaves, ...(wideFormat === 'cwbvh8' ? { maxLeafPrimitives: 3 } : {}) });
             this.noGpuReason = null;
         } else {
             this.firstTrees = null;
@@ -771,6 +776,11 @@ export class SceneTrees {
         if (!this.firstTrees) return;
         try {
             await this.firstTrees.prepare();
+            // A custom first-tree builder (tests) has no device to collapse on: wide scenes then wait for tinybvh.
+            if (this.wideFormat) {
+                if (!(this.firstTrees instanceof GpuFirstTrees)) throw new Error(`nodeFormat '${this.wideFormat}' collapses GPU first trees on the GPU, which needs the built-in H-PLOC builder`);
+                this.wideCollapse = await GpuWideCollapse.create(this.device, { format: this.wideFormat, triangleLeaves: this.triangleLeaves, label: `${this.label} wide collapse` });
+            }
             this.firstTreesReady = true;
         } catch (error) {
             this.firstTrees = null;
@@ -1379,6 +1389,8 @@ export class SceneTrees {
         for (const buffer of this.retiredStaging.splice(0)) buffer.destroy();
         for (const outputs of this.liveOutputs) outputs.destroy();
         this.liveOutputs.clear();
+        for (const run of this.wideRuns.values()) run.destroy();
+        this.wideRuns.clear();
         for (const resolve of this.builtWaiters.splice(0)) resolve();
         for (const resolve of this.refinedWaiters.splice(0)) resolve();
     }
@@ -1457,7 +1469,16 @@ export class SceneTrees {
             // Deforming meshes' trees are read back too (the refit needs their shape), so they get a batch of their own.
             // Split by the mesh's own flag, not by the GPU refit: without subgroups a CPU pose (setPoseCpu) needs the layout as much.
             const others = states.filter((state) => !state.deforming).map(request);
-            const deforming = states.filter((state) => state.deforming).map(request);
+            // Wide scenes: a deforming mesh's CPU pose repacks the collapse's own topology (refitWide), which only the
+            // CPU collapse keeps; it waits for tinybvh's tree.
+            const deforming = this.wideFormat ? [] : states.filter((state) => state.deforming).map(request);
+            if (this.wideFormat) {
+                for (const state of states) {
+                    if (!state.deforming) continue;
+                    state.gpu = 'none';
+                    state.fallbackReason = `a deforming mesh in a ${this.wideFormat} scene takes tinybvh's tree (its CPU poses repack the CPU collapse's topology)`;
+                }
+            }
             if (others.length > 0) this.startGpuBuilds(builder, others, { readLayouts: false, rebuild: false });
             if (deforming.length > 0) this.startGpuBuilds(builder, deforming, { readLayouts: true, rebuild: false });
         }
@@ -1519,6 +1540,51 @@ export class SceneTrees {
     }
 
     private gpuBatchFinished(result: GpuTreeBatchResult, rebuild: boolean, capped: boolean): void {
+        if (!this.wideFormat || this.disposed || result.built.length === 0 || !this.wideCollapse) {
+            this.finishGpuBatch(result, rebuild, capped, null);
+            return;
+        }
+        // Wide scenes: collapse the batch's trees on the GPU first; they arrive with their wide sizes.
+        const collapse = this.wideCollapse;
+        const byOutputs = new Map<GpuTreeOutputs, GpuBuiltTree[]>();
+        for (const built of result.built) byOutputs.set(built.outputs, [...(byOutputs.get(built.outputs) ?? []), built]);
+        const jobs = [...byOutputs].map(([outputs, trees]) => {
+            const encoder = this.device.createCommandEncoder({ label: `${this.label} wide collapse` });
+            const run = collapse.encode(
+                encoder,
+                outputs.nodes,
+                outputs.triangles,
+                trees.map((built) => ({ srcNode: built.tree.nodeOffset, nodeCount: built.tree.nodeCount, srcTriangle: built.tree.triangleOffset, triangleCount: built.tree.triangleCount, maxDepth: built.tree.maxDepth })),
+            );
+            this.device.queue.submit([encoder.finish()]);
+            return run.counts().then(
+                (counts) => ({ outputs, trees, run, counts, error: null as string | null }),
+                (error: unknown) => ({ outputs, trees, run, counts: null, error: describe(error) }),
+            );
+        });
+        void Promise.all(jobs).then((done) => {
+            if (this.disposed) {
+                for (const job of done) job.run.destroy();
+                this.finishGpuBatch(result, rebuild, capped, null);
+                return;
+            }
+            const wide = new Map<GpuBuiltTree, { run: WideCollapseRun; count: WideCollapseOutput }>();
+            const failed: string[] = [];
+            for (const job of done) {
+                if (!job.counts) {
+                    job.run.destroy();
+                    failed.push(job.error ?? 'the collapse failed');
+                    continue;
+                }
+                this.wideRuns.set(job.outputs, job.run);
+                job.trees.forEach((built, index) => wide.set(built, { run: job.run, count: job.counts![index] }));
+            }
+            if (failed.length > 0) this.warn(`@pmndrs/bvh: the GPU wide collapse failed (${failed[0]}), so those meshes wait for tinybvh`);
+            this.finishGpuBatch(result, rebuild, capped, wide);
+        });
+    }
+
+    private finishGpuBatch(result: GpuTreeBatchResult, rebuild: boolean, capped: boolean, wide: Map<GpuBuiltTree, { run: WideCollapseRun; count: WideCollapseOutput }> | null): void {
         this.lastGpuBuildMs = result.buildMs;
         if (result.failure === null) {
             this.gpuBatches++;
@@ -1556,10 +1622,23 @@ export class SceneTrees {
                 this.releaseOutputs(built.outputs);
                 continue;
             }
+            const collapsed = wide?.get(built);
+            if (wide && (!collapsed || collapsed.count.stackNeed > WIDE_MESH_STACK_SIZE[this.wideFormat!])) {
+                // Wide scenes: no wide tree (the collapse failed) or one the mesh walk's stack can't hold.
+                refuse(built.slot, built.generation, collapsed ? `the GPU-collapsed tree needs ${collapsed.count.stackNeed} stack entries, more than the mesh walk has` : 'the GPU wide collapse failed');
+                this.releaseOutputs(built.outputs);
+                continue;
+            }
             // A rebuild's mesh already had its first tree: its state stays as the first builds left it.
             if (!rebuild) state.gpu = 'built';
             this.gpuTreesBuilt++;
-            this.arrived.push({ source: 'gpu', slot: built.slot, generation: built.generation, built, rebuild });
+            if (collapsed) {
+                // Placed with the wide tree's size; the copy reads the collapse's output (copyGpuTree).
+                const widened: GpuBuiltTree = { ...built, tree: { ...built.tree, nodeCount: collapsed.count.nodeCount } };
+                this.arrived.push({ source: 'gpu', slot: built.slot, generation: built.generation, built: widened, rebuild, wide: collapsed });
+            } else {
+                this.arrived.push({ source: 'gpu', slot: built.slot, generation: built.generation, built, rebuild });
+            }
         }
         if (capped) this.storeBetweenUpdates(batchOutputs);
         this.reconcileReserve();
@@ -1768,7 +1847,12 @@ export class SceneTrees {
 
     private releaseOutputs(outputs: GpuTreeOutputs): void {
         outputs.release();
-        if (outputs.isDestroyed) this.liveOutputs.delete(outputs);
+        if (outputs.isDestroyed) {
+            this.liveOutputs.delete(outputs);
+            // Wide scenes: the batch's collapse job goes with its outputs.
+            this.wideRuns.get(outputs)?.destroy();
+            this.wideRuns.delete(outputs);
+        }
     }
 
     /**
@@ -1894,6 +1978,16 @@ export class SceneTrees {
     /** Records a GPU tree's copy out of its batch's buffers into the scene's, and a merged group's identity pass after it. */
     private copyGpuTree(encoder: GPUCommandEncoder, tree: GpuArrivedTree, size: TreeSize, nodeOffset: number, triangleOffset: number): void {
         const { outputs, tree: built } = tree.built;
+        if (tree.wide) {
+            // Wide: the collapse's nodes, and CWBVH's triangles in its leaves' order (BVH4 keeps the batch's).
+            const { run, count } = tree.wide;
+            encoder.copyBufferToBuffer(run.output, count.dstNode * this.nodeBytes, this.nodes.buffer, nodeOffset * this.nodeBytes, size.nodeCount * this.nodeBytes);
+            const bytes = this.triangleBytes;
+            if (count.dstTriangle >= 0) encoder.copyBufferToBuffer(run.output, run.nodeRegionBytes + count.dstTriangle * bytes, this.triangles.buffer, triangleOffset * bytes, size.triangleCount * bytes);
+            else encoder.copyBufferToBuffer(outputs.triangles, built.triangleOffset * bytes, this.triangles.buffer, triangleOffset * bytes, size.triangleCount * bytes);
+            this.afterGpuTreeCopy(encoder, tree, size, triangleOffset);
+            return;
+        }
         if (this.nodeFormat === 'quantized') {
             // The batch's nodes are f32: packed into the frame slot and the nodes on the way in.
             const job = nodeQuantizerFor(this.device).prepare(outputs.nodes, this.nodes.buffer, [{ sourceNodeOffset: built.nodeOffset, targetRootSlot: nodeOffset, nodeCount: size.nodeCount }], `${this.label} quantize`);
@@ -1904,6 +1998,11 @@ export class SceneTrees {
         }
         const bytes = this.triangleBytes;
         encoder.copyBufferToBuffer(outputs.triangles, built.triangleOffset * bytes, this.triangles.buffer, triangleOffset * bytes, size.triangleCount * bytes);
+        this.afterGpuTreeCopy(encoder, tree, size, triangleOffset);
+    }
+
+    /** After a GPU tree's triangles are in: a merged group's identity pass, or an indexed mesh's header. */
+    private afterGpuTreeCopy(encoder: GPUCommandEncoder, tree: GpuArrivedTree, size: TreeSize, triangleOffset: number): void {
         const state = this.meshes.get(tree.slot)!;
         const vertexBase = state.vertices?.offset ?? 0;
         if (state.group >= 0) this.identity.encode(encoder, this.triangles.buffer, this.groups[state.group].group, triangleOffset, size.triangleCount, this.positions ? { vertexBase } : undefined);

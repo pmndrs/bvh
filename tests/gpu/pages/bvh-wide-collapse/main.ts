@@ -63,7 +63,6 @@ await runGpuTest(async ({ device, log }) => {
     const failures: string[] = [];
     const results: Record<string, unknown> = {};
     const kernels = { f32: await TraceBatchKernel.create(device), bvh4: await TraceBatchKernel.create(device, { nodeFormat: 'bvh4' }), cwbvh8: await TraceBatchKernel.create(device, { nodeFormat: 'cwbvh8' }) };
-    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
     for (const format of ['bvh4', 'cwbvh8'] as const satisfies readonly WideNodeFormat[]) {
         const maxLeafPrimitives = format === 'cwbvh8' ? 3 : 8;
         const builders: [string, (geometry: MeshGeometry) => MeshBvh][] = [

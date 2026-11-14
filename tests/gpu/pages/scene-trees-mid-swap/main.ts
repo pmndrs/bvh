@@ -46,9 +46,10 @@
  * updates; one also with indexed leaves (packed positions).
  *
  * The `wide-*` variants run with `nodeFormat: 'bvh4'` or `'cwbvh8'`
- * (docs/internals/design/wide-nodes.md): no GPU collapse yet, so every tree
- * is tinybvh's, collapsed on arrival; the GPU top level, merged groups and
- * indexed leaves around it. One state each (there is no swap).
+ * (docs/internals/design/wide-nodes.md): H-PLOC's first trees collapsed on
+ * the GPU (gpu-wide-collapse.ts; CWBVH's built with leaves of at most 3),
+ * then tinybvh's, collapsed in the workers, swapped in as for the others;
+ * merged groups and indexed leaves around them.
  *
  * URL option: `?sharedRays=100000` shrinks the seam cases.
  */
@@ -139,7 +140,10 @@ await runGpuTest(
         };
         const firstTrees = new GpuFirstTrees(device, { label: 'mid-swap' });
         const indexedFirstTrees = new GpuFirstTrees(device, { label: 'mid-swap indexed', triangleLeaves: 'indexed' });
-        await Promise.all([firstTrees.prepare(), indexedFirstTrees.prepare()]);
+        // CWBVH's GPU collapse needs leaves of at most 3 (SceneTrees asks its own builder for that; these are shared).
+        const cwbvhFirstTrees = new GpuFirstTrees(device, { label: 'mid-swap cwbvh', maxLeafPrimitives: 3 });
+        const cwbvhIndexedFirstTrees = new GpuFirstTrees(device, { label: 'mid-swap cwbvh indexed', triangleLeaves: 'indexed', maxLeafPrimitives: 3 });
+        await Promise.all([firstTrees.prepare(), indexedFirstTrees.prepare(), cwbvhFirstTrees.prepare(), cwbvhIndexedFirstTrees.prepare()]);
         const pool = createBvhWorkerPool({ size: 4 });
         assert(pool.usesWorkers, 'the worker pool fell back to building inline in a browser');
         const failures: string[] = [];
@@ -163,7 +167,7 @@ await runGpuTest(
                     gpuMaxBatchBytes: variant.maxBatchBytes,
                     mergeStaticInstances: variant.merged,
                     workers: pool,
-                    firstTreeBuilder: variant.indexed ? indexedFirstTrees : firstTrees,
+                    firstTreeBuilder: variant.wide === 'cwbvh8' ? (variant.indexed ? cwbvhIndexedFirstTrees : cwbvhFirstTrees) : variant.indexed ? indexedFirstTrees : firstTrees,
                     ...(variant.indexed ? { triangleLeaves: 'indexed' as const, positionLayout: variant.indexed } : {}),
                     ...(variant.quantized ? { nodeFormat: 'quantized' as const } : {}),
                     ...(variant.wide ? { nodeFormat: variant.wide } : {}),
@@ -192,18 +196,6 @@ await runGpuTest(
                     return counts;
                 };
 
-                if (variant.wide) {
-                    // No GPU trees: every mesh waits for tinybvh's tree, collapsed when it arrives.
-                    frame();
-                    await scene.whenRefined();
-                    frame();
-                    const only = await check('tinybvh');
-                    if (only.onGpuTrees > 0 || only.onTinybvhTrees === 0) failures.push(`${oracleCase.name} ${variant.name}: ${only.onGpuTrees} GPU and ${only.onTinybvhTrees} tinybvh trees`);
-                    if (variant.merged && only.mergedGroups === 0) failures.push(`${oracleCase.name} ${variant.name}: nothing merged`);
-                    log(`${oracleCase.name} ${variant.name}: tinybvh ${only.onTinybvhTrees}, groups ${only.mergedGroups}`);
-                    scene.dispose();
-                    continue;
-                }
                 // The same with a cap: the batches go on between updates (each stored in its own submit), so no update is needed until whenBuilt.
                 frame();
                 await scene.whenBuilt();
