@@ -119,7 +119,7 @@ updateTrees();
 await trees.whenBuilt();
 updateTrees();
 overlay.build(log.build(trees));
-overlay.tree(log.tree(trees));
+overlay.tree(log.tree(trees, sync.meshHandles));
 overlay.set('characters', `${COUNT} × ${(geometry.index!.count / 3).toLocaleString('en-US')} triangles`);
 overlay.range('speed', 0, 3, 0.1, speed, (value) => (speed = value));
 overlay.note('Hover a character: the GPU ray walks the refit tree, so the marker sits on the skinned surface. three\'s CPU raycast (which skins on the CPU) is the check.');

@@ -198,9 +198,9 @@ enableDrop(async (model) => {
 
 function refresh(): void {
     if (!current) return;
-    const { trees, log, pool } = current;
+    const { trees, log, pool, sync } = current;
     overlay.build(log.build(trees));
-    overlay.tree(log.tree(trees));
+    overlay.tree(log.tree(trees, sync.meshHandles));
     const counts = trees.counts;
     overlay.set('swaps', `${counts.swaps} (${counts.tinybvhBuilding} tinybvh building, ${pool.stats.queued} queued)`);
     const timeline = trees.timeline;

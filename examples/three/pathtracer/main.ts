@@ -205,7 +205,7 @@ overlay.range('bounces', 0, 4, 1, bounces.value, (value) => {
 });
 overlay.note('Orbit to restart the accumulation. ?model= traces a glTF (base colours only, no textures).');
 overlay.build(log.build(trees));
-overlay.tree(log.tree(trees));
+overlay.tree(log.tree(trees, sync.meshHandles));
 overlay.set('materials', paletteIndex.size);
 
 let frame = 0;

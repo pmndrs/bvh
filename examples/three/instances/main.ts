@@ -108,7 +108,7 @@ updateTrees();
 await trees.whenBuilt();
 updateTrees();
 overlay.build(log.build(trees));
-overlay.tree(log.tree(trees));
+overlay.tree(log.tree(trees, sync.meshHandles));
 overlay.set('instances', `${INSTANCED.toLocaleString('en-US')} instanced + ${BATCHED.toLocaleString('en-US')} batched`);
 overlay.set('first sync', `${syncMs.toFixed(1)} ms`);
 overlay.set('top level', trees.topLevelPath === 'gpu' ? 'GPU (refit each frame)' : 'CPU (rebuilt each frame)');

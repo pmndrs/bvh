@@ -64,6 +64,15 @@ export function sourceOf(sync: SceneTreesObject3DSync, hitInstance: number, hitT
     // #endregion
 }
 
+export function meshHandles(sync: SceneTreesObject3DSync, trees: SceneTrees): number {
+    // #region sync-handles
+    // The SceneTrees mesh handles the sync holds now: one per shared geometry (or posed object).
+    let nodes = 0;
+    for (const handle of sync.meshHandles) nodes += trees.meshStatus(handle).placement?.nodeCount ?? 0;
+    // #endregion
+    return nodes;
+}
+
 // #region posing
 import type { Scene } from 'three/webgpu';
 

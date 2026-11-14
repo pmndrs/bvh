@@ -89,7 +89,7 @@ Each runs the suites of `compare/core/` (the same as `pnpm compare:node`) on the
 
 - `SceneTrees` keeps no CPU copy of its trees, so there is no SAH cost per tree for the overlay (open).
 - Done: `SceneTrees.update(encoder, { timestampWrites })` brackets everything the update records (`vanilla/instances` shows it; `GpuBracket` is gone), and `timestamps: true` times the GPU build batches (`counts.gpuBuildTimestampMs`; `counts.gpuBuildMs` stays submit-to-stats wall time).
-- `SceneTreesObject3DSync` doesn't list its mesh handles; the pages collect them from `onTree` events.
+- Done: `SceneTreesObject3DSync.meshHandles` lists its mesh handles; the three pages pass it to `SceneTreesLog.tree` instead of collecting handles from `onTree` events.
 - The GPU walk's step counters (the counted walk the benches use) aren't public, so the inspector's heat map is a CPU walk over the same tree.
 - Done: `GpuRays` (picking and batches: buffers, dispatch, readback, hit decoding) is in the package now; the pages use it.
 - Done: `createMeshLayoutBuilder` has `prepare: false` with `builder.prepare()` (setup apart from the build) and `onGpuBatch` (each GPU batch's pass from timestamps, and its wall time); the GPU builders' `buildMany` takes `timestampWrites`. `vanilla/hello` shows the build's GPU time, and `shared/builders.ts` (`vanilla/builders`, the inspector) builds through the chooser instead of driving batches itself.

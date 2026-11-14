@@ -69,7 +69,7 @@ export class SceneTreesLog {
         };
     }
 
-    /** The mesh handles seen in tree events (the sync doesn't list its handles). */
+    /** The mesh handles seen in tree events, for pages that keep no list of their own (a `SceneTreesObject3DSync` lists its `meshHandles`). */
     meshes(): number[] {
         return [...new Set(this.events.map((event) => event.mesh).filter((mesh): mesh is number => mesh !== null))];
     }
