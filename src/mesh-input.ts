@@ -196,8 +196,13 @@ export interface GpuTreeBuffers {
     readonly triangles: GPUBuffer;
     /** How `triangles` stores them; omitted means `'records'`. */
     readonly triangleLeaves?: 'records' | 'indexed';
-    /** One `u32` per node: its parent within its mesh, or 0xffffffff for a root. */
+    /** One `u32` per node: its parent within its mesh, or 0xffffffff for a root; a placeholder with {@link withoutParents}. */
     readonly parents: GPUBuffer;
+    /**
+     * The batch was built without its parents output (`GpuHplocBatchOptions.parents: false`):
+     * `parents` holds nothing, and a readback finds each tree's parents from its nodes.
+     */
+    readonly withoutParents?: true;
     readonly meshes: readonly GpuMeshTreeRange[];
     destroy(): void;
 }

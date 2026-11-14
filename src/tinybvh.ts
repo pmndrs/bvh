@@ -125,6 +125,12 @@ export interface TinyBvhLayoutOptions extends TinyBvhBuildOptions {
      * from the WASM's 64-byte nodes on the way out of its memory. Default `'f32'`.
      */
     readonly nodeFormat?: 'f32' | 'quantized';
+    /**
+     * Copy each node's parent out (4 bytes per node). Default true. False (P9
+     * lever 7: a tree no refit will use) gives an empty `parents` array; such a
+     * tree can be placed and traced, but not refit or made a `CpuMeshBvh`.
+     */
+    readonly parents?: boolean;
 }
 
 export interface TinyBvhLayoutBuild {
@@ -398,7 +404,7 @@ function buildGpuLayout(wasm: TinyBvhExports, geometry: MeshInput, options: Tiny
                           triangleLeaves: 'indexed' as const,
                       }
                     : { triangles: memory.slice(trianglesAt, trianglesAt + triangleCount * GPU_LAYOUT_TRIANGLE_BYTES) }),
-                parents: new Uint32Array(memory, wasm.tbvh_layout_parents(), nodeCount).slice(),
+                parents: options.parents === false ? new Uint32Array(0) : new Uint32Array(memory, wasm.tbvh_layout_parents(), nodeCount).slice(),
                 nodeCount,
                 triangleCount,
                 maxDepth: wasm.tbvh_layout_max_depth(),

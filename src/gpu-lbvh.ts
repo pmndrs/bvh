@@ -50,7 +50,8 @@
  * subgroups first, one fallback).
  */
 
-import { checkNodeFormat } from './quantized-nodes.ts';
+import { checkNodeFormat, dequantizeNodes } from './quantized-nodes.ts';
+import { parentsOfNodes } from './refit-cpu.ts';
 import { quantizeTreeBuffers } from './gpu-quantize.ts';
 import {
     GPU_LAYOUT_MAX_LEAF_PRIMITIVES,
@@ -403,13 +404,14 @@ export async function readTreeLayouts(device: GPUDevice, trees: GpuTreeBuffers, 
     const nodeBytes = nodeEnd * nodeSize;
     const triangleSize = gpuLayoutTriangleBytes(trees.triangleLeaves);
     const triangleBytes = triangleEnd * triangleSize;
-    const parentBytes = parentEnd * 4;
-    const readback = device.createBuffer({ label: `${label} readback`, size: nodeBytes + triangleBytes + parentBytes, usage: USAGE.MAP_READ | USAGE.COPY_DST });
+    // Without a parents output (P9 lever 7) each tree's parents come from its nodes, on the CPU.
+    const parentBytes = trees.withoutParents ? 0 : parentEnd * 4;
+    const readback = device.createBuffer({ label: `${label} readback`, size: Math.max(4, nodeBytes + triangleBytes + parentBytes), usage: USAGE.MAP_READ | USAGE.COPY_DST });
     try {
         const encoder = device.createCommandEncoder({ label: `${label} readback` });
         encoder.copyBufferToBuffer(trees.nodes, 0, readback, 0, nodeBytes);
         encoder.copyBufferToBuffer(trees.triangles, 0, readback, nodeBytes, triangleBytes);
-        encoder.copyBufferToBuffer(trees.parents, 0, readback, nodeBytes + triangleBytes, parentBytes);
+        if (parentBytes > 0) encoder.copyBufferToBuffer(trees.parents, 0, readback, nodeBytes + triangleBytes, parentBytes);
         device.queue.submit([encoder.finish()]);
         await readback.mapAsync(MAP_MODE_READ);
         const bytes = readback.getMappedRange();
@@ -419,12 +421,15 @@ export async function readTreeLayouts(device: GPUDevice, trees: GpuTreeBuffers, 
             const nodeStart = (mesh.nodeOffset - (quantized ? 1 : 0)) * nodeSize;
             const triangleStart = nodeBytes + mesh.triangleOffset * triangleSize;
             const parentStart = nodeBytes + triangleBytes + (mesh.parentOffset ?? mesh.nodeOffset) * 4;
+            const nodes = bytes.slice(nodeStart, nodeStart + gpuLayoutNodeBufferBytes(mesh.nodeCount, trees.nodeFormat));
             return {
-                nodes: bytes.slice(nodeStart, nodeStart + gpuLayoutNodeBufferBytes(mesh.nodeCount, trees.nodeFormat)),
+                nodes,
                 ...(quantized ? { nodeFormat: 'quantized' as const } : {}),
                 triangles: bytes.slice(triangleStart, triangleStart + mesh.triangleCount * triangleSize),
                 ...(trees.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const } : {}),
-                parents: new Uint32Array(bytes.slice(parentStart, parentStart + mesh.nodeCount * 4)),
+                parents: trees.withoutParents
+                    ? parentsOfNodes(new Uint32Array(dequantizeNodes({ nodes, nodeFormat: trees.nodeFormat, nodeCount: mesh.nodeCount }).nodes), 0, mesh.nodeCount)
+                    : new Uint32Array(bytes.slice(parentStart, parentStart + mesh.nodeCount * 4)),
                 nodeCount: mesh.nodeCount,
                 triangleCount: mesh.triangleCount,
                 maxDepth: mesh.maxDepth,

@@ -36,5 +36,5 @@ export function releaseInlineTinyBvh(): boolean {
 
 export async function buildMeshBvhAsync(geometry: MeshGeometry, options: MeshBvhBuildOptions = {}): Promise<MeshBvh> {
     tinyBvh ??= createTinyBvhBuilder().then((builder) => (started = builder));
-    return buildMeshBvhWithTinyBvh(geometry, await tinyBvh, { maxLeafPrimitives: options.maxLeafPrimitives, triangleLeaves: options.triangleLeaves, nodeFormat: options.nodeFormat });
+    return buildMeshBvhWithTinyBvh(geometry, await tinyBvh, { maxLeafPrimitives: options.maxLeafPrimitives, triangleLeaves: options.triangleLeaves, nodeFormat: options.nodeFormat, ...(options.parents === false ? { parents: false } : {}) });
 }

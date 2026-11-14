@@ -46,6 +46,31 @@ describe('growable storage', () => {
         expect(() => storage.adopt(gpu.device.createBuffer({ size: 400, usage: 0x8c }), [])).toThrow(/holds nothing/);
         expect(() => new GrowableStorage(gpu.device, 'x', 4, 1).adopt(gpu.device.createBuffer({ size: 16, usage: 0x80 }), [])).toThrow(/usage/);
     });
+
+    it('compacts every range in use to the front of a buffer of their size, keeping their bytes and order (BX.20 trim)', () => {
+        const gpu = createFakeGpu();
+        const storage = new GrowableStorage(gpu.device, 'test', 4, 100);
+        const ranges = [5, 7, 11].map((count, index) => ({ offset: storage.allocate(count)!, count, fill: index + 1 }));
+        // A hole: the middle range goes, then a range after it.
+        storage.release(ranges[1].offset, ranges[1].count);
+        const kept = [ranges[0], ranges[2]];
+        for (const range of kept) storage.write(range.offset, new Uint32Array(range.count).fill(range.fill).buffer);
+        const encoder = gpu.createEncoder();
+        expect(() => storage.compact(gpu.createEncoder(), [kept[0]])).toThrow(/every range/);
+        const moved = storage.compact(encoder, kept);
+        gpu.submit(encoder);
+        expect(storage.byteLength).toBe((5 + 11) * 4);
+        expect(storage.usedBytes).toBe((5 + 11) * 4);
+        expect([...moved]).toEqual([
+            [0, 0],
+            [12, 5],
+        ]);
+        const words = new Uint32Array((storage.buffer as unknown as FakeBuffer).bytes.buffer);
+        expect([...words]).toEqual([...new Array(5).fill(1), ...new Array(11).fill(3)]);
+        expect(storage.retiredByteLength).toBe(400);
+        // Full: the next range grows it again.
+        expect(storage.allocate(1)).toBeNull();
+    });
 });
 
 describe('range allocator reserve', () => {

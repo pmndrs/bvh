@@ -11,7 +11,11 @@ import { describe, expect, it } from 'vitest';
 import { createFakeGpu, type FakeBuffer, type FakeGpu } from '../../tests/support/fake-gpu.ts';
 import { FakeHploc } from '../../tests/support/fake-hploc.ts';
 import { SCENE_KERNELS } from '../../tests/support/scene-stand-ins.ts';
-import { compactPoseLayout, refitLayoutToPose } from '../refit-cpu.ts';
+import { compactPoseLayout, parentsOfNodes, refitLayoutToPose } from '../refit-cpu.ts';
+import { buildHplocOnCpu } from '../hploc-cpu.ts';
+import { buildLbvhOnCpu } from '../lbvh-cpu.ts';
+import { dequantizeNodes, quantizeNodes } from '../quantized-nodes.ts';
+import { createBvhWorkerPool } from '../worker/pool.ts';
 import { createCpuTracer, type CpuHit } from '../trace/cpu-traversal.ts';
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
 import { TOP_HEADER_WORD } from '../trace/layout.ts';
@@ -342,6 +346,100 @@ describe("compactPoseLayout and deformingLayouts: 'compact' (a deforming mesh ke
             expect(results.compact.kept).toBe(triangles * (triangleLeaves === 'records' ? 8 : 4));
         });
     }
+});
+
+describe("parents: 'refit' (parents only where a refit reads them, P9 lever 7)", () => {
+    it('parentsOfNodes finds the parents every builder writes, from f32 and decoded quantized nodes', async () => {
+        const random = createRandom(31);
+        for (const geometry of [tessellatedQuad(9, 1), { positions: Float32Array.from({ length: 900 }, () => random() * 4 - 2) }, tessellatedQuad(1, 1)]) {
+            for (const tree of [await buildMeshBvhAsync(geometry), await buildMeshBvhAsync(geometry, { maxLeafPrimitives: 1 }), buildHplocOnCpu(geometry), buildLbvhOnCpu(geometry)]) {
+                expect(parentsOfNodes(new Uint32Array(tree.nodes), 0, tree.nodeCount)).toEqual(tree.parents.subarray(0, tree.nodeCount));
+                const quantized = quantizeNodes(tree);
+                expect(parentsOfNodes(new Uint32Array(dequantizeNodes(quantized).nodes), 0, tree.nodeCount)).toEqual(tree.parents.subarray(0, tree.nodeCount));
+            }
+        }
+    });
+
+    it('a tinybvh build without parents gives the same tree and an empty parents array', async () => {
+        const geometry = tessellatedQuad(8, 1);
+        for (const options of [{}, { nodeFormat: 'quantized' as const }, { triangleLeaves: 'indexed' as const }]) {
+            const full = await buildMeshBvhAsync(geometry, options);
+            const bare = await buildMeshBvhAsync(geometry, { ...options, parents: false });
+            expect(new Uint8Array(bare.nodes)).toEqual(new Uint8Array(full.nodes));
+            expect(new Uint8Array(bare.triangles)).toEqual(new Uint8Array(full.triangles));
+            expect(bare.parents.length).toBe(0);
+            expect(full.parents.length).toBe(full.nodeCount);
+        }
+    });
+
+    for (const variant of [
+        { name: 'the defaults (quantized, merged, capped)', options: {} },
+        { name: 'adopt', options: { gpuTreeOutputs: 'adopt' as const, nodeFormat: 'f32' as const, gpuMaxBatchBytes: Infinity, mergeStaticInstances: false } },
+    ]) {
+        it(`${variant.name}: the same buffers, no batch asked for parents, static meshes' tinybvh trees without them, a deforming mesh's with them`, async () => {
+            const loads: Record<string, { gpuTrees: { nodes: Uint8Array; triangles: Uint8Array; hits: string[] }; settled: { nodes: Uint8Array; triangles: Uint8Array; hits: string[] } }> = {};
+            const asked: Record<string, boolean[]> = {};
+            for (const parents of ['always', 'refit'] as const) {
+                const original = FakeHploc.prototype.createBatch;
+                asked[parents] = [];
+                FakeHploc.prototype.createBatch = function (this: FakeHploc, ...args: Parameters<FakeHploc['createBatch']>) {
+                    asked[parents].push((args[1] as { parents?: boolean } | undefined)?.parents !== false);
+                    return original.apply(this, args);
+                };
+                try {
+                    const loaded = await load({ ...variant.options, parents });
+                    loads[parents] = loaded;
+                    loaded.scene.dispose();
+                } finally {
+                    FakeHploc.prototype.createBatch = original;
+                }
+            }
+            for (const state of ['gpuTrees', 'settled'] as const) {
+                expect(loads.refit[state].nodes).toEqual(loads.always[state].nodes);
+                expect(loads.refit[state].triangles).toEqual(loads.always[state].triangles);
+                expect(loads.refit[state].hits).toEqual(loads.always[state].hits);
+            }
+            expect(asked.always.length).toBeGreaterThan(0);
+            expect(asked.always.every(Boolean)).toBe(true);
+            expect(asked.refit.some(Boolean)).toBe(false);
+        });
+    }
+
+    it("the tinybvh builds: parents only for deforming meshes, whose CPU poses still work", async () => {
+        const requests: { parents: boolean }[] = [];
+        const workers = createBvhWorkerPool({ onBuild: () => {} });
+        const build = workers.build.bind(workers);
+        workers.build = (geometry, options, request) => {
+            requests.push({ parents: options?.parents !== false });
+            return build(geometry, options, request);
+        };
+        const { scene, frame } = await setUp({ parents: 'refit', workers, mergeStaticInstances: false });
+        const sheet = tessellatedQuad(6, 1);
+        const cloth = scene.addMesh(sheet, { deforming: true });
+        const rock = scene.addMesh(tessellatedQuad(3, 1));
+        scene.addInstance({ mesh: cloth, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], instanceIndex: 1 });
+        scene.addInstance({ mesh: rock, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1], instanceIndex: 2 });
+        frame();
+        await scene.whenRefined();
+        scene.releaseRefinements();
+        frame();
+        frame();
+        expect(scene.counts.onTinybvhTrees).toBe(2);
+        // The cloth (deforming) keeps its parents, the rock's build leaves them out.
+        expect(requests.map((request) => request.parents).sort()).toEqual([false, true]);
+        scene.setPoseCpu(cloth, hill(sheet));
+        frame();
+        expect(scene.deformingCounts.cpuPoses).toBe(1);
+        const hit = createCpuTracer(readScene(scene)).closest({ origin: [0.1, 0.1, 5], direction: [0, 0, -1], tMin: 0, tMax: 100 });
+        expect(hit?.instanceIndex).toBe(1);
+        expect(hit!.t).toBeLessThan(4.6);
+        scene.dispose();
+        workers.dispose();
+    });
+
+    it('refuses an unknown value', async () => {
+        await expect(setUp({ parents: 'never' as never })).rejects.toThrow(/parents/);
+    });
 });
 
 describe("refitBoxes: 'shared' (deforming meshes' refits take turns with one box buffer)", () => {

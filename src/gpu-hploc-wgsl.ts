@@ -179,7 +179,7 @@ struct HplocParams {
     tieBreak: u32,             // HPLOC_TIE_BREAK
     leafRunsOffset: u32,       // where each made node's leaf triangles (then, scanned, their first position) start in hplocLinks
     scratchQuads: u32,        // hplocScratch's length in vec4s, which the clear fills
-    unused: u32,
+    writeParents: u32,         // 1: hplocEmit writes each node's parent (lbvhOutParents); 0: the batch has no parents output (P9)
 }
 
 // Per sorted position: the split metric between it and the next, (high, low).
@@ -1104,7 +1104,9 @@ fn hplocEmit(
         let out = nodeOffset * LBVH_NODE_WORDS;
         lbvhWriteChild(out, 0u, box.lower, box.upper, 0u, 1u);
         lbvhWriteChild(out, 1u, vec3f(0.0), vec3f(0.0), LBVH_EMPTY_CHILD, 0u);
-        lbvhOutParents[nodeOffset] = LBVH_NO_PARENT;
+        if (hplocParams.writeParents != 0u) {
+            lbvhOutParents[nodeOffset] = LBVH_NO_PARENT;
+        }
         hplocLinks[hplocTreeOrderWord(mesh, 0u)] = 0u;
         return;
     }
@@ -1137,7 +1139,9 @@ fn hplocEmit(
     if (cluster != root) {
         parent = hplocOutputIndex(mesh, hplocLinks[hplocParentWord(mesh, cluster)], nodeOffset, rootRank);
     }
-    lbvhOutParents[nodeOffset + out] = parent;
+    if (hplocParams.writeParents != 0u) {
+        lbvhOutParents[nodeOffset + out] = parent;
+    }
 }
 
 // The triangle record at each tree position (whose triangle hplocEmit, which runs first, chose):

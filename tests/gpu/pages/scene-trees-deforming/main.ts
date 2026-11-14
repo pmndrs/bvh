@@ -64,7 +64,7 @@ function cloth(): { positions: Float32Array; indices: Uint16Array; triangleMater
 }
 
 /** The BX.20 levers the `levers` variants turn on (each off by default). */
-const LEVERS: Partial<SceneTreesOptions> = { refitBoxes: 'shared', trimWhenRefined: true, quantizeJobs: 'batched', deformingLayouts: 'compact' };
+const LEVERS: Partial<SceneTreesOptions> = { refitBoxes: 'shared', trimWhenRefined: true, quantizeJobs: 'batched', deformingLayouts: 'compact', parents: 'refit' };
 
 function pose(rest: Float32Array, wave: number, bend: number): Float32Array {
     const moved = new Float32Array(rest.length);

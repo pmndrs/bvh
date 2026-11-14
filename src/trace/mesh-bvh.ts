@@ -62,4 +62,10 @@ export interface MeshBvhBuildOptions {
     readonly nodeFormat?: 'f32' | 'quantized';
     /** Leaves with more triangles than this are cut in half until they fit. 1 to 8; default 8. */
     readonly maxLeafPrimitives?: number;
+    /**
+     * Keep each node's parent (4 bytes per node). Default true. False (P9
+     * lever 7) gives an empty `parents` array: for trees no refit will use
+     * (a scene's static meshes); such a tree can't be refit or made a `CpuMeshBvh`.
+     */
+    readonly parents?: boolean;
 }

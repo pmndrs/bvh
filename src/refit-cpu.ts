@@ -66,6 +66,24 @@ export function leafSlotsOf(words: Uint32Array, nodeWordOffset: number, nodeCoun
 }
 
 /**
+ * Each node's parent (its root's is `0xffffffff`), as builders write it, found
+ * from the `f32` nodes' child links: for a tree whose parents were not kept
+ * (P9 lever 7). The same array a builder writes for a tree in the GPU layout.
+ */
+export function parentsOfNodes(words: Uint32Array, nodeWordOffset: number, nodeCount: number): Uint32Array {
+    const parents = new Uint32Array(nodeCount).fill(GPU_LAYOUT_NO_PARENT);
+    for (let node = 0; node < nodeCount; node++) {
+        const base = nodeWordOffset + node * GPU_LAYOUT_NODE_WORDS;
+        for (let side = 0; side < 2; side++) {
+            const index = words[base + indexWord(side)];
+            if (index === GPU_LAYOUT_EMPTY_CHILD || words[base + countWord(side)] > 0) continue;
+            if (index < nodeCount) parents[index] = node;
+        }
+    }
+    return parents;
+}
+
+/**
  * Converts a parent array (parent node per node, as builders write it) into
  * parent slots, which say which side of the parent each node hangs on.
  */

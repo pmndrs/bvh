@@ -314,6 +314,15 @@ export interface SceneTreesOptions {
      * the records a pose needs (`compactPoseLayout`). Same poses bit for bit.
      */
     readonly deformingLayouts?: 'full' | 'compact';
+    /**
+     * Which trees carry parents (4 bytes per node; only a refit reads them).
+     * `'always'` (the default): every GPU batch writes its parents output and
+     * every tinybvh tree comes with its parents array. `'refit'` (P9 lever 7):
+     * GPU batches are built without the parents output (deforming meshes'
+     * read-back layouts get theirs from their nodes, on the CPU), and tinybvh
+     * builds of meshes that don't deform leave their parents out. Same trees.
+     */
+    readonly parents?: 'always' | 'refit';
 }
 
 /** A tree was placed: a mesh's (or merged group's) first, or a swap. */
@@ -766,6 +775,8 @@ export class SceneTrees {
     private trims = 0;
     /** `deformingLayouts: 'compact'`: deforming meshes keep {@link PoseLayout}s, not whole layouts. */
     private readonly compactPoseLayouts: boolean;
+    /** `parents: 'refit'`: only trees a refit uses carry parents. */
+    private readonly parentsForRefitOnly: boolean;
     private readonly weld: boolean;
     private readonly positions: GrowableStorage | null;
     /** Removed meshes' position ranges, freed at the next update. */
@@ -904,6 +915,9 @@ export class SceneTrees {
         const deformingLayouts = options.deformingLayouts ?? 'full';
         if (deformingLayouts !== 'full' && deformingLayouts !== 'compact') throw new RangeError(`deformingLayouts must be 'full' or 'compact', got ${String(deformingLayouts)}`);
         this.compactPoseLayouts = deformingLayouts === 'compact';
+        const parents = options.parents ?? 'always';
+        if (parents !== 'always' && parents !== 'refit') throw new RangeError(`parents must be 'always' or 'refit', got ${String(parents)}`);
+        this.parentsForRefitOnly = parents === 'refit';
         this.nodeLeading = this.nodeFormat === 'quantized' ? 1 : 0;
         this.nodes = new GrowableStorage(device, `${this.label} trace nodes`, this.nodeBytes, INITIAL_NODES);
         this.triangles = new GrowableStorage(device, `${this.label} trace triangles`, this.triangleBytes, indexed ? INITIAL_TRIANGLES * 3 : INITIAL_TRIANGLES);
@@ -1822,6 +1836,8 @@ export class SceneTrees {
         try {
             builds = builder.build(requests, {
                 readLayouts: kind.readLayouts,
+                // `parents: 'refit'`: no batch writes parents; a deforming mesh's read-back layout gets them from its nodes.
+                ...(this.parentsForRefitOnly ? { parents: false } : {}),
                 maxBatchBytes: this.maxBatchBytes,
                 cancelled: () => this.disposed,
                 onMemoryChange: () => this.samplePeak(),
@@ -2597,9 +2613,12 @@ export class SceneTrees {
      * copy, which an `f32` tree gives exactly; it is packed when placed).
      */
     private tinybvhOptions(slot: number): MeshBvhBuildOptions {
+        const deforming = this.meshes.get(slot)?.deforming ?? false;
         const indexed = this.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const } : {};
+        // `parents: 'refit'`: only a deforming mesh's tree is refit, so only it keeps its parents.
+        const parents = this.parentsForRefitOnly && !deforming ? { parents: false } : {};
         // Deforming meshes' trees stay f32 (the refits work on f32 nodes; they are quantized on the way in).
-        return this.nodeFormat === 'quantized' && !this.meshes.get(slot)?.deforming ? { ...indexed, nodeFormat: 'quantized' } : indexed;
+        return this.nodeFormat === 'quantized' && !deforming ? { ...indexed, ...parents, nodeFormat: 'quantized' } : { ...indexed, ...parents };
     }
 
     /** A tinybvh tree's nodes into the storage at its root `nodeOffset` (quantized: its frame slot first; packed here if the worker sent f32). */
