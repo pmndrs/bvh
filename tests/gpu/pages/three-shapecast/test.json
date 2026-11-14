@@ -1,0 +1,4 @@
+{
+    "description": "BvhTraceNodes.getShapecastFn on a WebGPURenderer: TSL compute kernels run scene shapecasts whose hooks are three function nodes (a TSL Fn with a layout and wgslFns with private state), over a three scene in SceneTrees loaded with updateSceneTreesAsync; the any-hit sphere cast must give the library's bvhIntersectsSphere and the counting cast the CPU's count over the world triangles, up to triangles within 1e-4 of the radius; a mask of 0 finds nothing.",
+    "timeoutMs": 300000
+}
