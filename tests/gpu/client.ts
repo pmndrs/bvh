@@ -184,7 +184,11 @@ export async function runGpuTest(
             adapter,
             device,
             adapterSummary,
-            log: (line) => logLines.push(line),
+            // Also to the console: the runner keeps console lines when a page times out (`--verbose` prints them).
+            log: (line) => {
+                logLines.push(line);
+                console.info(line);
+            },
         });
         if (returned) data = returned;
         await drainDevice(device);
