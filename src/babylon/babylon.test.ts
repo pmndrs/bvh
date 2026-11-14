@@ -19,8 +19,9 @@ import { Scene } from '@babylonjs/core/scene.js';
 import type { AbstractMesh } from '@babylonjs/core/Meshes/abstractMesh.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createRandom } from '../trace/oracle-fixtures.ts';
+import { traceModuleWgsl } from '../trace/wgsl.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
-import { bindTraceBuffers, createTraceComputeShader, gpuBufferToDataBuffer, TRACE_BINDING_NAMES, traceBindingsMapping } from './compute.ts';
+import { bindTraceBuffers, createTraceComputeShader, gpuBufferToDataBuffer, TRACE_BINDING_NAMES, traceBindingsMapping, wgslForBabylon } from './compute.ts';
 import { deviceFromEngine } from './device.ts';
 import { BabylonBvhPicker } from './picking.ts';
 import { BABYLON_MASK_PICKABLE, BABYLON_MASK_VISIBLE, bvhSceneFromBabylon } from './scene.ts';
@@ -373,5 +374,17 @@ describe('device and compute shader helpers', () => {
         expect(bound.get('bvhTraceNodes')).toBe(wrapped);
         // A ComputeShader is made without compiling on a NullEngine's missing WebGPU: the constructor only stores the source.
         expect(typeof createTraceComputeShader).toBe('function');
+    });
+
+    it('strips the comments Babylon would split at their semicolons, and nothing else', () => {
+        const walk = traceModuleWgsl();
+        // The walk's comments hold semicolons: left in, Babylon's preprocessor breaks the struct they sit in.
+        expect(walk).toMatch(/\/\/[^\n]*;/);
+        const stripped = wgslForBabylon(walk);
+        expect(stripped).not.toContain('//');
+        expect(stripped).not.toContain('/*');
+        expect(stripped).toContain('fn bvhTraceClosest(ray: BvhRay) -> BvhHit');
+        expect(stripped.replace(/\s+/g, ' ')).toContain('struct BvhHit { t: f32,');
+        expect(wgslForBabylon('a /* b; */ c // d;\ne')).toBe('a  c \ne');
     });
 });

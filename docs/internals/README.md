@@ -15,6 +15,7 @@ These are the internal design notes, kept beside the docs site but not part of i
 | `DIVERGENCES.md` | Every way the code differs from its sources, and why |
 | `PARITY.md` | The audit against three-mesh-bvh 0.9.18, row by row |
 | `three.md` | `@pmndrs/bvh/three` in full detail (the user pages are `docs/three/*.mdx`) |
+| `babylon.md` | `@pmndrs/bvh/babylon`: the P6 spike's findings (device, buffer binding, what went wrong), the decisions, the API gaps (the user page is `docs/engines/babylon.mdx`) |
 | `WINDOWS-RUNBOOK.md` | The next pass on the RTX 3060 and the Intel UHD |
 | `MIGRATING-FROM-DDGI.md`, `MIGRATING-FROM-REFLECTIONS-BRANCH.md` | Switching the known consumers to this package |
 
