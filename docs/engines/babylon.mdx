@@ -1,0 +1,207 @@
+---
+title: Babylon.js
+description: What @pmndrs/bvh/babylon gives a Babylon.js app: picking with scene.pick's result on any engine, and the WGSL walk in a ComputeShader on the WebGPUEngine's own device, which reaches into engine internals.
+nav: 51
+sourcecode: src/babylon/index.ts
+---
+
+`@pmndrs/bvh/babylon` is the only part of the package that imports `@babylonjs/core`, an optional peer dependency
+(`>=9.35.0 <10.0.0`; tested on 9.35.0). It is **"it works", not polish**: a thin layer that turns Babylon meshes into
+the core's inputs, picks like `scene.pick`, and binds the core's buffers into a Babylon `ComputeShader`. It has no scene
+sync, no skinning and no `BvhTraceNodes` equivalent.
+
+| You want | Use | Needs |
+| --- | --- | --- |
+| Faster `scene.pick` on a big mesh, any engine | `BabylonBvhPicker` | WebAssembly only (the WebGL engine and `NullEngine` work) |
+| Babylon meshes as `SceneTrees` or `buildTraceScene` inputs | `bvhSceneFromBabylon` | nothing |
+| The `WebGPUEngine`'s `GPUDevice` | `deviceFromEngine` | a `WebGPUEngine` (reads `engine._device`) |
+| The WGSL walk in a `ComputeShader` | `createTraceComputeShader`, `bindTraceBuffers` | a `WebGPUEngine` |
+
+The [examples](/examples/examples#babylonjs) show both halves: `babylon/picking` and `babylon/gpu-trace`.
+
+## The engine's device
+
+Babylon has no public accessor for its `GPUDevice`. `WebGPUEngine` keeps it in `_device`, an underscore field its own
+declarations mark internal. `deviceFromEngine(engine)` reads it, after checking that the engine is a WebGPU one
+(`engine.isWebGPU`) and has a device, so a Babylon release that moves the field fails there with a message that says
+what to check.
+
+{/* snippet: babylon-engine */}
+```ts
+import { WebGPUEngine } from '@babylonjs/core/Engines/webgpuEngine.js';
+import { deviceFromEngine } from '@pmndrs/bvh/babylon';
+
+// Babylon asks for WebGPU's default limits and no optional features: ask for the adapter's limits
+// (a scene past 128 MiB of triangles needs them) and for its features (the GPU builders need `subgroups`).
+const engine = await WebGPUEngine.CreateAsync(canvas, { enableAllFeatures: true, setMaximumLimits: true });
+const device = deviceFromEngine(engine); // engine._device, checked; throws on the WebGL engine
+```
+
+### Why this is fragile
+
+- **`engine._device` is not API.** Babylon can rename it, wrap it or move it in any release. The peer range stops at the
+  next major, and `pnpm examples:smoke` runs both Babylon examples against the pinned version, but a minor release can
+  still break it. The check in `deviceFromEngine` makes that a clear error, not a crash three calls later.
+- **Wrapping a `GPUBuffer` uses another internal.** `ComputeShader.setStorageBuffer` takes a Babylon `DataBuffer`, and on
+  WebGPU a `DataBuffer` is `WebGPUDataBuffer`, whose constructor Babylon exports but marks internal.
+  `gpuBufferToDataBuffer` is the one place that calls it.
+- **Babylon's compute path is young.** It resolves bindings by name from a mapping you give it, compiles WGSL through
+  its own preprocessor (below), and decides when its command buffers are submitted.
+
+The walk needs none of Babylon's *rendering* internals: if `_device` ever goes away, the fallback is to make the device
+yourself and give Babylon your own ([Sharing a device](/engines/sharing-a-device)) or to run the walk in compute passes
+of your own on the engine's device obtained any other way. The CPU picker needs no device at all.
+
+## Scenes
+
+`bvhSceneFromBabylon(scene)` (or a list of meshes) returns what `SceneTrees.addMesh`/`addInstance`,
+`buildTraceScene` and `CpuSceneBvh` take, plus the Babylon object behind every instance:
+
+- one mesh per geometry, shared by every `Mesh` and `InstancedMesh` that draws it (positions through
+  `getVerticesData`, so strided and normalized buffers work; the whole index buffer, or a plain triangle list);
+- one instance per mesh and `InstancedMesh`, with its world matrix (`computeWorldMatrix(true)`): Babylon's matrices
+  are row-vector and their memory is the column-major layout of the same transform, so the 16 floats go in as they
+  are;
+- `visible` is `isEnabled() && isVisible`; the instance mask has bit 0 on every instance and bit 1 on pickable ones;
+  `material(mesh)` may give `BvhHit.material`; `static` marks instances for `mergeStaticInstances`.
+
+{/* snippet: babylon-trees */}
+```ts
+import { SceneTrees } from '@pmndrs/bvh';
+import { bvhSceneFromBabylon } from '@pmndrs/bvh/babylon';
+
+const read = bvhSceneFromBabylon(scene); // one mesh per geometry, one instance per Mesh and InstancedMesh
+const trees = await SceneTrees.create(device);
+const meshes = read.meshes.map((geometry) => trees.addMesh(geometry));
+for (const instance of read.instances) {
+    trees.addInstance({
+        mesh: meshes[instance.meshIndex],
+        objectToWorld: instance.objectToWorld, // Babylon's world matrix memory is column-major as it is
+        instanceIndex: instance.instanceIndex, // so a hit's `instance` indexes read.sources
+        mask: instance.mask,
+        visible: instance.visible,
+    });
+}
+// A hit's instance names the Babylon mesh: read.sources[hit.instance].object
+```
+
+There is no sync object: after meshes move, call `trees.setTransform(handle, mesh.computeWorldMatrix(true).m)` for the
+ones that did (the `babylon/gpu-trace` example does this for a bobbing sphere).
+
+Not read: thin instances, skinned and morphed meshes (rest pose), a mesh's submesh ranges and material groups (the
+whole index buffer is read), lines and points (`fillMode` other than triangles).
+
+## Picking
+
+`BabylonBvhPicker` holds one tinybvh tree per geometry and a scene-level tree over the instances, and answers with the
+`PickingInfo` `scene.pick` returns.
+
+{/* snippet: babylon-picking */}
+```ts
+import { BabylonBvhPicker } from '@pmndrs/bvh/babylon';
+import type { PickingInfo } from '@babylonjs/core/Collisions/pickingInfo.js';
+import type { Scene } from '@babylonjs/core/scene.js';
+
+const picker = await BabylonBvhPicker.create(scene); // loads tinybvh, builds a tree per geometry
+const info = picker.pick(scene.pointerX, scene.pointerY); // a PickingInfo, as scene.pick returns
+if (info.hit) console.log(info.pickedMesh?.name, info.faceId, info.distance);
+
+// The picker sees the scene as of the last update(): call it after meshes move, show, hide or change.
+picker.update();
+```
+
+`pickWithRay(ray, options)` is `scene.pickWithRay`; `options` take `predicate` (and `camera` for `pick`). The result
+has `hit`, `distance` (world units), `pickedPoint`, `pickedMesh` (the `Mesh` or `InstancedMesh`), `bu` and `bv` (the
+weights of vertices 0 and 1, as Babylon reports them), `faceId`, `subMeshId`, `subMeshFaceId`, `ray`, and a working
+`getNormal()`. The Node tests check all of it against Babylon's own picking, on random rays, with mirrored and scaled
+instances and `InstancedMesh`es, on a `NullEngine`.
+
+| | `scene.pick` | `BabylonBvhPicker` |
+| --- | --- | --- |
+| Cost | every triangle of every candidate mesh, or the submesh octree you built | a tree walk |
+| A mesh with no material | picked by its bounding box | always its triangles |
+| A moved mesh | seen at once | seen after `update()` (transforms only: no tree is built) |
+| Edited vertex data | seen at once | a replaced array gets a new tree at `update()`; an edit in place needs `update({ rebuild: true })` |
+| `fastCheck`, `trianglePredicate` | supported | `fastCheck` is accepted and ignored (the closest hit is returned); no `trianglePredicate` |
+| Pixel coordinates | canvas pixels (`scene.pointerX`) | the same: with a hardware scaling level, pass canvas pixels |
+
+How much faster depends on the mesh: [Comparison](/performance/comparison) has Babylon's picking, with and without the
+submesh octree, against ours on the same rays.
+
+## The walk in a `ComputeShader`
+
+`createTraceComputeShader(name, engine, kernel, options)` makes a Babylon `ComputeShader` whose WGSL is
+`traceModuleWgsl(options.trace)` followed by your kernel. The walk's three storage buffers are bound by name
+(`bvhTraceNodes`, `bvhTraceTriangles`, `bvhTraceTopLevel`; an indexed scene's `bvhTracePositions` is the fourth) at
+group 0, bindings 0-2, and your own resources go after them. `bindTraceBuffers(shader, trees.buffers)` binds
+`SceneTrees`' own `GPUBuffer`s, with no copy.
+
+{/* snippet: babylon-compute */}
+```ts
+import { Constants } from '@babylonjs/core/Engines/constants.js';
+import { StorageBuffer } from '@babylonjs/core/Buffers/storageBuffer.js';
+import type { WebGPUEngine as Engine } from '@babylonjs/core/Engines/webgpuEngine.js';
+import { bindTraceBuffers, createTraceComputeShader } from '@pmndrs/bvh/babylon';
+
+// The walk (traceModuleWgsl) comes first; the kernel's own bindings follow its three (0-2).
+const kernel = `
+    @group(0) @binding(3) var<storage, read> rays: array<BvhRay>;
+    @group(0) @binding(4) var<storage, read_write> results: array<vec2f>;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) id: vec3u) {
+        if (id.x >= arrayLength(&rays)) { return; }
+        let hit = bvhTraceClosest(rays[id.x]);
+        results[id.x] = vec2f(hit.t, f32(hit.instance));
+    }`;
+const shader = createTraceComputeShader('bvh trace', engine, kernel, {
+    trace: { nodeFormat: trees.nodeFormat, triangleLeaves: trees.triangleLeaves, positionLayout: trees.positionLayout },
+    bindings: { rays: { group: 0, binding: 3 }, results: { group: 0, binding: 4 } },
+});
+const rays = new StorageBuffer(engine, rayCount * 32, Constants.BUFFER_CREATIONFLAG_READWRITE); // BvhRay is 32 bytes: origin, tMin, direction, tMax
+const results = new StorageBuffer(engine, rayCount * 8, Constants.BUFFER_CREATIONFLAG_READWRITE);
+shader.setStorageBuffer('rays', rays);
+shader.setStorageBuffer('results', results);
+
+// Each frame, after trees.update(encoder) was submitted: bind SceneTrees' own GPUBuffers (no copy) and dispatch.
+// Bind again whenever trees.version changes (a buffer grew).
+const dispatch = () => {
+    bindTraceBuffers(shader, trees.buffers);
+    shader.dispatch(Math.ceil(rayCount / 64));
+};
+```
+
+Each frame, record `trees.update(encoder)` in your own encoder and submit it before Babylon's frame uses the buffers
+(Babylon submits its own command buffers at the end of its frame), then bind if `trees.version` changed and
+dispatch. The `babylon/gpu-trace` example does this in a `scene.onBeforeRenderObservable` step, writes a shadow mask to
+a storage texture, and blends it over Babylon's render with a `Layer`. The mask comes from `bvhTraceAny` toward the sun,
+so it has no sampling: the package ends at the hit.
+
+### What went wrong on the way (Babylon 9.35)
+
+These cost time; the helpers handle the first two, and the rest are yours to know.
+
+- **Comments with a semicolon break the shader.** Babylon's WGSL preprocessor splits the source at every `;`, comments
+  included, and the walk's comments have them ("expected ':' for struct member"). `createTraceComputeShader` strips
+  comments (`wgslForBabylon`); do the same if you give `ComputeShader` WGSL yourself.
+- **`ComputeShader` needs an engine extension imported.** In a tree-shaken build nothing imports
+  `Engines/WebGPU/Extensions/engine.computeShader.js`, and `new ComputeShader` fails with
+  "engine.createComputeContext is not a function". `/babylon` imports it.
+- **Bindings are resolved by the names you map.** The names in `bindingsMapping` are the WGSL variable names. The
+  kernel's bindings are in group 0 after the walk's three; other groups are untested.
+- **A foreground `Layer` needs `applyPostProcess = true`** to show a texture over the scene on the `WebGPUEngine`:
+  without it, the scene's meshes disappeared behind the layer in 9.35.
+- **Pixel coordinates and hardware scaling.** `scene.createPickingRay` takes canvas pixels, which
+  `engine.setHardwareScalingLevel(n)` divides; a compute pass at the render size must multiply back to compare rays.
+- **`InstancedMesh` has to be imported** (`@babylonjs/core/Meshes/instancedMesh.js`) before `createInstance`, in a
+  tree-shaken build.
+- **Babylon never frees what it wraps.** A `StorageBuffer` you make is yours to `dispose()`; `SceneTrees`' buffers stay
+  the scene's, so `trees.dispose()` frees them, not Babylon.
+
+## Not supported
+
+- WebGL for the walk: the GPU path needs the `WebGPUEngine`. Picking works on any engine, and the examples run it on
+  the WebGL engine.
+- A scene sync (`SceneTreesObject3DSync` has no Babylon twin), skinning and morph targets, thin instances.
+- A node-material or `ShaderMaterial` binding of the walk (three's `BvhTraceNodes`): compute passes are what Babylon
+  offers.

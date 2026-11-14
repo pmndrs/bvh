@@ -1,6 +1,6 @@
 ---
 title: Sharing a device with an engine
-description: Building and tracing on the device your renderer already uses, in three.js and in plain WebGPU. Babylon is not supported yet.
+description: Building and tracing on the device your renderer already uses, in three.js, Babylon.js and plain WebGPU.
 nav: 50
 sourcecode: src/three/scene.ts
 ---
@@ -48,9 +48,11 @@ every user when to rebind.
 
 ## Babylon.js
 
-Not supported yet. A `@pmndrs/bvh/babylon` subpath is planned: CPU picking first, and the WGSL walk on Babylon's
-device, which today means reaching into the engine's internals (`engine._device`). Until then, the CPU queries
-([Raycast](/cpu-queries/raycast)) work with any engine's vertex arrays.
+`WebGPUEngine` has no public accessor for its device: `deviceFromEngine(engine)` from `@pmndrs/bvh/babylon` reads
+`engine._device` (checked), and `bindTraceBuffers` binds `SceneTrees`' buffers into a Babylon `ComputeShader` with no
+copy. That reaches into Babylon's internals, which is why it is pinned to Babylon 9 and kept thin: see
+[Babylon.js](/engines/babylon). Babylon asks for WebGPU's default limits and no optional features, so create the
+engine with `{ enableAllFeatures: true, setMaximumLimits: true }` to get `subgroups` and big storage buffers.
 
 ## Other engines
 

@@ -19,12 +19,21 @@ because `BvhTraceNodes` reads three's WebGPU backend internals, and each three r
 npm install three@0.187
 ```
 
+For the Babylon.js subpath, install `@babylonjs/core` (an optional peer dependency, `>=9.35.0 <10.0.0`, tested on
+9.35.0). `@pmndrs/bvh/babylon` reads `WebGPUEngine`'s internal `_device`, so each Babylon release is checked before the
+range widens ([Babylon.js](/engines/babylon)).
+
+```bash
+npm install @babylonjs/core@9.35.0
+```
+
 ## Entry points
 
 | Import | What it holds |
 | --- | --- |
 | `@pmndrs/bvh` | The core: builders, refits, the layout, the WGSL walk and its CPU port, `SceneTrees`, CPU queries, serialization. No engine. |
 | `@pmndrs/bvh/three` | three.js in, the core's inputs out; three-mesh-bvh's CPU API; `BvhTraceNodes` for TSL and WGSL. |
+| `@pmndrs/bvh/babylon` | Babylon.js in, the core's inputs out; picking with `scene.pick`'s result; the engine's device and a `ComputeShader` for the walk (basic). |
 | `@pmndrs/bvh/worker` | The tinybvh worker pool and the worker builders. |
 
 The package is ES modules only, with `sideEffects: false`. The worker files are loaded with

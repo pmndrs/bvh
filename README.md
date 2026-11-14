@@ -17,12 +17,14 @@ the API reference is at [bvh.docs.pmnd.rs/api](https://bvh.docs.pmnd.rs/api/)).
 ```bash
 npm install @pmndrs/bvh
 npm install three@0.187   # only for @pmndrs/bvh/three (an optional peer dependency)
+npm install @babylonjs/core@9.35.0   # only for @pmndrs/bvh/babylon (an optional peer dependency)
 ```
 
 | Import | What it holds |
 | --- | --- |
 | `@pmndrs/bvh` | The core: builders, refits, the layout, the WGSL walk and its CPU port, `SceneTrees`, CPU queries, serialization |
 | `@pmndrs/bvh/three` | three.js scenes in, `BvhTraceNodes` for TSL and WGSL, three-mesh-bvh's CPU API |
+| `@pmndrs/bvh/babylon` | Babylon.js meshes in, picking with `scene.pick`'s result, the walk in a `ComputeShader` (basic) |
 | `@pmndrs/bvh/worker` | The tinybvh worker pool |
 
 ## Quick start: vanilla WebGPU
@@ -73,8 +75,28 @@ CPU raycasts as drop-ins for three-mesh-bvh (`computeBoundsTree`, `acceleratedRa
 
 ## Quick start: Babylon.js
 
-Planned. A `@pmndrs/bvh/babylon` subpath (picking first, then the walk on Babylon's device) comes after 0.1. The CPU
-queries work with any engine's vertex arrays today.
+<!-- snippet: readme-babylon -->
+```ts
+import { SceneTrees } from '@pmndrs/bvh';
+import { BabylonBvhPicker, bvhSceneFromBabylon, deviceFromEngine } from '@pmndrs/bvh/babylon';
+
+// CPU picking, on any Babylon engine: a PickingInfo, as scene.pick returns it.
+const picker = await BabylonBvhPicker.create(scene);
+const info = picker.pick(scene.pointerX, scene.pointerY);
+
+// The walk on the WebGPUEngine's own device (engine._device, checked).
+const device = deviceFromEngine(engine);
+const trees = await SceneTrees.create(device);
+const read = bvhSceneFromBabylon(scene);
+const meshes = read.meshes.map((geometry) => trees.addMesh(geometry));
+for (const instance of read.instances) trees.addInstance({ mesh: meshes[instance.meshIndex], objectToWorld: instance.objectToWorld, instanceIndex: instance.instanceIndex });
+// Each frame: trees.update(encoder) and submit, then bindTraceBuffers(shader, trees.buffers) on a ComputeShader
+// from createTraceComputeShader (docs: engines/babylon).
+```
+
+Basic, "it works": picking is the same on the WebGL engine, and the GPU half reaches into `WebGPUEngine`'s internal
+`_device`. What it reads, what differs from `scene.pick`, and what to watch for:
+[Babylon.js](https://bvh.docs.pmnd.rs/engines/babylon).
 
 ## Which builder
 
@@ -95,6 +117,7 @@ queries work with any engine's vertex arrays today.
   tree on the CPU, and each result says so (`fallbackReason`). Chrome has it on the GPUs tested; Safari and Firefox
   don't expose it yet.
 - **three 0.187** for `@pmndrs/bvh/three` (`>=0.187.0 <0.188.0`; `BvhTraceNodes` reads three's backend internals).
+- **Babylon.js 9** for `@pmndrs/bvh/babylon` (`>=9.35.0 <10.0.0`, tested on 9.35.0; the GPU half reads `engine._device`).
 - WebGL2 is not a target.
 
 ## Headline numbers

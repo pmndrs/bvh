@@ -28,12 +28,15 @@ same `GPUDevice`.
 | The WGSL walk | `bvhTraceClosest` and `bvhTraceAny`, masks, a triangle filter, a watertight triangle test | [Tracing in WGSL](/tracing/wgsl-walk) |
 | CPU queries | Raycast, shapecast, bvhcast and closest point over the same layout | [Raycast](/cpu-queries/raycast) |
 | three.js | Scenes from `Object3D`, GPU skinning, TSL nodes, and three-mesh-bvh's CPU API | [three.js](/three/overview) |
+| Babylon.js | Picking with `scene.pick`'s result, scenes from meshes, the walk in a `ComputeShader` (basic) | [Babylon.js](/engines/babylon) |
 | Workers | A pool of tinybvh workers that needs no cross-origin isolation | [Workers](/workers/workers) |
 
 ## What it is not
 
 - It has no WebGL2 path. The CPU queries work anywhere JavaScript runs, but no GPU work targets WebGL2.
-- Babylon.js is not supported yet. A `/babylon` subpath is planned.
+- Babylon.js support is "it works", not polish: `/babylon` has picking that returns `scene.pick`'s `PickingInfo`, a
+  mesh conversion, and the walk in a `ComputeShader` on the `WebGPUEngine`'s device, reached through the engine's
+  internals ([Babylon.js](/engines/babylon)). It has no scene sync or skinning.
 - Points and lines are not primitives. Leaves hold triangles only.
 
 ## Where to start

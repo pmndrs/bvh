@@ -1,7 +1,7 @@
 {
     "$schema": "https://typedoc.org/schema.json",
     "name": "@pmndrs/bvh",
-    "entryPoints": ["src/index.ts", "src/three/index.ts", "src/worker/index.ts"],
+    "entryPoints": ["src/index.ts", "src/three/index.ts", "src/babylon/index.ts", "src/worker/index.ts"],
     "tsconfig": "tsconfig.json",
     "out": "api-docs",
     "readme": "none",

@@ -9,6 +9,7 @@ export default defineConfig({
         alias: [
             { find: /^@pmndrs\/bvh$/, replacement: resolve(root, 'src/index.ts') },
             { find: /^@pmndrs\/bvh\/three$/, replacement: resolve(root, 'src/three/index.ts') },
+            { find: /^@pmndrs\/bvh\/babylon$/, replacement: resolve(root, 'src/babylon/index.ts') },
             { find: /^@pmndrs\/bvh\/worker$/, replacement: resolve(root, 'src/worker/index.ts') },
         ],
     },

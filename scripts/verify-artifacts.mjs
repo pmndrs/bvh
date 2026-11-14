@@ -3,7 +3,7 @@
 // third-party code still carry their licence text (a build step can drop
 // comments; the /*! */ headers must survive).
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const root = resolve(import.meta.dirname, '..');
@@ -81,8 +81,29 @@ if (manifest.exports['./three'] && problems.length === 0) {
     }
 }
 
+// The /babylon subpath must import in Node with @babylonjs/core installed (its peer), and say what it exports.
+if (manifest.exports['./babylon'] && problems.length === 0) {
+    try {
+        const babylon = await import(pathToFileURL(resolve(root, manifest.exports['./babylon'].import)).href);
+        for (const name of ['BabylonBvhPicker', 'bvhSceneFromBabylon', 'deviceFromEngine', 'createTraceComputeShader']) {
+            if (typeof babylon[name] !== 'function') problems.push(`dist/babylon does not export ${name}`);
+        }
+    } catch (error) {
+        problems.push(`dist/babylon does not import in Node: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+// Only dist/babylon may name @babylonjs/*, and only dist/three three (the core is engine-free; ESLint checks the sources, this the output).
+for (const entry of existsSync(dist) ? readdirSync(dist, { recursive: true, withFileTypes: true }) : []) {
+    if (!entry.isFile() || !/\.js$/.test(entry.name)) continue;
+    const file = resolve(entry.parentPath, entry.name);
+    const inside = (folder) => file.startsWith(resolve(dist, folder) + sep);
+    const text = readFileSync(file, 'utf8');
+    if (!inside('babylon') && /from\s*["']@babylonjs\//.test(text)) problems.push(`${file} imports @babylonjs/* outside dist/babylon`);
+    if (!inside('three') && /from\s*["']three["']/.test(text)) problems.push(`${file} imports three outside dist/three`);
+}
+
 if (problems.length) {
     console.error(problems.join('\n'));
     process.exit(1);
 }
-console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl and gpu-hploc-wgsl, no .ts imports, no tests, worker entries built (' + workerEntries.size + '), /three imports in Node.');
+console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl and gpu-hploc-wgsl, no .ts imports, no tests, worker entries built (' + workerEntries.size + '), /three and /babylon import in Node, engines only in their own folders.');
