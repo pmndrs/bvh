@@ -20,6 +20,7 @@ export * from './top-level-async.ts';
 export * from './top-level-gpu.ts';
 export * from './scene-assembly.ts';
 export * from './static-merge.ts';
+export * from './clustered-scene.ts';
 export * from './cpu-traversal.ts';
 export * from './reference-tracer.ts';
 export * from './oracle-compare.ts';

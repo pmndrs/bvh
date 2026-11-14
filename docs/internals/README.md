@@ -12,6 +12,7 @@ These are the internal design notes, kept beside the docs site but not part of i
 | `design/trace.md` | The GPU layout, the WGSL walk, the watertight test, the oracle, merged static instances, the bench method |
 | `design/indexed-leaves.md`, `design/compressed-nodes.md` | The two layout variants, with their measurements |
 | `design/memory.md` | Every buffer, ours and three-mesh-bvh's, and the levers |
+| `design/clustered-bvh.md` | three-mesh-bvh's `ClusteredBVH` (PARITY 8.9): what it is, how it maps onto our layout, `clusterTraceScene` and its checks |
 | `DIVERGENCES.md` | Every way the code differs from its sources, and why |
 | `PARITY.md` | The audit against three-mesh-bvh 0.9.18, row by row |
 | `three.md` | `@pmndrs/bvh/three` in full detail (the user pages are `docs/three/*.mdx`) |
