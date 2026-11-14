@@ -115,6 +115,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         timeoutMs: 90_000,
     },
     {
+        name: 'three-sdf',
+        path: 'three/sdf',
+        title: 'SDF generation',
+        description: 'A signed distance field generated on the GPU from the scene\'s trees (closest point plus a three-ray inside vote per voxel) into a three 3D texture, shown by a TSL raymarch or a slice with contours. Resolution, margin and the inside rule live.',
+        timeoutMs: 120_000,
+    },
+    {
         name: 'compare-raycast',
         path: 'compare/raycast',
         title: 'compare/raycast',

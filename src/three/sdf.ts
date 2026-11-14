@@ -16,7 +16,7 @@
 import { Box3, ClampToEdgeWrapping, FloatType, LinearFilter, NearestFilter, RedFormat, Vector3 } from 'three';
 import { Storage3DTexture } from 'three/webgpu';
 import { texture3D, uniform } from 'three/tsl';
-import { SdfGenerator, type SdfOptions } from '../trace/sdf.ts';
+import { SdfGenerator, type SdfGrid, type SdfOptions } from '../trace/sdf.ts';
 import { traceSourceFormats, type TraceSceneBuffers } from '../trace/trace-gpu.ts';
 import { deviceFromRenderer } from './scene.ts';
 import type { BvhTraceBufferSource, BvhTslNode } from './trace-nodes.ts';
@@ -39,6 +39,10 @@ export interface BvhSdfTextureOptions extends SdfOptions {
 export interface BvhSdfTexture {
     /** `r32float`, the box's extent; linear filtering where the device has `float32-filterable`, else nearest. */
     readonly texture: Storage3DTexture;
+    /** The `GPUTexture` three made for it, for raw WebGPU passes and `readSdf` (three owns it). */
+    readonly gpuTexture: GPUTexture;
+    /** The core's grid: the box and resolution, for `readSdf`, `sdfVoxelCenter` and `generateSdfCpu`. */
+    readonly grid: SdfGrid;
     /** The world-space box the texture covers (a copy). */
     readonly box: Box3;
     readonly resolution: readonly [number, number, number];
@@ -128,7 +132,7 @@ export async function generateSdfTexture(renderer: unknown, source: BvhTraceBuff
         texture.minFilter = texture.magFilter = filter;
     }
     const gpuTexture = gpuTextureOf(target, texture);
-    const grid = { min: [box.min.x, box.min.y, box.min.z] as const, max: [box.max.x, box.max.y, box.max.z] as const, resolution };
+    const grid: SdfGrid = { min: [box.min.x, box.min.y, box.min.z], max: [box.max.x, box.max.y, box.max.z], resolution };
     const { ms } = await generator.generate(scene, { texture: gpuTexture }, grid, options);
 
     const boxMin = uniform(box.min.clone());
@@ -137,6 +141,8 @@ export async function generateSdfTexture(renderer: unknown, source: BvhTraceBuff
     const uvw = (position: BvhTslNode) => position.sub(boxMin).div(boxSize);
     return {
         texture: field,
+        gpuTexture,
+        grid,
         box,
         resolution,
         ms,
