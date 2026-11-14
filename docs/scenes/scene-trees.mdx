@@ -165,6 +165,9 @@ a deforming mesh needs an `f32` tree; an indexed scene welds each mesh's vertice
 deforms), and refuses an indexed tree then; and the tree must be within `gpuMaxDepth`. Each refusal is a `RangeError`.
 The layout's arrays are read at the next update.
 
+Trees baked to files go the same way: `placeTree(mesh, deserializeLayout(bytes, { geometry }))`, which checks the file
+against the mesh's geometry first ([Baked trees in SceneTrees](/serialization/serialization-and-baking#baked-trees-in-scenetrees)).
+
 ## Rebinding when a buffer grows
 
 The node and triangle buffers grow by doubling. A growth replaces the `GPUBuffer` and bumps `trees.version`. Make your

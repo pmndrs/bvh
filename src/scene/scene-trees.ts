@@ -1417,6 +1417,11 @@ export class SceneTrees {
      * scene refuses it. Throws a RangeError for these and for a tree deeper
      * than `gpuMaxDepth`. The layout's arrays are read at the update; keep them
      * unchanged until then.
+     *
+     * A baked file is `placeTree(mesh, deserializeLayout(bytes, { geometry }))`
+     * with the geometry given to `addMesh`: `deserializeLayout` refuses a file
+     * baked from other geometry when it was written with its own
+     * (`serializeLayout(layout, { geometry })`).
      */
     placeTree(mesh: number, layout: GpuLayoutMeshBvh): void {
         this.checkLive();

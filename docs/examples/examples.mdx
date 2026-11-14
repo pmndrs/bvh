@@ -70,7 +70,7 @@ A Node CLI plus the page that loads what it wrote. [Serialization and baking](/s
 
 | Page | Shows |
 | --- | --- |
-| [`node/bake`](https://github.com/pmndrs/bvh/tree/main/examples/node/bake) | `pnpm examples:bake` builds a model's tree with tinybvh in Node (no GPU) and writes it with `serializeLayout`; the page loads that file with `deserializeLayout` and no build at all, and its overlay says `builtBy: baked file`. Traced by the WGSL walk, with the header's versions shown. `?bake=<url>` or a dropped `.bvh` loads another. |
+| [`node/bake`](https://github.com/pmndrs/bvh/tree/main/examples/node/bake) | `pnpm examples:bake` builds a model's tree with tinybvh in Node (no GPU) and writes it with `serializeLayout`, or with `--scene` the whole scene with `serializeTraceScene`; the page checks the header with `readSerializedHeader`, loads either kind with no build at all, and its overlay says `builtBy: baked tree` or `baked scene`. An indexed tree loads next to its geometry. Traced by the WGSL walk, with the header's versions shown. `?bake=<url>` or a dropped `.bvh` loads another. |
 
 ## Planned
 

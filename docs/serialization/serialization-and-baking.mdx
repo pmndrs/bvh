@@ -1,12 +1,19 @@
 ---
 title: Serialization and baking
-description: Build trees once (in Node, at build time), save the bytes, and load them later with no build at all.
+description: Build trees or whole scenes once (in Node, at build time), save the bytes, check them, and load them later with no build at all.
 nav: 100
 sourcecode: src/serialize.ts
 ---
 
-`serializeLayout(layout)` writes one tree as one `ArrayBuffer`; `deserializeLayout(bytes)` reads it back. tinybvh's
-WebAssembly needs no GPU, so a Node script can bake every mesh's tree ahead of time.
+Two kinds of file, one header:
+
+- **A tree:** `serializeLayout(layout)` writes one mesh's tree as one `ArrayBuffer`; `deserializeLayout(bytes)` reads it
+  back. Load it into a scene you assemble, into `SceneTrees`, or into a CPU tree.
+- **A scene:** `serializeTraceScene(scene)` writes a whole assembled scene (every tree, the top level, instances,
+  materials); `deserializeTraceScene(bytes)` reads it back, ready to upload with no build and no assembly.
+
+`readSerializedHeader(bytes)` reads either file's 64-byte header without loading it. tinybvh's WebAssembly needs no GPU,
+so a Node script can bake everything ahead of time.
 
 ## Bake in Node
 
@@ -20,9 +27,13 @@ const tiny = await createTinyBvhBuilder();
 for (const [index, mesh] of meshes.entries()) {
     const { layout } = tiny.buildLayout(mesh, { maxLeafPrimitives: 8 });
     // One ArrayBuffer: a 64-byte header, then nodes, triangles and parents as the GPU reads them.
-    await writeFile(path(index), new Uint8Array(serializeLayout(layout)));
+    // With the geometry, the header keeps its hash, and loading the tree next to other geometry is refused.
+    await writeFile(path(index), new Uint8Array(serializeLayout(layout, { geometry: mesh })));
 }
 ```
+
+`{ geometry }` is optional. It stores a 64-bit hash of the positions and indices (`meshGeometryHash`) in the header, and
+changes nothing else in the file.
 
 ## Load in the browser
 
@@ -37,14 +48,155 @@ const buffers = uploadTraceScene(device, scene); // nodes, triangles, topLevel: 
 ```
 
 A loaded tree is a `GpuLayoutMeshBvh`, the same thing any builder returns. Use it wherever a tree goes:
-`assembleTraceScene` (above), a `build` function for `buildTraceScene`, `GpuMeshRefit.setTree`, or `new CpuMeshBvh(layout)`.
-`SceneTrees` builds its own trees and doesn't take baked ones.
+`assembleTraceScene` (above), a `build` function for `buildTraceScene`, `SceneTrees.placeTree` ([below](#baked-trees-in-scenetrees)),
+`GpuMeshRefit.setTree`, or `new CpuMeshBvh(layout)`.
+
+## Check a file before loading it
+
+A file records what it is and the versions it was written with. `readSerializedHeader(bytes)` reads them from the
+header alone:
+
+- `kind`: `'tree'` or `'scene'`;
+- `formatVersion` and `layoutVersion`;
+- `current`: true when this package loads the file. When it's false, `reason` says why, in the words
+  `deserializeLayout` would throw;
+- the formats (`triangleLeaves`, `nodeFormat`, and a scene's `positionLayout`);
+- the counts, and a tree's `bounds` and `geometryHash`.
+
+It throws only for bytes that are neither kind of file. `isSerializedCurrent(bytes)` is the yes or no, and never
+throws. To fall back instead of failing:
+
+{/* snippet: version-check */}
+```ts
+import { createTinyBvhBuilder, deserializeLayout, readSerializedHeader, type GpuLayoutMeshBvh, type MeshInput } from '@pmndrs/bvh';
+
+/** The baked tree at `url`, or a fresh build of `mesh` when the file is from another version of the package. */
+export async function loadOrRebuild(url: string, mesh: MeshInput): Promise<GpuLayoutMeshBvh> {
+    const bytes = await (await fetch(url)).arrayBuffer();
+    // The 64-byte header alone: the kind of file, the versions it was written with, and whether this package reads it.
+    const header = readSerializedHeader(bytes);
+    if (header.kind === 'tree' && header.current) return deserializeLayout(bytes, { geometry: mesh });
+    // A stale bake (header.reason says why): build it again, or fail the deploy.
+    console.warn(`${url}: ${header.reason ?? 'a scene file, not a tree'}; building instead`);
+    const tiny = await createTinyBvhBuilder();
+    return tiny.buildLayout(mesh, { maxLeafPrimitives: 8 }).layout;
+}
+```
+
+A stale file is refused when it loads, but only someone who opens the page would see the error. Check the committed or
+deployed bakes in CI as well:
+
+{/* snippet: ci-check */}
+```ts
+import { readdir, readFile } from 'node:fs/promises';
+import { isSerializedCurrent } from '@pmndrs/bvh';
+
+// In CI: every committed bake must be one this package loads, or the deploy ships files it refuses.
+const stale: string[] = [];
+for (const name of (await readdir(folder)).filter((file) => file.endsWith('.bvh'))) {
+    if (!isSerializedCurrent(await readFile(`${folder}/${name}`))) stale.push(name);
+}
+if (stale.length) throw new Error(`bake these again: ${stale.join(', ')}`);
+```
+
+## Scene files
+
+A scene file holds everything `uploadTraceScene` needs:
+
+- every mesh tree, and the merged static groups;
+- the top level, with each instance's transform, mask and material;
+- the triangles, with their per-triangle materials and filter flags;
+- an indexed scene's positions;
+- the formats.
+
+Loading it builds and assembles nothing.
+
+{/* snippet: bake-scene */}
+```ts
+import { buildTraceScene, serializeTraceScene } from '@pmndrs/bvh';
+
+const tiny = await createTinyBvhBuilder();
+// Every tree, merged static instances, the top level, instance and triangle materials, the formats.
+const scene = await buildTraceScene(meshes, instances, { build: (mesh) => tiny.buildLayout(mesh, { maxLeafPrimitives: 8 }).layout });
+await writeFile(path, new Uint8Array(serializeTraceScene(scene)));
+```
+
+{/* snippet: load-scene */}
+```ts
+import { deserializeTraceScene } from '@pmndrs/bvh';
+
+// No build and no assembly: the buffers go to the GPU as they were baked.
+const scene = deserializeTraceScene(await (await fetch(url)).arrayBuffer());
+const buffers = uploadTraceScene(device, scene); // compile the walk for scene.nodeFormat and scene.triangleLeaves
+```
+
+Any `TraceSceneData` can be saved: from `assembleTraceScene` or `buildTraceScene`, in any node or triangle format, with
+merged static instances, or cut into clusters (`clusterTraceScene`; the placements are kept, the `clusters` statistics
+are not). A loaded scene writes the same bytes again, and traces the same hits as the scene it was saved from.
+
+**A scene file is a snapshot.** Its top level is baked, so its instances can't move, and its merged meshes hold their
+instances' transforms. For a scene whose instances move, bake one tree per mesh, then assemble them at load or place them
+in `SceneTrees`.
+
+## Baked trees in SceneTrees
+
+`SceneTrees` builds a tree for each mesh it's given, unless the app places one first. A baked file per mesh, placed
+with `placeTree` before the first update, means no build starts at all: neither the GPU's nor tinybvh's.
+
+{/* snippet: baked-scene-trees */}
+```ts
+import { SceneTrees, type MeshGeometry } from '@pmndrs/bvh';
+
+const trees = await SceneTrees.create(device);
+for (const [index, geometry] of geometries.entries()) {
+    const mesh = trees.addMesh(geometry);
+    const bytes = await (await fetch(urls[index])).arrayBuffer();
+    // Checked against the geometry (its hash, when the bake has one); placed before the first update, so no build starts.
+    trees.placeTree(mesh, deserializeLayout(bytes, { geometry }));
+    trees.addInstance({ mesh, objectToWorld: matrix });
+}
+// The next update places every tree: trees.counts.onAppTrees === geometries.length.
+```
+
+The tree must have been baked from the geometry given to `addMesh`. With a hash in the file, `deserializeLayout(bytes, {
+geometry })` checks this. `placeTree` also requires:
+
+- the scene's triangle format;
+- `f32` trees for deforming meshes (a quantized scene quantizes `f32` trees, but an `f32` scene refuses quantized ones);
+- `weld: false` for indexed trees in an indexed scene;
+- a depth within `gpuMaxDepth`.
+
+A deforming mesh's rebuilds still replace its baked tree ([Scene trees](/scenes/scene-trees#trees-you-built)).
+
+## Indexed bakes
+
+An `indexed` tree holds 16-byte triangles of vertex indices, not positions. That makes the file small, but it only
+works next to the exact positions and indices it was baked from. Hand them over wherever the tree goes:
+
+{/* snippet: indexed */}
+```ts
+// An indexed tree holds vertex indices, not positions: it only works next to the geometry it was baked from.
+const tree = deserializeLayout(await (await fetch(url)).arrayBuffer(), { geometry });
+const scene = assembleTraceScene([tree], instances, {}, { geometries: [geometry] }); // the scene copies the positions
+const buffers = uploadTraceScene(device, scene);
+const cpu = new CpuMeshBvh(tree, { source: geometry }); // the CPU walk reads them from the geometry
+// SceneTrees takes it too: SceneTrees.create(device, { triangleLeaves: 'indexed', weld: false }), then placeTree.
+```
+
+`deserializeLayout(bytes, { geometry })` checks that the geometry fits the tree:
+
+- the triangle count matches;
+- every vertex index falls within the geometry's vertices;
+- the hash matches, if the file was written with `{ geometry }`.
+
+Without the hash, positions that moved but kept their count would still load, and would trace wrong triangles. Bake
+indexed trees with their geometry. An indexed **scene** file carries its positions, so it needs no geometry.
 
 ## The format
 
 ```text
 header, 16 words (64 bytes, little-endian)
-    0      magic 'PBVH'
+    0      magic 'PBVH' (a scene file: 'PBVS')
     1      format version (SERIALIZED_FORMAT_VERSION, now 1)
     2      GPU layout version (GPU_LAYOUT_VERSION, now 2)
     3      nodeCount
@@ -53,17 +205,36 @@ header, 16 words (64 bytes, little-endian)
     6      leafCount
     7      formats: bits 0-7 triangles (0 records, 1 indexed), bits 8-15 nodes (0 f32, 1 quantized)
     8-13   bounds: minX, minY, minZ, maxX, maxY, maxZ (f32)
-    14-15  0
+    14-15  the geometry's hash (0 and 0: written without one)
 nodes      nodeCount x 64 bytes (f32), or (nodeCount + 1) x 32 (quantized: the frame slot, then the nodes)
 triangles  triangleCount x 48 bytes (records) or x 16 (indexed)
 parents    nodeCount x 4 bytes
 ```
 
 `serializedLayoutBytes(layout)` gives the size before writing. The arrays are copied byte for byte, as the GPU reads
-them. WebGPU buffers are little-endian, as is every machine that runs WebGPU.
+them. WebGPU buffers are little-endian, as is every machine that runs WebGPU. Words 14-15 were 0 before the hash: older
+files load as files with no hash, and older readers ignore the words.
 
-**Bytes from another layout version are refused, not converted.** A tree is cheap to rebuild, and a wrong word position
-would only show up as wrong rays. Bake again when `GPU_LAYOUT_VERSION` changes, which is a breaking release.
+A scene file has its own magic and format version, and the same words 0-2:
+
+```text
+header, 16 words (64 bytes, little-endian)
+    0      magic 'PBVS'
+    1      format version (SERIALIZED_SCENE_FORMAT_VERSION, now 1)
+    2      GPU layout version (GPU_LAYOUT_VERSION, now 2)
+    3      formats: bits 0-7 triangles, bits 8-15 nodes (as a tree's), bits 16-23 positions (0 vec4, 1 packed)
+    4      meshes          5  merged static groups      6  top-level instance records
+    7      vertices        8  trace stack entries the scene needs
+    9-14   byte sizes: description, nodes, triangles, top level, recordOrder (entries), positions
+    15     0
+description  JSON: each mesh's and merged group's placement, the top level's node count, depth and skipped instances
+nodes, triangles, top level, recordOrder (u32), positions: the scene's buffers, byte for byte
+```
+
+**Files from another version are refused, not converted.** That holds for the byte format and for the layout version.
+A tree is cheap to rebuild, and a wrong word position would only show up as wrong rays. Bake again when
+`GPU_LAYOUT_VERSION` changes, which is a breaking release. A scene that needs a deeper trace stack than the walk has
+is refused too.
 
 ## CPU trees
 
@@ -92,7 +263,8 @@ builds our layout from the geometry (no SAH build, but a pass over every triangl
 
 ## Bake at build time
 
-The tree is built once, when the app is built, and shipped as a file next to the models. Two ways, neither a new package:
+The trees are built once, when the app is built, and shipped as files next to the models. There are two ways to do it,
+and neither needs a new package:
 
 - **A script.** The Node snippet above, run before the bundler: `"prebuild": "node scripts/bake.ts"` writes the `.bvh`
   files into `public/`, and the page fetches them as it would a texture. The repo's [`examples:bake`](#the-bake-cli)
@@ -121,71 +293,65 @@ export function bakeTrees(meshes: () => Promise<Record<string, MeshInput>>): Plu
 }
 ```
 
-A bake is one mesh's tree: the geometry a tree was built from is the geometry it must be loaded with. Meshes that share
-a tree are baked once and placed by many instances (`meshIndex`); there is no scene-level file.
-
-## The version check
-
-A file records the byte format (`SERIALIZED_FORMAT_VERSION`, header word 1) and the GPU layout
-(`GPU_LAYOUT_VERSION`, word 2) it was written with. `deserializeLayout` throws on a file from another version, naming
-both, so a stale bake never loads as wrong rays. To fall back instead of failing, read the two words first:
-
-{/* snippet: version-check */}
-```ts
-import { createTinyBvhBuilder, deserializeLayout, GPU_LAYOUT_VERSION, SERIALIZED_FORMAT_VERSION, type GpuLayoutMeshBvh, type MeshInput } from '@pmndrs/bvh';
-
-/** The baked tree at `url`, or a fresh build of `mesh` when the file is from another version of the package. */
-export async function loadOrRebuild(url: string, mesh: MeshInput): Promise<GpuLayoutMeshBvh> {
-    const bytes = await (await fetch(url)).arrayBuffer();
-    // The header's words 1 and 2 (little-endian u32): the byte format and the GPU layout the file was written with.
-    const header = new DataView(bytes);
-    if (header.getUint32(4, true) === SERIALIZED_FORMAT_VERSION && header.getUint32(8, true) === GPU_LAYOUT_VERSION) {
-        return deserializeLayout(bytes);
-    }
-    // A stale bake (the package moved on since the file was written): build it again, or fail the deploy.
-    const tiny = await createTinyBvhBuilder();
-    return tiny.buildLayout(mesh, { maxLeafPrimitives: 8 }).layout;
-}
-```
-
-Check in CI that the committed or deployed bakes are current (bake again and compare, or read the header): a stale file
-is refused at load, but only a person opening the page would see it.
+A tree file is one mesh's tree, and a tree must be loaded with the geometry it was built from. Meshes that share a tree
+are baked once and placed by many instances (`meshIndex`). A [scene file](#scene-files) holds a whole assembled scene.
 
 ## What invalidates a bake
 
 Bake again when any of these change:
 
-- **The geometry:** positions, indices, triangle order, or the per-triangle material numbers and filter flags (a
-  `records` file carries the triangles, the flags included, so it has no link to the source mesh except being built
-  from it). An `indexed` file holds no positions at all: it is only good next to the exact positions and indices it was
-  built from.
+- **The geometry:** positions, indices, triangle order, or the per-triangle material numbers and filter flags. A
+  `records` file carries the triangles, flags included, so its only link to the source mesh is that it was built from
+  it. An `indexed` file holds no positions at all, and is only good next to the exact positions and indices it was built
+  from. The geometry hash catches a changed position or index, but not changed flags or materials.
 - **The mesh space:** a baked tree is in the mesh's own space. Moving or scaling the mesh object changes nothing, but a
-  transform baked into the positions (a glTF merged to world space, as `examples:bake` does) is part of the file.
-- **The options:** `maxLeafPrimitives`, `triangleLeaves`, `nodeFormat` and the builder (a tinybvh tree and an H-PLOC
-  tree of one mesh differ). The formats are in the header, so a reader sees what it was given; the rest only changes
-  the tree.
-- **`GPU_LAYOUT_VERSION` or `SERIALIZED_FORMAT_VERSION`:** a breaking release. The file is refused, not converted.
+  transform baked into the positions is part of the file (a glTF merged to world space, as `examples:bake` does).
+- **A scene file's instances:** their transforms, masks and materials are part of the file.
+- **The options:** `maxLeafPrimitives`, `triangleLeaves`, `nodeFormat`, and the builder (a tinybvh tree and an H-PLOC
+  tree of one mesh differ). The formats are in the header, so a reader sees what it was given; the other options only
+  change the tree.
+- **`GPU_LAYOUT_VERSION`, `SERIALIZED_FORMAT_VERSION` or `SERIALIZED_SCENE_FORMAT_VERSION`:** a breaking release. The
+  file is refused, not converted.
 
-A newer tinybvh may build a different (equally valid) tree from the same mesh: an old bake still loads and traces the
-same hits. A refit changes the tree's boxes but is applied at load, never baked: bake the rest pose.
+A newer tinybvh may build a different (equally valid) tree from the same mesh. An old bake still loads, and traces the
+same hits. A refit changes the tree's boxes, but it's applied at load and never baked, so bake the rest pose.
 
 ## The bake CLI
 
-`pnpm examples:bake` bakes a model with tinybvh in Node and writes the tree (no GPU involved):
+`pnpm examples:bake` bakes a model with tinybvh in Node and writes a tree or a scene, with no GPU involved:
 
 ```bash
 pnpm examples:bake                                  # the default torus knot -> examples/node/bake/fixtures/torus-knot.bvh
 pnpm examples:bake model.glb --out public/model.bvh  # a glTF's meshes, merged into one world-space mesh
 pnpm examples:bake model.glb --leaf 4 --quantized   # smaller leaves, 32-byte nodes
+pnpm examples:bake model.glb --indexed              # 16-byte indexed triangles: load next to the same geometry
+pnpm examples:bake --scene                          # the default scene -> examples/node/bake/fixtures/knots.scene.bvh
+pnpm examples:bake model.glb --scene                # one tree per glTF mesh, its nodes as instances -> model.scene.bvh
 ```
 
-It reads `.glb` and `.gltf` (no Draco, meshopt or quantized positions) and prints the triangle and node counts, the
-build time and the two versions it wrote.
+It reads `.glb` and `.gltf` files, but not Draco, meshopt or quantized positions. It prints the counts, the build time,
+and the kind, formats and versions it wrote.
+
+- **Tree files** carry their geometry's hash.
+- **`--scene`** marks every instance static (a scene file's instances can't move anyway), so meshes used once merge into
+  one world-space mesh. `--no-merge` keeps them as instances.
+- **`--f32`** gives 64-byte nodes. A scene's default is quantized, a tree's is `f32`.
 
 ## An example
 
-[`node/bake`](https://github.com/pmndrs/bvh/tree/main/examples/node/bake) is the CLI above (`cli.ts`, `bake.ts`) and a
-page that loads its file with no build at all: `deserializeLayout`, an upload, and the WGSL walk in the shared ray-cast
-view. The overlay's `builtBy` says `baked file: torus-knot.bvh`, with the fetch and deserialize times, the header's
-versions, and, in the smoke run, a check that the file's bytes are identical to a fresh tinybvh build of the same model.
-`?bake=<url>` or a dropped `.bvh` loads another.
+[`node/bake`](https://github.com/pmndrs/bvh/tree/main/examples/node/bake) is the CLI above (`cli.ts`, `bake.ts`,
+`model.ts`) and a page that loads either kind of file with no build at all. The page:
+
+1. reads the header with `readSerializedHeader`;
+2. loads the file with `deserializeLayout` or `deserializeTraceScene`;
+3. uploads it, and traces it with the WGSL walk in the shared ray-cast view.
+
+The overlay's `builtBy` says `baked tree: torus-knot.bvh` or `baked scene: <name>`. It also shows the fetch and deserialize
+times, and the header's versions next to this package's.
+
+An indexed tree loads next to the default knot, or next to the glTF named by `?model=` (merged to world space as the
+CLI does it). The page refuses it next to anything else.
+
+`?bake=<url>` (try `fixtures/knots.scene.bvh`) or a dropped `.bvh` loads another file. The smoke run checks three
+files: the default tree, an indexed tree baked in the page, and the committed scene file. It compares each against the
+CPU walk, and the committed files byte for byte against fresh bakes.
