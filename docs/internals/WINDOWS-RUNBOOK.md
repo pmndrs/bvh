@@ -78,6 +78,13 @@ pnpm test:gpu:page scene-trees-sponza --gpu nvidia
 ```
 Manual page, 900 s limit. It reports `SceneTrees` memory (GPU-tree state, peak, settled) and times for copy, adopt and merged modes, uncapped (`Infinity`), the default 256 MiB cap and caps of 512, 256 and 128 MiB, and the quantized and indexed variants. Gate: the GPU walk matches the CPU reference; a capped row's peak is gated at storage plus one batch. M5 references: default cap peak 711 MiB, settled 458.6; quantized 360.8 (peak 613.2); indexed 327.1 (peak 580); both 230.0 (peak 483); uncapped peak 1,482.6 (`docs/internals/design/compressed-nodes.md`, `docs/internals/design/bvh-builders.md`).
 - Rule written: "Default: 256 MiB (Dennis's decision)" (`docs/internals/design/bvh-builders.md`), weighed against first trees arriving later (M5: 166 against 171 ms, no cost now). Whether it holds on D3D12: **Dennis decides** (no threshold written). Also compare tinybvh arrival times (quantized 439 ms against 351 on the M5).
+- Levers built 2026-11-14, not in the default variant list (off by default; correctness passed on SwiftShader only). Run them by name:
+  ```
+  $env:BVH_PAGE_QUERY = 'variants=quantized-copy,quantized-copy-emit,quantized-copy-default,quantized-copy-emit-default,quantized-adopt,quantized-indexed-copy,quantized-indexed-adopt'
+  pnpm test:gpu:page scene-trees-sponza --gpu nvidia --json sponza-trees-levers.json
+  $env:BVH_PAGE_QUERY = ''
+  ```
+  `-emit` is `gpuQuantizeOnEmit` (H-PLOC writes the quantized nodes; predicted one uncapped batch 1,482.4 to 1,307.1 MiB): compare `peak`, `firstTreesMs` and `gpuBuildMs` with the same name without `-emit`. `quantized-adopt` and `quantized-indexed-adopt` are the adopt lever in quantized and indexed scenes (adoption implies the emit): compare `peak` and `settled` with the `-copy` rows. Also `bvh-hploc-profile` (manual) times the quantize pass against the emit. **Dennis decides** whether any of them becomes a default.
 
 ## 4. Appending rows to `bench/results/trace.csv`
 
