@@ -4,7 +4,7 @@ description: The API mapping from three-mesh-bvh 0.9, what is missing here, what
 nav: 87
 ---
 
-This compares `@pmndrs/bvh` with three-mesh-bvh 0.9.18. Of the 52 features audited, 44 have an equivalent here, 3 have
+This compares `@pmndrs/bvh` with three-mesh-bvh 0.9.18. Of the 52 features audited, 45 have an equivalent here, 2 have
 part of one and 5 won't be done. The full audit, with the code behind each row, is
 [`docs/internals/PARITY.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/PARITY.md).
 
@@ -31,6 +31,7 @@ Most code switches by changing the import:
 | `ObjectBVH.shapecast({ intersectsBounds, intersectsObject, ... })` | `picker.shapecast(...)`: the same callbacks over the objects' world boxes ([Shapecast over the objects](/three/cpu-raycast#shapecast-over-the-objects)) |
 | `BatchedMesh.prototype.computeBoundsTree = computeBatchedBoundsTree` | The same: a tree per geometry in `batchedMesh.boundsTrees` ([BatchedMesh](/three/cpu-raycast#batchedmesh)) |
 | `StaticGeometryGenerator` | The same class: skinned and morphed meshes baked on the CPU ([On the CPU](/three/skinned-and-morphed#on-the-cpu-staticgeometrygenerator)) |
+| `new SkinnedMeshBVH(mesh, options)`, `bvh.refit()` | The same class: a tree over the mesh's posed triangles, refitted to the pose ([A tree that follows the pose](/three/skinned-and-morphed#a-tree-that-follows-the-pose)) |
 | `PointsBVH`, `LineSegmentsBVH`, `LineLoopBVH`, `LineBVH`, `computeBoundsTree({ type })` | The same classes and option; `acceleratedRaycast` on `Points` and the line objects answers as three's raycast, draw range read at each raycast ([Points and lines](/three/points-and-lines)) |
 
 Without three, the same queries are on the core's `CpuMeshBvh` with plain points ([CPU queries](/cpu-queries/raycast)).
@@ -58,11 +59,31 @@ Without three, the same queries are on the core's `CpuMeshBvh` with plain points
 | Per-vertex attribute buffers | None: use `hit.triangle` and `hit.barycentrics` against your own attributes, or `hit.material` |
 | `writeTransformData` override (material in the pad words) | `material(object, info)` in the sync's options, which becomes `hit.material` |
 
+## Both libraries in one TypeScript program
+
+Both packages add the same members to three's types, typed with their own classes: `BufferGeometry.boundsTree`,
+`computeBoundsTree` and `disposeBoundsTree`, and `BatchedMesh.boundsTrees`, `computeBoundsTree` and
+`disposeBoundsTree`. TypeScript can't merge two different types for one member, so it keeps the declaration it reads
+first and the other doesn't apply. A program that imports both (while migrating, or to compare them) can then refuse
+`BatchedMesh.prototype.computeBoundsTree = computeBatchedBoundsTree`, or type `batchedMesh.boundsTrees` as
+three-mesh-bvh's trees.
+
+Our declarations can't be made to match three-mesh-bvh's: its types name its own classes (`GeometryBVH`), whose
+`traverse` and `refit` take other arguments than ours (our `traverse` is the shapecast box walk; our `refit` takes the
+new positions). The way around it:
+
+- Keep three-mesh-bvh's types out of the program that uses ours. Importing anything from `three-mesh-bvh`, types
+  included, brings its declarations in. If you need both, put the code that uses three-mesh-bvh in its own
+  `tsconfig` project, as this repository does for its comparison suite.
+- Or cast where the two meet: assign through `BatchedMesh.prototype as unknown as { computeBoundsTree: typeof
+  computeBatchedBoundsTree }`, and read `batchedMesh.boundsTrees as (BvhBoundsTree | null)[] | null` and
+  `geometry.boundsTree as BvhBoundsTree | undefined`.
+- Either way, set `skipLibCheck`: the second declaration reports TS2717 in the other package's `.d.ts`.
+
+At run time nothing clashes: whichever functions you assign to the prototypes are the ones that run.
+
 ## Partly there
 
-- **Skinned meshes:** posed on the GPU for GPU rays ([Skinned and morphed meshes](/three/skinned-and-morphed)), and
-  baked on the CPU by `StaticGeometryGenerator` for CPU queries. No `SkinnedMeshBVH` (a tree that refits from the pose
-  itself).
 - **`maxDepth`:** accepted, not honoured.
 - **`setBoundingBox`, `verbose`, `onProgress`:** `onProgress` reports 0 and 1 only: tinybvh builds in one WebAssembly
   call and has no progress callback (its task hooks run only in threaded builds; ours is single-threaded). `verbose` is
