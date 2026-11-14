@@ -62,13 +62,13 @@
 import {
     BackSide,
     Box3,
+    BufferAttribute,
     DoubleSide,
     FrontSide,
     Mesh,
     Triangle,
     Vector2,
     Vector3,
-    type BufferAttribute,
     type BufferGeometry,
     type Face,
     type Intersection,
@@ -97,8 +97,10 @@ import {
     type BvhTriangleAccept,
     type BvhVec3Like,
     type CpuMeshBvhBuildOptions,
+    type CpuMeshBvhOptions,
 } from '../query/cpu-mesh-bvh.ts';
 import type { BvhMatrix4Like } from '../query/shapes.ts';
+import { meshBvhFromThreeMeshBvh, serializeThreeMeshBvh, type ThreeMeshBvhSerialized } from '../query/three-mesh-bvh-format.ts';
 import { ExtendedTriangle } from './shapes.ts';
 import { deserializeLayout } from '../serialize.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
@@ -526,6 +528,52 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
         } finally {
             threeTrianglePool.push(triangle);
         }
+    }
+
+    /**
+     * three-mesh-bvh's `MeshBVH.serialize(bvh, { cloneBuffers })`: the tree
+     * in three-mesh-bvh's serialized format (indirect mode, `index` a copy of
+     * the geometry's), which its `MeshBVH.deserialize` reads
+     * (`serializeThreeMeshBvh`). `bvh.serialize()` gives our own format.
+     */
+    static serialize(bvh: CpuMeshBvh<unknown> & { readonly geometry?: BufferGeometry }, options: { readonly cloneBuffers?: boolean } = {}): ThreeMeshBvhSerialized {
+        const index = bvh.geometry?.index?.array as Uint16Array | Uint32Array | Int32Array | undefined;
+        return serializeThreeMeshBvh(bvh, { index: index ?? null, cloneBuffers: options.cloneBuffers });
+    }
+
+    /**
+     * three-mesh-bvh's `MeshBVH.deserialize(data, geometry, { setIndex })`:
+     * a tree for `geometry` from three-mesh-bvh's serialized format (its
+     * `MeshBVH.serialize`, or {@link BvhBoundsTree.serialize}), or from our
+     * bytes (`bvh.serialize()`). For three-mesh-bvh's format, `setIndex`
+     * (default true) sets the geometry's index from `data.index` as
+     * three-mesh-bvh does (makes one when the geometry has none, else copies
+     * into it); the tree's shape is kept and its boxes made exact
+     * (`meshBvhFromThreeMeshBvh`). The other options are `computeBoundsTree`'s.
+     * Doesn't set `geometry.boundsTree`; `setBoundsTree` does.
+     */
+    static override deserialize(data: ThreeMeshBvhSerialized | ArrayBuffer | ArrayBufferView, geometry: BufferGeometry, options?: BvhBoundsTreeOptions & { readonly setIndex?: boolean }): BvhBoundsTree;
+    /** The core's form (`CpuMeshBvh.deserialize(bytes, options)`), for subclasses whose constructor takes a layout. */
+    static override deserialize<T>(this: new (layout: GpuLayoutMeshBvh, options?: CpuMeshBvhOptions) => T, bytes: ArrayBuffer | ArrayBufferView, options?: CpuMeshBvhOptions): T;
+    static override deserialize(data: ThreeMeshBvhSerialized | ArrayBuffer | ArrayBufferView, geometry?: BufferGeometry | CpuMeshBvhOptions, options: BvhBoundsTreeOptions & { readonly setIndex?: boolean } = {}): unknown {
+        if (!geometry || !(geometry as BufferGeometry).isBufferGeometry) return CpuMeshBvh.deserialize.call(this as never, data as ArrayBuffer, geometry as CpuMeshBvhOptions);
+        return BvhBoundsTree.deserializeFor(data, geometry as BufferGeometry, options);
+    }
+
+    private static deserializeFor(data: ThreeMeshBvhSerialized | ArrayBuffer | ArrayBufferView, geometry: BufferGeometry, options: BvhBoundsTreeOptions & { readonly setIndex?: boolean }): BvhBoundsTree {
+        if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) return deserializeBoundsTree(data, geometry, options);
+        const { setIndex = true, ...rest } = options;
+        if (setIndex && data.index) {
+            const current = geometry.getIndex();
+            if (current === null) geometry.setIndex(new BufferAttribute(data.index, 1, false));
+            else if (current.array !== data.index) {
+                (current.array as Uint32Array).set(data.index);
+                current.needsUpdate = true;
+            }
+        }
+        const snapshot = snapshotGeometry(geometry);
+        const layout = meshBvhFromThreeMeshBvh(data, snapshot.input);
+        return new BvhBoundsTree(geometry, { ...rest, layout, snapshot });
     }
 
     /**

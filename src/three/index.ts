@@ -68,6 +68,9 @@ export { GenerateMeshBvhWorker, type GenerateMeshBvhWorkerOptions } from './gene
 export { BVHHelper, MeshBVHHelper } from './helper.ts';
 // three-mesh-bvh's debug functions (the core's, which take any CpuMeshBvh, so a BvhBoundsTree too).
 export { estimateMemoryInBytes, getBVHExtremes, validateBounds, type BvhExtremes, type BvhExtremes as ExtremeInfo } from '../query/debug.ts';
+export { getJSONStructure } from './debug.ts';
+// three-mesh-bvh's serialized format (MeshBVH.serialize / deserialize take it too), next to ours.
+export { meshBvhFromThreeMeshBvh, serializeThreeMeshBvh, type BvhJsonNode, type ThreeMeshBvhSerialized, type ThreeMeshBvhSerialized as SerializedBVH } from '../query/three-mesh-bvh-format.ts';
 
 // The walk in three's node system (three-mesh-bvh's BVHComputeData pattern), for TSL and wgslFn.
 export { BvhTraceNodes, bvhClosestPointHitStruct, bvhTraceHitStruct, type BvhTraceBuffers, type BvhTraceBufferSource, type BvhTraceNodesOptions, type BvhTslNode } from './trace-nodes.ts';
