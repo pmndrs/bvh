@@ -34,3 +34,12 @@ node tests/gpu/pages/trace-bench/surface-to-csv.ts out.json [more.json ...] [--a
 
 - `platform-bench.ts` and the `platform` tracer of `trace-bench` compared against ddgi's own platform tracer; the `platform*` variants of `trace-oracle` and the createGI/technique version of `trace-inline` tested ddgi's platform. They live on in webgpu-ddgi.
 - The batch kernel and scene upload the pages use (`TraceBatchKernel`, `uploadTraceScene`) are in `src/trace/trace-gpu.ts`.
+
+## SwiftShader on a machine with a GPU
+
+CI's flags (`.github/workflows/ci.yml`: `--no-sandbox --use-webgpu-adapter=swiftshader --use-angle=swiftshader --enable-unsafe-swiftshader`) give no WebGPU adapter in Chrome 157 on Windows: `--use-angle=swiftshader` is the one that breaks it. To check a page on the CPU while the real GPUs are busy (another project benchmarking, say), use:
+
+```
+BVH_CHROME_FLAGS="--no-sandbox --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --disable-gpu-compositing" BVH_ALLOW_SOFTWARE_ADAPTER=1 BVH_PAGE_QUERY=profile=ci pnpm test:gpu:page <page>
+```
+The runner reports the adapter as `google/swiftshader`. SwiftShader has no `subgroups`, so the GPU builders fall back to tinybvh.
