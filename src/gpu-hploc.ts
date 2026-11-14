@@ -46,7 +46,7 @@
  * (`device.adapterInfo.subgroupMinSize`), never on a fixed warp width.
  */
 
-import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, gpuLayoutTriangleBytes, type GpuLayoutMeshBvh, type GpuLayoutNodeFormat, type GpuLayoutTriangleLeaves } from './gpu-layout.ts';
+import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_QUANTIZED_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES, gpuLayoutTriangleBytes, type GpuLayoutMeshBvh, type GpuLayoutNodeFormat, type GpuLayoutTriangleLeaves } from './gpu-layout.ts';
 import { quantizeTreeBuffers } from './gpu-quantize.ts';
 import {
     allocatedBytes,
@@ -73,7 +73,7 @@ import {
     type BatchTotals,
     type MeshPlacement,
 } from './gpu-lbvh.ts';
-import type { GpuMeshGeometry, GpuTreeBuffers } from './mesh-input.ts';
+import type { GpuMeshGeometry, GpuMeshTreeRange, GpuTreeBuffers } from './mesh-input.ts';
 import { LBVH_FIRST_ROUND_TRIANGLES, LBVH_PARAMS_BYTES, LBVH_STATS_BYTES, LBVH_STATS_WORDS, LBVH_WORKGROUP_SIZE } from './gpu-lbvh-wgsl.ts';
 import {
     HPLOC_CLIMB_WORDS,
@@ -107,6 +107,10 @@ const SORT_BITS = { 'cubic-30': [30], 'tinybvh-63': [32, 31] } as const satisfie
 export interface HplocBatchPlanOptions extends BatchPlanOptions {
     /** The Morton codes the batches will use (`'tinybvh-63'` needs 8 more bytes per triangle). Default `'cubic-30'`. */
     readonly mortonCodes?: HplocMortonCodes;
+    /** The batches will write quantized nodes in their emit pass (`HplocOptions.quantizeOnEmit`): 32 bytes per node and 32 per mesh, not 64 per node. Default false. */
+    readonly quantizeOnEmit?: boolean;
+    /** The batches will write their parents output (`GpuHplocBatchOptions.parents`). Default true. */
+    readonly parents?: boolean;
 }
 
 /**
@@ -122,7 +126,7 @@ export interface HplocBatchPlanOptions extends BatchPlanOptions {
  */
 export function planGpuHplocBatches(device: GPUDevice, geometries: readonly GpuMeshGeometry[], options: HplocBatchPlanOptions = {}): { batches: number[][]; tooBig: number[] } {
     const mortonCodes = options.mortonCodes ?? 'cubic-30';
-    return planMeshBatches(device, geometries, LARGEST_BYTES_PER_TRIANGLE, HPLOC_MAX_MESH_TRIANGLES, budgetOf(options, (totals) => hplocBatchBytes(totals, mortonCodes, options.triangleLeaves).total));
+    return planMeshBatches(device, geometries, LARGEST_BYTES_PER_TRIANGLE, HPLOC_MAX_MESH_TRIANGLES, budgetOf(options, (totals) => hplocBatchBytes(totals, mortonCodes, options.triangleLeaves, options.parents ?? true, options.quantizeOnEmit).total));
 }
 
 /** Where the climb's scratch and the links buffer put each part, in words (see the batch's constructor). */
@@ -158,8 +162,15 @@ function hplocParamRecords(mortonCodes: HplocMortonCodes) {
 /**
  * The H-PLOC batch's buffers, as {@link GpuHplocBatch} asks for them (before rounding up to 4 bytes, at least 16).
  * `parents: false` (a batch built without its parents output, {@link GpuHplocBatchOptions.parents}) leaves a 4-byte placeholder.
+ * `quantizeOnEmit`: the output nodes are each mesh's frame slot and 32-byte nodes (one slot per mesh and radix-tree node).
  */
-export function hplocBatchBuffers(totals: BatchTotals, mortonCodes: HplocMortonCodes = 'cubic-30', triangleLeaves: GpuLayoutTriangleLeaves = 'records', parents = true) {
+export function hplocBatchBuffers(
+    totals: BatchTotals,
+    mortonCodes: HplocMortonCodes = 'cubic-30',
+    triangleLeaves: GpuLayoutTriangleLeaves = 'records',
+    parents = true,
+    quantizeOnEmit = false,
+) {
     const { meshes, triangles, inner } = totals;
     const layout = hplocLayout(totals);
     const sortOffsetWords = totals.sortTiles * RADIX_BINS;
@@ -169,7 +180,7 @@ export function hplocBatchBuffers(totals: BatchTotals, mortonCodes: HplocMortonC
         flags: Math.max(1, totals.flagWords) * 4,
         // Every mesh's stats, then the word lbvhStart clears for the LBVH's climb queue (unused here).
         stats: meshes * LBVH_STATS_BYTES + 16,
-        outNodes: inner * GPU_LAYOUT_NODE_BYTES,
+        outNodes: quantizeOnEmit ? (inner + meshes) * GPU_LAYOUT_QUANTIZED_NODE_BYTES : inner * GPU_LAYOUT_NODE_BYTES,
         outTriangles: triangles * gpuLayoutTriangleBytes(triangleLeaves),
         outParents: parents ? inner * 4 : 4,
         tables: tableWords(totals) * 4,
@@ -193,8 +204,14 @@ export type HplocBatchBuffer = keyof ReturnType<typeof hplocBatchBuffers>;
 export type HplocPoolBuffer = Exclude<HplocBatchBuffer, 'outNodes' | 'outTriangles' | 'outParents'>;
 
 /** GPU bytes an H-PLOC batch of these totals holds while it builds, by buffer: its inputs, scratch and uniforms (`scratch`) and its trees (`outputs`). */
-export function hplocBatchBytes(totals: BatchTotals, mortonCodes: HplocMortonCodes = 'cubic-30', triangleLeaves: GpuLayoutTriangleLeaves = 'records', parents = true): BatchBytes<HplocBatchBuffer> {
-    return summarizeBatchBuffers(hplocBatchBuffers(totals, mortonCodes, triangleLeaves, parents));
+export function hplocBatchBytes(
+    totals: BatchTotals,
+    mortonCodes: HplocMortonCodes = 'cubic-30',
+    triangleLeaves: GpuLayoutTriangleLeaves = 'records',
+    parents = true,
+    quantizeOnEmit = false,
+): BatchBytes<HplocBatchBuffer> {
+    return summarizeBatchBuffers(hplocBatchBuffers(totals, mortonCodes, triangleLeaves, parents, quantizeOnEmit));
 }
 
 /** Options of one H-PLOC batch ({@link GpuHplocBuilder.createBatch}): the build's, and whether it writes parents. */
@@ -363,12 +380,17 @@ function minSubgroupSize(device: GPUDevice): number {
     return typeof size === 'number' && size >= MIN_SUBGROUP_SIZE ? size : MIN_SUBGROUP_SIZE;
 }
 
-function checkHplocOptions(options: HplocOptions): Required<HplocOptions> {
+/** Checks H-PLOC options and fills in the defaults. */
+export function checkHplocOptions(options: HplocOptions): Required<HplocOptions> {
     const mortonCodes = options.mortonCodes ?? 'cubic-30';
     const tieBreak = options.tieBreak ?? 'pairs';
     if (!(mortonCodes in HPLOC_MORTON)) throw new RangeError(`unknown Morton codes: ${String(mortonCodes)}`);
     if (!(tieBreak in HPLOC_TIE_BREAK)) throw new RangeError(`unknown tie break: ${String(tieBreak)}`);
-    return { ...checkOptions(options), mortonCodes, tieBreak };
+    const settings = checkOptions(options);
+    const quantizeOnEmit = options.quantizeOnEmit ?? false;
+    if (typeof quantizeOnEmit !== 'boolean') throw new RangeError(`quantizeOnEmit must be a boolean, got ${String(quantizeOnEmit)}`);
+    if (quantizeOnEmit && settings.nodeFormat !== 'quantized') throw new RangeError("quantizeOnEmit writes quantized nodes: it needs nodeFormat: 'quantized'");
+    return { ...settings, mortonCodes, tieBreak, quantizeOnEmit };
 }
 
 /** Compiles the builder's kernels once per device and builds any number of batches with them. */
@@ -492,10 +514,12 @@ export class GpuHplocBatch {
     readonly meshCount: number;
     /** The triangle format the batch writes. */
     readonly triangleLeaves: GpuLayoutTriangleLeaves;
-    /** The node format `finish` hands out (the batch builds `f32` nodes either way). */
+    /** The node format `finish` hands out (the batch builds `f32` nodes and packs them, unless {@link quantizeOnEmit}). */
     readonly nodeFormat: GpuLayoutNodeFormat;
     /** The batch writes each node's parent ({@link GpuHplocBatchOptions.parents}). */
     readonly parents: boolean;
+    /** The emit pass writes the quantized nodes itself (`HplocOptions.quantizeOnEmit`): no `f32` nodes, no quantize pass. */
+    readonly quantizeOnEmit: boolean;
     private readonly device: GPUDevice;
     private readonly label: string;
     private readonly mortonCodes: HplocMortonCodes;
@@ -543,9 +567,10 @@ export class GpuHplocBatch {
 
         // Sizes from hplocBatchBuffers, which the planner's byte cap and the scratch pool also use.
         const totals = batchTotals(this.meshes);
-        const sizes = hplocBatchBuffers(totals, options.mortonCodes, options.triangleLeaves, parents);
+        const sizes = hplocBatchBuffers(totals, options.mortonCodes, options.triangleLeaves, parents, options.quantizeOnEmit);
         this.triangleLeaves = options.triangleLeaves;
         this.nodeFormat = options.nodeFormat;
+        this.quantizeOnEmit = options.quantizeOnEmit;
         if (tables.byteLength !== sizes.tables || sortTable.offsetWords * 4 !== sizes.sortOffsets) throw new Error('hplocBatchBuffers is out of step with buildTables');
         const output = USAGE.STORAGE | USAGE.COPY_SRC | USAGE.COPY_DST;
         const make = (name: string, bytes: number, usage: number, owned = true): GPUBuffer => {
@@ -614,6 +639,10 @@ export class GpuHplocBatch {
             leafRunsOffset, // leafRunsOffset
             scratchQuads, // scratchQuads
             parents ? 1 : 0, // writeParents
+            options.quantizeOnEmit ? 1 : 0, // quantizedNodes
+            0, // unused0
+            0, // unused1
+            0, // unused2
         ]);
         if (hplocParams.byteLength !== HPLOC_PARAMS_BYTES) throw new Error('HplocParams changed size');
 
@@ -789,24 +818,26 @@ export class GpuHplocBatch {
             // From here the outputs are the caller's; if the read above failed, destroy() frees them with the rest.
             this.finished = true;
             const { outNodes, outTriangles, outParents } = this.buffers;
+            const meshes = this.meshes.map((mesh, index) => {
+                const stats = words.subarray(index * LBVH_STATS_WORDS, (index + 1) * LBVH_STATS_WORDS);
+                return meshResult(mesh, index, stats, hplocProblems(stats));
+            });
             const trees: GpuTreeBuffers = {
                 nodes: outNodes,
+                ...(this.quantizeOnEmit ? { nodeFormat: 'quantized' as const } : {}),
                 triangles: outTriangles,
                 triangleLeaves: this.triangleLeaves,
                 parents: outParents,
                 ...(this.parents ? {} : { withoutParents: true as const }),
-                meshes: this.meshes.map((mesh, index) => {
-                    const stats = words.subarray(index * LBVH_STATS_WORDS, (index + 1) * LBVH_STATS_WORDS);
-                    return meshResult(mesh, index, stats, hplocProblems(stats));
-                }),
+                meshes: this.quantizeOnEmit ? emittedQuantizedRanges(meshes) : meshes,
                 destroy() {
                     outNodes.destroy();
                     outTriangles.destroy();
                     outParents.destroy();
                 },
             };
-            // Built f32 (the climb and the leaf collapse need f32 boxes), then packed.
-            return this.nodeFormat === 'quantized' ? quantizeTreeBuffers(device, trees, this.label) : trees;
+            // Built f32 (the climb and the leaf collapse need f32 boxes), then packed, unless the emit packed them.
+            return this.nodeFormat === 'quantized' && !this.quantizeOnEmit ? quantizeTreeBuffers(device, trees, this.label) : trees;
         } finally {
             readback.destroy();
             this.destroy();
@@ -836,6 +867,22 @@ export class GpuHplocBatch {
             this.buffers.outParents.destroy();
         }
     }
+}
+
+/**
+ * The ranges of a batch whose emit wrote quantized nodes (`quantizeOnEmit`):
+ * mesh `m`'s frame slot is its first kept node's scanned rank (the `f32`
+ * numbering, `nodeOffset` in its stats) plus `m`, so its root is the slot after
+ * (`nodeOffset + m + 1`); its parents stay at the `f32` numbering
+ * (`parentOffset`). A mesh with a problem gets `nodeOffset: 0, nodeCount: 0`,
+ * as `quantizedMeshRanges` gives it, so nothing reads its slots.
+ */
+export function emittedQuantizedRanges(meshes: readonly GpuMeshTreeRange[]): GpuMeshTreeRange[] {
+    return meshes.map((mesh, index) => {
+        const parentOffset = mesh.parentOffset ?? mesh.nodeOffset;
+        if (mesh.problem || mesh.nodeCount < 1) return { ...mesh, nodeOffset: 0, nodeCount: 0, parentOffset };
+        return { ...mesh, nodeOffset: mesh.nodeOffset + index + 1, parentOffset };
+    });
 }
 
 /** What H-PLOC's own stats words say is wrong with a mesh's tree. */
