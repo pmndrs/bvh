@@ -217,7 +217,7 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         name: 'three-lineIntersection',
         path: 'three/lineIntersection',
         title: 'Line intersection',
-        description: 'Raycasting a polyline of hundreds of thousands of segments with a pick threshold; three-mesh-bvh\'s lineIntersection, which uses LineBVH. There is no line primitive here, so every segment is a degenerate triangle and tree.shapecast does the ray-segment test. Checked against three\'s Line.raycast in the smoke run.',
+        description: "Raycasting a polyline of hundreds of thousands of segments with a pick threshold, three-mesh-bvh's lineIntersection: LineBVH through computeBoundsTree({ type: LineBVH }) and acceleratedRaycast on the Line. Checked against three's Line.raycast in the smoke run.",
         timeoutMs: 240_000,
     },
     {
