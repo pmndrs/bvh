@@ -39,7 +39,6 @@ Raw WebGPU and `@pmndrs/bvh` only: no three, no engine.
 | [`three/instances`](https://github.com/pmndrs/bvh/tree/main/examples/three/instances) | 6,000 `InstancedMesh` and 3,000 `BatchedMesh` instances moving, with a top-level refit every frame and picking. |
 | [`three/load-gltf`](https://github.com/pmndrs/bvh/tree/main/examples/three/load-gltf) | Fast first trees on a real glTF: GPU H-PLOC, then tinybvh from the worker pool, with a per-mesh timeline. |
 | [`three/inspector`](https://github.com/pmndrs/bvh/tree/main/examples/three/inspector) | tinybvh, H-PLOC and LBVH on one mesh: build times, SAH, depth, bytes, `MeshBVHHelper` and a heat map of nodes per ray. |
-| [`three/point-cloud`](https://github.com/pmndrs/bvh/tree/main/examples/three/point-cloud) | three-mesh-bvh's `pointCloudIntersection`, ported: a [`PointsBVH`](/three/points-and-lines) over a scanned point cloud, the pointer picked through `acceleratedRaycast` with `Raycaster.params.Points.threshold`, and `BVHHelper` boxes. |
 | [`three/sdf`](https://github.com/pmndrs/bvh/tree/main/examples/three/sdf) | A [signed distance field](/tracing/sdf) generated on the GPU from the scene's trees into a three 3D texture, shown by a TSL raymarch or a slice with contours; resolution, margin and the inside rule live. [`compare/sdf`](https://github.com/pmndrs/bvh/tree/main/examples/compare/sdf) times the generation against three-mesh-bvh's `webgpu_sdfGeneration`. |
 
 ### three-mesh-bvh examples, ported
@@ -55,6 +54,7 @@ Each of these is one of three-mesh-bvh's examples (MIT) running on `@pmndrs/bvh/
 | [`three/triangleIntersect`](https://github.com/pmndrs/bvh/tree/main/examples/three/triangleIntersect) | `ExtendedTriangle.intersectsTriangle` on its own: two triangles with draggable corners and the segment where they cross. From `triangleIntersect`. |
 | [`three/voxelize`](https://github.com/pmndrs/bvh/tree/main/examples/three/voxelize) | `tree.intersectsBox(box, boxToMesh)` for the voxels on a surface and `tree.raycastFirst(ray, DoubleSide)` for the ones inside, filled a few milliseconds per frame; a dropped glTF builds its tree in `GenerateMeshBvhWorker`. From `voxelize`. |
 | [`three/batchedMesh`](https://github.com/pmndrs/bvh/tree/main/examples/three/batchedMesh) | `computeBatchedBoundsTree` and `acceleratedRaycast` on a `BatchedMesh` of three geometries with hundreds of raycasters firing every frame, against three's own `BatchedMesh.raycast`. From `batchedMesh`. |
+| [`three/point-cloud`](https://github.com/pmndrs/bvh/tree/main/examples/three/point-cloud) | three-mesh-bvh's `pointCloudIntersection`, ported: a [`PointsBVH`](/three/points-and-lines) over a scanned point cloud, the pointer picked through `acceleratedRaycast` with `Raycaster.params.Points.threshold`, and `BVHHelper` boxes. |
 
 ## Babylon.js
 
