@@ -131,5 +131,6 @@ A GPU build runs on a device, and a device's buffers can't be shared with anothe
    upload, and the GPU itself is still shared, so it saves no GPU time.
 3. **Everything in a worker**, rendering to an `OffscreenCanvas`: one device, no copies, and the main thread is free.
 
-`SceneTrees` uses option 1, and tinybvh on the pool for the swaps. The vanilla `workers-gpu` example that shows the
-three side by side is planned.
+`SceneTrees` uses option 1, and tinybvh on the pool for the swaps. The vanilla `workers-gpu` example runs all three
+side by side on the same meshes, against tinybvh's pool alone, and reports the time to a first usable scene and to the
+best trees for each ([Examples](/examples/examples)).

@@ -66,6 +66,5 @@ const cost = treeSahCost(layout); // lower is better; compare builders on the sa
 ## Adding a builder
 
 A new builder (from a paper, say) has to write this layout, pass `checkGpuLayout` and the oracle, and add its rows to
-the benches. Only MIT or Apache-2.0 code may be ported, or code written from the paper alone; its licence goes in
-`licenses/` and `THIRD_PARTY.md`. The contributor notes are in
-[`docs/internals/design/bvh-framework.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/bvh-framework.md).
+the benches. Only MIT or Apache-2.0 code may be ported, or code written from the paper alone. The steps, with a small
+builder you can run, are in [Adding a builder from a paper](/builders/adding-a-builder).

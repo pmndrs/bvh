@@ -1,0 +1,161 @@
+---
+title: Adding a builder from a paper
+description: How a new BVH build method becomes one more builder here, with the same contract, the same oracle, the same bench rows and a licence rule.
+nav: 22
+sourcecode: src/topology.ts
+---
+
+New BVH build methods appear in papers every year. This package is set up so that one of them is a new builder, not a
+new library: it writes [the GPU layout](/concepts/gpu-layout), so every walk, refit, serializer and engine adapter
+keeps working, and it is judged on the same checks as the three builders already here. This page is the route for
+someone who wants to add one.
+
+It is for contributors. If you only want to use a builder, start at [Choosing a builder](/builders/choosing-a-builder).
+
+## What a builder is
+
+A builder takes a mesh and gives back a tree in the layout ([the builder contract](/concepts/builder-contract)). There
+are two ways to write one:
+
+- **A CPU builder that decides the tree's shape.** It returns a `MeshTreeTopology`: which triangle sits where
+  (`order`) and which node is whose child (`children`, four numbers per node). `buildMeshBvhFromTopology` turns the shape
+  into the layout. It computes every box itself, from the triangles' own `f32` corners, so your builder can't produce a
+  box that is a hair too small and lets rays slip through. This is how tinybvh's trees get into the layout
+  (`topologyFromTinyBvhNodes`), and how three-mesh-bvh's do.
+- **A GPU builder that writes nodes, triangles and parents into buffers.** `GpuHplocBuilder` and `GpuLbvhBuilder` are the
+  models. This is more work and only pays when build time matters; write the CPU version first and keep it as the
+  reference your GPU port must match.
+
+Start with the first. Most of the work in a new method is the algorithm, and the topology route lets you check it
+before you spend time on WGSL.
+
+## A builder in a few lines
+
+This one is a toy: it cuts the triangles' centres at the median of their longest axis. A paper's algorithm replaces
+`medianSplitTopology` and nothing around it changes.
+
+{/* snippet: new-builder */}
+```ts
+import { buildMeshBvhFromTopology, singleLeafTopology, type MeshTreeTopology } from '@pmndrs/bvh';
+
+/** A toy builder: cut the triangles' centres at the median of their longest axis. Yours replaces this function. */
+export function medianSplitTopology(positions: Float32Array, indices: Uint32Array): MeshTreeTopology {
+    const triangleCount = indices.length / 3;
+    const order = Uint32Array.from({ length: triangleCount }, (_, triangle) => triangle);
+    if (triangleCount <= 2) return singleLeafTopology(order, 0, triangleCount);
+    const centre = (triangle: number, axis: number) =>
+        (positions[indices[triangle * 3] * 3 + axis] + positions[indices[triangle * 3 + 1] * 3 + axis] + positions[indices[triangle * 3 + 2] * 3 + axis]) / 3;
+
+    // Four words per node: leftIndex, leftCount, rightIndex, rightCount. A count above 0 is a leaf of
+    // order[index .. index + count); a count of 0 is the inner node `index`. Node 0 is the root.
+    const children: number[] = [];
+    const emit = (start: number, count: number): number => {
+        const node = children.length / 4;
+        children.push(0, 0, 0, 0);
+        const run = order.subarray(start, start + count);
+        const extent = [0, 1, 2].map((axis) => Math.max(...run.map((t) => centre(t, axis))) - Math.min(...run.map((t) => centre(t, axis))));
+        const axis = extent.indexOf(Math.max(...extent));
+        run.sort((a, b) => centre(a, axis) - centre(b, axis));
+        const left = count >> 1;
+        for (const [side, from, size] of [[0, start, left], [2, start + left, count - left]]) {
+            if (size <= 4) children.splice(node * 4 + side, 2, from, size);
+            else children[node * 4 + side] = emit(from, size);
+        }
+        return node;
+    };
+    emit(0, triangleCount);
+    return { order, children: Uint32Array.from(children) };
+}
+
+export function treeFromTopology(positions: Float32Array, indices: Uint32Array) {
+    // The package writes the boxes, the triangle records and the parents from the shape alone.
+    return buildMeshBvhFromTopology({ positions, indices }, medianSplitTopology(positions, indices));
+}
+```
+
+Two rules about the shape: a child's node number is larger than its parent's, and every triangle sits in exactly one
+leaf. Leaves larger than `maxLeafPrimitives` (8 by default) are cut in half for you. A mesh of one or two triangles
+has no inner node to split; `singleLeafTopology` makes its root.
+
+## The checks
+
+A builder is used only after it passes two checks. The first needs no GPU.
+
+1. **The layout check.** `checkGpuLayout(layout, mesh)` returns a list of problems, empty when the tree is right: every
+   triangle is there bit for bit, every box is exactly the box below it, and the parents, depth and counts agree.
+   `treeSahCost(layout)` scores the tree (lower is better), so your builder can be compared with tinybvh's on the same
+   mesh.
+2. **The oracle.** The CPU walk over your trees must give the same answers as the tree-less reference on fixed hard
+   cases and random rays, then the GPU walk must too, on every GPU you have. Why it is a gate, what its cases are and
+   how to run the GPU page: [The oracle rule](/concepts/oracle).
+
+{/* snippet: new-builder-oracle */}
+```ts
+import { buildReferenceScene, buildTraceScene, checkGpuLayout, compareClosest, createCpuTracer, createRandom, IDENTITY_TRANSFORM, randomRays, randomTriangleSoup, traceClosestReference, treeSahCost } from '@pmndrs/bvh';
+
+const random = createRandom(1);
+const geometry = randomTriangleSoup(random, 2000, 10, 1.5);
+const mesh = { positions: geometry.positions, indices: new Uint32Array(geometry.positions.length / 3).map((_, i) => i) };
+const instances = [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }];
+
+// 1. The tree is well formed: every triangle bit for bit, every box exactly the box below it.
+const layout = treeFromTopology(mesh.positions, mesh.indices);
+const problems = checkGpuLayout(layout, mesh); // [] when right
+const sah = treeSahCost(layout); // lower is better; compare with tinybvh's on the same mesh
+
+// 2. The CPU walk over your trees agrees with the tree-less reference on random rays.
+const scene = await buildTraceScene([mesh], instances, { build: (input) => treeFromTopology(input.positions, input.indices as Uint32Array) });
+const tracer = createCpuTracer(scene);
+const reference = buildReferenceScene([mesh], instances);
+const rays = randomRays(random, 5000, [-10, -10, -10, 10, 10, 10], 2);
+let mismatches = 0;
+for (const ray of rays) {
+    const hit = tracer.closest(ray);
+    if (compareClosest(hit && { hit: true, ...hit }, traceClosestReference(reference, ray), ray).verdict === 'mismatch') mismatches++;
+}
+```
+
+Random rays are the easy part. The oracle's fixed cases (thin walls, mirrored transforms, rays aimed at shared edges,
+instance masks) are what find a builder's real mistakes; the fixtures are exported, so your own page can use them. The
+quantized and indexed layout variants run the same cases, and a builder is expected to pass them all.
+
+## The bench rows
+
+Correctness is a gate, speed is measured. A new builder adds its rows next to the others so the comparison stays honest:
+
+- **The trace bench.** `tests/gpu/pages/trace-bench` times the walk on Sponza, Bistro and the other scenes, one
+  `tracer` id per way of building trees (`ours-tinybvh`, `ours-lbvh`, `ours-hploc`, `ours-tmbuild`). Add yours as one
+  more id. A GPU builder also reports its build time, tree size and SAH cost. Rows go to `bench/results/trace.csv`
+  with the date, commit, device and browser.
+- **The method is fixed:** a loaded GPU, medians, the same rays for every tracer, and the clock rule. How to read and
+  repeat it: [Builds and tracing](/performance/builds-and-tracing#method).
+- **The builders example.** `examples/vanilla/builders` shows each builder on one mesh: build time, SAH cost, depth,
+  bytes, and trace speed on the same rays. A builder worth keeping gets a row there too.
+
+Report the SAH cost and trace speed against tinybvh's trees, the quality reference. A faster build with worse trees
+is a trade, and the numbers should say which.
+
+## The licence rule
+
+Only code under **MIT or Apache-2.0** is ported into this package. Otherwise, build from the paper alone: papers are
+fine to implement, code with no licence or a copyleft one is not to be read and translated. When you port:
+
+- put the licence text in `licenses/` and add the source, version and commit to `THIRD_PARTY.md`;
+- say where the port differs from its source in `docs/internals/DIVERGENCES.md`;
+- if code ends up in the `.wasm` or a bundled file, the build keeps its licence in a comment, and fails if a built file
+  loses it.
+
+The package's own licences are in the [README](https://github.com/pmndrs/bvh#licences).
+
+## Candidates already researched
+
+Two methods were researched and not built:
+
+- **DOBB-BVH** (Benthin et al., HPG 2024), which turns a wide BVH into a tree of oriented bounding boxes with
+  discretized rotations.
+- **Tetrahedral cages**, a different shape for what a node bounds.
+
+Both change what a node holds, so each would be a new node format as well as a builder, and its walk would need the
+same oracle. Their notes live in `research/` of the ddgi research repository, not here. One more builder that was tried
+and dropped is a compressed 8-wide layout (CWBVH): about the same trace speed on Sponza and slower on Bistro, for
+nodes four times smaller; the reasons are in [`docs/internals/design/bvh-framework.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/bvh-framework.md).

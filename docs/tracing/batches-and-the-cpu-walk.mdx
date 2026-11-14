@@ -129,3 +129,9 @@ const blocked = tracer.any({ origin: [0, 0, 5], direction: [0, 0, -1], tMin: 0, 
 - `createCpuTracer(scene, { triangleFilter, rayMasks })` takes the filter as a TypeScript function.
 
 For queries on one mesh (raycasts with sides, shapecasts, closest points), use [`CpuMeshBvh`](/cpu-queries/raycast).
+
+## See also
+
+- [Tracing in WGSL](/tracing/wgsl-walk): the walk these batches call, in your own kernel.
+- [The oracle rule](/concepts/oracle): the CPU walk as one of three tracers that must agree.
+- [Builds and tracing](/performance/builds-and-tracing): ray rates, and how they were measured.

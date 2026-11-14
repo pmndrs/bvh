@@ -20,6 +20,7 @@ import { DOCS_DIR, docPages, syncDocs } from '../../tools/docs-snippets.ts';
 import * as babylon from './babylon.ts';
 import * as builders from './builders.ts';
 import * as cpu from './cpu-queries.ts';
+import * as newBuilder from './new-builder.ts';
 import * as start from './getting-started.ts';
 import * as serialization from './serialization.ts';
 import * as three from './three.ts';
@@ -108,6 +109,14 @@ describe('docs samples that need no GPU', () => {
         expect(builders.check(layout, mesh.positions, mesh.indices as Uint32Array)).toBeGreaterThan(0);
         builders.layoutVersion();
         builders.readNode(layout, 0);
+    });
+
+    it('check a new builder with the layout check and the reference tracer', async () => {
+        const { problems, sah, mismatches, rays } = await newBuilder.checkNewBuilder();
+        expect(problems).toEqual([]);
+        expect(sah).toBeGreaterThan(0);
+        expect(rays).toBe(5000);
+        expect(mismatches).toBe(0);
     });
 
     it('run the CPU walk and the WGSL samples', async () => {
