@@ -99,7 +99,7 @@ $env:BVH_ASSETS_DIR = $AssetsDir
 $env:BVH_MANIFESTS_DIR = $ManifestsDir
 
 $correctness = @(
-    'trace-oracle', 'trace-inline', 'query-oracle', 'sdf-oracle', 'trace-cpu-agreement',
+    'trace-oracle', 'trace-inline', 'query-oracle', 'sdf-oracle', 'trace-clustered', 'trace-cpu-agreement',
     'bvh-lbvh,bvh-hploc,bvh-blas-refit,bvh-top-level-gpu,bvh-shared',
     'scene-trees-runtime,scene-trees-deforming,scene-trees-mid-swap',
     'three-trace,three-skinned,three-shapecast'
