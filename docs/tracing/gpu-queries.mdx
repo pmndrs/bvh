@@ -183,6 +183,9 @@ through an edge two triangles share hits one of them. `bvhClosestPointToTriangle
 `new BvhTraceNodes(renderer, trees, { queries: true })` puts the queries in `bvh.module` (call them by name from a
 `wgslFn`), and `bvh.closestPoint(point, maxDistance)` returns a `BvhClosestPointHit` struct node (`.get('distance')`,
 `'instance'`, `'triangle'`, `'material'`, `'barycentrics'`, `'point'`, `'normal'`); `closestPointMasked` takes a mask.
+`bvh.getShapecastFn({ shape, intersectsBounds, intersectsTriangle, keep })` compiles a shapecast whose hooks are TSL
+`Fn`s or `wgslFn`s, three-mesh-bvh's `getShapecastFn`
+([Shapecasts with TSL hooks](/three/trace-nodes#shapecasts-with-tsl-hooks)).
 
 ## How they are checked
 

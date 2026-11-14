@@ -79,6 +79,111 @@ Call `bvh.update()` after every `SceneTrees.update` that may grow a buffer, and 
 `SceneTrees.version` changed it swaps in an attribute bound to the new buffer, and three makes new bind groups.
 Nothing recompiles.
 
+## Waiting for every tree
+
+three-mesh-bvh's `await bvh.updateAsync()` builds every tree before the scene is traced. Here the builds already run in
+the background (GPU first trees, tinybvh in workers), so a frame loop needs nothing extra: its next frame starts them
+and each tree is placed when it arrives. For a first load that should be complete before the first traced frame, wait
+for it:
+
+{/* snippet: update-async */}
+```ts
+import { BvhTraceNodes, SceneTreesObject3DSync, deviceFromRenderer, updateSceneTreesAsync } from '@pmndrs/bvh/three';
+import { SceneTrees } from '@pmndrs/bvh';
+import type { WebGPURenderer } from 'three/webgpu';
+
+const trees = await SceneTrees.create(deviceFromRenderer(renderer));
+const sync = new SceneTreesObject3DSync(trees, scene, { renderer });
+const bvh = new BvhTraceNodes(renderer, trees);
+
+// three-mesh-bvh's `await bvh.updateAsync()`: every tree built and placed before the first traced frame.
+await bvh.updateAsync({ sync }); // or updateSceneTreesAsync(trees, { sync, nodes: bvh, until: 'refined' })
+```
+
+`updateSceneTreesAsync(trees, { sync, nodes, until })` walks the scene (`sync.sync()`) and waits for its pose pipelines
+(`sync.ready`), runs an update in an encoder of its own (which starts every build), waits for `whenBuilt()` (or
+`whenRefined()` with `until: 'refined'`: tinybvh's trees, not the GPU's first ones), runs another update (which places
+the trees) and rebinds the nodes. `bvh.updateAsync({ sync, until })` does the same for a `SceneTrees` source, and only
+rebinds an uploaded one.
+
+## Shapecasts with TSL hooks
+
+`bvh.getShapecastFn(options)` is three-mesh-bvh's `getShapecastFn`: a shapecast over the whole scene whose box and
+triangle tests are three function nodes, a TSL `Fn` with `setLayout` or a `wgslFn`. It returns a TSL function that runs
+the cast and returns true when the triangle test stopped it. It needs `queries: true`.
+
+{/* snippet: shapecast-fn */}
+```ts
+import { BvhTraceNodes, type BvhTslNode } from '@pmndrs/bvh/three';
+import type { SceneTrees } from '@pmndrs/bvh';
+import { Fn, If, float, instanceIndex, max, select, storage, uint, vec3, wgslFn } from 'three/tsl';
+import { StorageBufferAttribute, type WebGPURenderer } from 'three/webgpu';
+
+const bvh = new BvhTraceNodes(renderer, trees, { queries: true });
+
+// A box test as a TSL Fn with a layout (a pure function of its arguments): the box's score, negative to skip it.
+const sphereBounds = Fn(([sphere, boxMin, boxMax]: BvhTslNode[]) => {
+    const outside = max(max(boxMin.sub(sphere.xyz), sphere.xyz.sub(boxMax)), vec3(0));
+    const distanceSq = outside.dot(outside);
+    return select(distanceSq.lessThanEqual(sphere.w.mul(sphere.w)), distanceSq, float(-1));
+}).setLayout({ name: 'sphereBounds', type: 'float', inputs: [{ name: 'sphere', type: 'vec4' }, { name: 'boxMin', type: 'vec3' }, { name: 'boxMax', type: 'vec3' }] });
+
+// A triangle test as a wgslFn, which may call the module's helpers: true stops the cast.
+const sphereTriangle = wgslFn(
+    `fn sphereTriangle(sphere: vec4f, a: vec3f, b: vec3f, c: vec3f) -> bool {
+        let offset = bvhClosestPointToTriangle(sphere.xyz, a, b, c).point - sphere.xyz;
+        return dot(offset, offset) <= sphere.w * sphere.w;
+    }`,
+    [bvh.module],
+);
+
+// Does each sphere (centre, radius) touch the scene?
+const touches = bvh.getShapecastFn({ name: 'sphereTouches', shape: 'vec4', intersectsBounds: sphereBounds, intersectsTriangle: sphereTriangle });
+
+const sphereNode = storage(spheres, 'vec4', count).toReadOnly();
+const out = new StorageBufferAttribute(new Uint32Array(count), 1);
+const outNode = storage(out, 'uint', count);
+const kernel = Fn(() => {
+    If(instanceIndex.lessThan(count), () => {
+        outNode.element(instanceIndex).assign(select(touches(sphereNode.element(instanceIndex)), uint(1), uint(0)));
+    });
+})().compute(count, [64]);
+await renderer.computeAsync(kernel);
+const touching = new Uint32Array(await renderer.getArrayBufferAsync(out));
+```
+
+- **`shape`**: the TSL type of the value the cast is called with (`'vec4'`, `'mat4'`, a `StructTypeNode`, ...). Every hook
+  gets it first. Without it, the hooks and the call take no shape.
+- **`intersectsBounds(shape?, boxMin, boxMax) -> float`**: a world box's score. Negative skips the box; of two siblings
+  the lower score is entered first.
+- **`intersectsTriangle(shape?, a, b, c, instance, triangle, material, normal) -> bool`**, or any leading part of those
+  arguments (only what the hook declares is computed): a triangle in world space, its instance (`hit.instance`),
+  original triangle, material and the world normal of its authored front side. True stops the cast.
+- **`keep(shape?, score) -> bool`** (optional): asked when a box comes off the stack with the score it was pushed with;
+  false skips it. Use it to cull boxes farther than the best answer so far. Default: keep every box.
+- **`name`**: the WGSL name of the cast (default `bvhThreeShapecast<n>`, numbered in order of creation). Name your casts
+  to keep the shader text the same across loads.
+- The call takes `(shape?, mask?)`; `mask` (a `u32`, default every instance) only with `rayMasks`.
+
+The hooks become functions of their own in the shader, and the walk is the trace module's shapecast walk (the one
+`traceModuleWgsl({ shapecast })` stamps for WGSL hooks, [Your own shapecast](/tracing/gpu-queries#your-own-shapecast)):
+world space, every instance, node and triangle format. Two limits come from three:
+
+- A TSL `Fn` with a layout is cached across shaders, so its body must depend only on its arguments. Pass per-call data
+  as the `shape`, not as a uniform read in the hook.
+- TSL hooks can't keep state between calls. A hook that counts or keeps a best distance is a `wgslFn` writing a
+  `var<private>` (declared in a `code()` node it includes) or a storage buffer; another `wgslFn` with the same include
+  reads it after the cast.
+
+The triangle hook may call the module's other walks (`bvhTraceAny`, `bvhClosestPoint`, ...); the box and keep hooks
+must not. The differences from three-mesh-bvh's: the triangle test gets one world-space triangle at a time rather than a
+leaf's index range, and there is no result pointer (the shape goes in by value; results come back through state, as
+above).
+
+Checked in Node, with three's own WGSL node builder, that a kernel calling a cast compiles to the expected text, and on a
+GPU by the `three-shapecast` page: a sphere cast against the library's `bvhIntersectsSphere`, and a counting cast with
+private state against a CPU count.
+
 ## How it binds, and what can break
 
 - The storage nodes are bound to `SceneTrees`' own `GPUBuffer`s, with no copy. `BvhTraceNodes` sets three's backend
