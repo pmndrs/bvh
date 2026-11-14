@@ -76,15 +76,14 @@ There, with differences:
   no result pointer: the shape goes in by value, and results come back through a `wgslFn`'s private state.
 - **`StaticGeometryGenerator`:** it also bakes a mesh again when only a morph weight changed (three-mesh-bvh keeps the
   old pose then).
-
 - **Points and lines:** CPU only (`SceneTrees` and the GPU walk take triangles), as three-mesh-bvh's are. Where
   three-mesh-bvh departs from three's raycast (no bounding-sphere test, the draw range and groups fixed at build time,
   the index reordered outside `indirect` mode), we follow three ([Points and lines](/three/points-and-lines#where-three-mesh-bvh-differs)).
 
 ## Missing
 
-Nothing on the CPU. On the GPU nothing is missing either. SDF generation exists ([Signed distance fields](/tracing/sdf), `generateSdfTexture` in
-`/three`), and so do closest point, sphere and box tests, shapecasts (with WGSL or TSL hooks) and the WGSL helpers
+Nothing on the CPU. On the GPU nothing is missing either. SDF generation exists
+([Signed distance fields](/tracing/sdf), `generateSdfTexture` in `/three`), and so do closest point, sphere and box tests, shapecasts (with WGSL or TSL hooks) and the WGSL helpers
 `intersectRayTriangle` and `closestPointToTriangle` ([Spatial queries on the GPU](/tracing/gpu-queries)); the queries
 run over the whole scene in world space rather than over one mesh. `ClusteredBVH`'s cut is `clusterTraceScene`
 ([Clustered top level](/scenes/clustered-top-level)), for scenes assembled without `SceneTrees`.
