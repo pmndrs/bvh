@@ -222,6 +222,13 @@ export function workerLoadFailure(what: string, detail?: string): string {
     );
 }
 
+/** A timer for `idleTimeoutMs` that doesn't keep Node's process alive on its own (browsers have no `unref`). */
+function idleTimer(callback: () => void, ms: number): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(callback, ms);
+    (timer as { unref?: () => void }).unref?.();
+    return timer;
+}
+
 /** The worker entry's URL. It stays inline in `new Worker(new URL(...))` so bundlers find the file. */
 function startWorker(): Worker {
     return new Worker(new URL('../trace/mesh-bvh-worker.ts', import.meta.url), { type: 'module' });
@@ -378,7 +385,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
                 clearTimeout(entry.idleTimer);
                 entry.idleTimer = null;
             } else if (idle && entry.idleTimer === null) {
-                entry.idleTimer = setTimeout(() => {
+                entry.idleTimer = idleTimer(() => {
                     entry.idleTimer = null;
                     if (disposed || entry.job !== null || !workers.includes(entry)) return;
                     removeWorker(entry);
@@ -391,7 +398,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
             clearTimeout(inlineIdleTimer);
             inlineIdleTimer = null;
         } else if (inlineIdle && inlineIdleTimer === null && inlineBuilt) {
-            inlineIdleTimer = setTimeout(() => {
+            inlineIdleTimer = idleTimer(() => {
                 inlineIdleTimer = null;
                 if (disposed || inlineRunning > 0 || queue.some((job) => !job.settled)) return;
                 // Only when this pool built something inline since the last drop: another pool's instance is the same one.
