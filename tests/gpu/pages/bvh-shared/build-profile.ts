@@ -8,20 +8,27 @@
  * - whole: one compute pass, as the trace bench times it;
  * - by step: each step (for every mesh at once) in its own timed pass (the
  *   extra passes add a little time, so the sum is above "whole");
- * - by size: the largest mesh alone, and every other mesh together.
+ * - by size: the largest mesh alone, and every other mesh together;
+ * - H-PLOC only, quantized nodes two ways: the `f32` build plus the quantize
+ *   pass (`nodeFormat: 'quantized'`, the default path) against the emit
+ *   writing them (`quantizeOnEmit`), with each way's output node bytes.
  *
  * Not a recorded number; the trace-bench-lbvh and trace-bench-hploc pages are.
  */
 
 import { GpuHplocBuilder, HPLOC_STAGES } from '../../../../src/gpu-hploc.ts';
 import { GpuLbvhBuilder, LBVH_STAGES } from '../../../../src/gpu-lbvh.ts';
-import type { GpuMeshGeometry } from '../../../../src/mesh-input.ts';
+import type { GpuMeshGeometry, GpuTreeBuffers } from '../../../../src/mesh-input.ts';
+import { nodeQuantizerFor, quantizedMeshRanges } from '../../../../src/gpu-quantize.ts';
+import { GPU_LAYOUT_QUANTIZED_NODE_BYTES } from '../../../../src/gpu-layout.ts';
+import type { HplocOptions } from '../../../../src/gpu-hploc.ts';
 import { loadBenchScene } from '../trace-bench/scene-source.ts';
 import { median } from '../trace-bench/statistics.ts';
 import { assert, runGpuTest } from '../../client.ts';
 
 /** What the profile needs of a batch; both builders' batches have it. */
 interface ProfiledBatch {
+    readonly outputBytes?: number;
     encode(encoder: GPUCommandEncoder, timestampWrites?: GPUComputePassTimestampWrites, stageTimestamps?: (stage: string) => GPUComputePassTimestampWrites): void;
     finish(): Promise<unknown>;
     destroy(): void;
@@ -30,7 +37,7 @@ interface ProfiledBatch {
 interface ProfiledBuilder {
     readonly stages: readonly string[];
     prepare(): Promise<void>;
-    createBatch(geometries: readonly GpuMeshGeometry[]): ProfiledBatch;
+    createBatch(geometries: readonly GpuMeshGeometry[], options?: HplocOptions): ProfiledBatch;
 }
 
 function profiledBuilder(device: GPUDevice, kind: 'lbvh' | 'hploc'): ProfiledBuilder {
@@ -38,7 +45,7 @@ function profiledBuilder(device: GPUDevice, kind: 'lbvh' | 'hploc'): ProfiledBui
     return {
         stages: kind === 'lbvh' ? LBVH_STAGES : HPLOC_STAGES,
         prepare: () => builder.prepare(),
-        createBatch: (geometries) => builder.createBatch(geometries) as ProfiledBatch,
+        createBatch: (geometries, options) => builder.createBatch(geometries, options) as ProfiledBatch,
     };
 }
 
@@ -69,6 +76,41 @@ async function timeWhole(device: GPUDevice, batch: ProfiledBatch): Promise<numbe
         if (run > 0) samples.push(ms);
     }
     return median(samples);
+}
+
+/**
+ * H-PLOC's quantized nodes two ways: the f32 build (`f32WholeMs`) plus the
+ * quantize pass over its trees, against the emit writing them
+ * (`quantizeOnEmit`), and each way's output node bytes at their peak (the pass
+ * holds the f32 nodes and the packed ones at once).
+ */
+async function timeQuantizedNodes(device: GPUDevice, builder: ProfiledBuilder, geometries: readonly GpuMeshGeometry[], f32WholeMs: number, f32Trees: GpuTreeBuffers) {
+    const { jobs, slots } = quantizedMeshRanges(f32Trees.meshes);
+    const target = device.createBuffer({ size: Math.max(1, slots) * GPU_LAYOUT_QUANTIZED_NODE_BYTES, usage: GPUBufferUsage.STORAGE });
+    const job = nodeQuantizerFor(device).prepare(f32Trees.nodes, target, jobs, 'profile quantize');
+    const passSamples: number[] = [];
+    for (let run = 0; run <= RUNS; run++) {
+        const [ms] = await timePasses(device, 1, (encoder, writes) => {
+            const pass = encoder.beginComputePass({ timestampWrites: writes(0) });
+            job.dispatch(pass);
+            pass.end();
+        });
+        if (run > 0) passSamples.push(ms);
+    }
+    job.destroy();
+    target.destroy();
+    const emitting = builder.createBatch(geometries, { nodeFormat: 'quantized', quantizeOnEmit: true });
+    const emitWholeMs = await timeWhole(device, emitting);
+    const emittedNodeBytes = (await emitting.finish()) as GpuTreeBuffers;
+    const result = {
+        passMs: Number(median(passSamples).toFixed(3)),
+        f32BuildPlusPassMs: Number((f32WholeMs + median(passSamples)).toFixed(3)),
+        emitWholeMs: Number(emitWholeMs.toFixed(3)),
+        passPeakNodeBytes: f32Trees.nodes.size + slots * GPU_LAYOUT_QUANTIZED_NODE_BYTES,
+        emitNodeBytes: emittedNodeBytes.nodes.size,
+    };
+    emittedNodeBytes.destroy();
+    return result;
 }
 
 export async function runBuildProfile(kind: 'lbvh' | 'hploc'): Promise<void> {
@@ -103,7 +145,10 @@ export async function runBuildProfile(kind: 'lbvh' | 'hploc'): Promise<void> {
             }
             const byStage = Object.fromEntries(Object.entries(perStage).map(([stage, samples]) => [stage, Number(median(samples).toFixed(3))]));
             log(`by step: ${JSON.stringify(byStage)}`);
-            await batch.finish();
+            const f32Trees = (await batch.finish()) as GpuTreeBuffers;
+            const quantized = kind === 'hploc' ? await timeQuantizedNodes(device, builder, geometries, wholeMs, f32Trees) : null;
+            if (quantized) log(`quantized nodes: ${JSON.stringify(quantized)}`);
+            f32Trees.destroy();
 
             const largest = triangles.indexOf(Math.max(...triangles));
             const sizes: Record<string, number> = {};
@@ -116,7 +161,7 @@ export async function runBuildProfile(kind: 'lbvh' | 'hploc'): Promise<void> {
                 part.destroy();
             }
             log(`by size: ${JSON.stringify(sizes)}`);
-            return { scene: sceneId, meshes: geometries.length, wholeMs: Number(wholeMs.toFixed(3)), byStage, sizes };
+            return { scene: sceneId, meshes: geometries.length, wholeMs: Number(wholeMs.toFixed(3)), byStage, sizes, ...(quantized ? { quantized } : {}) };
         },
         { optionalFeatures: ['subgroups', 'timestamp-query'], requiredLimits: { maxStorageBufferBindingSize: 1 << 30, maxBufferSize: 1 << 30 } },
     );
