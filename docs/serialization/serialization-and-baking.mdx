@@ -81,6 +81,102 @@ const loaded = CpuMeshBvh.deserialize(bytes, { source: input });
 In three, `geometry.boundsTree.serialize()` and `deserializeBoundsTree(bytes, geometry)` do the same
 ([The tree object](/three/bounds-tree#save-and-load)). These are our layout's bytes, not three-mesh-bvh's format.
 
+## Bake at build time
+
+The tree is built once, when the app is built, and shipped as a file next to the models. Two ways, neither a new package:
+
+- **A script.** The Node snippet above, run before the bundler: `"prebuild": "node scripts/bake.ts"` writes the `.bvh`
+  files into `public/`, and the page fetches them as it would a texture. The repo's [`examples:bake`](#the-bake-cli)
+  is such a script.
+- **A Vite plugin.** The same calls in `generateBundle`, so `vite build` emits the trees with the other assets (the dev
+  server doesn't run `generateBundle`: run the script once, or serve the file from `configureServer`).
+
+{/* snippet: bake-plugin */}
+```ts
+// vite.config.ts: bake at build time; the trees are emitted next to the app's other assets.
+import { createTinyBvhBuilder, serializeLayout, type MeshInput } from '@pmndrs/bvh';
+import type { Plugin } from 'vite';
+
+/** `meshes` reads the app's models and returns each one's positions and indices, keyed by file name. */
+export function bakeTrees(meshes: () => Promise<Record<string, MeshInput>>): Plugin {
+    return {
+        name: 'bake-trees',
+        async generateBundle() {
+            const tiny = await createTinyBvhBuilder();
+            for (const [name, mesh] of Object.entries(await meshes())) {
+                const { layout } = tiny.buildLayout(mesh, { maxLeafPrimitives: 8 });
+                this.emitFile({ type: 'asset', fileName: `trees/${name}.bvh`, source: new Uint8Array(serializeLayout(layout)) });
+            }
+        },
+    };
+}
+```
+
+A bake is one mesh's tree: the geometry a tree was built from is the geometry it must be loaded with. Meshes that share
+a tree are baked once and placed by many instances (`meshIndex`); there is no scene-level file.
+
+## The version check
+
+A file records the byte format (`SERIALIZED_FORMAT_VERSION`, header word 1) and the GPU layout
+(`GPU_LAYOUT_VERSION`, word 2) it was written with. `deserializeLayout` throws on a file from another version, naming
+both, so a stale bake never loads as wrong rays. To fall back instead of failing, read the two words first:
+
+{/* snippet: version-check */}
+```ts
+import { createTinyBvhBuilder, deserializeLayout, GPU_LAYOUT_VERSION, SERIALIZED_FORMAT_VERSION, type GpuLayoutMeshBvh, type MeshInput } from '@pmndrs/bvh';
+
+/** The baked tree at `url`, or a fresh build of `mesh` when the file is from another version of the package. */
+export async function loadOrRebuild(url: string, mesh: MeshInput): Promise<GpuLayoutMeshBvh> {
+    const bytes = await (await fetch(url)).arrayBuffer();
+    // The header's words 1 and 2 (little-endian u32): the byte format and the GPU layout the file was written with.
+    const header = new DataView(bytes);
+    if (header.getUint32(4, true) === SERIALIZED_FORMAT_VERSION && header.getUint32(8, true) === GPU_LAYOUT_VERSION) {
+        return deserializeLayout(bytes);
+    }
+    // A stale bake (the package moved on since the file was written): build it again, or fail the deploy.
+    const tiny = await createTinyBvhBuilder();
+    return tiny.buildLayout(mesh, { maxLeafPrimitives: 8 }).layout;
+}
+```
+
+Check in CI that the committed or deployed bakes are current (bake again and compare, or read the header): a stale file
+is refused at load, but only a person opening the page would see it.
+
+## What invalidates a bake
+
+Bake again when any of these change:
+
+- **The geometry:** positions, indices, triangle order, or the per-triangle material numbers and filter flags (a
+  `records` file carries the triangles, the flags included, so it has no link to the source mesh except being built
+  from it). An `indexed` file holds no positions at all: it is only good next to the exact positions and indices it was
+  built from.
+- **The mesh space:** a baked tree is in the mesh's own space. Moving or scaling the mesh object changes nothing, but a
+  transform baked into the positions (a glTF merged to world space, as `examples:bake` does) is part of the file.
+- **The options:** `maxLeafPrimitives`, `triangleLeaves`, `nodeFormat` and the builder (a tinybvh tree and an H-PLOC
+  tree of one mesh differ). The formats are in the header, so a reader sees what it was given; the rest only changes
+  the tree.
+- **`GPU_LAYOUT_VERSION` or `SERIALIZED_FORMAT_VERSION`:** a breaking release. The file is refused, not converted.
+
+A newer tinybvh may build a different (equally valid) tree from the same mesh: an old bake still loads and traces the
+same hits. A refit changes the tree's boxes but is applied at load, never baked: bake the rest pose.
+
+## The bake CLI
+
+`pnpm examples:bake` bakes a model with tinybvh in Node and writes the tree (no GPU involved):
+
+```bash
+pnpm examples:bake                                  # the default torus knot -> examples/node/bake/fixtures/torus-knot.bvh
+pnpm examples:bake model.glb --out public/model.bvh  # a glTF's meshes, merged into one world-space mesh
+pnpm examples:bake model.glb --leaf 4 --quantized   # smaller leaves, 32-byte nodes
+```
+
+It reads `.glb` and `.gltf` (no Draco, meshopt or quantized positions) and prints the triangle and node counts, the
+build time and the two versions it wrote.
+
 ## An example
 
-A Node bake example (`node/bake`) is planned for the examples site.
+[`node/bake`](https://github.com/pmndrs/bvh/tree/main/examples/node/bake) is the CLI above (`cli.ts`, `bake.ts`) and a
+page that loads its file with no build at all: `deserializeLayout`, an upload, and the WGSL walk in the shared ray-cast
+view. The overlay's `builtBy` says `baked file: torus-knot.bvh`, with the fetch and deserialize times, the header's
+versions, and, in the smoke run, a check that the file's bytes are identical to a fresh tinybvh build of the same model.
+`?bake=<url>` or a dropped `.bvh` loads another.
