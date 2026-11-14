@@ -66,7 +66,7 @@ way into storage, so the batches are the same size either way.
 ## Other memory
 
 - **Workers:** each tinybvh worker keeps a 64 MiB WebAssembly heap; the default pool of up to 4 holds 256 MiB of CPU
-  memory while it lives. Inputs are copied in (one mesh per worker at a time), results transferred out.
+  memory while it lives (`idleTimeoutMs` ends idle workers). Inputs are copied in (one mesh per worker at a time), results transferred out.
 - **Deforming meshes:** the GPU refit's buffers (32 bytes of box per triangle, plus topology and scratch) and, with
   the default quantized nodes, a 64-byte `f32` copy of the mesh's nodes that the refit runs on (a pass packs it into
   the scene). So a deforming mesh holds 96 bytes per node: its 32 in the scene and the 64-byte copy. Static scenes pay
@@ -74,7 +74,7 @@ way into storage, so the batches are the same size either way.
 - **Merged static instances** (on by default, for instances added with `static: true`): the same resident bytes as
   instanced, plus a CPU plan of 161.6 MiB on Sponza while the merged mesh builds.
 - **`gpuTreeOutputs: 'adopt'`:** no copy at load, but the node buffer keeps one node per triangle: 613.6 MiB settled on
-  Sponza against 470.0 (both `f32`). It needs `nodeFormat: 'f32'`.
+  Sponza against 470.0 (both `f32`), unless `trimWhenRefined` packs it afterwards (448.1). It needs `nodeFormat: 'f32'`.
 
 ## Levers
 
@@ -86,6 +86,25 @@ way into storage, so the batches are the same size either way.
 | Both | quantized only | 222.6 MiB resident against `f32` records | not measured together yet |
 | Compact hit records (`hitNormal: false`) | off | 16 bytes per ray in a batch | the 40-byte record costs 6-12% (0.88-0.94x); M5 0.96-1.15x |
 | Smaller leaves (`maxLeafPrimitives`) | 8 | nothing: tinybvh picks about 1.9 per leaf anyway (8 against 4 saved 0.5 MiB) | |
+
+### Options that keep the layout
+
+These change where bytes live, not what the walk reads: the same trees and the same hits as the default. All are off
+by default for now. Figures from `tools/memory-breakdown.ts`, Sponza and Bistro exterior.
+
+| Option | Default | What it does | Saves on Sponza (Bistro exterior) |
+| --- | --- | --- | --- |
+| `SceneTrees.trim()`, `trimWhenRefined: true` | off | packs the node buffer to its trees once nothing is building | **165.5 MiB** settled with `gpuTreeOutputs: 'adopt'` (92.2); 5.3 with `copy` and the default cap (1.4) |
+| `parents: 'refit'` | `'always'` | no parents output in the GPU builds, no parents arrays for meshes that don't deform | 3.7 MiB of peak with the default cap, 21.9 uncapped; 11.6 MiB of CPU during the load |
+| `deformingLayouts: 'compact'` | `'full'` | a deforming mesh keeps its nodes, parents and 4 bytes per triangle for `setPoseCpu`, not its whole tree | 241.0 MiB of CPU if every mesh deformed (118.7); half of each deforming mesh's copy |
+| `refitBoxes: 'shared'` | `'per-mesh'` | deforming meshes' refits share one box buffer, sized for the largest | 168.7 MiB of GPU if every mesh deformed (83.8) |
+| `quantizeJobs: 'batched'` | `'per-tree'` | one quantize pass per update instead of one per GPU tree | a few KiB; 132 passes and 264 small buffers become 7 and 14 (1,296 and 2,592 become 3 and 6) |
+| Worker pool `idleTimeoutMs` | `Infinity` | ends workers left idle that long | 256 MiB of CPU once the pool is idle (4 workers of 64 MiB) |
+
+Pass them to `SceneTrees.create(device, { ... })`, or `idleTimeoutMs` in its `workers` options (or to
+`createBvhWorkerPool`). A trim moves trees: `version` changes, so bind groups are made again, and placements read from
+`meshStatus` before it are stale. `GpuMeshRefit` users can share boxes themselves with `GpuRefitBoxPool`, and keep a
+deforming mesh's CPU copy small with `compactPoseLayout` (which `refitLayoutToPose` takes).
 
 Speeds are against `f32` nodes, records and the 40-byte record. RTX 3060 Laptop: Windows, headless Chrome 157,
 2026-11-13, Sponza and Bistro interior surface-ray benches, the median of three runs, each lever timed alone.
