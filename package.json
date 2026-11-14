@@ -22,6 +22,11 @@
             "types": "./dist/three/index.d.ts",
             "import": "./dist/three/index.js",
             "default": "./dist/three/index.js"
+        },
+        "./babylon": {
+            "types": "./dist/babylon/index.d.ts",
+            "import": "./dist/babylon/index.js",
+            "default": "./dist/babylon/index.js"
         }
     },
     "scripts": {
@@ -71,9 +76,13 @@
         "README.md"
     ],
     "peerDependencies": {
+        "@babylonjs/core": ">=9.35.0 <10.0.0",
         "three": ">=0.187.0 <0.188.0"
     },
     "peerDependenciesMeta": {
+        "@babylonjs/core": {
+            "optional": true
+        },
         "three": {
             "optional": true
         }

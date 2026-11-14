@@ -3,15 +3,17 @@ import tseslint from 'typescript-eslint';
 import globals from 'globals';
 
 const ENGINE_MESSAGE =
-    '@pmndrs/bvh must stay engine-free: no three, babylon, pixi or ddgi code in src/. three belongs in src/three/ (the @pmndrs/bvh/three subpath) only; other engines in tests/, tools/ or an adapter.';
+    '@pmndrs/bvh must stay engine-free: no three, babylon, pixi or ddgi code in src/. three belongs in src/three/ (the @pmndrs/bvh/three subpath) and Babylon in src/babylon/ (@pmndrs/bvh/babylon) only; other engines in tests/, tools/ or an adapter.';
 
-/** Imports no file in src/ may make; src/three/ may import three (below). */
-const forbidden = (allowThree) => [
-    // The core may not reach into src/three/ either (relative '../three/...').
-    ...(allowThree ? [] : ['three', 'three/*', '**/three/**']),
+/**
+ * Imports no file in src/ may make. `engine` is the one engine a folder may import: 'three' (src/three/), 'babylon' (src/babylon/) or null (the core).
+ * The core may not reach into either folder (relative '../three/...'), and an engine's folder takes no other engine.
+ */
+const forbidden = (engine) => [
+    ...(engine === 'three' ? [] : ['three', 'three/*', '**/three/**']),
+    ...(engine === 'babylon' ? [] : ['@babylonjs/*', '**/babylon/**']),
     'three-mesh-bvh',
     'three-mesh-bvh/*',
-    '@babylonjs/*',
     'pixi.js',
     'pixi.js/*',
     '@pmndrs/gi',
@@ -24,15 +26,12 @@ const forbidden = (allowThree) => [
     '**/ddgi-three/**',
     '**/ddgi/src/**',
 ];
-const engineRules = (allowThree) => ({
-    'no-restricted-imports': ['error', { patterns: [{ group: forbidden(allowThree), message: ENGINE_MESSAGE }] }],
+const dynamicImportSelector = (engine) =>
+    `ImportExpression[source.value=/^(${engine === 'three' ? '' : 'three|'}three-mesh-bvh|${engine === 'babylon' ? '' : '@babylonjs\\/|'}pixi\\.js|@pmndrs\\/gi(\\/|$))|ddgi-(core|three)/]`;
+const engineRules = (engine) => ({
+    'no-restricted-imports': ['error', { patterns: [{ group: forbidden(engine), message: ENGINE_MESSAGE }] }],
     // no-restricted-imports only sees static imports, so catch import('three') too.
-    'no-restricted-syntax': ['error', {
-        selector: allowThree
-            ? "ImportExpression[source.value=/^(three-mesh-bvh|@babylonjs\\/|pixi\\.js|@pmndrs\\/gi(\\/|$))|ddgi-(core|three)/]"
-            : "ImportExpression[source.value=/^(three|three-mesh-bvh|@babylonjs\\/|pixi\\.js|@pmndrs\\/gi(\\/|$))|ddgi-(core|three)/]",
-        message: ENGINE_MESSAGE,
-    }],
+    'no-restricted-syntax': ['error', { selector: dynamicImportSelector(engine), message: ENGINE_MESSAGE }],
 });
 
 export default tseslint.config(
@@ -50,14 +49,20 @@ export default tseslint.config(
     {
         // The library: engine-free, and independent of the GI code it was split from.
         files: ['src/**/*.ts'],
-        ignores: ['src/**/*.test.ts', 'src/three/**'],
-        rules: engineRules(false),
+        ignores: ['src/**/*.test.ts', 'src/three/**', 'src/babylon/**'],
+        rules: engineRules(null),
     },
     {
         // @pmndrs/bvh/three: the one place three (a peer dependency) may be imported.
         files: ['src/three/**/*.ts'],
         ignores: ['src/three/**/*.test.ts'],
-        rules: engineRules(true),
+        rules: engineRules('three'),
+    },
+    {
+        // @pmndrs/bvh/babylon: the one place @babylonjs/* (a peer dependency) may be imported.
+        files: ['src/babylon/**/*.ts'],
+        ignores: ['src/babylon/**/*.test.ts'],
+        rules: engineRules('babylon'),
     },
     {
         // Tests, GPU pages and tools may use three (as the reference builder and loader), the DOM and WebGPU.

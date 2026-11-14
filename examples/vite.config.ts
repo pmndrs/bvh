@@ -65,6 +65,7 @@ export default defineConfig({
         alias: [
             { find: /^@pmndrs\/bvh$/, replacement: resolve(repoRoot, 'src/index.ts') },
             { find: /^@pmndrs\/bvh\/three$/, replacement: resolve(repoRoot, 'src/three/index.ts') },
+            { find: /^@pmndrs\/bvh\/babylon$/, replacement: resolve(repoRoot, 'src/babylon/index.ts') },
             { find: /^@pmndrs\/bvh\/worker$/, replacement: resolve(repoRoot, 'src/worker/index.ts') },
         ],
     },
@@ -90,6 +91,7 @@ export default defineConfig({
                     if (id.includes('/node_modules/@dimforge/')) return 'rapier';
                     if (id.includes('/node_modules/@babylonjs/')) return 'babylon';
                     if (id.includes('/src/three/')) return 'bvh-three';
+                    if (id.includes('/src/babylon/')) return 'bvh-babylon';
                     if (id.startsWith(resolve(repoRoot, 'src') + sep)) return 'bvh';
                     return undefined;
                 },

@@ -7,6 +7,7 @@
         "paths": {
             "@pmndrs/bvh": ["./src/index.ts"],
             "@pmndrs/bvh/three": ["./src/three/index.ts"],
+            "@pmndrs/bvh/babylon": ["./src/babylon/index.ts"],
             "@pmndrs/bvh/worker": ["./src/worker/index.ts"]
         }
     },
