@@ -417,6 +417,24 @@ export class GpuMeshRefit {
         this.triangleWordOffset = placement.triangleWordOffset ?? 0;
     }
 
+    /**
+     * The tree moved to another place in the target's node buffer (a scene
+     * that compacted its nodes, `SceneTrees.trim`): its root is now at
+     * `nodeWordOffset`, as {@link setTree}'s placement names it. The shape,
+     * the triangles' place and the stats stay.
+     */
+    moveTree(nodeWordOffset: number): void {
+        if (this.quantized) {
+            if (nodeWordOffset < 8 || nodeWordOffset % 8 !== 0) throw new RangeError(`GpuMeshRefit.moveTree: a quantized target's nodeWordOffset (${nodeWordOffset}) must be a 32-byte slot after the frame slot`);
+            this.quantized.rootSlot = nodeWordOffset / 8;
+            this.quantized.job?.destroy();
+            this.quantized.job = null;
+            this.quantized.jobTarget = null;
+        } else {
+            this.refit.setNodeWordOffset(nodeWordOffset);
+        }
+    }
+
     /** Records the triangle step and the refit into `pass`. The vertices must be written by an earlier command. */
     encode(pass: GPUComputePassEncoder, target: MeshRefitTarget, vertices: MeshRefitVertices): void {
         const pipeline = this.kernels.triangles;

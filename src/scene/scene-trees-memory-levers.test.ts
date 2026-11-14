@@ -152,3 +152,112 @@ describe("quantizeJobs: 'batched' (one quantize pass per update, not per tree)",
         await expect(setUp({ quantizeJobs: 'all' as never })).rejects.toThrow(/quantizeJobs/);
     });
 });
+
+/** A quad's positions lifted into a hill: a CPU pose that changes every triangle. */
+function hill(geometry: MeshGeometry): Float32Array {
+    const positions = geometry.positions.slice();
+    for (let at = 0; at < positions.length; at += 3) positions[at + 2] += 0.5 + 0.25 * Math.sin(positions[at] * 1.7) * Math.cos(positions[at + 1] * 1.3);
+    return positions;
+}
+
+describe('SceneTrees.trim and trimWhenRefined (the node buffer packed after the swaps)', () => {
+    for (const variant of [
+        { name: "adopt (f32, the batch's one node per triangle)", options: { gpuTreeOutputs: 'adopt' as const, nodeFormat: 'f32' as const, gpuMaxBatchBytes: Infinity, mergeStaticInstances: false } },
+        { name: 'adopt, merged', options: { gpuTreeOutputs: 'adopt' as const, nodeFormat: 'f32' as const, gpuMaxBatchBytes: Infinity } },
+        { name: 'copy, the defaults (quantized, merged, capped)', options: {} },
+        { name: 'copy, indexed, uncapped', options: { triangleLeaves: 'indexed' as const, gpuMaxBatchBytes: Infinity } },
+    ]) {
+        it(`${variant.name}: trim() packs the nodes to their size, with the same hits; trimWhenRefined does it unasked`, async () => {
+            const plain = await load(variant.options);
+            const before = plain.scene.memory;
+            expect(before.nodes).toBeGreaterThan(before.nodesInUse);
+            const version = plain.scene.version;
+            plain.scene.trim();
+            plain.frame();
+            const after = plain.scene.memory;
+            expect(after.nodes).toBe(before.nodesInUse);
+            expect(after.nodesInUse).toBe(before.nodesInUse);
+            expect(plain.scene.trimCount).toBe(1);
+            expect(plain.scene.version).toBeGreaterThan(version);
+            expect(hits(plain.scene, plain.rays)).toEqual(plain.settled.hits);
+            // The old buffer goes at the next update; a trim with nothing to give back does nothing.
+            plain.scene.trim();
+            plain.frame();
+            expect(plain.scene.trimCount).toBe(1);
+            expect(plain.scene.memory.retired).toBe(0);
+
+            const auto = await load({ ...variant.options, trimWhenRefined: true });
+            expect(auto.scene.trimCount).toBe(1);
+            expect(auto.settled.memory.nodes).toBe(before.nodesInUse);
+            expect(auto.settled.hits).toEqual(plain.settled.hits);
+
+            // A mesh added after the trim grows the buffer again and traces like the rest.
+            const extra = tessellatedQuad(5, 1);
+            const mesh = plain.scene.addMesh(extra);
+            plain.scene.addInstance({ mesh, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 2, 1], instanceIndex: 999 });
+            plain.frame();
+            await plain.scene.whenRefined();
+            plain.frame();
+            plain.frame();
+            const tracer = createCpuTracer(readScene(plain.scene));
+            expect(tracer.closest({ origin: [0.3, 0.4, 5], direction: [0, 0, -1], tMin: 0, tMax: 100 })?.instanceIndex).toBe(999);
+            plain.scene.dispose();
+            auto.scene.dispose();
+        });
+    }
+
+    for (const nodeFormat of ['f32', 'quantized'] as const) {
+        it(`${nodeFormat}: a deforming mesh's refit and CPU pose follow its tree when a trim moves it`, async () => {
+            const gpu = createFakeGpu({}, { features: ['subgroups'], kernels: SCENE_KERNELS });
+            const scenes = [];
+            for (const trimWhenRefined of [false, true]) {
+                const hploc = new FakeHploc(gpu.device);
+                const scene = await SceneTrees.create(gpu.device, { nodeFormat, topLevel: 'cpu', trimWhenRefined, firstTreeBuilder: new GpuFirstTrees(gpu.device, { hploc }) });
+                const frame = () => {
+                    const encoder = gpu.createEncoder();
+                    scene.update(encoder);
+                    gpu.submit(encoder);
+                };
+                const { geometries, instances } = sceneOf(4);
+                const meshes = geometries.map((geometry) => scene.addMesh(geometry));
+                const handles = instances.map((instance) => scene.addInstance({ ...instance, mesh: meshes[instance.meshIndex], static: false }));
+                const sheet = tessellatedQuad(4, 1);
+                const cloth = scene.addMesh(sheet, { deforming: { bounds: [-5, -5, -5, 5, 5, 5] } });
+                scene.addInstance({ mesh: cloth, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], instanceIndex: 50 });
+                frame();
+                await scene.whenRefined();
+                frame();
+                frame();
+                // A mesh before the cloth goes: its range is a hole the trim closes, moving the cloth's tree.
+                scene.removeInstance(handles[0]);
+                scene.removeMesh(meshes[0]);
+                frame();
+                frame();
+                // The CPU pose after the trim, written where the tree is now.
+                scene.setPoseCpu(cloth, hill(sheet));
+                frame();
+                frame();
+                const placement = scene.meshStatus(cloth).placement!;
+                const internal = scene as unknown as { deforming: { meshes: Map<number, { placement: { nodeWordOffset: number }; refit: { quantized: { rootSlot: number } | null; refit: { params: FakeBuffer } } }> } };
+                const refit = internal.deforming.meshes.get(cloth)!;
+                const wordsPerNode = nodeFormat === 'quantized' ? 8 : 16;
+                expect(refit.placement.nodeWordOffset).toBe(placement.nodeOffset * wordsPerNode);
+                if (nodeFormat === 'quantized') expect(refit.refit.quantized!.rootSlot).toBe(placement.nodeOffset);
+                else expect(refit.refit.refit.params.words[0]).toBe(placement.nodeOffset * wordsPerNode);
+                // Once after the load, once after the removal.
+                expect(scene.trimCount).toBe(trimWhenRefined ? 2 : 0);
+                scenes.push({ scene, placement });
+            }
+            // Random rays, and a grid straight down onto the posed cloth (z 0.25 to 0.75 over [-1, 1]^2).
+            const grid: TraceRay[] = Array.from({ length: 400 }, (_, index) => ({ origin: [-0.95 + 0.1 * (index % 20), -0.95 + 0.1 * Math.floor(index / 20), 4], direction: [0, 0, -1], tMin: 0, tMax: 100 }));
+            const rays = [...randomRays(createRandom(4), 800, [-6, -6, -6, 6, 6, 6], 1), ...grid];
+            // The trim moved the cloth's tree; the refit and the CPU pose went with it.
+            expect(scenes[1].placement.nodeOffset).not.toBe(scenes[0].placement.nodeOffset);
+            const trimmedHits = hits(scenes[1].scene, rays);
+            expect(trimmedHits).toEqual(hits(scenes[0].scene, rays));
+            expect(trimmedHits.filter((hit) => hit.startsWith('50/')).length).toBeGreaterThan(200);
+            expect(scenes[1].scene.memory.nodes).toBe(scenes[1].scene.memory.nodesInUse);
+            for (const { scene } of scenes) scene.dispose();
+        });
+    }
+});

@@ -220,6 +220,14 @@ export class DeformingTrees {
         mesh.refitDue = mesh.vertices !== null;
     }
 
+    /** The mesh's placed tree moved in the node buffer (`SceneTrees.trim`): the refit follows it, keeping its shape and drift. */
+    treeMoved(slot: number, placement: DeformingTreePlacement): void {
+        const mesh = this.meshes.get(slot);
+        if (!mesh?.placement) return;
+        mesh.refit.moveTree(placement.nodeWordOffset);
+        mesh.placement = placement;
+    }
+
     treeReleased(slot: number): void {
         const mesh = this.meshes.get(slot);
         if (mesh) mesh.placement = null;

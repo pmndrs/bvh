@@ -289,6 +289,15 @@ export interface SceneTreesOptions {
      * buffers, bind groups and passes (P9, docs/internals/design/memory.md).
      */
     readonly quantizeJobs?: 'per-tree' | 'batched';
+    /**
+     * Trim the node buffer whenever the scene is quiet (no build running or
+     * waiting, every tree placed) and the buffer holds more than its trees:
+     * the trees are packed to the front of a buffer of their exact size (see
+     * {@link SceneTrees.trim}). Default false: the buffer keeps its growth
+     * room, and with `gpuTreeOutputs: 'adopt'` the batch's one node per
+     * triangle (Sponza: 350.6 MiB for 185.1 in use).
+     */
+    readonly trimWhenRefined?: boolean;
 }
 
 /** A tree was placed: a mesh's (or merged group's) first, or a swap. */
@@ -734,6 +743,11 @@ export class SceneTrees {
     private quantizeJobsToRelease: QuantizeJob[] = [];
     /** `quantizeJobs: 'batched'`: one quantize pass per encoder, not per tree. */
     private readonly batchQuantize: boolean;
+    /** {@link trim} was asked for, or `trimWhenRefined`: the node buffer is packed at the next quiet update. */
+    private trimAsked = false;
+    private readonly trimWhenRefined: boolean;
+    /** Node buffer trims done ({@link trim}, `trimWhenRefined`). */
+    private trims = 0;
     private readonly weld: boolean;
     private readonly positions: GrowableStorage | null;
     /** Removed meshes' position ranges, freed at the next update. */
@@ -868,6 +882,7 @@ export class SceneTrees {
         const quantizeJobs = options.quantizeJobs ?? 'per-tree';
         if (quantizeJobs !== 'per-tree' && quantizeJobs !== 'batched') throw new RangeError(`quantizeJobs must be 'per-tree' or 'batched', got ${String(quantizeJobs)}`);
         this.batchQuantize = quantizeJobs === 'batched';
+        this.trimWhenRefined = options.trimWhenRefined ?? false;
         this.nodeLeading = this.nodeFormat === 'quantized' ? 1 : 0;
         this.nodes = new GrowableStorage(device, `${this.label} trace nodes`, this.nodeBytes, INITIAL_NODES);
         this.triangles = new GrowableStorage(device, `${this.label} trace triangles`, this.triangleBytes, indexed ? INITIAL_TRIANGLES * 3 : INITIAL_TRIANGLES);
@@ -1585,6 +1600,8 @@ export class SceneTrees {
             this.placeTrees(encoder, arrived);
             this.cpuTopLevelStale = true;
         }
+        // A trim moves trees: after the placements above, before anything below writes into a tree.
+        if ((this.trimAsked || this.trimWhenRefined) && this.quiet()) this.trimNodes(encoder);
         // CPU poses, after the trees placed above (their copies and growths are in the encoder before these).
         this.writeCpuPoses(encoder);
         let failure: unknown = null;
@@ -1600,6 +1617,58 @@ export class SceneTrees {
         this.noteTimeline();
         this.samplePeak();
         if (failure !== null) throw failure;
+    }
+
+    /**
+     * Trims the node buffer at the next quiet update (no GPU build running, no
+     * tree waiting to be placed, no tinybvh build left, nothing reserved): the
+     * placed trees are packed to the front of a new buffer of their exact size,
+     * in that update's encoder, and the old buffer is freed at the update
+     * after. The growth room goes (and, with `gpuTreeOutputs: 'adopt'`, the
+     * load batch's one node per triangle), so a later tree makes the buffer
+     * grow again. Trees move: {@link version} changes (make bind groups
+     * again), and placements read before ({@link meshStatus}) are stale. The
+     * scene's deforming meshes follow by themselves. `trimWhenRefined` asks
+     * for it whenever the scene is quiet and the buffer has room to give.
+     */
+    trim(): void {
+        this.checkLive();
+        this.trimAsked = true;
+    }
+
+    /** Node buffer trims done so far. */
+    get trimCount(): number {
+        return this.trims;
+    }
+
+    /** Nothing building, waiting or reserved: trees can move. */
+    private quiet(): boolean {
+        return this.buildsRunning.size === 0 && this.arrived.length === 0 && this.newMeshes.length === 0 && this.pendingTinybvh === 0 && this.reserve.nodes.units === 0 && this.outputsWaitingForUpdate.size === 0;
+    }
+
+    /** Packs every placed tree's node range (its frame slot first, quantized) to the front of a buffer of their size, and moves their placements. */
+    private trimNodes(encoder: GPUCommandEncoder): void {
+        // Nothing to give back (`trimWhenRefined` looks at every quiet update), or no tree yet (an empty scene keeps its first size).
+        if (this.placed.size === 0 || this.nodes.byteLength <= Math.max(this.nodeBytes, this.nodes.usedBytes)) {
+            if (this.placed.size > 0) this.trimAsked = false;
+            return;
+        }
+        const ranges = [...this.placed.values()].map((tree) => ({ offset: tree.nodeOffset - this.nodeLeading, count: tree.nodeCount + this.nodeLeading }));
+        // Only the placed trees may hold ranges (anything else would be left behind); otherwise a later quiet update tries again.
+        if (this.nodes.usedBytes !== ranges.reduce((total, range) => total + range.count, 0) * this.nodeBytes) return;
+        this.trimAsked = false;
+        const moved = this.nodes.compact(encoder, ranges);
+        this.encoderWritesStorage = true;
+        this.trims++;
+        for (const [slot, tree] of [...this.placed]) {
+            const nodeOffset = moved.get(tree.nodeOffset - this.nodeLeading)! + this.nodeLeading;
+            if (nodeOffset === tree.nodeOffset) continue;
+            const placed: PlacedTree = { ...tree, nodeOffset };
+            this.placed.set(slot, placed);
+            this.gpuTopLevel?.setMeshTree(slot, placed);
+            this.deforming?.treeMoved(slot, { ...this.refitPlacement(slot, placed) });
+        }
+        this.cpuTopLevelStale = true;
     }
 
     dispose(): void {
@@ -2638,6 +2707,31 @@ export class SceneTrees {
         }
     }
 
+    /** Where a deforming mesh's placed tree sits, as its refit takes it. */
+    private refitPlacement(slot: number, placed: PlacedTree): ReturnType<typeof meshRefitPlacement> {
+        const state = this.meshes.get(slot)!;
+        // meshRefitPlacement refuses merged meshes: merged ranges are never refit.
+        // Indexed: the refit copies the pose to the mesh's vertex base (deforming meshes are unwelded, so pose vertex v is scene vertex base + v).
+        return meshRefitPlacement(
+            {
+                meshes: [
+                    {
+                        nodeOffset: placed.nodeOffset,
+                        nodeCount: placed.nodeCount,
+                        triangleOffset: placed.triangleOffset,
+                        triangleCount: placed.triangleCount,
+                        ...(state.mergedInto !== null ? { mergedInto: state.mergedInto } : {}),
+                        ...(state.vertices ? { vertexBase: state.vertices.offset, vertexCount: state.vertices.count, welded: false } : {}),
+                    },
+                ],
+                triangleLeaves: this.triangleLeaves,
+                positionLayout: this.positionLayout,
+                nodeFormat: this.nodeFormat,
+            },
+            0,
+        );
+    }
+
     /** A placed mesh's box in the top level, for every instance of it at the next update. */
     private moveTopLevelBox(mesh: number, box: ArrayLike<number>): void {
         const placed = this.placed.get(mesh);
@@ -2679,27 +2773,7 @@ export class SceneTrees {
         this.gpuTopLevel?.setMeshTree(tree.slot, placed);
         if (this.deforming?.has(tree.slot)) {
             const layout: GpuLayoutMeshBvh | null = tree.source === 'tinybvh' ? tree.bvh : tree.built.layout;
-            // meshRefitPlacement refuses merged meshes: merged ranges are never refit.
-            // Indexed: the refit copies the pose to the mesh's vertex base (deforming meshes are unwelded, so pose vertex v is scene vertex base + v).
-            const placement = meshRefitPlacement(
-                {
-                    meshes: [
-                        {
-                            nodeOffset,
-                            nodeCount: placed.nodeCount,
-                            triangleOffset,
-                            triangleCount: placed.triangleCount,
-                            ...(state.mergedInto !== null ? { mergedInto: state.mergedInto } : {}),
-                            ...(state.vertices ? { vertexBase: state.vertices.offset, vertexCount: state.vertices.count, welded: false } : {}),
-                        },
-                    ],
-                    triangleLeaves: this.triangleLeaves,
-                    positionLayout: this.positionLayout,
-                    nodeFormat: this.nodeFormat,
-                },
-                0,
-            );
-            this.deforming.treePlaced(tree.slot, placement, layout);
+            this.deforming.treePlaced(tree.slot, this.refitPlacement(tree.slot, placed), layout);
         }
         if (state.cpuPose) {
             // A CPU pose given before is written into the new tree too, at this update.
