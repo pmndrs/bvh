@@ -11,7 +11,7 @@ import { BatchedMesh, BoxGeometry, type BufferGeometry, DoubleSide, type Interse
 import { acceleratedRaycast as tmbAcceleratedRaycast, computeBatchedBoundsTree as tmbComputeBatchedBoundsTree } from 'three-mesh-bvh';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createRandom } from '../trace/oracle-fixtures.ts';
-import { acceleratedRaycast, BvhBoundsTree, computeBatchedBoundsTree, disposeBatchedBoundsTree, prepareBoundsTrees } from './raycast.ts';
+import { acceleratedRaycast, BvhBoundsTree, computeBatchedBoundsTree, disposeBatchedBoundsTree, prepareBoundsTrees, setBoundsTree as setBoundsTreeForTest } from './raycast.ts';
 
 const threeMeshRaycast = Mesh.prototype.raycast;
 const threeBatchedRaycast = BatchedMesh.prototype.raycast;
@@ -154,5 +154,37 @@ describe('computeBatchedBoundsTree', () => {
         warn.mockClear();
         compare();
         expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('walks the trees with only BatchedMesh.prototype.raycast set (Mesh.prototype.raycast stays three\'s)', () => {
+        for (const perGeometry of [true, false]) {
+            const mesh = batch(8, true);
+            const plain = batch(8, true);
+            let trees: BvhBoundsTree[];
+            if (perGeometry) trees = (computeBatchedBoundsTree.call(mesh) as (BvhBoundsTree | null)[]).filter((tree): tree is BvhBoundsTree => tree !== null);
+            else {
+                // The whole batch's tree on its geometry, found by the stand-in's shared position attribute.
+                const tree = new BvhBoundsTree(mesh.geometry);
+                setBoundsTreeForTest(mesh.geometry, tree);
+                trees = [tree];
+            }
+            const walks = trees.map((tree) => vi.spyOn(tree, 'raycastLocal'));
+            expect(Mesh.prototype.raycast).toBe(threeMeshRaycast);
+            const random = createRandom(perGeometry ? 21 : 22);
+            const raycaster = new Raycaster();
+            let hitRays = 0;
+            for (let r = 0; r < 200; r++) {
+                randomRay(random, raycaster);
+                BatchedMesh.prototype.raycast = acceleratedRaycast as unknown as BatchedMesh['raycast'];
+                const ourHits = raycastAll(mesh, raycaster);
+                BatchedMesh.prototype.raycast = threeBatchedRaycast;
+                const expected = raycastAll(plain, raycaster);
+                if ([...expected, ...ourHits].some((hit) => Math.min(hit.barycoord!.x, hit.barycoord!.y, hit.barycoord!.z) < 1e-5)) continue;
+                expect(keys(ourHits), `per geometry ${perGeometry}, ray ${r}`).toEqual(keys(expected));
+                if (expected.length > 0) hitRays++;
+            }
+            expect(hitRays).toBeGreaterThan(40);
+            expect(walks.reduce((sum, walk) => sum + walk.mock.calls.length, 0), `per geometry ${perGeometry}: the trees were walked`).toBeGreaterThan(0);
+        }
     });
 });
