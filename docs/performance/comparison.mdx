@@ -45,3 +45,75 @@ Measured on the same harness. These are open items, not footnotes:
 - **three-mesh-bvh, GPU:** its closest-hit walk is 1.1–1.2× ours on the furnished room. Its any-hit from outside the room was 3.2× our default kernel's: our any-hit enters the farther child first (right for shadow rays from surfaces), and a few rays per SIMD group of 32 went deep into the far side's furniture. With `anyHitOrder: 'larger'` (enter the larger child first) ours is 1.73× theirs on those rays; it stays a setting because it costs 0.78× on merged surface rays on the M5 and 0.80–0.87× on the RTX 3060 ([trace design](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/trace.md)), and merged trees are the default.
 - **bvh.js** builds its scene tree about 3× faster.
 - **Memory:** our CPU trees (`CpuMeshBvh`, what the suite measures) hold about 9–10× more bytes beyond the app's geometry than three-mesh-bvh, because our triangle records copy the corners. On the GPU the default scene now has quantized nodes: Sponza 355.5 MiB beyond the geometry against three-mesh-bvh's 51.2, about 7×. Indexed leaves take it to 225.5 ([memory page](/performance/memory)). Building one huge mesh with tinybvh grows its WebAssembly memory to about 230 bytes per triangle while the build runs (Sponza as one mesh: 1.3 GiB); the builder now drops that memory afterwards and the worker pool ends such a worker, so the build leaves 391 MiB behind instead of 1.7 GiB ([workers](/workers/workers)).
+
+## The compare pages
+
+The suite also runs live in the [examples site](/examples/examples) (`examples/compare/`): each page puts the same
+geometry through both libraries, checks every answer against ours, shows the tables and the CSV rows, and has a "what
+else you can do" box with one thing only our pipeline does. Smoke runs use small scenes and short timings; the numbers
+for this page come from full runs on the RTX 3060 and the M5, which are still to be taken for the two newest pages.
+
+| Page | What it compares | What else (live) |
+| --- | --- | --- |
+| `compare/raycast` | CPU first and all hits per second, every library; a GPU batch against three-mesh-bvh/webgpu | the batch is a raw WebGPU pass three never sees |
+| `compare/build` | build, refit, memory; main-thread stalls of builds on the main thread and in workers | a GPU H-PLOC build of the same mesh |
+| `compare/tree-quality` | SAH cost, depth, boxes, leaves, bytes | three builders, one layout |
+| `compare/queries` | box, sphere and closest point (three-mesh-bvh, Rapier) | the GPU builder's tree answers the same CPU queries |
+| `compare/scene` | scene trees over thousands of moving objects (bvh.js, `ObjectBVH`) | the GPU top-level refit every frame |
+| `compare/gpu` | GPU closest and any hit against three-mesh-bvh/webgpu, paired rounds | a GPU-built tree traced by the same kernel |
+| `compare/sdf` | SDF generation on the GPU against three-mesh-bvh's `webgpu_sdfGeneration` | the scene's GPU-built tree straight into a three texture |
+| `compare/skinned` | skinned meshes kept on their pose every frame: three-mesh-bvh's `SkinnedMeshBVH.refit()` on the CPU against our GPU pose pass and refit, CPU and GPU ms per frame | a plain WebGPU pass, never seen by three, traces the refit trees every frame |
+| `compare/pathtracer` | the same small path tracer on three-mesh-bvh/webgpu's WGSL functions and on our walk: Mrays/s for the whole tracer, its closest-hit rays and its any-hit rays | the scene's GPU-built trees traced by the same kernel |
+
+### Method: `compare/skinned`
+
+Nine skinned characters (tubes on a chain of six bones, `?characters=`, `?rings=`). In each measured frame both
+libraries see the same pose (the bones are set from the frame's time), in alternating order:
+
+- **three-mesh-bvh** (its `skinnedMesh` example): one `SkinnedMeshBVH` per character and `refit()` each frame, which
+  skins every vertex on the CPU (`SkinnedMesh.getVertexPosition`). CPU ms is the refits' wall time. Its trees stay on
+  the CPU; to trace the pose on the GPU it re-packs them with `BVHComputeData.update()`, which skins every vertex
+  again. That is a row of its own (the upload itself happens at the next compute and is not counted).
+- **ours**: `SceneTreesObject3DSync` with the renderer poses each `SkinnedMesh` on the GPU (`BvhPosePass`) and
+  `SceneTrees.setPose` refits its tree from that buffer, in the frame's encoder. CPU ms is the sync and the recording;
+  GPU ms is the pose passes (three's compute timestamps) plus what `SceneTrees.update` records (its
+  `timestampWrites`), or without `timestamp-query` the wall time to the queue being done (an upper bound).
+
+Medians over the measured frames. Tree quality is reported beside the times: three-mesh-bvh's summed SAH score against
+its fresh build (`getBVHExtremes`), and our refit and drift-rebuild counts. The check: on a frozen pose, a top-down grid
+of rays through our GPU-refit trees agrees with three-mesh-bvh's refit trees (CPU raycast) on every ray away from a
+silhouette.
+
+### Method: `compare/pathtracer`
+
+One kernel (`examples/three/pathtracer/kernel.ts`: jittered camera rays, PCG random numbers, diffuse bounces, one sun
+shadow ray per hit, accumulation) over two walks: ours through `BvhTraceNodes` (`traceClosest`, `traceAny`, the
+library's defaults: merged static meshes, quantized nodes), and three-mesh-bvh's `BVHComputeData` (a `MeshBVH` with SAH
+per geometry) through `bvh_RaycastFirstHit` and `bvh_RaycastAnyHit` in a `wgslFn`. Both read one palette colour per
+mesh, so the shading is the same. Measured in paired rounds (the two back to back, the order reversed every other
+round, the ratio taken within each round):
+
+- **path**: every ray of the full tracer, closest and any hit;
+- **closest**: the tracer with its shadow rays compiled out (the same closest-hit rays, since the shadow ray draws no
+  random number);
+- **any**: the shadow rays alone, derived as their count over the time the full tracer takes beyond the closest-only
+  one (noisier than the other two).
+
+Rays are counted in the kernel (one atomic per pixel); time is three's compute timestamps, else the wall time of one
+dispatch with the queue drained before and after. Each pixel's first hit is checked against ours; a pixel through a
+silhouette may graze either way between two different triangle tests, so up to 0.1% of pixels may differ.
+
+## three-mesh-bvh's examples, ported
+
+These are three-mesh-bvh's own examples on our API (`@pmndrs/bvh/three`), not timed comparisons. Each page says where it
+departs from the original, and its smoke run checks our answers (against three-mesh-bvh's where the example asks a
+query both answer).
+
+| Page | Shows | Departure from the original |
+| --- | --- | --- |
+| `three/shapecast` | `intersectsSphere`, `intersectsBox`, `intersectsGeometry` against a spinning knot | none |
+| `three/distancecast` | `closestPointToGeometry` (tree against tree) and a marching-cubes volume of `closestPointToPoint` | three's seeded `SimplexNoise` |
+| `three/characterMovement` | a capsule walked through a level baked by `StaticGeometryGenerator`, pushed out of what `shapecast` hands back | a level of three's primitives instead of a downloaded dungeon |
+| `three/physics` | spheres pushed out of an environment's triangles (`shapecast`, nearest boxes first) | an environment of three's primitives instead of a downloaded jungle |
+| `three/sculpt` | brushes that find vertices with `shapecast` (contained boxes whole), then a refit | our `refit()` is whole-tree; three-mesh-bvh refits only the visited nodes |
+| `three/selection` | lasso and box selection narrowed by each box's screen hull | the knot stays indexed |
