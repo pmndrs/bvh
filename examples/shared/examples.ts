@@ -184,6 +184,16 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         description: 'SDF generation time on the GPU against three-mesh-bvh\'s webgpu_sdfGeneration kernel at several resolutions, in paired rounds, distances and signs checked; the scene\'s GPU-built tree straight into a three texture, shown as a slice.',
         timeoutMs: 240_000,
     },
+    // ---- three-mesh-bvh compares and example ports, set 1: skinned, pathtracer; shapecast, distancecast,
+    // characterMovement, physics, sculpt, selection.
+    {
+        name: 'compare-skinned',
+        path: 'compare/skinned',
+        title: 'compare/skinned',
+        description: "Skinned characters kept on their pose every frame: three-mesh-bvh's SkinnedMeshBVH.refit() on the CPU against our GPU pose pass and refit (SceneTrees.setPose), CPU and GPU ms per frame; a plain WebGPU pass three never sees traces the refit trees.",
+        timeoutMs: 240_000,
+    },
+    // ---- end of set 1.
     {
         name: 'node-bake',
         path: 'node/bake',
