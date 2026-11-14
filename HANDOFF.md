@@ -79,9 +79,9 @@ Everything below is on `main` and pushed to origin. No release, tag or npm publi
   - Each `f32` tree is collapsed when a scene is assembled or a `SceneTrees` tree arrives.
   - Planes are decoded exactly, so hits equal the binary walk's (ties apart).
   - `wideStack: 'private' | 'workgroup'` for CWBVH.
-- **Works with:** `SceneTrees` (tinybvh trees only, collapsed in the workers; no GPU first trees), merged groups, indexed leaves, CPU poses (`refitWide`), `/three`, and the CPU walk.
-- **Not built:** the GPU collapse and the GPU wide refit (`setPose` is skipped with a warning).
-- **Gates on the M5:** `trace-oracle` full (17 wide variants: 0 of 2M shared-edge slips; seams equal records); `trace-wide-compile` (largest kernel 42.3 KB); `scene-trees-mid-swap` (44 wide states, 0 disagreements).
+- **Works with:** `SceneTrees`, merged groups, indexed leaves, CPU poses (`refitWide`), `/three`, and the CPU walk. In `SceneTrees`, H-PLOC's first trees are collapsed on the GPU (`src/gpu-wide-collapse.ts`) and tinybvh's in the workers; deforming meshes take tinybvh's trees only.
+- **Not built:** the GPU wide refit (`setPose` is skipped with a warning).
+- **Gates on the M5:** `trace-oracle` full (every wide variant, the L1 and L7 ones included: 0 of 2M shared-edge slips; seams at most records'); `trace-wide-compile` (largest kernel 43.9 KB); `scene-trees-mid-swap` (132 wide states with GPU-collapsed first trees, 0 disagreements); `bvh-wide-collapse` (the GPU collapse: hits equal f32's).
 - **Memory, Sponza:** nodes 185.1 → 74.5 MiB (BVH4) → 40.5 MiB (CWBVH).
 - **Collapse time, Sponza, one core:** 1.35 s (BVH4), 1.83 s (CWBVH).
 - **Speed, best effort** (M5, 2026-11-14, under the lock but with Chrome open; three runs per scene; design note section 8). Closest hit on incoherent rays, wide over f32:
