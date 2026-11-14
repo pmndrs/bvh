@@ -46,7 +46,12 @@ try {
         ...process.env,
     };
     rmSync(out, { recursive: true, force: true });
-    const build = spawnSync('npx', ['-y', '@pmndrs/docs@4', 'build', mdx, out, '--format', 'website'], { stdio: 'inherit', env });
+    const build = spawnSync('npx', ['-y', '@pmndrs/docs@4', 'build', mdx, out, '--format', 'website'], {
+        stdio: 'inherit',
+        env,
+        shell: process.platform === 'win32', // npx is npx.cmd on Windows, which spawn alone can't start
+    });
+    if (build.error) console.error(`docs: could not run npx: ${build.error.message}`);
     if (build.status !== 0) process.exit(build.status ?? 1);
 
     const api = join(ROOT, 'api-docs');

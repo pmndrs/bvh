@@ -124,8 +124,7 @@ without binding numbers. A kernel refuses buffers of the other format.
 another: `bvhTraceClosestCounted(ray)` and `bvhTraceAnyCounted(ray)` (and `*Masked(ray, mask)` unless
 `rayMasks: false`) return a `BvhWalkCounts`: the hit (`t`, `instance`, `triangle`; any hit: `t` 1.0 blocked, -1.0
 clear) and the work: `steps` (loop iterations, both levels), `meshNodes` and `topLevelNodes` (inner nodes whose
-children were tested), `instanceEntries`, `triangleTests` and `instancesWithHit`. `TraceBatchKernel.create(device,
-{ counters: true })` writes one record per ray (`WALK_COUNTS_BYTES`, words in `WALK_COUNTS_WORD`), and
+children were tested), `instanceEntries`, `triangleTests` and `instancesWithHit`. `TraceBatchKernel.create(device, { counters: true })` writes one record per ray (`WALK_COUNTS_BYTES`, words in `WALK_COUNTS_WORD`), and
 `GpuRays.countWalk(rays)` reads them back.
 
 {/* snippet: counted-walk */}
@@ -180,3 +179,10 @@ vector by a per-ray value kept it fast: Sponza closest-hit went from 61 to 101 M
 
 `BvhTraceNodes.module` is this walk as a three node: include it in a `wgslFn`, or use the TSL helpers
 ([BvhTraceNodes](/three/trace-nodes)).
+
+## See also
+
+- [Ray batches and the CPU walk](/tracing/batches-and-the-cpu-walk): many rays in one dispatch, without writing a kernel.
+- [Spatial queries on the GPU](/tracing/gpu-queries) and [Signed distance fields](/tracing/sdf): the walk's other questions.
+- [BvhTraceNodes](/three/trace-nodes): the same walk in three's node system.
+- [The oracle rule](/concepts/oracle): why the walk is trusted.
