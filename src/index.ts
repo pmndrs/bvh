@@ -200,6 +200,7 @@ export {
     type BvhVertexAttribute,
     type CpuMeshBvhBuildOptions,
     type CpuMeshBvhOptions,
+    type CpuMeshBvhCorners,
 } from './query/cpu-mesh-bvh.ts';
 
 // three-mesh-bvh's debug functions on a CpuMeshBvh.

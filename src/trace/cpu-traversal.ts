@@ -177,6 +177,13 @@ export interface CpuTracerOptions {
      * writing the flag into a layout it may share. Default false. Not in the WGSL walk.
      */
     readonly filterEveryTriangle?: boolean;
+    /**
+     * An indexed scene of mesh trees with no 16-byte header before their
+     * triangles: every instance has vertex base 0 and no material table.
+     * `CpuMeshBvh` with `corners: 'positions'` uses it (one mesh, its
+     * triangles as built, the source's own positions). Default false. CPU only.
+     */
+    readonly indexedWithoutHeaders?: boolean;
 }
 
 /**
@@ -184,7 +191,11 @@ export interface CpuTracerOptions {
  * (default `'records'`), `positions` and `positionLayout` (default `'vec4'`)
  * only matter for an indexed scene.
  */
-export type CpuTraceScene = Pick<TraceSceneData, 'nodes' | 'triangles' | 'topLevel'> & Partial<Pick<TraceSceneData, 'triangleLeaves' | 'positions' | 'positionLayout' | 'nodeFormat'>>;
+export type CpuTraceScene = Pick<TraceSceneData, 'nodes' | 'triangles' | 'topLevel'> &
+    Partial<Pick<TraceSceneData, 'triangleLeaves' | 'positionLayout' | 'nodeFormat'>> & {
+        /** Indexed scenes: the positions, as a buffer or as a `Float32Array` view (read through the view, not its whole buffer). */
+        readonly positions?: ArrayBuffer | Float32Array;
+    };
 
 /** Where a triangle's corners and ids are, for either format: word offsets into `floats`, and its id and flags. */
 interface TriangleSource {
@@ -221,10 +232,12 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
     const triangleFloats = new Float32Array(scene.triangles);
     const triangleWords = new Uint32Array(scene.triangles);
     const indexed = scene.triangleLeaves === 'indexed';
-    const positionFloats = indexed ? new Float32Array(scene.positions ?? new ArrayBuffer(0)) : triangleFloats;
+    const positions = scene.positions;
+    const positionFloats = indexed ? (positions instanceof Float32Array ? positions : new Float32Array(positions ?? new ArrayBuffer(0))) : triangleFloats;
     const stride = positionStrideFloats(scene.positionLayout);
+    const headers = indexed && !options.indexedWithoutHeaders;
     /** Indexed: the vertex base in the header before a mesh's triangles. */
-    const vertexBaseOf = (triangleOffset: number): number => (indexed ? triangleWords[(triangleOffset - 1) * INDEXED_TRIANGLE_WORDS + MESH_HEADER_WORD.vertexBase] : 0);
+    const vertexBaseOf = (triangleOffset: number): number => (headers ? triangleWords[(triangleOffset - 1) * INDEXED_TRIANGLE_WORDS + MESH_HEADER_WORD.vertexBase] : 0);
     /** The triangle at `slot` (in the scene's triangle buffer), read as the WGSL's bvhLoadTriangle reads it. */
     const loadTriangle = (slot: number, vertexBase: number, out: TriangleSource): TriangleSource => {
         if (indexed) {
@@ -495,7 +508,9 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
         const triangleCode = merged
             ? mergedSource(offset, slot, triangleFlags).materialCode
             : indexed
-              ? indexedMaterialCode(triangleWords, offset, triangle.original)
+              ? headers
+                  ? indexedMaterialCode(triangleWords, offset, triangle.original)
+                  : 0
               : triangleFlags >>> MATERIAL_SHIFT;
         const material = materialFromCode(hitMaterialCode(triangleCode, flags));
         return { ...hit, material, normal };
