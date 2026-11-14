@@ -1,68 +1,143 @@
 /**
- * node/bake: a tree baked in Node, loaded here with no build at all.
+ * node/bake: a tree or a whole scene baked in Node, loaded here with no build
+ * at all.
  *
- * `pnpm examples:bake` built this tree with tinybvh in Node (the WebAssembly
- * needs no GPU), `serializeLayout` wrote it to a file, and this page does
- * `deserializeLayout(await (await fetch(url)).arrayBuffer())`: no builder, no
- * worker, no tinybvh in the page (a smoke run builds the default model fresh
- * once, to compare). The overlay's `builtBy` says the tree is the baked file.
+ * `pnpm examples:bake` built the file with tinybvh in Node (the WebAssembly
+ * needs no GPU) and wrote it with `serializeLayout` (one mesh's tree) or, with
+ * `--scene`, `serializeTraceScene` (every tree, the top level, instances and
+ * materials). This page reads the header first (`readSerializedHeader`: the
+ * kind, the versions, whether this package loads it), then
+ * `deserializeLayout` or `deserializeTraceScene`: no builder, no worker, no
+ * tinybvh in the page (a smoke run bakes the defaults fresh once, to compare).
+ * The overlay's `builtBy` says the trees are the baked file.
  *
- * The file is `fixtures/torus-knot.bvh`, `?bake=<url>` names another, and a
- * dropped `.bvh` replaces it. The walk traces it in the shared ray-cast
- * kernel, one ray per pixel; the baked triangles are the only geometry the
- * page has (a baked `records` tree carries them), so nothing else is drawn.
+ * - A tree with `records` triangles carries its triangles: it is traced alone.
+ * - A tree with `indexed` triangles holds no positions: it is loaded next to
+ *   the geometry it was baked from, the default knot or the glTF named by
+ *   `?model=` (merged to world space as the CLI does). `deserializeLayout(bytes,
+ *   { geometry })` refuses other geometry (the file carries its hash).
+ * - A scene file uploads as it is (an indexed one carries its positions).
+ *
+ * The file is `fixtures/torus-knot.bvh`, `?bake=<url>` names another (try
+ * `fixtures/knots.scene.bvh`), and a dropped `.bvh` replaces it. The walk
+ * traces it in the shared ray-cast kernel, one ray per pixel.
  */
 
-import { createCpuTracer, createTinyBvhBuilder, deserializeLayout, GPU_LAYOUT_VERSION, IDENTITY_TRANSFORM, SERIALIZED_FORMAT_VERSION, uploadTraceScene, type GpuLayoutMeshBvh, type TraceSceneBuffers, type TraceSceneData, type TraceSource } from '@pmndrs/bvh';
+import {
+    createCpuTracer,
+    createTinyBvhBuilder,
+    deserializeLayout,
+    deserializeTraceScene,
+    GPU_LAYOUT_VERSION,
+    IDENTITY_TRANSFORM,
+    INSTANCE_RECORD_BYTES,
+    NODE_WORD,
+    readSerializedHeader,
+    SERIALIZED_FORMAT_VERSION,
+    SERIALIZED_SCENE_FORMAT_VERSION,
+    serializeLayout,
+    TOP_LEVEL_HEADER_BYTES,
+    uploadTraceScene,
+    type GpuLayoutMeshBvh,
+    type MeshGeometry,
+    type TraceSceneBuffers,
+    type TraceSceneData,
+    type TraceSource,
+} from '@pmndrs/bvh';
 import { assembleLayouts } from '../../shared/builders.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 import { bytes as formatBytes } from '../../shared/overlay.ts';
 import { layoutInfo } from '../../shared/stats.ts';
 import { createVanillaApp } from '../../shared/vanilla/app.ts';
-import { checkViewAgainstCpu } from '../../shared/vanilla/check.ts';
+import { checkViewAgainstCpu, type Agreement } from '../../shared/vanilla/check.ts';
+import { mergeToWorld } from '../../shared/vanilla/geometry.ts';
+import { loadGltfScene } from '../../shared/vanilla/gltf.ts';
 import { vec3 } from '../../shared/vanilla/math.ts';
 import { RayCastView, VIEW_MODES, type ViewMode } from '../../shared/vanilla/raycast-view.ts';
 import fixtureUrl from './fixtures/torus-knot.bvh?url';
-import { DEFAULT_LEAF, defaultMesh } from './model.ts';
+import sceneFixtureUrl from './fixtures/knots.scene.bvh?url';
+import { bakeScene, DEFAULT_LEAF, defaultMesh, defaultScene } from './model.ts';
 
 const app = await createVanillaApp('Node bake', 'node/bake');
 const { device, camera, overlay, canvas } = app;
 
-const requested = new URLSearchParams(location.search).get('bake');
+const params = new URLSearchParams(location.search);
+const requested = params.get('bake');
+const modelPath = params.get('model');
 const settings = { mode: 'normal' as ViewMode, shadows: true };
 const view = RayCastView.create(device, app.format);
-let current: { layout: GpuLayoutMeshBvh; data: TraceSceneData; buffers: TraceSceneBuffers; source: TraceSource; radius: number } | null = null;
+let current: { kind: 'tree' | 'scene'; layout: GpuLayoutMeshBvh | null; data: TraceSceneData; buffers: TraceSceneBuffers; source: TraceSource; radius: number } | null = null;
 
-/** The header's two versions, read before loading: what a version check shows (deserializeLayout refuses a mismatch). */
-function header(bytes: ArrayBuffer): { formatVersion: number; layoutVersion: number } {
-    const words = new DataView(bytes);
-    return { formatVersion: words.getUint32(4, true), layoutVersion: words.getUint32(8, true) };
+/** The geometry an indexed tree is loaded next to: the glTF of `?model=` merged to world space (as the CLI bakes it), else the default knot. */
+let appGeometry: Promise<MeshGeometry> | null = null;
+function geometryForIndexed(): Promise<MeshGeometry> {
+    appGeometry ??= modelPath ? loadGltfScene(modelPath).then(mergeToWorld) : Promise.resolve(defaultMesh());
+    return appGeometry;
 }
 
-/** Loads a baked tree from `bytes`: no build. Takes the old scene's place between frames. */
+/** The world box of a scene: its top level's root (the union of the root's two child boxes; an empty child is an inverted box). */
+function sceneBounds(data: TraceSceneData): number[] {
+    const floats = new Float32Array(data.topLevel.buffer, TOP_LEVEL_HEADER_BYTES + data.topLevel.instanceCount * INSTANCE_RECORD_BYTES, 16);
+    const out = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+    for (const [min, max] of [
+        [NODE_WORD.leftMin, NODE_WORD.leftMax],
+        [NODE_WORD.rightMin, NODE_WORD.rightMax],
+    ]) {
+        if ([0, 1, 2].some((axis) => !(floats[min + axis] <= floats[max + axis]))) continue;
+        for (let axis = 0; axis < 3; axis++) {
+            out[axis] = Math.min(out[axis], floats[min + axis]);
+            out[axis + 3] = Math.max(out[axis + 3], floats[max + axis]);
+        }
+    }
+    return out;
+}
+
+/** Loads a baked tree or scene from `bytes`: no build. Takes the old scene's place between frames. */
 async function useBake(bytes: ArrayBuffer, name: string, fetchMs: number): Promise<void> {
-    const { formatVersion, layoutVersion } = header(bytes);
-    const start = performance.now();
-    const layout = deserializeLayout(bytes); // throws on another layout version: rebuild (bake again)
-    const loadMs = performance.now() - start;
-    if (layout.triangleLeaves === 'indexed') throw new Error(`${name} is an indexed bake: it holds no positions, and this page has no geometry to load it next to. Bake without --indexed.`);
+    // The header first: what the file is and whether this package reads it (a stale bake says why).
+    const header = readSerializedHeader(bytes);
+    const own = header.kind === 'tree' ? SERIALIZED_FORMAT_VERSION : SERIALIZED_SCENE_FORMAT_VERSION;
+    overlay.set('header', `${header.kind}, byte format ${header.formatVersion}, GPU layout version ${header.layoutVersion} (this package: ${own} and ${GPU_LAYOUT_VERSION})`);
+    if (!header.current) throw new Error(`${name} is a stale bake: ${header.reason}`);
+
+    let layout: GpuLayoutMeshBvh | null = null;
+    let data: TraceSceneData;
+    let bounds: ArrayLike<number>;
+    let loadMs: number;
+    let geometryNote = '';
+    if (header.kind === 'scene') {
+        const start = performance.now();
+        data = deserializeTraceScene(bytes); // the whole scene: trees, top level, instances, materials
+        loadMs = performance.now() - start;
+        bounds = sceneBounds(data);
+        overlay.set('scene', `${header.meshCount} meshes, ${header.instanceCount} instance records (${header.mergedGroupCount} merged static groups)`);
+        overlay.tree({ sah: null, depth: data.maxMeshDepth, nodes: null, triangles: null, bytes: data.byteLength });
+    } else {
+        // An indexed tree reads the positions it was baked from: hand them over, and deserializeLayout checks them.
+        const geometry = header.triangleLeaves === 'indexed' ? await geometryForIndexed() : null;
+        const start = performance.now();
+        layout = deserializeLayout(bytes, geometry ? { geometry } : {});
+        loadMs = performance.now() - start;
+        data = assembleLayouts([layout], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }], geometry ? [geometry] : []);
+        bounds = layout.bounds;
+        if (geometry) geometryNote = header.geometryHash ? `, next to ${modelPath ?? 'the default knot'} (hash checked)` : `, next to ${modelPath ?? 'the default knot'} (no hash in the file)`;
+        overlay.set('scene', 'one tree, one instance');
+        overlay.tree(layoutInfo(layout));
+    }
 
     // Nothing was built: the builder is the file.
-    overlay.build({ builtBy: `baked file: ${name}`, fallbackReason: null, cpuMs: 0 });
-    overlay.tree(layoutInfo(layout));
+    overlay.build({ builtBy: `baked ${header.kind}: ${name}`, fallbackReason: null, cpuMs: 0 });
     overlay.set('file', `${name}, ${formatBytes(bytes.byteLength)}`);
     overlay.set('fetch + deserialize', `${fetchMs.toFixed(1)} ms + ${loadMs.toFixed(2)} ms (no build)`);
-    overlay.set('header', `byte format ${formatVersion}, GPU layout version ${layoutVersion} (this package: ${SERIALIZED_FORMAT_VERSION} and ${GPU_LAYOUT_VERSION})`);
-    overlay.set('formats', `${layout.triangleLeaves ?? 'records'} triangles, ${layout.nodeFormat ?? 'f32'} nodes`);
+    overlay.set('formats', `${header.triangleLeaves} triangles${geometryNote}, ${header.nodeFormat} nodes`);
 
-    const data = assembleLayouts([layout], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }], []);
     const buffers = uploadTraceScene(device, data, 'bake');
     const source: TraceSource = buffers; // an uploaded scene is a TraceSource as it is
     await view.prepare(source);
     const old = current;
-    const b = layout.bounds;
-    current = { layout, data, buffers, source, radius: Math.hypot(b[3] - b[0], b[4] - b[1], b[5] - b[2]) / 2 };
-    camera.frame(b);
+    const b = bounds;
+    current = { kind: header.kind, layout, data, buffers, source, radius: Math.hypot(b[3] - b[0], b[4] - b[1], b[5] - b[2]) / 2 };
+    camera.frame(Array.from(b));
     old?.buffers.destroy();
 }
 
@@ -76,7 +151,9 @@ async function loadUrl(url: string): Promise<void> {
 
 overlay.select('show', VIEW_MODES, settings.mode, (value) => (settings.mode = value));
 overlay.checkbox('shadows (any hit)', settings.shadows, (value) => (settings.shadows = value));
-overlay.note('Nothing is built here: the tree is a file baked by `pnpm examples:bake` in Node, read with deserializeLayout and traced by the WGSL walk. Drop another .bvh, or open ?bake=<url>. Drag to orbit.');
+overlay.note(
+    'Nothing is built here: the file was baked by `pnpm examples:bake` in Node (a tree, or a scene with --scene), checked with readSerializedHeader, read with deserializeLayout or deserializeTraceScene and traced by the WGSL walk. Drop another .bvh, or open ?bake=<url> (an indexed tree loads next to the default knot, or ?model=<glTF>). Drag to orbit.',
+);
 
 let pointer: [number, number] | null = null;
 canvas.addEventListener('pointermove', (event) => (pointer = [event.clientX / canvas.clientWidth, event.clientY / canvas.clientHeight]));
@@ -105,9 +182,16 @@ try {
 const sun = vec3.normalize([0.45, 0.85, 0.3]);
 let frame = 0;
 let smoke: Promise<void> | null = null;
+/** Resolves once `count` more frames were traced (the smoke run reads the view after switching files). */
+const frameWaiters: { at: number; resolve: () => void }[] = [];
+const afterFrames = (count: number) => new Promise<void>((resolve) => frameWaiters.push({ at: frame + count, resolve }));
 app.loop({
     async update() {
         frame++;
+        for (const waiter of frameWaiters.filter((entry) => entry.at <= frame)) {
+            frameWaiters.splice(frameWaiters.indexOf(waiter), 1);
+            waiter.resolve();
+        }
         const { measurement, pick } = await view.collect();
         if (measurement && measurement.gpuMs !== null && measurement.gpuMs > 0) {
             overlay.rays('primary (GPU timestamps)', measurement.primaryRays / (measurement.gpuMs / 1000));
@@ -115,7 +199,7 @@ app.loop({
         } else if (measurement) overlay.set('trace pass', 'no timestamp-query on this device');
         if (pick !== undefined) {
             highlight = pick ? pick.instance : null;
-            overlay.set('pixel', pick ? `triangle ${pick.triangle}, t ${pick.t.toFixed(3)}` : '-');
+            overlay.set('pixel', pick ? `instance ${pick.instance}, triangle ${pick.triangle}, t ${pick.t.toFixed(3)}` : '-');
         }
         if (isSmoke && frame === 20) smoke ??= smokeRun();
     },
@@ -129,33 +213,68 @@ app.loop({
     },
 });
 
+/** The view's last frame against the CPU walk over the loaded scene (at least 50 hits); throws on any difference it can't explain. */
+async function checkView(what: string): Promise<Agreement> {
+    const agreement = await checkViewAgainstCpu(view, (aspect) => camera.basis(aspect), createCpuTracer(current!.data));
+    if (agreement.hits < 50) throw new Error(`${what}: the view hits too little: ${JSON.stringify(agreement)}`);
+    return agreement;
+}
+
+const sameBytes = (a: ArrayBuffer | Uint8Array, b: ArrayBuffer | Uint8Array) => {
+    const x = a instanceof Uint8Array ? a : new Uint8Array(a);
+    const y = b instanceof Uint8Array ? b : new Uint8Array(b);
+    return x.byteLength === y.byteLength && x.every((byte, index) => byte === y[index]);
+};
+
 /**
- * Smoke: the view's 1,024 pixels against the CPU walk over the loaded tree
- * (at least 50 of them hits); then, when the page showed the default file, the
- * default model built fresh with tinybvh in the page: its layout bytes are the
- * baked file's bytes. Anything else fails the run.
+ * Smoke: the view against the CPU walk over each kind of file, in turn.
+ *
+ * 1. The page's file. When it is the default, the default model built fresh
+ *    with tinybvh in the page gives its exact layout bytes.
+ * 2. With no `?bake=`: an indexed tree of the default knot, baked in the
+ *    page with its geometry and loaded next to it.
+ * 3. With no `?bake=`: the committed scene file (`--scene`), whose bytes are
+ *    those of the default scene baked fresh in the page.
+ *
+ * Anything else fails the run.
  */
 async function smokeRun(): Promise<void> {
-    const loaded = current!;
-    const agreement = await checkViewAgainstCpu(view, (aspect) => camera.basis(aspect), createCpuTracer(loaded.data));
-    // checkViewAgainstCpu throws on any difference it can't explain.
-    if (agreement.hits < 50) throw new Error(`the baked tree's view hits too little: ${JSON.stringify(agreement)}`);
+    const tree = await checkView('the page\'s file');
+    if (requested) {
+        overlay.set('check', `the view agrees with the CPU walk (${current!.kind})`);
+        await ready(device, { ...overlay.snapshot(), agreement: { [current!.kind]: tree } });
+        return;
+    }
 
-    let fresh: Record<string, unknown> | null = null;
-    if (!requested) {
-        const tiny = await createTinyBvhBuilder();
-        const built = tiny.buildLayout(defaultMesh(), { maxLeafPrimitives: DEFAULT_LEAF }).layout;
-        const same = (a: ArrayBuffer, b: ArrayBuffer) => a.byteLength === b.byteLength && new Uint8Array(a).every((byte, index) => byte === new Uint8Array(b)[index]);
-        fresh = {
-            nodes: same(built.nodes, loaded.layout.nodes),
-            triangles: same(built.triangles, loaded.layout.triangles),
-            parents: built.parents.every((parent, index) => parent === loaded.layout.parents[index]),
-            nodeCount: built.nodeCount === loaded.layout.nodeCount,
-        };
-        if (!Object.values(fresh).every(Boolean)) throw new Error(`the baked tree differs from a fresh build of the same model: ${JSON.stringify(fresh)}`);
-        overlay.set('check', 'identical to a fresh tinybvh build; the view agrees with the CPU walk');
-    } else overlay.set('check', 'the view agrees with the CPU walk');
-    await ready(device, { ...overlay.snapshot(), agreement, fresh, builtByBake: overlay.snapshot().build });
+    const loaded = current!.layout!;
+    const tiny = await createTinyBvhBuilder();
+    const built = tiny.buildLayout(defaultMesh(), { maxLeafPrimitives: DEFAULT_LEAF }).layout;
+    const fresh = {
+        nodes: sameBytes(built.nodes, loaded.nodes),
+        triangles: sameBytes(built.triangles, loaded.triangles),
+        parents: built.parents.every((parent, index) => parent === loaded.parents[index]),
+        nodeCount: built.nodeCount === loaded.nodeCount,
+    };
+    if (!Object.values(fresh).every(Boolean)) throw new Error(`the baked tree differs from a fresh build of the same model: ${JSON.stringify(fresh)}`);
+
+    // An indexed bake of the default knot, loaded next to the knot's positions.
+    const knot = defaultMesh();
+    const indexedTree = tiny.buildLayout(knot, { maxLeafPrimitives: DEFAULT_LEAF, triangleLeaves: 'indexed' }).layout;
+    await useBake(serializeLayout(indexedTree, { geometry: knot }), 'torus-knot (indexed, baked in the page)', 0);
+    await afterFrames(3);
+    const indexed = await checkView('the indexed tree');
+    if (current!.data.triangleLeaves !== 'indexed') throw new Error('the indexed bake was not traced as an indexed scene');
+
+    // The committed scene file, and the same scene baked in the page.
+    await loadUrl(sceneFixtureUrl);
+    await afterFrames(3);
+    const scene = await checkView('the scene file');
+    const committed = await (await fetch(sceneFixtureUrl)).arrayBuffer();
+    const sceneFresh = sameBytes((await bakeScene(defaultScene(), {}, tiny)).bytes, committed);
+    if (!sceneFresh) throw new Error('the committed scene file differs from the default scene baked fresh in the page: run pnpm examples:bake --scene');
+
+    overlay.set('check', 'tree, indexed tree and scene agree with the CPU walk; the files are identical to fresh bakes');
+    await ready(device, { ...overlay.snapshot(), agreement: { tree, indexed, scene }, fresh, sceneFresh, builtByBake: overlay.snapshot().build });
 }
 
 // For the smoke run's screenshot: the pointer in the middle until the mouse moves.
