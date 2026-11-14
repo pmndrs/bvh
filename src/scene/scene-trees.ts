@@ -298,6 +298,13 @@ export interface SceneTreesOptions {
      * triangle (Sponza: 350.6 MiB for 185.1 in use).
      */
     readonly trimWhenRefined?: boolean;
+    /**
+     * Deforming meshes' refits: `'per-mesh'` (the default) gives each its own
+     * primitive-box buffer (32 bytes per triangle); `'shared'` gives them one,
+     * sized for the largest deforming mesh, used in turn (every refit is
+     * recorded one after another in the update's pass). Same boxes, same trees.
+     */
+    readonly refitBoxes?: 'per-mesh' | 'shared';
 }
 
 /** A tree was placed: a mesh's (or merged group's) first, or a swap. */
@@ -896,7 +903,9 @@ export class SceneTrees {
         this.cpuTopLevel = this.createTopLevelBuffer(TOP_LEVEL_HEADER_BYTES);
         device.queue.writeBuffer(this.cpuTopLevel, 0, new Uint32Array(TOP_LEVEL_HEADER_WORDS));
         this.identity = new GpuMergedIdentity(device, this.label);
-        this.deforming = DeformingTrees.isSupported(device) ? new DeformingTrees(device, { label: this.label }) : null;
+        const refitBoxes = options.refitBoxes ?? 'per-mesh';
+        if (refitBoxes !== 'per-mesh' && refitBoxes !== 'shared') throw new RangeError(`refitBoxes must be 'per-mesh' or 'shared', got ${String(refitBoxes)}`);
+        this.deforming = DeformingTrees.isSupported(device) ? new DeformingTrees(device, { label: this.label, refitBoxes }) : null;
     }
 
     /** Compiles the GPU builder, the top level and the merged-identity pass, all at once. */

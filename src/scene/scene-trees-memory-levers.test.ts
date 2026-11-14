@@ -261,3 +261,40 @@ describe('SceneTrees.trim and trimWhenRefined (the node buffer packed after the 
         });
     }
 });
+
+describe("refitBoxes: 'shared' (deforming meshes' refits take turns with one box buffer)", () => {
+    it('binds one buffer sized for the largest mesh in every refit of the pass, and saves the others', async () => {
+        const memory: Record<string, number> = {};
+        for (const refitBoxes of ['per-mesh', 'shared'] as const) {
+            const gpu = createFakeGpu({}, { features: ['subgroups'], kernels: SCENE_KERNELS });
+            const scene = await SceneTrees.create(gpu.device, { gpuFirstTrees: false, topLevel: 'cpu', refitBoxes });
+            const boxBuffers: FakeBuffer[] = [];
+            const frame = () => {
+                const encoder = gpu.createEncoder();
+                scene.update(encoder);
+                const commands = (encoder as unknown as { commands: { dispatch?: { entryPoint: string; bindings: ReadonlyMap<number, { buffer: FakeBuffer }> } }[] }).commands;
+                for (const command of commands) if (command.dispatch?.entryPoint === 'meshRefitTriangles') boxBuffers.push(command.dispatch.bindings.get(3)!.buffer);
+                gpu.submit(encoder);
+            };
+            const sizes = [3, 8, 5];
+            const meshes = sizes.map((cells) => scene.addMesh(tessellatedQuad(cells, 1), { deforming: true }));
+            for (const mesh of meshes) scene.addInstance({ mesh, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] });
+            frame();
+            await scene.whenRefined();
+            frame();
+            sizes.forEach((cells, index) => scene.setPose(meshes[index], { positionBuffer: gpu.device.createBuffer({ size: (cells + 1) ** 2 * 12, usage: 0x80 }), vertexCount: (cells + 1) ** 2 }));
+            frame();
+            expect(boxBuffers).toHaveLength(3);
+            if (refitBoxes === 'shared') {
+                expect(new Set(boxBuffers).size).toBe(1);
+                // The largest mesh's boxes: 8 x 8 cells, 2 triangles each, 32 bytes per triangle.
+                expect(boxBuffers[0].size).toBe(8 * 8 * 2 * 32);
+            } else {
+                expect(new Set(boxBuffers).size).toBe(3);
+            }
+            memory[refitBoxes] = scene.memory.meshRefits;
+            scene.dispose();
+        }
+        expect(memory['per-mesh'] - memory.shared).toBe((3 * 3 * 2 + 5 * 5 * 2) * 32);
+    });
+});

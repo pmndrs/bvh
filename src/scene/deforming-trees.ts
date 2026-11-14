@@ -35,7 +35,7 @@
  */
 
 import type { GpuLayoutMeshBvh } from '../gpu-layout.ts';
-import { GpuMeshRefit, GpuMeshRefitKernels, type MeshRefitVertices } from '../gpu-mesh-refit.ts';
+import { GpuMeshRefit, GpuMeshRefitKernels, GpuRefitBoxPool, type MeshRefitVertices } from '../gpu-mesh-refit.ts';
 import type { GpuMeshBuffers } from '../mesh-input.ts';
 import { relativeSahCost } from '../refit-cpu.ts';
 import { dequantizeNodes } from '../quantized-nodes.ts';
@@ -101,15 +101,19 @@ export class DeformingTrees {
     private readonly device: GPUDevice;
     private readonly label: string;
     private readonly kernels: GpuMeshRefitKernels;
+    /** `refitBoxes: 'shared'`: one primitive-box buffer for every refit, sized for the largest mesh; null: one per mesh. */
+    private readonly boxPool: GpuRefitBoxPool | null;
     private readonly meshes = new Map<number, DeformingMesh>();
     private nextShapeGeneration = 1;
     private refits = 0;
     private driftRebuilds = 0;
 
-    constructor(device: GPUDevice, options: { readonly label?: string } = {}) {
+    constructor(device: GPUDevice, options: { readonly label?: string; readonly refitBoxes?: 'per-mesh' | 'shared' } = {}) {
         this.device = device;
         this.label = `${options.label ?? 'bvh'} mesh refit`;
         this.kernels = new GpuMeshRefitKernels(device, this.label);
+        // Every refit is recorded one after another in one pass (encode), so they can take turns with one box buffer.
+        this.boxPool = options.refitBoxes === 'shared' ? new GpuRefitBoxPool(device, `${this.label} boxes`) : null;
     }
 
     prepare(): Promise<void> {
@@ -122,9 +126,9 @@ export class DeformingTrees {
         return { refitting, refits: this.refits, driftRebuilds: this.driftRebuilds };
     }
 
-    /** GPU bytes of the refits' own buffers (the trees are in the scene's). */
+    /** GPU bytes of the refits' own buffers, and of the shared box buffer (the trees are in the scene's). */
     get memoryBytes(): number {
-        let bytes = 0;
+        let bytes = this.boxPool?.memoryBytes ?? 0;
         for (const mesh of this.meshes.values()) bytes += mesh.refit.memoryBytes;
         return bytes;
     }
@@ -151,7 +155,7 @@ export class DeformingTrees {
             flags,
             flagsBuffer: null,
             slot,
-            refit: new GpuMeshRefit(this.device, { label: `${this.label} ${slot}`, diagnostics: true, kernels: this.kernels }),
+            refit: new GpuMeshRefit(this.device, { label: `${this.label} ${slot}`, diagnostics: true, kernels: this.kernels, ...(this.boxPool ? { boxes: this.boxPool } : {}) }),
             triangleCount,
             deformBox: Float32Array.from(deformBox),
             vertices: null,
@@ -233,8 +237,9 @@ export class DeformingTrees {
         if (mesh) mesh.placement = null;
     }
 
-    /** Starts reading back stats copied in earlier updates (never waits). */
+    /** Starts reading back stats copied in earlier updates (never waits); at an update's start, so the shared box buffer's old ones can go. */
     pollStats(): void {
+        this.boxPool?.releaseRetired();
         for (const mesh of this.meshes.values()) mesh.refit.pollStats();
     }
 
@@ -327,6 +332,7 @@ export class DeformingTrees {
             mesh.flagsBuffer?.destroy();
         }
         this.meshes.clear();
+        this.boxPool?.dispose();
     }
 
     private readDrift(mesh: DeformingMesh): void {

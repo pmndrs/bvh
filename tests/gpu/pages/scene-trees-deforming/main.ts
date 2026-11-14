@@ -22,9 +22,17 @@
  * The cloth has per-triangle materials (every fourth triangle without one,
  * taking its instance's), so every check compares materials too, through the
  * refits and the drift rebuild (whose flags come from a buffer of their own).
+ *
+ * The `levers` variants (records, quantized and `f32`) turn on the P9 memory
+ * levers of BX.20 that touch the GPU side (docs/internals/design/memory.md):
+ * {@link LEVERS}. They add a second deforming mesh, half the cloth's triangles
+ * with vertices of its own, posed through the first six poses, so two refits
+ * take turns with one shared box buffer in each update's pass, and the node
+ * buffer is trimmed whenever the scene is quiet (the refits follow the moved
+ * trees).
  */
 
-import { SceneTrees } from '../../../../src/scene/scene-trees.ts';
+import { SceneTrees, type SceneTreesOptions } from '../../../../src/scene/scene-trees.ts';
 import { DRIFT_HOLD_FRAMES } from '../../../../src/scene/deforming-trees.ts';
 import { assembleTraceScene, type TraceSceneInstance } from '../../../../src/trace/scene-assembly.ts';
 import { buildMeshBvhWithTinyBvh } from '../../../../src/trace/mesh-bvh-topology.ts';
@@ -55,6 +63,9 @@ function cloth(): { positions: Float32Array; indices: Uint16Array; triangleMater
     return { positions, indices, triangleMaterials };
 }
 
+/** The BX.20 levers the `levers` variants turn on (each off by default). */
+const LEVERS: Partial<SceneTreesOptions> = { refitBoxes: 'shared', trimWhenRefined: true, quantizeJobs: 'batched' };
+
 function pose(rest: Float32Array, wave: number, bend: number): Float32Array {
     const moved = new Float32Array(rest.length);
     for (let at = 0; at < rest.length; at += 3) {
@@ -74,12 +85,19 @@ await runGpuTest(
         const results: Record<string, unknown> = {};
         // Records, then indexed leaves (the refit copies each pose into the scene's positions).
         // Then quantized nodes (docs/internals/design/compressed-nodes.md): the refit keeps an f32 copy and packs it into the scene.
-        for (const [triangleLeaves, nodeFormat] of [['records', 'f32'], ['indexed', 'f32'], ['records', 'quantized'], ['indexed', 'quantized']] as const) {
-            const label = nodeFormat === 'quantized' ? `quantized ${triangleLeaves}` : triangleLeaves;
+        for (const [triangleLeaves, nodeFormat, levers] of [
+            ['records', 'f32', false],
+            ['indexed', 'f32', false],
+            ['records', 'quantized', false],
+            ['indexed', 'quantized', false],
+            ['records', 'quantized', true],
+            ['records', 'f32', true],
+        ] as const) {
+            const label = `${nodeFormat === 'quantized' ? `quantized ${triangleLeaves}` : triangleLeaves}${levers ? ' levers' : ''}`;
             const kernel = await TraceBatchKernel.create(device, { triangleLeaves, nodeFormat });
             const rest = cloth();
             const rock: MeshGeometry = { positions: new Float32Array([-1, -1, -1, 1, -1, -1, 0, 1, -1, 0, 0, 1]), indices: new Uint32Array([0, 1, 2, 0, 1, 3, 1, 2, 3, 0, 2, 3]) };
-            const scene = await SceneTrees.create(device, { label: `deforming ${label}`, holdRefinements: true, mergeStaticInstances: true, workers: { size: 2 }, triangleLeaves, nodeFormat });
+            const scene = await SceneTrees.create(device, { label: `deforming ${label}`, holdRefinements: true, mergeStaticInstances: true, workers: { size: 2 }, triangleLeaves, nodeFormat, ...(levers ? LEVERS : {}) });
             const clothMesh = scene.addMesh(rest, { deforming: { bounds: [-3, -3, -3, 3, 3, 3] } });
             const rockMesh = scene.addMesh(rock);
             const instances: (TraceSceneInstance & { readonly mesh: number })[] = [
@@ -87,20 +105,43 @@ await runGpuTest(
                 { mesh: clothMesh, meshIndex: 0, instanceIndex: 11, objectToWorld: [-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 1, 0, 1] },
                 { mesh: rockMesh, meshIndex: 1, instanceIndex: 12, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 3, 0, 1], static: true, material: 3 },
             ];
-            for (const instance of instances) scene.addInstance(instance);
+            // `levers`: a second deforming mesh, the cloth's first half of triangles (smaller, so the shared box buffer is the cloth's size).
+            const halfTriangles = rest.indices.length / 6;
+            const half = { positions: rest.positions, indices: rest.indices.slice(0, halfTriangles * 3), triangleMaterials: rest.triangleMaterials.slice(0, halfTriangles) };
+            const halfMesh = levers ? scene.addMesh(half, { deforming: { bounds: [-3, -3, -3, 3, 3, 3] } }) : -1;
+            if (levers) instances.push({ mesh: halfMesh, meshIndex: 2, instanceIndex: 13, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, -2, 0, 1], material: 7 });
+            const handles = instances.map((instance) => scene.addInstance(instance));
+            // `levers`: the half cloth is in the scene through the first six poses, then removed (its range a hole the next trim closes).
+            let halfInScene = levers;
 
             // The cloth's vertices on the GPU, interleaved; indices as 16-bit pairs in a u32 buffer.
             const vertexCount = rest.positions.length / 3;
-            const vertexBuffer = device.createBuffer({ label: 'cloth vertices', size: vertexCount * STRIDE * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-            const indexBuffer = device.createBuffer({ label: 'cloth indices', size: Math.ceil(rest.indices.byteLength / 4) * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+            const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+            const vertexBuffer = device.createBuffer({ label: 'cloth vertices', size: vertexCount * STRIDE * 4, usage });
+            const indexBuffer = device.createBuffer({ label: 'cloth indices', size: Math.ceil(rest.indices.byteLength / 4) * 4, usage });
             const paddedIndices = new Uint16Array(indexBuffer.size / 2);
             paddedIndices.set(rest.indices);
             device.queue.writeBuffer(indexBuffer, 0, paddedIndices);
-            const setPose = (positions: Float32Array) => {
+            // The half cloth's own vertices (a pose of its own) and indices.
+            const halfVertexBuffer = device.createBuffer({ label: 'half cloth vertices', size: vertexCount * STRIDE * 4, usage });
+            const halfIndexBuffer = device.createBuffer({ label: 'half cloth indices', size: Math.ceil(half.indices.byteLength / 4) * 4, usage });
+            device.queue.writeBuffer(halfIndexBuffer, 0, half.indices.buffer, 0, half.indices.byteLength);
+            const interleave = (target: GPUBuffer, positions: Float32Array) => {
                 const interleaved = new Float32Array(vertexCount * STRIDE);
                 for (let vertex = 0; vertex < vertexCount; vertex++) interleaved.set(positions.subarray(vertex * 3, vertex * 3 + 3), vertex * STRIDE + OFFSET);
-                device.queue.writeBuffer(vertexBuffer, 0, interleaved);
+                device.queue.writeBuffer(target, 0, interleaved);
+            };
+            const setPose = (positions: Float32Array) => {
+                interleave(vertexBuffer, positions);
                 scene.setPose(clothMesh, { positionBuffer: vertexBuffer, vertexCount, positionStrideFloats: STRIDE, positionOffsetFloats: OFFSET, indexBuffer, indexFormat: 'uint16' });
+            };
+            // The half cloth's pose (the last one it was given), for the reference.
+            let halfPositions = rest.positions;
+            const setHalfPose = (positions: Float32Array) => {
+                if (!levers) return;
+                halfPositions = positions;
+                interleave(halfVertexBuffer, positions);
+                scene.setPose(halfMesh, { positionBuffer: halfVertexBuffer, vertexCount, positionStrideFloats: STRIDE, positionOffsetFloats: OFFSET, indexBuffer: halfIndexBuffer, indexFormat: 'uint16' });
             };
             const frame = () => {
                 const encoder = device.createCommandEncoder();
@@ -113,8 +154,12 @@ await runGpuTest(
                 const name = `${label} ${state}`;
                 await device.queue.onSubmittedWorkDone();
                 const reference = assembleTraceScene(
-                    [buildMeshBvhWithTinyBvh({ positions, indices: rest.indices, triangleMaterials: rest.triangleMaterials }, tinyBvh), buildMeshBvhWithTinyBvh(rock, tinyBvh)],
-                    instances.map(({ mesh: _mesh, ...instance }) => instance),
+                    [
+                        buildMeshBvhWithTinyBvh({ positions, indices: rest.indices, triangleMaterials: rest.triangleMaterials }, tinyBvh),
+                        buildMeshBvhWithTinyBvh(rock, tinyBvh),
+                        ...(halfInScene ? [buildMeshBvhWithTinyBvh({ positions: halfPositions, indices: half.indices, triangleMaterials: half.triangleMaterials }, tinyBvh)] : []),
+                    ],
+                    instances.filter((instance) => halfInScene || instance.meshIndex !== 2).map(({ mesh: _mesh, ...instance }) => instance),
                     {},
                     { nodeFormat: 'f32' },
                 );
@@ -133,6 +178,7 @@ await runGpuTest(
             for (let step = 1; step <= 3; step++) {
                 const positions = pose(rest.positions, step * 0.7, 0);
                 setPose(positions);
+                setHalfPose(pose(rest.positions, step * 0.5, 0.1));
                 frame();
                 await check(`gpu tree pose ${step}`, positions);
             }
@@ -140,14 +186,33 @@ await runGpuTest(
             scene.releaseRefinements();
             let positions = pose(rest.positions, 2.1, 0);
             setPose(positions);
+            setHalfPose(pose(rest.positions, 1.7, 0.1));
             frame();
             assert(scene.meshStatus(clothMesh).builtBy === 'tinybvh', 'the cloth did not swap to tinybvh');
             await check('tinybvh tree after swap', positions);
             for (let step = 4; step <= 6; step++) {
                 positions = pose(rest.positions, step * 0.7, 0);
                 setPose(positions);
+                setHalfPose(pose(rest.positions, step * 0.5, 0.1));
                 frame();
                 await check(`tinybvh tree pose ${step}`, positions);
+            }
+
+            if (levers) {
+                // The half cloth goes: the trim after it moves the trees behind its range, the cloth's refit with them.
+                const before = scene.meshStatus(clothMesh).placement!.nodeOffset;
+                scene.removeInstance(handles[3]);
+                scene.removeMesh(halfMesh);
+                halfInScene = false;
+                const trimsBefore = scene.trimCount;
+                frame();
+                frame();
+                results[`${label} cloth moved by the trim`] = scene.meshStatus(clothMesh).placement!.nodeOffset !== before;
+                assert(scene.trimCount > trimsBefore, 'trimWhenRefined did not trim after the removal');
+                positions = pose(rest.positions, 4.9, 0);
+                setPose(positions);
+                frame();
+                await check('after the trim', positions);
             }
 
             // A bend held still: the refit drifts and holds, so the cloth is rebuilt from its pose.
@@ -176,6 +241,7 @@ await runGpuTest(
 
             // Poses on the CPU, on the rebuilt GPU tree (its layout was read back): no GPU refit, the top-level box follows.
             const refitsBefore = scene.deformingCounts.refits;
+
             for (let step = 7; step <= 8; step++) {
                 positions = pose(rest.positions, step * 0.7, 0.2);
                 scene.setPoseCpu(clothMesh, positions);
@@ -191,10 +257,15 @@ await runGpuTest(
             results[`${label} updatesToRebuild`] = updates;
             results[`${label} driftRatioAtRebuild`] = drift;
             results[`${label} cpuPoses`] = counts.cpuPoses;
+            results[`${label} meshRefitsBytes`] = scene.memory.meshRefits;
+            if (levers) {
+                results[`${label} trims`] = scene.trimCount;
+                assert(scene.trimCount > 0, 'trimWhenRefined never trimmed the node buffer');
+                assert(scene.memory.nodes === scene.memory.nodesInUse, `the node buffer holds ${scene.memory.nodes} bytes for ${scene.memory.nodesInUse} in use after the trims`);
+            }
             scene.dispose();
             kernel.destroy();
-            vertexBuffer.destroy();
-            indexBuffer.destroy();
+            for (const buffer of [vertexBuffer, indexBuffer, halfVertexBuffer, halfIndexBuffer]) buffer.destroy();
         }
         if (failures.length > 0) throw new Error(failures.join(' | '));
         return results;
