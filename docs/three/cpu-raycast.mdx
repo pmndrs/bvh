@@ -45,7 +45,8 @@ the index at a `NaN` distance; we report nothing there.
 ## When it falls back to three's raycast
 
 - The geometry has no tree.
-- A `SkinnedMesh`, or a mesh with morph targets (three poses each vertex on the CPU; that is exact).
+- A `SkinnedMesh`, or a mesh with morph targets (three poses each vertex on the CPU; that is exact), unless its tree is
+  a `SkinnedMeshBVH`, which holds the pose ([A tree that follows the pose](/three/skinned-and-morphed#a-tree-that-follows-the-pose)).
 - The position attribute's version, or the index, changed since `computeBoundsTree`. It warns once and stays on three's
   raycast until `geometry.boundsTree.refit()` (same index) or `computeBoundsTree` runs again.
 
@@ -59,8 +60,8 @@ raycast walks only its own geometry's tree.
 import { BatchedMesh, Mesh } from 'three';
 import { acceleratedRaycast, computeBatchedBoundsTree, disposeBatchedBoundsTree } from '@pmndrs/bvh/three';
 
-Mesh.prototype.raycast = acceleratedRaycast;
-BatchedMesh.prototype.raycast = acceleratedRaycast; // three-mesh-bvh's setup; three's own BatchedMesh.raycast runs underneath
+Mesh.prototype.raycast = acceleratedRaycast; // other meshes; the BatchedMesh needs only its own line below
+BatchedMesh.prototype.raycast = acceleratedRaycast; // each instance walks its geometry's tree
 BatchedMesh.prototype.computeBoundsTree = computeBatchedBoundsTree;
 BatchedMesh.prototype.disposeBoundsTree = disposeBatchedBoundsTree;
 
@@ -76,13 +77,20 @@ for (const tree of batched.boundsTrees ?? []) tree?.refit();
 - Each tree is a `BvhBoundsTree` over that geometry's range of the batched geometry. The hits are three's: `faceIndex`,
   `face` and the interpolated attributes over the whole batched geometry, and `batchId`. three-mesh-bvh reorders the
   batch's index in place, so its `faceIndex` numbers differ from three's; ours don't.
-- `acceleratedRaycast` on a `BatchedMesh` runs three's own `BatchedMesh.raycast`, whose stand-in mesh comes back to
-  `Mesh.raycast`: set both prototypes, as with three-mesh-bvh.
+- `BatchedMesh.prototype.raycast = acceleratedRaycast` is enough for a `BatchedMesh`: it runs three's
+  `BatchedMesh.raycast` loop (active, visible instances, each geometry's draw range, matrix, box and sphere) through a
+  stand-in of its own that walks the trees, so `Mesh.prototype.raycast` may stay three's. With only
+  `Mesh.prototype.raycast` set, three's own `BatchedMesh.raycast` sends its stand-in there and the trees are walked too.
+  A geometry with no tree gets three's raycast either way.
+- TypeScript: with three-mesh-bvh's types in the same program, `computeBoundsTree` and `boundsTrees` on `BatchedMesh`
+  may take three-mesh-bvh's types; see [Both libraries in one TypeScript
+  program](/three/coming-from-three-mesh-bvh#both-libraries-in-one-typescript-program).
 - After `setGeometryAt`, or another edit of the batch's positions or index, the trees are stale: raycasts fall back to
   three's, with one warning, until the changed geometry's tree is built again and the others are refitted or rebuilt.
 - A geometry whose index count isn't a multiple of 3 loses the one triangle three would read past its range.
 
-Tested against three's raycast and three-mesh-bvh's accelerated `BatchedMesh` raycast, indexed and not.
+Tested against three's raycast and three-mesh-bvh's accelerated `BatchedMesh` raycast, indexed and not, and with only
+`BatchedMesh.prototype.raycast` set.
 
 ## A whole scene
 
