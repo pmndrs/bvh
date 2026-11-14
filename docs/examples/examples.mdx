@@ -50,7 +50,14 @@ Basic: [`@pmndrs/bvh/babylon`](/engines/babylon) is "it works", not polish.
 | [`babylon/picking`](https://github.com/pmndrs/bvh/tree/main/examples/babylon/picking) | `scene.pick` over a big mesh against `BabylonBvhPicker`, picks per second for each, and the picker's `PickingInfo` under the pointer. It needs no WebGPU: it runs on Babylon's WebGL engine too (`?engine=webgl`). |
 | [`babylon/gpu-trace`](https://github.com/pmndrs/bvh/tree/main/examples/babylon/gpu-trace) | Hard shadows from the WGSL walk in a Babylon `ComputeShader` on the `WebGPUEngine`'s own device (`engine._device`), bound to `SceneTrees`' buffers with no copy and blended over Babylon's render. No AO: that needs sampling, which is above the hit. |
 
+## Node
+
+A Node CLI plus the page that loads what it wrote. [Serialization and baking](/serialization/serialization-and-baking) has the recipe.
+
+| Page | Shows |
+| --- | --- |
+| [`node/bake`](https://github.com/pmndrs/bvh/tree/main/examples/node/bake) | `pnpm examples:bake` builds a model's tree with tinybvh in Node (no GPU) and writes it with `serializeLayout`; the page loads that file with `deserializeLayout` and no build at all, and its overlay says `builtBy: baked file`. Traced by the WGSL walk, with the header's versions shown. `?bake=<url>` or a dropped `.bvh` loads another. |
+
 ## Planned
 
-- **Node:** `bake` (build in Node, load with no build).
 - **Comparisons with three-mesh-bvh** (`compare/`): raycast, async builds, path tracer, skinned, tree quality.

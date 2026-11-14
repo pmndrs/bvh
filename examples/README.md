@@ -72,6 +72,16 @@ Measured on the Apple M5 (Chrome, headless, `pnpm examples:smoke`, a loaded mach
 
 Measured on the Apple M5 (Chrome, headless, `pnpm examples:smoke`), default scenes: the GPU batch traces 65k rays in about 1.9 ms (35 Mrays/s, a 100k-triangle knot from outside, timestamps); `acceleratedRaycast` 0.40 M rays/s against three's 306 (100k triangles); the path tracer about 120 Mrays/s (wall time of one dispatch); Sponza (405 meshes, 3.7 M triangles) through `load-gltf` has every first tree in about 150-230 ms and every tinybvh tree in about 600 ms after the first update.
 
+## Node bake (BX.11)
+
+A Node CLI and the page that loads its file with no build at all. The CLI is `pnpm examples:bake [model.glb|.gltf] [--out file.bvh] [--leaf n] [--indexed] [--quantized]`: tinybvh's WebAssembly builds the tree (no GPU), `serializeLayout` writes it. With no model it bakes the default torus knot (6,400 triangles) to `node/bake/fixtures/torus-knot.bvh`, the 0.5 MB fixture the page loads (and the smoke run needs). A glTF's meshes are merged into one world-space mesh, because a bake is one mesh's tree; there is no scene-level file. `bake.ts` (the CLI's functions, also used by the unit test, `docs/snippets/node-bake.test.ts`), `model.ts` (the default mesh, browser-safe), `cli.ts`, and the page (`index.html`, `main.ts`). The script runs the TypeScript with `--experimental-transform-types` and the compare runner's resolve hook (`compare/node/register.mjs`), so it needs no `pnpm build`.
+
+| Page | Shows | Smoke check |
+| --- | --- | --- |
+| `node/bake` | The baked file read with `deserializeLayout` (fetch and deserialize ms, no build), uploaded and traced by the shared ray-cast view; the overlay's `builtBy` is `baked file: <name>`, with the file's header versions beside this package's. `?bake=<url>`, or a dropped `.bvh` (an `indexed` bake is refused: the page has no geometry to load it next to) | the view's 1,024 pixels agree with the CPU walk over the loaded tree (at least 50 hits); then the default model is built fresh with tinybvh in the page and its nodes, triangles and parents are byte-identical to the baked file's |
+
+Documented in `docs/serialization/serialization-and-baking.mdx`: the bake-at-build-time recipe (a script, a Vite plugin sketch), the version check and what invalidates a bake. The smoke run's screenshot under SwiftShader showed only the overlay (the canvas came out blank); the report has the numbers.
+
 ## Babylon.js examples (P6)
 
 `@pmndrs/bvh/babylon` is "it works", not polish (docs/engines/babylon.mdx; contributor notes in docs/internals/babylon.md). The shell is `shared/babylon/app.ts` (an engine, a scene, an orbit camera, the shared overlay, Babylon's render loop); `@babylonjs/core` is imported by deep path, so the build tree-shakes it, and its chunk is `babylon`.
