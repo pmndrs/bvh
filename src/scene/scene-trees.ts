@@ -47,7 +47,12 @@
  *   (one node per triangle) after the swaps. A deforming mesh's own batch
  *   (built apart, it reads its layout back) waits while the main load batch
  *   builds, so the main one is adopted; trees that arrive with the adopted
- *   batch are placed into its buffers at the next update.
+ *   batch are placed into its buffers at the next update. Indexed scenes
+ *   adopt too: their GPU builds leave each mesh's leading units (its header,
+ *   a merged group's side tables) free before its triangles
+ *   (`GpuTreeRequest.triangleLeading`), and the scene writes them at the
+ *   adoption. Quantized scenes adopt batches whose nodes H-PLOC wrote
+ *   quantized itself (`gpuQuantizeOnEmit`, implied by `'adopt'`).
  *
  * **A cap on the GPU batches' bytes** (`gpuMaxBatchBytes`, 256 MiB by default,
  * `Infinity` for none: the P9 build-peak lever; docs/internals/design/bvh-builders.md,
@@ -175,8 +180,41 @@ export interface SceneTreesOptions {
     readonly label?: string;
     /** First trees from the GPU (H-PLOC) on a device with subgroups. Default true; false: tinybvh only. */
     readonly gpuFirstTrees?: boolean;
-    /** How GPU trees reach the scene's buffers: `'copy'` (default) or `'adopt'` (see the file comment). `'adopt'` needs `nodeFormat: 'f32'`. */
+    /**
+     * How GPU trees reach the scene's buffers: `'copy'` (default) or `'adopt'`
+     * (see the file comment). Any node and triangle format: a quantized scene
+     * adopts H-PLOC batches that wrote quantized nodes themselves
+     * ({@link gpuQuantizeOnEmit}, which `'adopt'` turns on), and an indexed
+     * scene's builds leave room for each mesh's header.
+     */
     readonly gpuTreeOutputs?: GpuTreeOutputsMode;
+    /**
+     * Quantized scenes: H-PLOC writes the first trees' nodes quantized in its
+     * emit pass (`HplocOptions.quantizeOnEmit`), so a batch holds 32-byte
+     * nodes and a frame slot per mesh instead of 64-byte nodes, and no
+     * quantize pass runs as the trees are copied in. The trees are the same,
+     * bit for bit. Deforming meshes' builds stay `f32` (their refit needs an
+     * `f32` copy). Default false (the quantize pass), and true with
+     * `gpuTreeOutputs: 'adopt'`, which needs it. Ignored by `f32` scenes.
+     */
+    readonly gpuQuantizeOnEmit?: boolean;
+    /**
+     * Indexed scenes: the app's own positions buffer, bound as the walk's
+     * positions (`buffers.positions`) instead of the scene's copy, which is
+     * then never made (docs/internals/design/indexed-leaves.md, option A). It
+     * must hold every mesh's vertices as `f32`, in the {@link positionLayout}
+     * stride (`'vec4'`: 16 bytes per vertex, `'packed'`: 12), each mesh's from
+     * the `vertexBase` given to `addMesh`, with exactly the bits of the
+     * geometry given there (the trees are built from that geometry; the walk
+     * reads this buffer), and `STORAGE` usage. Its vertices are the meshes'
+     * own, so the scene neither welds them (`weld` is false, and true
+     * throws), nor merges static instances (`mergeStaticInstances` is false,
+     * and true throws: a merged group's world-space vertices are not in it),
+     * nor takes deforming meshes (their refit writes its pose into the
+     * scene's copy). The app keeps the buffer alive and unchanged while the
+     * scene uses it. Default: none (the scene's copy).
+     */
+    readonly positionsBuffer?: GPUBuffer;
     /**
      * Cap each GPU build batch's bytes (inputs, scratch and outputs) and build
      * the batches one after another (see the file comment). Default 256 MiB
@@ -252,10 +290,9 @@ export interface SceneTreesOptions {
     /**
      * The triangle format (docs/internals/design/indexed-leaves.md): `'records'` (the
      * default, 48 bytes per triangle) or `'indexed'` (16 bytes per triangle,
-     * plus the scene's own positions, `buffers.positions`). The walk that
-     * reads the scene must be built with the same `triangleLeaves` and
-     * `positionLayout`. Indexed needs `gpuTreeOutputs: 'copy'` (each mesh
-     * gets a header before its triangles, which a batch's buffers don't have).
+     * plus the scene's own positions, `buffers.positions`, or the app's,
+     * {@link positionsBuffer}). The walk that reads the scene must be built
+     * with the same `triangleLeaves` and `positionLayout`.
      */
     readonly triangleLeaves?: TriangleLeaves;
     /** Indexed: `'vec4'` (the default, 16 bytes per vertex) or `'packed'` (12) positions. */
@@ -268,9 +305,8 @@ export interface SceneTreesOptions {
      * ({@link SceneTrees.nodeFormat}; the walk's default is quantized too). tinybvh trees come
      * quantized from the workers (deforming meshes' come `f32`: their refit
      * keeps an `f32` copy, and they are packed when placed); GPU trees are
-     * built `f32` and packed by a compute pass on their way into the storage.
-     * Quantized needs `gpuTreeOutputs: 'copy'` (an adopted batch's nodes are
-     * `f32`), so `'adopt'` needs `nodeFormat: 'f32'`. Independent of `triangleLeaves`.
+     * built `f32` and packed by a compute pass on their way into the storage
+     * (or written quantized by H-PLOC, {@link gpuQuantizeOnEmit}). Independent of `triangleLeaves`.
      * A coordinate of magnitude 2^100 or more, or a non-finite one, makes a quantized box empty on that axis (hits there are lost).
      */
     readonly nodeFormat?: NodeFormat;
@@ -474,6 +510,12 @@ export interface SceneTreesTimeline {
 }
 
 export interface SceneMeshOptions {
+    /**
+     * With `SceneTreesOptions.positionsBuffer`, required: the mesh's first
+     * vertex in that buffer (its vertex `v` is the buffer's vertex
+     * `vertexBase + v`). Not allowed otherwise.
+     */
+    readonly vertexBase?: number;
     /**
      * The mesh deforms ({@link SceneTrees.setPose}): its tree is refit from each
      * pose on the GPU and rebuilt when the refit drifts. `bounds` is the box
@@ -778,7 +820,14 @@ export class SceneTrees {
     /** `parents: 'refit'`: only trees a refit uses carry parents. */
     private readonly parentsForRefitOnly: boolean;
     private readonly weld: boolean;
+    /** Indexed triangles: each mesh has leading units (a header) and positions somewhere. */
+    private readonly indexed: boolean;
+    /** The scene's own positions (indexed, without {@link appPositions}), else null. */
     private readonly positions: GrowableStorage | null;
+    /** The app's positions buffer (`positionsBuffer`), or null. */
+    private readonly appPositions: GPUBuffer | null;
+    /** H-PLOC writes quantized nodes (`gpuQuantizeOnEmit`; quantized scenes only). */
+    private readonly quantizeOnEmit: boolean;
     /** Removed meshes' position ranges, freed at the next update. */
     private releasePositionsAtUpdate: { offset: number; count: number }[] = [];
     private readonly gpuTopLevel: GpuTopLevel | null;
@@ -865,7 +914,11 @@ export class SceneTrees {
         if (!(maxBatchBytes > 0)) throw new RangeError(`gpuMaxBatchBytes must be a positive number of bytes (Infinity: no cap), got ${maxBatchBytes}`);
         this.maxBatchBytes = maxBatchBytes === Infinity ? undefined : maxBatchBytes;
         this.transferGeometry = options.transferGeometry ?? false;
-        this.mergeStatic = options.mergeStaticInstances ?? true;
+        this.appPositions = options.positionsBuffer ?? null;
+        if (this.appPositions && options.mergeStaticInstances === true) {
+            throw new RangeError("SceneTrees: positionsBuffer can't merge static instances (a merged group's world-space vertices are not in the app's buffer); leave mergeStaticInstances out or false");
+        }
+        this.mergeStatic = options.mergeStaticInstances ?? !this.appPositions;
         this.gpuMaxDepth = options.gpuMaxDepth ?? GPU_TREE_MAX_DEPTH;
         this.timestamps = options.timestamps ?? false;
         this.refine = options.refine ?? true;
@@ -894,18 +947,22 @@ export class SceneTrees {
         this.triangleLeaves = options.triangleLeaves ?? 'records';
         if (this.triangleLeaves !== 'records' && this.triangleLeaves !== 'indexed') throw new RangeError(`triangleLeaves must be 'records' or 'indexed', got ${String(this.triangleLeaves)}`);
         this.positionLayout = options.positionLayout ?? 'vec4';
-        this.weld = options.weld ?? true;
         const indexed = this.triangleLeaves === 'indexed';
-        if (indexed && this.gpuTreeOutputs === 'adopt') throw new RangeError("SceneTrees: triangleLeaves: 'indexed' needs gpuTreeOutputs: 'copy' (an adopted batch's buffers have no mesh headers)");
+        this.indexed = indexed;
+        if (this.gpuTreeOutputs !== 'copy' && this.gpuTreeOutputs !== 'adopt') throw new RangeError(`gpuTreeOutputs must be 'copy' or 'adopt', got ${String(this.gpuTreeOutputs)}`);
+        if (this.appPositions) {
+            if (!indexed) throw new RangeError("SceneTrees: positionsBuffer needs triangleLeaves: 'indexed' (records carry their corners)");
+            if (options.weld === true) throw new RangeError("SceneTrees: positionsBuffer can't weld (the trees must name the app's own vertices); leave weld out or false");
+            if ((this.appPositions.usage & USAGE.STORAGE) === 0) throw new RangeError('SceneTrees: positionsBuffer needs STORAGE usage');
+        }
+        this.weld = options.weld ?? !this.appPositions;
         this.triangleBytes = indexed ? INDEXED_TRIANGLE_BYTES : TRIANGLE_BYTES;
         this.nodeFormat = options.nodeFormat ?? DEFAULT_NODE_FORMAT;
         if (this.nodeFormat !== 'f32' && this.nodeFormat !== 'quantized') throw new RangeError(`nodeFormat must be 'f32' or 'quantized', got ${String(this.nodeFormat)}`);
-        if (this.nodeFormat === 'quantized' && this.gpuTreeOutputs === 'adopt') {
-            throw new RangeError(
-                options.nodeFormat === undefined
-                    ? "SceneTrees: gpuTreeOutputs: 'adopt' needs nodeFormat: 'f32' (an adopted batch's nodes are f32, and the default node format is 'quantized')"
-                    : "SceneTrees: nodeFormat: 'quantized' needs gpuTreeOutputs: 'copy' (an adopted batch's nodes are f32)",
-            );
+        // An adopted batch's nodes are the storage, so a quantized scene adopts only batches that wrote quantized nodes.
+        this.quantizeOnEmit = this.nodeFormat === 'quantized' && (options.gpuQuantizeOnEmit ?? this.gpuTreeOutputs === 'adopt');
+        if (this.nodeFormat === 'quantized' && this.gpuTreeOutputs === 'adopt' && !this.quantizeOnEmit) {
+            throw new RangeError("SceneTrees: gpuTreeOutputs: 'adopt' with quantized nodes needs gpuQuantizeOnEmit (an adopted batch's nodes are the storage); leave it out or true");
         }
         this.nodeBytes = this.nodeFormat === 'quantized' ? QUANTIZED_NODE_BYTES : BVH_NODE_BYTES;
         const quantizeJobs = options.quantizeJobs ?? 'per-tree';
@@ -921,7 +978,7 @@ export class SceneTrees {
         this.nodeLeading = this.nodeFormat === 'quantized' ? 1 : 0;
         this.nodes = new GrowableStorage(device, `${this.label} trace nodes`, this.nodeBytes, INITIAL_NODES);
         this.triangles = new GrowableStorage(device, `${this.label} trace triangles`, this.triangleBytes, indexed ? INITIAL_TRIANGLES * 3 : INITIAL_TRIANGLES);
-        this.positions = indexed ? new GrowableStorage(device, `${this.label} trace positions`, positionStrideFloats(this.positionLayout) * 4, INITIAL_TRIANGLES) : null;
+        this.positions = indexed && !this.appPositions ? new GrowableStorage(device, `${this.label} trace positions`, positionStrideFloats(this.positionLayout) * 4, INITIAL_TRIANGLES) : null;
         this.topLevelPath = options.topLevel !== 'cpu' && GpuTopLevel.isSupported(device) ? 'gpu' : 'cpu';
         this.gpuTopLevel =
             this.topLevelPath === 'gpu'
@@ -965,7 +1022,7 @@ export class SceneTrees {
      * `bvhTracePositions`; null for records).
      */
     get buffers(): { readonly nodes: GPUBuffer; readonly triangles: GPUBuffer; readonly topLevel: GPUBuffer; readonly positions: GPUBuffer | null } {
-        return { nodes: this.nodes.buffer, triangles: this.triangles.buffer, topLevel: this.topLevelBuffer, positions: this.positions?.buffer ?? null };
+        return { nodes: this.nodes.buffer, triangles: this.triangles.buffer, topLevel: this.topLevelBuffer, positions: this.positions?.buffer ?? this.appPositions };
     }
 
     /**
@@ -1020,8 +1077,11 @@ export class SceneTrees {
         checkTriangleFlags(geometry.triangleFlags, triangleCount, 'SceneTrees.addMesh');
         const materialCodes = triangleMaterialCodes(geometry.triangleMaterials, triangleCount, 'SceneTrees.addMesh');
         if (triangleCount === 0) throw new RangeError('SceneTrees.addMesh: the mesh has no triangles');
+        const deforming = options.deforming !== undefined && options.deforming !== false;
+        const vertices = this.appVerticesOf(geometry, options, deforming);
         const slot = this.meshSlots.take();
-        const state = this.newMeshSlot(slot, -1, geometry, triangleCount, options.deforming !== undefined && options.deforming !== false, materialCodes);
+        const state = this.newMeshSlot(slot, -1, geometry, triangleCount, deforming, materialCodes);
+        state.vertices = vertices;
         this.meshes.set(slot, state);
         if (state.deforming && this.deforming) {
             const box = typeof options.deforming === 'object' ? options.deforming.bounds : state.bounds;
@@ -1031,6 +1091,23 @@ export class SceneTrees {
         }
         this.newMeshes.push(slot);
         return slot;
+    }
+
+    /** With `positionsBuffer`: where the mesh's vertices are in it (checked against the buffer's size); else null, and `vertexBase` is refused. */
+    private appVerticesOf(geometry: MeshGeometry, options: SceneMeshOptions, deforming: boolean): { offset: number; count: number } | null {
+        const base = options.vertexBase;
+        if (!this.appPositions) {
+            if (base !== undefined) throw new RangeError('SceneTrees.addMesh: vertexBase needs the scene to have a positionsBuffer');
+            return null;
+        }
+        if (deforming) throw new RangeError("SceneTrees.addMesh: a scene with a positionsBuffer can't take deforming meshes (their refit writes the pose into the scene's own positions)");
+        if (base === undefined || !Number.isInteger(base) || base < 0) throw new RangeError(`SceneTrees.addMesh: with a positionsBuffer, vertexBase must be a non-negative integer, got ${String(base)}`);
+        const count = geometry.positions.length / 3;
+        const stride = positionStrideFloats(this.positionLayout) * 4;
+        if ((base + count) * stride > this.appPositions.size) {
+            throw new RangeError(`SceneTrees.addMesh: vertices ${base} to ${base + count - 1} don't fit the positionsBuffer (${this.appPositions.size} bytes, ${stride} per vertex)`);
+        }
+        return { offset: base, count: Math.max(1, count) };
     }
 
     /**
@@ -1182,7 +1259,7 @@ export class SceneTrees {
             this.releaseAtUpdate.push(tree);
             this.forgetTree(mesh);
         }
-        if (state.vertices) this.releasePositionsAtUpdate.push(state.vertices);
+        if (state.vertices && this.positions) this.releasePositionsAtUpdate.push(state.vertices);
         this.deforming?.meshRemoved(mesh);
         this.meshes.delete(mesh);
         this.newMeshes = this.newMeshes.filter((slot) => slot !== mesh);
@@ -1809,7 +1886,7 @@ export class SceneTrees {
             if (!builder) state.fallbackReason = this.noGpuReason ?? 'the GPU builder is not ready';
         }
         if (builder && states.length > 0) {
-            const request = (state: MeshSlot): GpuTreeRequest => ({ slot: state.slot, generation: state.generation, geometry: state.geometry! });
+            const request = (state: MeshSlot): GpuTreeRequest => ({ slot: state.slot, generation: state.generation, geometry: state.geometry!, ...this.adoptLeading(state.slot, state.triangleCount) });
             // Deforming meshes' trees are read back too (the refit needs their shape), so they get a batch of their own.
             // Split by the mesh's own flag, not by the GPU refit: without subgroups a CPU pose (setPoseCpu) needs the layout as much.
             const others = states.filter((state) => !state.deforming).map(request);
@@ -1824,8 +1901,15 @@ export class SceneTrees {
         for (const state of bySize) if (this.refine || !builder) this.startTinybvhBuild(state);
     }
 
+    /** An adopting indexed scene's GPU request: the mesh's leading units left free in its batch, for its header at the adoption. */
+    private adoptLeading(slot: number, triangleCount: number): { triangleLeading?: number } {
+        return this.gpuTreeOutputs === 'adopt' && this.indexed ? { triangleLeading: this.leadingOf(slot, triangleCount) } : {};
+    }
+
     /** Starts GPU builds. `rebuild` marks a deforming mesh's drift rebuild: refused, the mesh keeps refitting its tree. Returns whether anything started. */
     private startGpuBuilds(builder: FirstTreeBuilder, requests: readonly GpuTreeRequest[], kind: { readonly readLayouts: boolean; readonly rebuild: boolean }): boolean {
+        // Builds whose layouts are read back (deforming meshes: the refit's f32 copy) stay f32.
+        const quantizeOnEmit = this.quantizeOnEmit && !kind.readLayouts;
         const report = this.buildReporter('gpu', kind.rebuild, requests);
         const refuse = (slot: number, generation: number, reason: string): void => {
             report.finished(slot, generation, 'refused', reason);
@@ -1838,6 +1922,7 @@ export class SceneTrees {
                 readLayouts: kind.readLayouts,
                 // `parents: 'refit'`: no batch writes parents; a deforming mesh's read-back layout gets them from its nodes.
                 ...(this.parentsForRefitOnly ? { parents: false } : {}),
+                ...(quantizeOnEmit ? { quantizeOnEmit: true } : {}),
                 maxBatchBytes: this.maxBatchBytes,
                 cancelled: () => this.disposed,
                 onMemoryChange: () => this.samplePeak(),
@@ -1862,7 +1947,7 @@ export class SceneTrees {
                     this.samplePeak();
                     this.buildsRunning.delete(builds);
                 }
-                this.gpuBatchFinished(result, kind.rebuild, this.maxBatchBytes !== undefined, report);
+                this.gpuBatchFinished(result, kind.rebuild, this.maxBatchBytes !== undefined, report, quantizeOnEmit ? 'quantized' : 'f32');
             });
         }
         return builds.batches.length > 0;
@@ -1917,11 +2002,11 @@ export class SceneTrees {
         if (!state || state.gpu === 'building' || state.tinybvh === 'building') return;
         const geometry = deforming.rebuildGeometry(slot);
         if (!geometry) return;
-        const started = this.startGpuBuilds(builder, [{ slot, generation: state.generation, geometry }], { readLayouts: true, rebuild: true });
+        const started = this.startGpuBuilds(builder, [{ slot, generation: state.generation, geometry, ...this.adoptLeading(slot, state.triangleCount) }], { readLayouts: true, rebuild: true });
         deforming.rebuildStarted(slot, started);
     }
 
-    private gpuBatchFinished(result: GpuTreeBatchResult, rebuild: boolean, capped: boolean, report: BuildReporter): void {
+    private gpuBatchFinished(result: GpuTreeBatchResult, rebuild: boolean, capped: boolean, report: BuildReporter, nodeFormat: NodeFormat): void {
         this.lastGpuBuildMs = result.buildMs;
         if (result.failure === null) {
             this.gpuBatches++;
@@ -1945,9 +2030,9 @@ export class SceneTrees {
         for (const { slot, generation, reason } of result.refused) refuse(slot, generation, reason);
         if (result.failure) this.warn(`@pmndrs/bvh: ${result.failure}, so ${rebuild ? 'the mesh keeps its refit tree' : 'the meshes wait for tinybvh'}`);
         for (const built of result.built) {
-            if (built.outputs.nodeFormat !== 'f32') {
-                // The scene quantizes f32 trees as it copies them in; already-quantized ones can't be copied.
-                const reason = 'the first-tree builder returned quantized nodes; SceneTrees needs f32 GPU trees (it quantizes them itself)';
+            if (built.outputs.nodeFormat !== nodeFormat) {
+                // The scene quantizes f32 trees as it copies them in, and copies quantized ones only when it asked for them (gpuQuantizeOnEmit).
+                const reason = `the first-tree builder returned ${built.outputs.nodeFormat} nodes; SceneTrees asked for ${nodeFormat} GPU trees`;
                 if (this.currentState(built.slot, built.generation)) {
                     this.warn(`@pmndrs/bvh: ${reason}`);
                     refuse(built.slot, built.generation, reason);
@@ -2289,7 +2374,7 @@ export class SceneTrees {
             const state = this.meshes.get(tree.slot)!;
             if (tree.source === 'tinybvh') {
                 this.writeTinybvhNodes(tree.bvh, nodeOffset);
-                if (this.positions) {
+                if (this.indexed) {
                     this.writeIndexedTree(state, tree.bvh, triangleOffset, leadings[at]);
                 } else {
                     if (state.group >= 0) writeMergedTriangleIdentity(tree.bvh.triangles, this.groups[state.group].group, 0, tree.bvh.triangleCount);
@@ -2327,7 +2412,11 @@ export class SceneTrees {
      */
     private copyGpuTree(encoder: GPUCommandEncoder, tree: GpuArrivedTree, size: TreeSize, nodeOffset: number, triangleOffset: number, quantize: PendingQuantize | null = null): void {
         const { outputs, tree: built } = tree.built;
-        if (this.nodeFormat === 'quantized' && quantize) {
+        if (outputs.nodeFormat === 'quantized') {
+            // H-PLOC wrote them quantized (gpuQuantizeOnEmit): the frame slot and the nodes, as they are.
+            encoder.copyBufferToBuffer(outputs.nodes, (built.nodeOffset - 1) * QUANTIZED_NODE_BYTES, this.nodes.buffer, (nodeOffset - 1) * QUANTIZED_NODE_BYTES, (size.nodeCount + 1) * QUANTIZED_NODE_BYTES);
+        } else if (this.nodeFormat === 'quantized' && quantize) {
+            // f32 batch nodes, packed by the one batched pass the caller flushes into the encoder after.
             quantize.add(outputs.nodes, { sourceNodeOffset: built.nodeOffset, targetRootSlot: nodeOffset, nodeCount: size.nodeCount });
         } else if (this.nodeFormat === 'quantized') {
             // The batch's nodes are f32: packed into the frame slot and the nodes on the way in.
@@ -2339,11 +2428,21 @@ export class SceneTrees {
         }
         const bytes = this.triangleBytes;
         encoder.copyBufferToBuffer(outputs.triangles, built.triangleOffset * bytes, this.triangles.buffer, triangleOffset * bytes, size.triangleCount * bytes);
-        const state = this.meshes.get(tree.slot)!;
+        this.writeGpuTreeIdentity(encoder, tree.slot, triangleOffset, size.triangleCount);
+    }
+
+    /**
+     * A GPU tree's identity in the storage, at `triangleOffset`: a merged
+     * group's (the identity pass, in `encoder`), or an indexed mesh's leading
+     * units (its header and material table, written now). Records of an
+     * unmerged mesh need none. `encoder` may be null when the mesh is not merged.
+     */
+    private writeGpuTreeIdentity(encoder: GPUCommandEncoder | null, slot: number, triangleOffset: number, triangleCount: number): void {
+        const state = this.meshes.get(slot)!;
         const vertexBase = state.vertices?.offset ?? 0;
-        if (state.group >= 0) this.identity.encode(encoder, this.triangles.buffer, this.groups[state.group].group, triangleOffset, size.triangleCount, this.positions ? { vertexBase } : undefined);
-        else if (this.positions) {
-            const leading = this.leadingOf(tree.slot, size.triangleCount);
+        if (state.group >= 0) this.identity.encode(encoder!, this.triangles.buffer, this.groups[state.group].group, triangleOffset, triangleCount, this.indexed ? { vertexBase } : undefined);
+        else if (this.indexed) {
+            const leading = this.leadingOf(slot, triangleCount);
             const words = new Uint32Array(leading * INDEXED_TRIANGLE_WORDS);
             writeIndexedMeshHeader(words, leading, vertexBase, state.materialCodes);
             this.triangles.write(triangleOffset - leading, words);
@@ -2482,22 +2581,45 @@ export class SceneTrees {
         if (this.gpuTreeOutputs !== 'adopt' || !this.storagesEmpty() || trees.some((tree) => tree.rebuild)) return null;
         const outputs = trees[0].built.outputs;
         const usable = outputs.meshes.filter((mesh) => mesh.problem === null).length;
-        if (outputs.isDestroyed || trees.length !== usable || trees.some((tree) => tree.built.outputs !== outputs)) return null;
-        this.nodes.adopt(outputs.nodes, trees.map((tree) => ({ offset: tree.built.tree.nodeOffset, count: tree.built.tree.nodeCount })));
-        this.triangles.adopt(outputs.triangles, trees.map((tree) => ({ offset: tree.built.tree.triangleOffset, count: tree.built.tree.triangleCount })));
+        if (outputs.isDestroyed || trees.length !== usable || trees.some((tree) => tree.built.outputs !== outputs) || !this.canAdopt(outputs, trees)) return null;
+        this.adoptOutputs(outputs, trees);
+        const merged = trees.some((tree) => this.meshes.get(tree.slot)!.group >= 0);
+        const encoder = merged ? this.device.createCommandEncoder({ label: `${this.label} adopted batch identity` }) : null;
+        for (const tree of trees) this.writeGpuTreeIdentity(encoder, tree.slot, tree.built.tree.triangleOffset, tree.built.tree.triangleCount);
+        if (encoder) this.device.queue.submit([encoder.finish()]);
+        return new Map(trees.map((tree) => [tree, { nodeOffset: tree.built.tree.nodeOffset, triangleOffset: tree.built.tree.triangleOffset, triangleLeading: this.leadingOf(tree.slot, tree.built.tree.triangleCount) }]));
+    }
+
+    /**
+     * Whether a batch's buffers can be the storage: its nodes in the scene's
+     * format, and (indexed) each tree's leading units free in front of it,
+     * inside the buffer and clear of every other tree of the batch (a builder
+     * that ignored `triangleLeading` is copied instead).
+     */
+    private canAdopt(outputs: GpuTreeOutputs, trees: readonly GpuArrivedTree[]): boolean {
+        if (outputs.nodeFormat !== this.nodeFormat) return false;
+        if (!this.indexed) return true;
+        const ranges = outputs.meshes.filter((mesh) => mesh.problem === null).map((mesh) => ({ start: mesh.triangleOffset, end: mesh.triangleOffset + mesh.triangleCount }));
+        return trees.every((tree) => {
+            const { triangleOffset, triangleCount } = tree.built.tree;
+            const start = triangleOffset - this.leadingOf(tree.slot, triangleCount);
+            return start >= 0 && ranges.every((range) => range.end <= start || range.start >= triangleOffset);
+        });
+    }
+
+    /** The batch's node and triangle buffers become the storages, with its trees' ranges (frame slots and leading units included) in use. */
+    private adoptOutputs(outputs: GpuTreeOutputs, trees: readonly GpuArrivedTree[]): void {
+        this.nodes.adopt(outputs.nodes, trees.map((tree) => ({ offset: tree.built.tree.nodeOffset - this.nodeLeading, count: tree.built.tree.nodeCount + this.nodeLeading })));
+        this.triangles.adopt(
+            outputs.triangles,
+            trees.map((tree) => {
+                const leading = this.leadingOf(tree.slot, tree.built.tree.triangleCount);
+                return { offset: tree.built.tree.triangleOffset - leading, count: tree.built.tree.triangleCount + leading };
+            }),
+        );
         outputs.markAdopted();
         this.liveOutputs.delete(outputs);
         this.versionBase++;
-        const merged = trees.filter((tree) => this.meshes.get(tree.slot)!.group >= 0);
-        if (merged.length > 0) {
-            const encoder = this.device.createCommandEncoder({ label: `${this.label} adopted batch identity` });
-            for (const tree of merged) {
-                const built = tree.built.tree;
-                this.identity.encode(encoder, this.triangles.buffer, this.groups[this.meshes.get(tree.slot)!.group].group, built.triangleOffset, built.triangleCount);
-            }
-            this.device.queue.submit([encoder.finish()]);
-        }
-        return new Map(trees.map((tree) => [tree, { nodeOffset: tree.built.tree.nodeOffset, triangleOffset: tree.built.tree.triangleOffset, triangleLeading: 0 }]));
     }
 
     /**
@@ -2562,8 +2684,8 @@ export class SceneTrees {
         if (arrived.some((tree) => tree.source === 'gpu' && tree.stored) || this.arrived.some((tree) => tree.source === 'gpu' && tree.stored) || this.reserve.nodes.units > 0 || this.reserve.triangles.units > 0) return null;
         const placedUnits = { nodes: 0, triangles: 0 };
         for (const tree of this.placed.values()) {
-            placedUnits.nodes += tree.nodeCount;
-            placedUnits.triangles += tree.triangleCount;
+            placedUnits.nodes += tree.nodeCount + this.nodeLeading;
+            placedUnits.triangles += tree.triangleCount + tree.triangleLeading;
         }
         if (this.nodes.usedBytes !== placedUnits.nodes * this.nodeBytes || this.triangles.usedBytes !== placedUnits.triangles * this.triangleBytes) return null;
         const byOutputs = new Map<GpuTreeOutputs, GpuArrivedTree[]>();
@@ -2576,7 +2698,7 @@ export class SceneTrees {
         let best: { trees: GpuArrivedTree[]; deforming: boolean; triangles: number } | null = null;
         for (const [outputs, trees] of byOutputs) {
             const usable = outputs.meshes.filter((mesh) => mesh.problem === null).length;
-            if (trees.length !== usable || outputs.isDestroyed) continue;
+            if (trees.length !== usable || outputs.isDestroyed || !this.canAdopt(outputs, trees)) continue;
             const slots = new Set(trees.map((tree) => tree.slot));
             if ([...this.placed.keys()].some((slot) => !slots.has(slot))) continue;
             const deforming = trees.some((tree) => this.deformingSlot(tree.slot));
@@ -2589,20 +2711,12 @@ export class SceneTrees {
     /** The adopt lever: the batch's output buffers become the storage, with its trees in place. */
     private adoptLoadBatch(encoder: GPUCommandEncoder, trees: readonly GpuArrivedTree[], replaced: ReadonlyMap<number, TreeBuilder>): void {
         for (const tree of trees) this.releaseTree(tree.slot);
-        const outputs = trees[0].built.outputs;
-        this.nodes.adopt(outputs.nodes, trees.map((tree) => ({ offset: tree.built.tree.nodeOffset, count: tree.built.tree.nodeCount })));
-        this.triangles.adopt(outputs.triangles, trees.map((tree) => ({ offset: tree.built.tree.triangleOffset, count: tree.built.tree.triangleCount })));
-        outputs.markAdopted();
-        this.liveOutputs.delete(outputs);
-        this.versionBase++;
+        this.adoptOutputs(trees[0].built.outputs, trees);
         for (const tree of trees) {
             const built = tree.built.tree;
-            const state = this.meshes.get(tree.slot)!;
-            if (state.group >= 0) {
-                this.identity.encode(encoder, this.triangles.buffer, this.groups[state.group].group, built.triangleOffset, built.triangleCount);
-                this.encoderWritesStorage = true;
-            }
-            this.recordPlacement(tree, treeSize(tree), built.nodeOffset, built.triangleOffset, replaced.get(tree.slot) ?? null);
+            this.writeGpuTreeIdentity(encoder, tree.slot, built.triangleOffset, built.triangleCount);
+            if (this.meshes.get(tree.slot)!.group >= 0) this.encoderWritesStorage = true;
+            this.recordPlacement(tree, treeSize(tree), built.nodeOffset, built.triangleOffset, replaced.get(tree.slot) ?? null, this.leadingOf(tree.slot, built.triangleCount));
         }
         this.reconcileReserve();
     }
@@ -2636,7 +2750,7 @@ export class SceneTrees {
      * group's side and source tables); 0 for records.
      */
     private leadingOf(slot: number, triangleCount: number): number {
-        if (!this.positions) return 0;
+        if (!this.indexed) return 0;
         const state = this.meshes.get(slot);
         const sources = state && state.group >= 0 ? this.groups[state.group].group.sources.length : 0;
         return indexedLeadingUnits(triangleCount, sources, Boolean(state?.materialCodes));

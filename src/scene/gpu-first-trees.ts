@@ -45,7 +45,7 @@
  * declared fallback).
  */
 
-import { GpuHplocBuilder, hplocScratchPoolBytes, planGpuHplocBatches, type GpuHplocBatch, type GpuHplocScratchPool } from '../gpu-hploc.ts';
+import { GpuHplocBuilder, hplocScratchPoolBytes, planGpuHplocBatches, type GpuHplocBatch, type GpuHplocScratchPool, type GpuHplocBatchOptions } from '../gpu-hploc.ts';
 import type { GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import type { GpuMeshGeometry, GpuMeshTreeRange, GpuTreeBuffers } from '../mesh-input.ts';
 import { PassTimestamps } from '../gpu-timestamps.ts';
@@ -55,6 +55,12 @@ export interface GpuTreeRequest {
     readonly slot: number;
     readonly generation: number;
     readonly geometry: GpuMeshGeometry;
+    /**
+     * Triangles left free before the mesh's in its batch's triangle buffer
+     * (`GpuBuildOptions.triangleLeading`): an indexed scene that adopts the
+     * buffer writes the mesh's header and side tables there. Default 0.
+     */
+    readonly triangleLeading?: number;
 }
 
 /** Options of one {@link FirstTreeBuilder.build}. */
@@ -82,6 +88,12 @@ export interface GpuTreeBuildOptions {
     readonly timestamps?: boolean;
     /** Called when a batch is submitted (a capped batch can wait in the queue first), with its meshes. */
     readonly onBatchStart?: (members: readonly GpuTreeRequest[]) => void;
+    /**
+     * Quantized nodes written by the build itself (H-PLOC `quantizeOnEmit`):
+     * the outputs' nodes are each mesh's frame slot and 32-byte nodes, with no
+     * `f32` nodes and no quantize pass. Default false: `f32` nodes.
+     */
+    readonly quantizeOnEmit?: boolean;
 }
 
 /**
@@ -115,7 +127,7 @@ export class GpuTreeOutputs {
         return this.trees.triangles;
     }
 
-    /** The batch's node format; `SceneTrees` takes only `f32` batches (it quantizes on the way in). */
+    /** The batch's node format: `f32`, or quantized when built with `quantizeOnEmit` (a frame slot before each root). */
     get nodeFormat(): 'f32' | 'quantized' {
         return this.trees.nodeFormat ?? 'f32';
     }
@@ -293,7 +305,7 @@ export class GpuFirstTrees implements FirstTreeBuilder {
 
     build(requests: readonly GpuTreeRequest[], options: GpuTreeBuildOptions = {}): GpuTreeBuilds {
         const geometries = requests.map((request) => request.geometry);
-        const plan = planGpuHplocBatches(this.device, geometries, { maxBatchBytes: options.maxBatchBytes, ...this.buildOptions });
+        const plan = planGpuHplocBatches(this.device, geometries, { maxBatchBytes: options.maxBatchBytes, ...this.buildOptions, quantizeOnEmit: options.quantizeOnEmit === true, parents: options.parents !== false });
         const limitBytes = Math.min(this.device.limits.maxStorageBufferBindingSize, this.device.limits.maxBufferSize);
         const notBuilt = plan.tooBig.map((index) => ({
             slot: requests[index].slot,
@@ -313,7 +325,7 @@ export class GpuFirstTrees implements FirstTreeBuilder {
         for (const indices of plan.batches) {
             const members = indices.map((index) => requests[index]);
             try {
-                const batch = this.hploc.createBatch(members.map((member) => member.geometry), options.parents === false ? { ...this.buildOptions, parents: false } : this.buildOptions);
+                const batch = this.hploc.createBatch(members.map((member) => member.geometry), this.batchOptions(members, options));
                 const writes = timer?.writes();
                 batch.encode(encoder, writes);
                 buildingBytes += batch.scratchBytes + batch.outputBytes;
@@ -422,7 +434,7 @@ export class GpuFirstTrees implements FirstTreeBuilder {
             const geometries = members.map((member) => member.geometry);
             const pool = this.poolFor(geometries);
             this.poolOwner = owner;
-            batch = this.hploc.createBatch(geometries, options.parents === false ? { ...this.buildOptions, parents: false } : this.buildOptions, pool);
+            batch = this.hploc.createBatch(geometries, this.batchOptions(members, options), pool);
             const building = batch;
             this.current = { owner, bytes: () => building.outputBytes };
             options.onMemoryChange?.();
@@ -441,6 +453,16 @@ export class GpuFirstTrees implements FirstTreeBuilder {
             this.current = null;
             return refused(`the GPU mesh tree build could not start: ${describe(error)}`);
         }
+    }
+
+    /** One batch's H-PLOC options: the triangle format, no parents output when asked, quantized nodes in the emit when asked, and the members' gaps when any has one. */
+    private batchOptions(members: readonly GpuTreeRequest[], options: GpuTreeBuildOptions): GpuHplocBatchOptions {
+        return {
+            ...this.buildOptions,
+            ...(options.parents === false ? { parents: false } : {}),
+            ...(options.quantizeOnEmit ? { nodeFormat: 'quantized' as const, quantizeOnEmit: true } : {}),
+            ...(members.some((member) => (member.triangleLeading ?? 0) > 0) ? { triangleLeading: members.map((member) => member.triangleLeading ?? 0) } : {}),
+        };
     }
 
     /**

@@ -9,8 +9,10 @@
  * of it all. Test-only.
  */
 
-import { hplocScratchPoolBytes, type GpuHplocBatch, type GpuHplocScratchPool } from '../../src/gpu-hploc.ts';
+import { hplocScratchPoolBytes, type GpuHplocBatch, type GpuHplocScratchPool, type HplocOptions } from '../../src/gpu-hploc.ts';
 import type { GpuMeshGeometry, GpuMeshTreeRange, GpuTreeBuffers } from '../../src/mesh-input.ts';
+import { quantizeNodes } from '../../src/quantized-nodes.ts';
+import type { MeshBvh } from '../../src/trace/mesh-bvh.ts';
 import type { HplocBatchBuilder } from '../../src/scene/gpu-first-trees.ts';
 import { buildMeshBvhAsync } from '../../src/trace/mesh-bvh-build.ts';
 import type { MeshGeometry } from '../../src/trace/mesh-bvh.ts';
@@ -72,8 +74,10 @@ export class FakeHploc implements HplocBatchBuilder {
         return pool as unknown as GpuHplocScratchPool;
     }
 
-    createBatch(geometries: readonly GpuMeshGeometry[], options?: { readonly triangleLeaves?: 'records' | 'indexed' }, pool?: GpuHplocScratchPool): GpuHplocBatch {
+    createBatch(geometries: readonly GpuMeshGeometry[], options?: HplocOptions, pool?: GpuHplocScratchPool): GpuHplocBatch {
         const triangleLeaves = options?.triangleLeaves === 'indexed' ? 'indexed' : 'records';
+        const quantizeOnEmit = options?.quantizeOnEmit === true;
+        const leading = geometries.map((_, index) => options?.triangleLeading?.[index] ?? 0);
         const index = this.created++;
         if (!pool) this.violations.push(`batch ${index} without a pool`);
         else if (pool.isDestroyed) this.violations.push(`batch ${index} on a freed pool`);
@@ -114,7 +118,7 @@ export class FakeHploc implements HplocBatchBuilder {
                     throw new Error(`batch ${index}'s readback failed (test)`);
                 }
                 finished = true;
-                return this.trees(copies, triangleTotal, triangleLeaves, () => letGo('let go'));
+                return this.trees(copies, leading, triangleLeaves, quantizeOnEmit, () => letGo('let go'));
             },
             destroy: () => {
                 if (destroyed) return;
@@ -142,13 +146,9 @@ export class FakeHploc implements HplocBatchBuilder {
         await settle();
     }
 
-    private async trees(meshes: readonly MeshGeometry[], triangleTotal: number, triangleLeaves: 'records' | 'indexed', onLetGo: () => void): Promise<GpuTreeBuffers> {
+    private async trees(meshes: readonly MeshGeometry[], leading: readonly number[], triangleLeaves: 'records' | 'indexed', quantizeOnEmit: boolean, onLetGo: () => void): Promise<GpuTreeBuffers> {
         const trees = await Promise.all(meshes.map((mesh) => buildMeshBvhAsync(mesh, { maxLeafPrimitives: 1, triangleLeaves })));
-        const bytes = triangleLeaves === 'indexed' ? 16 : 48;
-        const usage = 0x4 | 0x8 | 0x80;
-        const nodes = this.device.createBuffer({ label: 'fake hploc nodes', size: triangleTotal * 64, usage });
-        const triangles = this.device.createBuffer({ label: 'fake hploc triangles', size: triangleTotal * bytes, usage });
-        const parents = this.device.createBuffer({ label: 'fake hploc parents', size: triangleTotal * 4, usage });
+        const { nodes, triangles, parents, meshes: ranges } = standInOutputs(this.device, trees, leading.map((triangleLeading) => ({ triangleLeading })), triangleLeaves, quantizeOnEmit, 'fake hploc');
         // The parents go with the outputs either way (destroyed, or freed at an adoption): that is the batch letting go.
         const destroyParents = parents.destroy.bind(parents);
         let letGo = false;
@@ -159,18 +159,60 @@ export class FakeHploc implements HplocBatchBuilder {
             }
             destroyParents();
         };
-        const ranges: GpuMeshTreeRange[] = [];
-        let nodeOffset = 0;
-        let triangleOffset = 0;
-        for (const tree of trees) {
-            this.device.queue.writeBuffer(nodes, nodeOffset * 64, tree.nodes, 0, tree.nodeCount * 64);
-            this.device.queue.writeBuffer(triangles, triangleOffset * bytes, tree.triangles, 0, tree.triangleCount * bytes);
-            ranges.push({ nodeOffset, nodeCount: tree.nodeCount, triangleOffset, triangleCount: tree.triangleCount, leafCount: tree.leafCount, maxDepth: tree.maxDepth, bounds: tree.bounds, problem: null });
-            nodeOffset += tree.nodeCount;
-            triangleOffset += tree.triangleCount;
-        }
-        return { nodes, triangles, parents, meshes: ranges, ...(triangleLeaves === 'indexed' ? { triangleLeaves } : {}), destroy: () => [nodes, triangles, parents].forEach((buffer) => buffer.destroy()) };
+        return {
+            nodes,
+            triangles,
+            parents,
+            meshes: ranges,
+            ...(triangleLeaves === 'indexed' ? { triangleLeaves } : {}),
+            ...(quantizeOnEmit ? { nodeFormat: 'quantized' as const } : {}),
+            destroy: () => [nodes, triangles, parents].forEach((buffer) => buffer.destroy()),
+        };
     }
+}
+
+/**
+ * Fake buffers laid out like an H-PLOC batch's outputs for these trees: room
+ * for one node per triangle (with `quantizeOnEmit`, each mesh's frame slot and
+ * 32-byte nodes, `quantizeNodes`' bytes: what the emit writes), the used nodes
+ * packed at the front, and each mesh's triangles after its `triangleLeading`
+ * gap. The ranges are H-PLOC's (`nodeOffset` the root's slot).
+ */
+export function standInOutputs(
+    device: GPUDevice,
+    trees: readonly MeshBvh[],
+    members: readonly { readonly triangleLeading?: number }[],
+    triangleLeaves: 'records' | 'indexed',
+    quantizeOnEmit: boolean,
+    label: string,
+): { nodes: GPUBuffer; triangles: GPUBuffer; parents: GPUBuffer; meshes: GpuMeshTreeRange[] } {
+    const bytes = triangleLeaves === 'indexed' ? 16 : 48;
+    const triangleTotal = trees.reduce((sum, tree) => sum + tree.triangleCount, 0);
+    const leadingTotal = members.reduce((sum, member) => sum + (member.triangleLeading ?? 0), 0);
+    const usage = 0x4 | 0x8 | 0x80;
+    const nodes = device.createBuffer({ label: `${label} nodes`, size: quantizeOnEmit ? (triangleTotal + trees.length) * 32 : triangleTotal * 64, usage });
+    const triangles = device.createBuffer({ label: `${label} triangles`, size: Math.max(1, triangleTotal + leadingTotal) * bytes, usage });
+    const parents = device.createBuffer({ label: `${label} parents`, size: triangleTotal * 4, usage });
+    const meshes: GpuMeshTreeRange[] = [];
+    let nodeSlot = 0;
+    let triangleOffset = 0;
+    trees.forEach((tree, index) => {
+        let nodeOffset: number;
+        if (quantizeOnEmit) {
+            device.queue.writeBuffer(nodes, nodeSlot * 32, quantizeNodes(tree).nodes, 0, (tree.nodeCount + 1) * 32);
+            nodeOffset = nodeSlot + 1;
+            nodeSlot += tree.nodeCount + 1;
+        } else {
+            device.queue.writeBuffer(nodes, nodeSlot * 64, tree.nodes, 0, tree.nodeCount * 64);
+            nodeOffset = nodeSlot;
+            nodeSlot += tree.nodeCount;
+        }
+        triangleOffset += members[index]?.triangleLeading ?? 0;
+        device.queue.writeBuffer(triangles, triangleOffset * bytes, tree.triangles, 0, tree.triangleCount * bytes);
+        meshes.push({ nodeOffset, nodeCount: tree.nodeCount, triangleOffset, triangleCount: tree.triangleCount, leafCount: tree.leafCount, maxDepth: tree.maxDepth, bounds: tree.bounds, problem: null });
+        triangleOffset += tree.triangleCount;
+    });
+    return { nodes, triangles, parents, meshes };
 }
 
 /** Lets pending promise callbacks (and a few awaits deep) run. */

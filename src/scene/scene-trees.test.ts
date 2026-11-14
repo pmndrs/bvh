@@ -26,17 +26,25 @@ import { assembleTraceScene, type TraceSceneData, type TraceSceneInstance } from
 import type { TopLevelBvh } from '../trace/top-level.ts';
 import { GpuFirstTrees, GpuTreeOutputs, type FirstTreeBuilder, type GpuTreeBatchResult, type GpuTreeBuildOptions, type GpuTreeBuilds, type GpuTreeRequest } from './gpu-first-trees.ts';
 import { DEFAULT_GPU_MAX_BATCH_BYTES, SceneTrees, type SceneInstanceDescriptor, type SceneTreeEvent, type SceneTreesOptions } from './scene-trees.ts';
-import type { GpuMeshTreeRange } from '../mesh-input.ts';
 import { gatherStandIn } from '../../tests/support/top-level-gather.ts';
 import { mergedIdentityIndexedStandIn, mergedIdentityStandIn, quantizeStandIn } from '../../tests/support/scene-stand-ins.ts';
-import { FakeHploc, settle } from '../../tests/support/fake-hploc.ts';
+import { FakeHploc, settle, standInOutputs } from '../../tests/support/fake-hploc.ts';
 import { addToTally, compareClosest, newTally } from '../trace/oracle-compare.ts';
 import { buildReferenceScene, traceClosestReference } from '../trace/reference-tracer.ts';
 
 /** A first-tree builder that answers when the test says so; each `build` is one batch. */
 class StandInGpuBuilder implements FirstTreeBuilder {
     readonly requests: GpuTreeRequest[][] = [];
-    private readonly pending: { members: { slot: number; generation: number; geometry: MeshGeometry }[]; readLayouts: boolean; resolve: (result: GpuTreeBatchResult) => void }[] = [];
+    private readonly pending: {
+        members: { slot: number; generation: number; geometry: MeshGeometry; triangleLeading: number }[];
+        readLayouts: boolean;
+        quantizeOnEmit: boolean;
+        resolve: (result: GpuTreeBatchResult) => void;
+    }[] = [];
+    /** Each build's `quantizeOnEmit`. */
+    readonly quantizeOnEmit: boolean[] = [];
+    /** Ignores `triangleLeading`, as a custom builder may (the scene must then copy, not adopt). */
+    ignoreLeading = false;
     /** Each build's `readLayouts`. */
     readonly readLayouts: boolean[] = [];
     /** Answers `readLayouts` with no layouts, as a failed readback does. */
@@ -58,15 +66,18 @@ class StandInGpuBuilder implements FirstTreeBuilder {
         this.requests.push([...requests]);
         this.readLayouts.push(options.readLayouts ?? false);
         const readLayouts = options.readLayouts ?? false;
-        const members = requests.map(({ slot, generation, geometry }) => {
+        const quantizeOnEmit = options.quantizeOnEmit ?? false;
+        this.quantizeOnEmit.push(quantizeOnEmit);
+        const members = requests.map(({ slot, generation, geometry, triangleLeading }) => {
             const cpu = geometry as MeshGeometry;
             return {
                 slot,
                 generation,
+                triangleLeading: this.ignoreLeading ? 0 : (triangleLeading ?? 0),
                 geometry: { positions: cpu.positions.slice(), indices: cpu.indices ? Uint32Array.from(cpu.indices) : null, triangleFlags: cpu.triangleFlags?.slice() ?? null, triangleMaterials: cpu.triangleMaterials ?? null },
             };
         });
-        const batch = new Promise<GpuTreeBatchResult>((resolve) => this.pending.push({ members, readLayouts, resolve }));
+        const batch = new Promise<GpuTreeBatchResult>((resolve) => this.pending.push({ members, readLayouts, quantizeOnEmit, resolve }));
         return { notBuilt: [], batches: [batch], buildingBytes: 1000 };
     }
 
@@ -79,26 +90,13 @@ class StandInGpuBuilder implements FirstTreeBuilder {
         const batch = this.pending.splice(index, 1)[0];
         if (!batch) throw new Error('no batch is waiting');
         const trees = await Promise.all(batch.members.map((member) => buildMeshBvhAsync(member.geometry, { maxLeafPrimitives: 1, triangleLeaves: this.triangleLeaves })));
-        const bytes = this.triangleLeaves === 'indexed' ? 16 : 48;
-        // As H-PLOC's outputs: room for one node per triangle, the used nodes packed at the front.
-        const triangleTotal = trees.reduce((sum, tree) => sum + tree.triangleCount, 0);
-        const usage = 0x4 | 0x8 | 0x80;
-        const nodes = this.device.createBuffer({ label: 'stand-in nodes', size: triangleTotal * 64, usage });
-        const triangles = this.device.createBuffer({ label: 'stand-in triangles', size: triangleTotal * bytes, usage });
-        const parents = this.device.createBuffer({ label: 'stand-in parents', size: triangleTotal * 4, usage });
-        const meshes: GpuMeshTreeRange[] = [];
-        let nodeOffset = 0;
-        let triangleOffset = 0;
-        trees.forEach((tree, index) => {
-            this.device.queue.writeBuffer(nodes, nodeOffset * 64, tree.nodes, 0, tree.nodeCount * 64);
-            this.device.queue.writeBuffer(triangles, triangleOffset * bytes, tree.triangles, 0, tree.triangleCount * bytes);
-            const refused = this.refuse.has(batch.members[index].slot);
-            meshes.push({ nodeOffset, nodeCount: tree.nodeCount, triangleOffset, triangleCount: tree.triangleCount, leafCount: tree.leafCount, maxDepth: tree.maxDepth, bounds: tree.bounds, problem: refused ? 'refused by the test' : null });
-            nodeOffset += tree.nodeCount;
-            triangleOffset += tree.triangleCount;
+        const { nodes, triangles, parents, meshes } = standInOutputs(this.device, trees, batch.members, this.triangleLeaves, batch.quantizeOnEmit, 'stand-in');
+        meshes.forEach((mesh, index) => {
+            if (this.refuse.has(batch.members[index].slot)) meshes[index] = { ...mesh, problem: 'refused by the test' };
         });
         const usable = meshes.filter((mesh) => mesh.problem === null).length;
-        const outputs = new GpuTreeOutputs({ nodes, triangles, parents, meshes, triangleLeaves: this.triangleLeaves, ...(this.quantizedOutputs ? { nodeFormat: 'quantized' as const } : {}), destroy: () => [nodes, triangles, parents].forEach((buffer) => buffer.destroy()) }, usable);
+        const quantized = this.quantizedOutputs || batch.quantizeOnEmit;
+        const outputs = new GpuTreeOutputs({ nodes, triangles, parents, meshes, triangleLeaves: this.triangleLeaves, ...(quantized ? { nodeFormat: 'quantized' as const } : {}), destroy: () => [nodes, triangles, parents].forEach((buffer) => buffer.destroy()) }, usable);
         batch.resolve({
             built: meshes.flatMap((tree, index) =>
                 tree.problem ? [] : [{ slot: batch.members[index].slot, generation: batch.members[index].generation, outputs, tree, layout: batch.readLayouts && !this.failLayouts ? trees[index] : null }],
@@ -119,7 +117,7 @@ interface Instance extends SceneInstanceDescriptor {
 /**
  * The helpers make scenes with the library's defaults (quantized nodes, merged static instances). Tests that check
  * something else ask for it: `UNMERGED` where a test counts instances or trees that merging would change, `F32` where
- * the adopt lever (f32 only) is under test.
+ * the adopt lever's f32 path is under test (quantized scenes adopt batches whose nodes H-PLOC wrote quantized).
  */
 const UNMERGED: Partial<SceneTreesOptions> = { mergeStaticInstances: false };
 const F32: Partial<SceneTreesOptions> = { nodeFormat: 'f32' };
@@ -812,7 +810,7 @@ describe('SceneTrees with indexed leaves', () => {
         });
     }
 
-    it('is smaller than records, welds by exact bits, and refuses the adopt lever', async () => {
+    it('is smaller than records, and welds by exact bits', async () => {
         const sizes = [];
         for (const triangleLeaves of ['records', 'indexed'] as const) {
             const { scene, frame } = await setUp({ ...UNMERGED, stand: false, triangleLeaves });
@@ -828,7 +826,129 @@ describe('SceneTrees with indexed leaves', () => {
         // Meshes of 3-6 cells a side, two triangles a cell: 16 bytes each and a 16-byte header per mesh, against 48.
         const triangles = (9 + 16 + 25 + 36) * 2;
         expect(sizes).toEqual([triangles * 48, triangles * 16 + 4 * 16]);
-        await expect(setUp({ stand: false, triangleLeaves: 'indexed', gpuTreeOutputs: 'adopt' })).rejects.toThrow(/gpuTreeOutputs: 'copy'/);
+    });
+
+    for (const variant of [
+        { name: 'f32', options: { ...F32 } },
+        { name: 'quantized', options: {} },
+        { name: 'f32, merged', options: { ...F32, mergeStaticInstances: true } },
+        { name: 'quantized, merged, packed', options: { mergeStaticInstances: true, positionLayout: 'packed' as const } },
+    ]) {
+        it(`adopt (${variant.name}): the load batch's buffers become the storage, each mesh's header written into the gap its build left; the same hits through the swaps`, async () => {
+            const { scene, stand, frame, gpu } = await setUp({ ...UNMERGED, ...variant.options, triangleLeaves: 'indexed', holdRefinements: true, gpuTreeOutputs: 'adopt', gpuMaxBatchBytes: Infinity });
+            const { geometries, instances, rays } = sceneOf(5);
+            const mixed = instances.map((instance, index) => ({ ...instance, static: index % 2 === 0 }));
+            addAll(scene, geometries, mixed);
+            frame();
+            const quantized = scene.nodeFormat === 'quantized';
+            // Every request asks for its leading units, and quantized scenes for quantized nodes from the emit.
+            expect(stand!.requests[0].every((request) => (request.triangleLeading ?? 0) > 0)).toBe(true);
+            expect(stand!.quantizeOnEmit[0]).toBe(quantized);
+            await stand!.finishBatch();
+            frame();
+            const expected = await reference(geometries, mixed);
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+            const standIn = gpu.buffers.find((buffer) => buffer.label === 'stand-in nodes')!;
+            expect(scene.buffers.nodes === (standIn as unknown as GPUBuffer)).toBe(true);
+            expect(scene.counts).toMatchObject({ onTinybvhTrees: 0, waitingForFirstTree: 0 });
+            expect(scene.counts.onGpuTrees).toBeGreaterThan(0);
+            await scene.whenRefined();
+            scene.releaseRefinements((mesh) => mesh % 2 === 0);
+            frame();
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+            scene.releaseRefinements();
+            frame();
+            frame();
+            expect(scene.counts.onGpuTrees).toBe(0);
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+            scene.dispose();
+        });
+    }
+
+    it("adopt: a builder that ignored the gaps is copied, not adopted (the headers would land on another mesh's triangles)", async () => {
+        const { scene, stand, frame, gpu } = await setUp({ ...UNMERGED, ...F32, triangleLeaves: 'indexed', holdRefinements: true, gpuTreeOutputs: 'adopt', gpuMaxBatchBytes: Infinity });
+        stand!.ignoreLeading = true;
+        const { geometries, instances, rays } = sceneOf(3);
+        addAll(scene, geometries, instances);
+        frame();
+        await stand!.finishBatch();
+        frame();
+        const standIn = gpu.buffers.find((buffer) => buffer.label === 'stand-in nodes')!;
+        expect(scene.buffers.nodes === (standIn as unknown as GPUBuffer)).toBe(false);
+        expect(scene.counts.onGpuTrees).toBe(3);
+        expect(disagreements(readScene(scene), await reference(geometries, instances), rays)).toEqual([]);
+        scene.dispose();
+    });
+
+    it("positionsBuffer: the walk binds the app's positions (no copy made), with each mesh at its vertexBase; the same hits as the scene's own copy", async () => {
+        const { geometries, instances, rays } = sceneOf(4);
+        for (const positionLayout of ['vec4', 'packed'] as const) {
+            const gpu: FakeGpu = createFakeGpu({}, { kernels: { bvhqQuantize: quantizeStandIn } });
+            const stride = positionLayout === 'vec4' ? 4 : 3;
+            // The app's buffer: two spare vertices, then the meshes one after another (unwelded, as the app keeps them).
+            const bases: number[] = [];
+            let vertexCount = 2;
+            for (const geometry of geometries) {
+                bases.push(vertexCount);
+                vertexCount += geometry.positions.length / 3;
+            }
+            const data = new Float32Array(vertexCount * stride);
+            geometries.forEach((geometry, index) => {
+                for (let vertex = 0; vertex < geometry.positions.length / 3; vertex++) data.set(geometry.positions.subarray(vertex * 3, vertex * 3 + 3), (bases[index] + vertex) * stride);
+            });
+            const appPositions = gpu.device.createBuffer({ label: 'app positions', size: data.byteLength, usage: 0x80 | 0x8 });
+            gpu.device.queue.writeBuffer(appPositions, 0, data);
+            const stand = new StandInGpuBuilder(gpu.device, 'indexed');
+            const scene = await SceneTrees.create(gpu.device, { firstTreeBuilder: stand, triangleLeaves: 'indexed', positionLayout, positionsBuffer: appPositions, holdRefinements: true });
+            const frame = () => {
+                const encoder = gpu.createEncoder();
+                scene.update(encoder);
+                gpu.submit(encoder);
+            };
+            const meshes = geometries.map((geometry, index) => scene.addMesh(geometry, { vertexBase: bases[index] }));
+            const handles = instances.map((instance) => scene.addInstance({ ...instance, mesh: meshes[instance.meshIndex] }));
+            frame();
+            // Static instances are not merged: a merged group's vertices are not in the app's buffer.
+            expect(scene.counts.mergedGroups).toBe(0);
+            expect(scene.buffers.positions).toBe(appPositions);
+            expect(scene.memory.positions).toBe(0);
+            await stand.finishBatch();
+            frame();
+            const expected = await reference(geometries, instances);
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+            scene.releaseRefinements();
+            await scene.whenRefined();
+            frame();
+            expect(scene.counts.onTinybvhTrees).toBe(4);
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+            // A mesh removed and another added at the same base: nothing of the app's buffer is freed or written.
+            scene.removeInstance(handles[3]);
+            scene.removeMesh(meshes[3]);
+            frame();
+            expect(scene.buffers.positions).toBe(appPositions);
+            scene.dispose();
+            expect((appPositions as unknown as FakeBuffer).destroyed).toBe(false);
+        }
+    });
+
+    it('positionsBuffer: refuses records, welding, merging, deforming meshes and a mesh past its end; vertexBase needs it', async () => {
+        const gpu: FakeGpu = createFakeGpu({});
+        const buffer = gpu.device.createBuffer({ size: 16 * 30, usage: 0x80 });
+        const create = (options: Partial<SceneTreesOptions>) => SceneTrees.create(gpu.device, { gpuFirstTrees: false, triangleLeaves: 'indexed', positionsBuffer: buffer, ...options });
+        await expect(create({ triangleLeaves: 'records' })).rejects.toThrow(/needs triangleLeaves: 'indexed'/);
+        await expect(create({ weld: true })).rejects.toThrow(/can't weld/);
+        await expect(create({ mergeStaticInstances: true })).rejects.toThrow(/can't merge static instances/);
+        await expect(create({ positionsBuffer: gpu.device.createBuffer({ size: 64, usage: 0x8 }) })).rejects.toThrow(/STORAGE/);
+        const scene = await create({});
+        const quad = tessellatedQuad(1, 1);
+        expect(() => scene.addMesh(quad)).toThrow(/vertexBase must be/);
+        expect(() => scene.addMesh(quad, { vertexBase: 28 })).toThrow(/don't fit/);
+        expect(() => scene.addMesh(quad, { vertexBase: 0, deforming: true })).toThrow(/deforming/);
+        expect(scene.addMesh(quad, { vertexBase: 26 })).toBeGreaterThanOrEqual(0);
+        scene.dispose();
+        const plain = await SceneTrees.create(gpu.device, { gpuFirstTrees: false, triangleLeaves: 'indexed' });
+        expect(() => plain.addMesh(quad, { vertexBase: 0 })).toThrow(/needs the scene to have a positionsBuffer/);
+        plain.dispose();
     });
 });
 
@@ -869,7 +989,7 @@ describe('SceneTrees with quantized nodes', () => {
         });
     }
 
-    it('takes half the node bytes plus a frame slot per tree, and refuses the adopt lever', async () => {
+    it('takes half the node bytes plus a frame slot per tree', async () => {
         const sizes = [];
         let trees = 0;
         for (const nodeFormat of ['f32', 'quantized'] as const) {
@@ -885,10 +1005,32 @@ describe('SceneTrees with quantized nodes', () => {
             scene.dispose();
         }
         expect(sizes[1]).toBe(sizes[0] / 2 + trees * 32);
-        await expect(setUp({ stand: false, nodeFormat: 'quantized', gpuTreeOutputs: 'adopt' })).rejects.toThrow(/gpuTreeOutputs: 'copy'/);
     });
 
-    it('the defaults: quantized nodes, static instances merged at the first update, adopt asks for f32', async () => {
+    for (const mode of ['copy', 'adopt'] as const) {
+        it(`gpuQuantizeOnEmit (${mode}): GPU trees come quantized from the emit and are copied (or adopted) as they are; deforming meshes' builds stay f32; the same hits`, async () => {
+            const { scene, stand, frame, gpu } = await setUp({ ...UNMERGED, holdRefinements: true, gpuQuantizeOnEmit: true, gpuTreeOutputs: mode, gpuMaxBatchBytes: Infinity });
+            const { geometries, instances, rays } = sceneOf(4);
+            addAll(scene, geometries, instances);
+            frame();
+            expect(stand!.quantizeOnEmit).toEqual([true]);
+            await stand!.finishBatch();
+            frame();
+            const expected = await reference(geometries, instances);
+            expect(scene.counts.onGpuTrees).toBe(4);
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+            // Copy mode: no quantize pass ran (the stand-in counts none); adopt: the batch's nodes are the storage.
+            const standIn = gpu.buffers.find((buffer) => buffer.label === 'stand-in nodes')!;
+            expect(scene.buffers.nodes === (standIn as unknown as GPUBuffer)).toBe(mode === 'adopt');
+            scene.releaseRefinements();
+            await scene.whenRefined();
+            frame();
+            expect(disagreements(readScene(scene), expected, rays)).toEqual([]);
+            scene.dispose();
+        });
+    }
+
+    it('the defaults: quantized nodes, static instances merged at the first update; adopt turns on gpuQuantizeOnEmit and refuses it off', async () => {
         const { scene, frame } = await setUp({ stand: false });
         expect(scene.nodeFormat).toBe('quantized');
         const { geometries, instances, rays } = sceneOf(4);
@@ -909,7 +1051,12 @@ describe('SceneTrees with quantized nodes', () => {
         unmarked.frame();
         expect(unmarked.scene.counts.mergedGroups).toBe(0);
         unmarked.scene.dispose();
-        await expect(setUp({ stand: false, gpuTreeOutputs: 'adopt' })).rejects.toThrow(/'adopt' needs nodeFormat: 'f32'/);
+        const adopting = await setUp({ ...UNMERGED, gpuTreeOutputs: 'adopt' });
+        addAll(adopting.scene, geometries.slice(0, 1), instances.slice(0, 1));
+        adopting.frame();
+        expect(adopting.stand!.quantizeOnEmit).toEqual([true]);
+        adopting.scene.dispose();
+        await expect(setUp({ stand: false, gpuTreeOutputs: 'adopt', gpuQuantizeOnEmit: false })).rejects.toThrow(/needs gpuQuantizeOnEmit/);
     });
 });
 
@@ -925,6 +1072,11 @@ describe('SceneTrees with gpuMaxBatchBytes (the real queue, a stand-in H-PLOC)',
         { name: 'adopt', options: { ...UNMERGED, ...F32, gpuTreeOutputs: 'adopt' as const }, allGpu: false },
         { name: 'copy, quantized, unmerged, holdRefinements', options: { ...UNMERGED, holdRefinements: true, nodeFormat: 'quantized' as const }, allGpu: true },
         { name: 'copy, quantized, unmerged', options: { ...UNMERGED, nodeFormat: 'quantized' as const }, allGpu: false },
+        { name: 'copy, quantized on emit, holdRefinements', options: { holdRefinements: true, gpuQuantizeOnEmit: true }, allGpu: true },
+        { name: 'adopt, quantized, holdRefinements', options: { ...UNMERGED, holdRefinements: true, gpuTreeOutputs: 'adopt' as const }, allGpu: true },
+        { name: 'adopt, indexed, f32, holdRefinements', options: { ...UNMERGED, ...F32, holdRefinements: true, gpuTreeOutputs: 'adopt' as const, triangleLeaves: 'indexed' as const }, allGpu: true },
+        { name: 'adopt, indexed, quantized, merged, holdRefinements', options: { holdRefinements: true, gpuTreeOutputs: 'adopt' as const, triangleLeaves: 'indexed' as const, mergeStaticInstances: true }, allGpu: true },
+        { name: 'adopt, indexed, quantized', options: { ...UNMERGED, gpuTreeOutputs: 'adopt' as const, triangleLeaves: 'indexed' as const }, allGpu: false },
     ]) {
         it(`${variant.name}: frame(); await whenBuilt(); frame() places every first tree, batch after batch without updates in between`, async () => {
             const { scene, frame, hploc } = await setUpCapped(variant.options);

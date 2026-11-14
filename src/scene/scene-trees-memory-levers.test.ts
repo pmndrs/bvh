@@ -166,12 +166,93 @@ function hill(geometry: MeshGeometry): Float32Array {
     return positions;
 }
 
+describe('the 2026-11-14 levers with the BX.20 ones (where they share code)', () => {
+    for (const variant of [
+        { name: 'uncapped, merged', options: { gpuMaxBatchBytes: Infinity } },
+        { name: 'capped, merged', options: { gpuMaxBatchBytes: SMALL_CAP } },
+        { name: 'uncapped, indexed, unmerged', options: { gpuMaxBatchBytes: Infinity, triangleLeaves: 'indexed' as const, mergeStaticInstances: false } },
+    ]) {
+        it(`${variant.name}: gpuQuantizeOnEmit with quantizeJobs 'batched' and parents 'refit' gives the quantize pass's buffers bit for bit, with no quantize dispatch`, async () => {
+            const reference = await load({ ...variant.options, quantizeJobs: 'per-tree' });
+            const levers = await load({ ...variant.options, gpuQuantizeOnEmit: true, quantizeJobs: 'batched', parents: 'refit' });
+            for (const state of ['gpuTrees', 'settled'] as const) {
+                expect(levers[state].nodes).toEqual(reference[state].nodes);
+                expect(levers[state].triangles).toEqual(reference[state].triangles);
+                expect(levers[state].hits).toEqual(reference[state].hits);
+            }
+            // The emit wrote every GPU tree's quantized nodes: nothing was left for a pass, batched or not.
+            expect(levers.gpuTrees.quantizeDispatches).toBe(0);
+            expect(reference.gpuTrees.quantizeDispatches).toBeGreaterThan(0);
+            reference.scene.dispose();
+            levers.scene.dispose();
+        });
+    }
+
+    it("adopt (quantized, indexed) with parents 'refit', quantizeJobs 'batched' and trimWhenRefined: the copy scene's hits, a trimmed buffer, the adopted one replaced", async () => {
+        const copy = await load({ gpuMaxBatchBytes: Infinity, triangleLeaves: 'indexed' });
+        const adopted = await load({ gpuMaxBatchBytes: Infinity, triangleLeaves: 'indexed', gpuTreeOutputs: 'adopt', parents: 'refit', quantizeJobs: 'batched', trimWhenRefined: true });
+        expect(adopted.gpuTrees.hits).toEqual(copy.gpuTrees.hits);
+        expect(adopted.gpuTrees.quantizeDispatches).toBe(0);
+        expect(adopted.settled.hits).toEqual(copy.settled.hits);
+        expect(adopted.scene.trimCount).toBe(1);
+        expect(adopted.settled.memory.nodes).toBe(adopted.settled.memory.nodesInUse);
+        expect(adopted.gpu.buffers.find((buffer) => buffer.label === 'fake hploc nodes')!.destroyed).toBe(true);
+        copy.scene.dispose();
+        adopted.scene.dispose();
+    });
+
+    it("positionsBuffer with trimWhenRefined and quantizeJobs 'batched': the app's buffer stays bound and untouched through the trim", async () => {
+        const { geometries, instances, rays } = sceneOf(4);
+        const reference = await load({ gpuMaxBatchBytes: Infinity, triangleLeaves: 'indexed', mergeStaticInstances: false }, 4);
+        const gpu = createFakeGpu({}, { kernels: SCENE_KERNELS });
+        const bases: number[] = [];
+        let count = 0;
+        for (const geometry of geometries) {
+            bases.push(count);
+            count += geometry.positions.length / 3;
+        }
+        const data = new Float32Array(count * 4);
+        geometries.forEach((geometry, index) => {
+            for (let vertex = 0; vertex < geometry.positions.length / 3; vertex++) data.set(geometry.positions.subarray(vertex * 3, vertex * 3 + 3), (bases[index] + vertex) * 4);
+        });
+        const app = gpu.device.createBuffer({ label: 'app positions', size: data.byteLength, usage: 0x80 | 0x8 });
+        gpu.device.queue.writeBuffer(app, 0, data);
+        const hploc = new FakeHploc(gpu.device);
+        const appScene = await SceneTrees.create(gpu.device, { holdRefinements: true, gpuMaxBatchBytes: Infinity, triangleLeaves: 'indexed', trimWhenRefined: true, quantizeJobs: 'batched', positionsBuffer: app, firstTreeBuilder: new GpuFirstTrees(gpu.device, { hploc, triangleLeaves: 'indexed' }) });
+        const meshes = geometries.map((geometry, index) => appScene.addMesh(geometry, { vertexBase: bases[index] }));
+        for (const instance of instances) appScene.addInstance({ ...instance, mesh: meshes[instance.meshIndex] });
+        const appFrame = () => {
+            const encoder = gpu.createEncoder();
+            appScene.update(encoder);
+            gpu.submit(encoder);
+        };
+        appFrame();
+        await appScene.whenBuilt();
+        appFrame();
+        expect(hits(appScene, rays)).toEqual(reference.gpuTrees.hits);
+        await appScene.whenRefined();
+        appScene.releaseRefinements();
+        appFrame();
+        appFrame();
+        expect(appScene.trimCount).toBe(1);
+        expect(appScene.buffers.positions).toBe(app);
+        expect(Array.from(new Float32Array(bytesOf(app).slice().buffer))).toEqual(Array.from(data));
+        expect(hits(appScene, rays)).toEqual(reference.settled.hits);
+        appScene.dispose();
+        reference.scene.dispose();
+    });
+});
+
 describe('SceneTrees.trim and trimWhenRefined (the node buffer packed after the swaps)', () => {
     for (const variant of [
         { name: "adopt (f32, the batch's one node per triangle)", options: { gpuTreeOutputs: 'adopt' as const, nodeFormat: 'f32' as const, gpuMaxBatchBytes: Infinity, mergeStaticInstances: false } },
         { name: 'adopt, merged', options: { gpuTreeOutputs: 'adopt' as const, nodeFormat: 'f32' as const, gpuMaxBatchBytes: Infinity } },
         { name: 'copy, the defaults (quantized, merged, capped)', options: {} },
         { name: 'copy, indexed, uncapped', options: { triangleLeaves: 'indexed' as const, gpuMaxBatchBytes: Infinity } },
+        // With the 2026-11-14 levers: adoption in quantized and indexed scenes (frame slots and headers in the adopted buffers), and the emit.
+        { name: 'adopt, quantized (the emit), unmerged', options: { gpuTreeOutputs: 'adopt' as const, gpuMaxBatchBytes: Infinity, mergeStaticInstances: false } },
+        { name: 'adopt, quantized, indexed, merged', options: { gpuTreeOutputs: 'adopt' as const, triangleLeaves: 'indexed' as const, gpuMaxBatchBytes: Infinity } },
+        { name: 'copy, quantized on emit, capped, no parents', options: { gpuQuantizeOnEmit: true, parents: 'refit' as const } },
     ]) {
         it(`${variant.name}: trim() packs the nodes to their size, with the same hits; trimWhenRefined does it unasked`, async () => {
             const plain = await load(variant.options);

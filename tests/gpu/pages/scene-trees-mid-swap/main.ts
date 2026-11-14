@@ -51,6 +51,19 @@
  * trees), `quantizeJobs: 'batched'` and `parents: 'refit'` (no batch writes
  * parents). After the swap the node buffer must hold its trees and no more.
  *
+ *
+ * Since 2026-11-14 adopt takes every format: `quantized-emit-copy` copies H-PLOC
+ * batches whose emit wrote quantized nodes (`gpuQuantizeOnEmit`, no quantize
+ * pass); the `*-adopt*` indexed and quantized variants adopt the load batch
+ * (each build leaves its mesh's leading units free, `triangleLeading`, and the
+ * scene writes the headers and merged side tables into them; quantized
+ * adoption implies the quantized emit). `indexed-app-positions` binds an app
+ * positions buffer (`positionsBuffer`: every mesh's vertices one after
+ * another, two spare vertices first) instead of the scene's copy. The two
+ * `-emit-levers` / `-adopt-*-levers` variants combine both sets: adoption
+ * (quantized, indexed) with the trim, batched quantize passes and no parents
+ * output; and the quantized emit, capped, with the same levers.
+ *
  * URL options: `?sharedRays=100000` shrinks the seam cases; `?variants=a,b` runs only those
  * variants (`?variants=levers` every `-levers` one).
  */
@@ -80,6 +93,10 @@ interface Variant {
     readonly quantized?: boolean;
     /** The BX.20 placement levers: trimWhenRefined, quantizeJobs 'batched', parents 'refit'. */
     readonly levers?: boolean;
+    /** Quantized nodes written by H-PLOC's emit (`gpuQuantizeOnEmit`); adopting quantized scenes imply it. */
+    readonly quantizeOnEmit?: boolean;
+    /** Indexed: the walk binds an app positions buffer (`positionsBuffer`) instead of the scene's copy. */
+    readonly appPositions?: boolean;
 }
 
 /** Smaller than any one-mesh batch (its uniforms alone are 2.8 kB), so every mesh is a batch of its own. */
@@ -111,7 +128,35 @@ const VARIANTS: readonly Variant[] = [
     { name: 'adopt-merged-levers', gpuTreeOutputs: 'adopt', merged: true, levers: true },
     { name: 'quantized-copy-merged-levers', gpuTreeOutputs: 'copy', merged: true, quantized: true, levers: true },
     { name: 'quantized-copy-capped-levers', gpuTreeOutputs: 'copy', merged: false, maxBatchBytes: SMALL_CAP, quantized: true, levers: true },
+    // Since 2026-11-14: the quantized emit, adoption in every format, and the app's positions.
+    { name: 'quantized-emit-copy', gpuTreeOutputs: 'copy', merged: false, quantized: true, quantizeOnEmit: true },
+    { name: 'indexed-adopt', gpuTreeOutputs: 'adopt', merged: false, indexed: 'vec4' },
+    { name: 'indexed-adopt-merged-capped', gpuTreeOutputs: 'adopt', merged: true, maxBatchBytes: SMALL_CAP, indexed: 'packed' },
+    { name: 'quantized-adopt', gpuTreeOutputs: 'adopt', merged: false, quantized: true },
+    { name: 'quantized-indexed-adopt-merged', gpuTreeOutputs: 'adopt', merged: true, indexed: 'packed', quantized: true },
+    { name: 'indexed-app-positions', gpuTreeOutputs: 'copy', merged: false, indexed: 'vec4', quantized: true, appPositions: true },
+    // Both sets together: adoption in every format with the trim, batched quantize passes and no parents; the emit with the levers, capped.
+    { name: 'quantized-indexed-adopt-merged-levers', gpuTreeOutputs: 'adopt', merged: true, indexed: 'packed', quantized: true, levers: true },
+    { name: 'quantized-emit-copy-capped-levers', gpuTreeOutputs: 'copy', merged: false, maxBatchBytes: SMALL_CAP, quantized: true, quantizeOnEmit: true, levers: true },
 ];
+
+/** An app's positions buffer for `meshes`: two spare vertices, then each mesh's vertices in `layout`'s stride; and each mesh's base. */
+function appPositionsOf(device: GPUDevice, meshes: readonly MeshGeometry[], layout: 'vec4' | 'packed'): { buffer: GPUBuffer; bases: number[] } {
+    const stride = layout === 'vec4' ? 4 : 3;
+    const bases: number[] = [];
+    let vertexCount = 2;
+    for (const mesh of meshes) {
+        bases.push(vertexCount);
+        vertexCount += mesh.positions.length / 3;
+    }
+    const data = new Float32Array(vertexCount * stride);
+    meshes.forEach((mesh, index) => {
+        for (let vertex = 0; vertex < mesh.positions.length / 3; vertex++) data.set(mesh.positions.subarray(vertex * 3, vertex * 3 + 3), (bases[index] + vertex) * stride);
+    });
+    const buffer = device.createBuffer({ label: 'app positions', size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    device.queue.writeBuffer(buffer, 0, data);
+    return { buffer, bases };
+}
 
 /** Each instance its own mesh copy, two of every three static (the trace-oracle's merged variants). */
 function forMerge(meshes: readonly MeshGeometry[], instances: readonly TraceSceneInstance[]) {
@@ -159,6 +204,7 @@ await runGpuTest(
             );
             for (const variant of variants) {
                 const { meshes, instances } = variant.merged ? forMerge(oracleCase.meshes, oracleCase.instances) : { meshes: oracleCase.meshes, instances: oracleCase.instances };
+                const app = variant.appPositions ? appPositionsOf(device, meshes, variant.indexed ?? 'vec4') : null;
                 const scene = await SceneTrees.create(device, {
                     label: `${oracleCase.name} ${variant.name}`,
                     holdRefinements: true,
@@ -170,9 +216,11 @@ await runGpuTest(
                     ...(variant.indexed ? { triangleLeaves: 'indexed' as const, positionLayout: variant.indexed } : {}),
                     nodeFormat: variant.quantized ? 'quantized' : 'f32',
                     ...(variant.levers ? { trimWhenRefined: true, quantizeJobs: 'batched' as const, parents: 'refit' as const } : {}),
+                    ...(variant.quantizeOnEmit ? { gpuQuantizeOnEmit: true } : {}),
+                    ...(app ? { positionsBuffer: app.buffer } : {}),
                 });
                 const kernel = kernels[`${variant.quantized ? 'quantized-' : ''}${variant.indexed ?? 'records'}` as keyof typeof kernels];
-                const handles = meshes.map((mesh) => scene.addMesh(mesh));
+                const handles = meshes.map((mesh, index) => scene.addMesh(mesh, app ? { vertexBase: app.bases[index] } : {}));
                 for (const instance of instances) scene.addInstance({ ...instance, mesh: handles[instance.meshIndex] });
                 const frame = () => {
                     const encoder = device.createCommandEncoder();
@@ -209,6 +257,7 @@ await runGpuTest(
                 }
                 const first = await check('gpu');
                 if (first.onTinybvhTrees > 0 || first.onGpuTrees === 0) failures.push(`${oracleCase.name} ${variant.name}: the first trees were ${first.onGpuTrees} GPU and ${first.onTinybvhTrees} tinybvh`);
+                if (app && scene.buffers.positions !== app.buffer) failures.push(`${oracleCase.name} ${variant.name}: the scene binds its own positions, not the app's`);
                 if (variant.merged && first.mergedGroups === 0) failures.push(`${oracleCase.name} ${variant.name}: nothing merged`);
                 await scene.whenRefined();
                 // Merged groups (negative keys) and meshes with odd handles swap now; the rest keep their GPU trees.
@@ -229,6 +278,7 @@ await runGpuTest(
                 }
                 log(`${oracleCase.name} ${variant.name}: gpu ${first.onGpuTrees}, mid ${mid.onGpuTrees}/${mid.onTinybvhTrees}, swaps ${last.swaps}, groups ${last.mergedGroups}`);
                 scene.dispose();
+                app?.buffer.destroy();
             }
         }
         pool.dispose();
