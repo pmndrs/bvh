@@ -1855,7 +1855,11 @@ export class SceneTrees {
             const current = this.disposed ? undefined : this.currentState(state.slot, generation);
             if (current) {
                 current.abort = null;
-                if (bvh && bvh.maxDepth > this.gpuMaxDepth) {
+                if (bvh && this.hasAppTree(state.slot)) {
+                    // The app placed the mesh's tree (placeTree) after this build had already answered: it is final.
+                    report.finished(state.slot, generation, 'cancelled', "the app placed the mesh's tree");
+                    bvh = null;
+                } else if (bvh && bvh.maxDepth > this.gpuMaxDepth) {
                     // Refused like a too-deep GPU tree: the mesh keeps the tree it has (or gets none), and the trace stack stays safe.
                     const reason = `tinybvh's tree is ${bvh.maxDepth} levels deep, more than gpuMaxDepth (${this.gpuMaxDepth})`;
                     current.fallbackReason = current.fallbackReason ? `${current.fallbackReason}; ${reason}` : reason;
@@ -1877,6 +1881,11 @@ export class SceneTrees {
             report.finished(state.slot, generation, cancelled ? 'cancelled' : 'failed', describe(error));
             finished(null);
         });
+    }
+
+    /** The app placed the mesh's tree, or one waits for the next update (placeTree). */
+    private hasAppTree(slot: number): boolean {
+        return this.placed.get(slot)?.app === true || this.arrived.some((tree) => tree.source === 'tinybvh' && tree.app === true && tree.slot === slot);
     }
 
     private currentState(slot: number, generation: number): MeshSlot | undefined {
