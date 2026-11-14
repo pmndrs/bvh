@@ -20,16 +20,18 @@
  */
 
 import {
+    GPU_LAYOUT_INDEXED_TRIANGLE_BYTES,
     GPU_LAYOUT_MAX_LEAF_PRIMITIVES,
     GPU_LAYOUT_MAX_TRIANGLES,
     GPU_LAYOUT_NODE_BYTES,
+    GPU_LAYOUT_QUANTIZED_NODE_BYTES,
     GPU_LAYOUT_TRIANGLE_BYTES,
     type GpuLayoutMeshBvh,
 } from './gpu-layout.ts';
 import { singleLeafTopology, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from './topology.ts';
 import { TINYBVH_WASM_BASE64 } from './tinybvh-wasm.ts';
 import { packedTriangleFlags, type MeshInput } from './mesh-input.ts';
-import { builderNodeFormat } from './quantized-nodes.ts';
+import { builderNodeFormat, checkNodeFormat } from './quantized-nodes.ts';
 import { checkTriangleLeaves, indexedTrianglesFromRecordWords } from './indexed-leaves.ts';
 
 /** tinybvh's node: aabbMin (3 floats), leftFirst, aabbMax (3 floats), triCount. 32 bytes. */
@@ -51,10 +53,15 @@ const BUILD_STATUS = {
     badTree: 7,
     tooLarge: 8,
     badBuilder: 9,
+    badFormat: 10,
+    quantizeFailed: 11,
 } as const;
 
 /** The `Builder` values of native/tinybvh-wasm.cpp. */
 const BUILDER = { default: 0, hploc: 1 } as const;
+
+/** The `LayoutFormat` bits of native/tinybvh-wasm.cpp (`tbvh_write_layout_as`). */
+const LAYOUT_FORMAT = { indexedTriangles: 1, quantizedNodes: 2 } as const;
 
 /**
  * The largest byte size `tbvh_alloc` takes: its argument is a 32-bit WASM
@@ -84,6 +91,8 @@ interface TinyBvhExports {
     tbvh_triangle_order(): number;
     tbvh_triangle_order_length(): number;
     tbvh_write_layout(triangleFlags: number, maxLeafPrimitives: number): number;
+    /** In .wasm builds since 2026-11-14 only: the layout with indexed triangles and/or quantized nodes ({@link LAYOUT_FORMAT}). */
+    tbvh_write_layout_as?(triangleFlags: number, maxLeafPrimitives: number, format: number): number;
     tbvh_layout_nodes(): number;
     tbvh_layout_node_count(): number;
     tbvh_layout_triangles(): number;
@@ -115,14 +124,17 @@ export interface TinyBvhLayoutOptions extends TinyBvhBuildOptions {
     /** Leaves with more triangles than this are cut in half until they fit. 1 to 8; default 8. */
     readonly maxLeafPrimitives?: number;
     /**
-     * `'indexed'`: 16-byte indexed triangles (docs/internals/design/indexed-leaves.md).
-     * The WASM writes records; they are converted on the way out of its
-     * memory, with no 48-byte copy in JavaScript. Default `'records'`.
+     * `'indexed'`: 16-byte indexed triangles (docs/internals/design/indexed-leaves.md),
+     * written inside the WASM (no 48-byte records are made). With a .wasm
+     * from before `tbvh_write_layout_as`, or `formatsInWasm: false`, the WASM
+     * writes records and they are converted on the way out of its memory.
+     * Default `'records'`.
      */
     readonly triangleLeaves?: 'records' | 'indexed';
     /**
      * `'quantized'`: 32-byte nodes (docs/internals/design/compressed-nodes.md), packed
-     * from the WASM's 64-byte nodes on the way out of its memory. Default `'f32'`.
+     * inside the WASM after its 64-byte nodes are written (or, as for
+     * `triangleLeaves`, in JavaScript on the way out). Default `'f32'`.
      */
     readonly nodeFormat?: 'f32' | 'quantized';
     /**
@@ -157,6 +169,13 @@ export interface TinyBvhBuilder {
     readonly releases: number;
     /** Bytes of the WASM memory at the end of the last build, before any release (0 before the first build). */
     readonly lastBuildHeapBytes: number;
+    /**
+     * Whether `buildLayout` writes indexed triangles and quantized nodes inside
+     * the WASM: the .wasm has `tbvh_write_layout_as` and
+     * {@link TinyBvhBuilderOptions.formatsInWasm} is not false. Otherwise they
+     * are converted in JavaScript. The bytes are the same either way.
+     */
+    readonly formatsInWasm: boolean;
     /** Builds one mesh's tree and returns its shape. Synchronous; one at a time. */
     build(geometry: MeshInput, options?: TinyBvhBuildOptions): TinyBvhBuild;
     /**
@@ -180,6 +199,14 @@ export interface TinyBvhBuilderOptions {
      * builder's life, as before.
      */
     readonly releaseAboveBytes?: number;
+    /**
+     * Default true: `buildLayout`'s `triangleLeaves: 'indexed'` and
+     * `nodeFormat: 'quantized'` are written inside the WASM when it can
+     * (`tbvh_write_layout_as`). False: the WASM writes records and 64-byte
+     * nodes and JavaScript converts them, the path before; the same bytes,
+     * kept for comparisons and as the path for an older .wasm.
+     */
+    readonly formatsInWasm?: boolean;
 }
 
 /** {@link TinyBvhBuilderOptions.releaseAboveBytes}'s default: 256 MiB. */
@@ -250,6 +277,8 @@ export async function createTinyBvhBuilder(options: TinyBvhBuilderOptions = {}):
     compiled ??= WebAssembly.compile(decodeBase64(TINYBVH_WASM_BASE64));
     const module = await compiled;
     let wasm: TinyBvhExports | null = startInstance(module);
+    // Capability check: an older .wasm has no tbvh_write_layout_as, and converts in JavaScript.
+    const formatsInWasm = options.formatsInWasm !== false && typeof wasm.tbvh_write_layout_as === 'function';
     let releases = 0;
     let lastBuildHeapBytes = 0;
     // The WASM memory is dropped after the build that grew it (the result is a copy), and the
@@ -276,8 +305,9 @@ export async function createTinyBvhBuilder(options: TinyBvhBuilderOptions = {}):
         get lastBuildHeapBytes() {
             return lastBuildHeapBytes;
         },
+        formatsInWasm,
         build: (geometry, buildOptions = {}) => run((exports) => buildTopology(exports, geometry, buildOptions)),
-        buildLayout: (geometry, buildOptions = {}) => run((exports) => buildGpuLayout(exports, geometry, buildOptions)),
+        buildLayout: (geometry, buildOptions = {}) => run((exports) => buildGpuLayout(exports, geometry, buildOptions, formatsInWasm)),
     };
 }
 
@@ -308,6 +338,8 @@ function throwOnStatus(wasm: TinyBvhExports, status: number, geometry: MeshInput
             throw new Error('tinybvh ordered its triangles wrongly: not every triangle exactly once');
         case BUILD_STATUS.badTree:
             throw new Error(`tinybvh's nodes do not form a tree over every triangle: ${TREE_PROBLEMS[detail] ?? `problem ${detail}`}`);
+        case BUILD_STATUS.quantizeFailed:
+            throw new RangeError(`tinybvh: node ${detail} does not fit the quantized format (a child box outside the root's, or a reference past 28 bits)`);
         default:
             throw new Error(`tinybvh failed with status ${status}`);
     }
@@ -371,13 +403,16 @@ function buildTopology(wasm: TinyBvhExports, geometry: MeshInput, options: TinyB
     });
 }
 
-function buildGpuLayout(wasm: TinyBvhExports, geometry: MeshInput, options: TinyBvhLayoutOptions): TinyBvhLayoutBuild {
+function buildGpuLayout(wasm: TinyBvhExports, geometry: MeshInput, options: TinyBvhLayoutOptions, formatsInWasm: boolean): TinyBvhLayoutBuild {
     const start = performance.now();
     const maxLeaf = options.maxLeafPrimitives ?? GPU_LAYOUT_MAX_LEAF_PRIMITIVES;
     if (!Number.isInteger(maxLeaf) || maxLeaf < 1 || maxLeaf > GPU_LAYOUT_MAX_LEAF_PRIMITIVES) {
         throw new RangeError(`maxLeafPrimitives must be an integer from 1 to ${GPU_LAYOUT_MAX_LEAF_PRIMITIVES}, got ${maxLeaf}`);
     }
     const indexed = checkTriangleLeaves(options.triangleLeaves, 'tinybvh') === 'indexed';
+    const quantized = checkNodeFormat(options.nodeFormat, 'tinybvh') === 'quantized';
+    // With tbvh_write_layout_as the WASM writes the formats; without, it writes records and f32 nodes and they are converted below.
+    const format = formatsInWasm ? (indexed ? LAYOUT_FORMAT.indexedTriangles : 0) + (quantized ? LAYOUT_FORMAT.quantizedNodes : 0) : 0;
     const { vertexCount, triangleCount } = countInput(geometry);
     // The flags the records get: the input's filter bit and its triangles' materials in bits 16-31.
     const triangleFlags = packedTriangleFlags(geometry, triangleCount, 'mesh');
@@ -388,7 +423,8 @@ function buildGpuLayout(wasm: TinyBvhExports, geometry: MeshInput, options: Tiny
             if (triangleFlags) new Uint32Array(wasm.memory.buffer, flagsPointer, triangleCount).set(triangleFlags.subarray(0, triangleCount));
 
             const layoutStart = performance.now();
-            throwOnStatus(wasm, wasm.tbvh_write_layout(flagsPointer, maxLeaf), geometry, vertexCount);
+            const status = format === 0 ? wasm.tbvh_write_layout(flagsPointer, maxLeaf) : wasm.tbvh_write_layout_as!(flagsPointer, maxLeaf, format);
+            throwOnStatus(wasm, status, geometry, vertexCount);
             const layoutMs = performance.now() - layoutStart;
 
             // Copied out (`slice` copies): the WASM memory is reused by the next build.
@@ -396,14 +432,21 @@ function buildGpuLayout(wasm: TinyBvhExports, geometry: MeshInput, options: Tiny
             const nodeCount = wasm.tbvh_layout_node_count();
             const nodesAt = wasm.tbvh_layout_nodes();
             const trianglesAt = wasm.tbvh_layout_triangles();
+            const wasmIndexed = (format & LAYOUT_FORMAT.indexedTriangles) !== 0;
+            const wasmQuantized = (format & LAYOUT_FORMAT.quantizedNodes) !== 0;
             const layout: GpuLayoutMeshBvh = {
-                nodes: memory.slice(nodesAt, nodesAt + nodeCount * GPU_LAYOUT_NODE_BYTES),
-                ...(indexed
-                    ? {
-                          triangles: indexedTrianglesFromRecordWords(new Uint32Array(memory, trianglesAt, triangleCount * (GPU_LAYOUT_TRIANGLE_BYTES / 4)), triangleCount, geometry),
-                          triangleLeaves: 'indexed' as const,
-                      }
-                    : { triangles: memory.slice(trianglesAt, trianglesAt + triangleCount * GPU_LAYOUT_TRIANGLE_BYTES) }),
+                // Quantized in the WASM: the frame slot, then the nodes.
+                ...(wasmQuantized
+                    ? { nodes: memory.slice(nodesAt, nodesAt + (nodeCount + 1) * GPU_LAYOUT_QUANTIZED_NODE_BYTES), nodeFormat: 'quantized' as const }
+                    : { nodes: memory.slice(nodesAt, nodesAt + nodeCount * GPU_LAYOUT_NODE_BYTES) }),
+                ...(wasmIndexed
+                    ? { triangles: memory.slice(trianglesAt, trianglesAt + triangleCount * GPU_LAYOUT_INDEXED_TRIANGLE_BYTES), triangleLeaves: 'indexed' as const }
+                    : indexed
+                      ? {
+                            triangles: indexedTrianglesFromRecordWords(new Uint32Array(memory, trianglesAt, triangleCount * (GPU_LAYOUT_TRIANGLE_BYTES / 4)), triangleCount, geometry),
+                            triangleLeaves: 'indexed' as const,
+                        }
+                      : { triangles: memory.slice(trianglesAt, trianglesAt + triangleCount * GPU_LAYOUT_TRIANGLE_BYTES) }),
                 parents: options.parents === false ? new Uint32Array(0) : new Uint32Array(memory, wasm.tbvh_layout_parents(), nodeCount).slice(),
                 nodeCount,
                 triangleCount,
