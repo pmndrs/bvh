@@ -962,6 +962,22 @@ fn lbvhWriteChild(out: u32, side: u32, lower: vec3f, upper: vec3f, index: u32, c
 // A leaf child in the emit pass: the box of the triangle record at its sorted
 // position (written by lbvhTriangles, which runs first), the same corners the
 // climb's boxes came from.
+//
+// Indexed triangles hold no corners, and the emit pass has no binding left for
+// the primitive boxes (8 storage buffers per stage). So lbvhLeafBoxes, which
+// runs first, writes each leaf's box into its own child slot of its parent in
+// lbvhScratch: a slot the climb never writes or reads (a leaf hands nothing
+// over; its sibling's thread reads it with lbvhLeafChild). The box is the
+// triangle's primitive box: min and max over the same corners in the same
+// order as below, so the same bits.
+fn lbvhLeafBox(mesh: LbvhMesh, split: u32, side: u32, position: u32) -> LbvhBox {
+    if (lbvhParams.indexedLeaves == 1u) {
+        let slot = lbvhReadChild(mesh, split, side);
+        return LbvhBox(slot.lower, slot.upper);
+    }
+    return lbvhTriangleBox(mesh, position);
+}
+
 fn lbvhTriangleBox(mesh: LbvhMesh, position: u32) -> LbvhBox {
     let base = (mesh.triangleStart + position) * LBVH_TRIANGLE_WORDS;
     var lower = vec3f(LBVH_FLOAT_MAX);
@@ -1006,7 +1022,7 @@ fn lbvhEmit(
     let nodeOffset = lbvhRank[mesh.innerStart];
     if (mesh.triangleCount == 1u) {
         // One triangle: the root holds it on the left and nothing on the right.
-        let box = lbvhTriangleBox(mesh, 0u);
+        let box = lbvhLeafBox(mesh, 0u, 0u, 0u);
         let out = nodeOffset * LBVH_NODE_WORDS;
         lbvhWriteChild(out, 0u, box.lower, box.upper, 0u, 1u);
         lbvhWriteChild(out, 1u, vec3f(0.0), vec3f(0.0), LBVH_EMPTY_CHILD, 0u);
@@ -1029,7 +1045,7 @@ fn lbvhEmit(
         var index: u32;
         var count: u32;
         if (isLeaf) {
-            let box = lbvhTriangleBox(mesh, leafPosition);
+            let box = lbvhLeafBox(mesh, split, side, leafPosition);
             child = LbvhChild(box.lower, box.upper, LBVH_LEAF_BIT | leafPosition, 0.0, 0u);
             index = leafPosition;
             count = 1u;
@@ -1085,7 +1101,7 @@ fn lbvhFinish(@builtin(global_invocation_id) id: vec3u) {
 // The triangle record of the mesh's triangle 'triangle' at its tree position 'position':
 // three corners as they are, the original index and the flags.
 //
-// With lbvhParams.indexedLeaves (H-PLOC only; indexed-leaves.ts): a 16-byte indexed
+// With lbvhParams.indexedLeaves (indexed-leaves.ts): a 16-byte indexed
 // triangle instead, vec4u(i0, i1, i2, triangle | flags << 28), the mesh's own vertex indices.
 fn lbvhWriteTriangle(mesh: LbvhMesh, triangle: u32, position: u32) {
     if (lbvhParams.indexedLeaves == 1u) {
@@ -1117,6 +1133,33 @@ fn lbvhWriteTriangle(mesh: LbvhMesh, triangle: u32, position: u32) {
     lbvhOutTriangles[base + LBVH_TRIANGLE_ORIGINAL_INDEX] = triangle;
     lbvhOutTriangles[base + LBVH_TRIANGLE_FLAGS] = flags;
     lbvhOutTriangles[base + LBVH_TRIANGLE_PADDING] = 0u;
+}
+
+// Indexed triangles only (lbvhLeafBox): each sorted position's triangle box
+// into its child slot of its parent, the parent found as the climb finds it.
+// A one-triangle mesh's leaf is the left child of inner node 0.
+@compute @workgroup_size(${LBVH_WORKGROUP_SIZE})
+fn lbvhLeafBoxes(
+    @builtin(workgroup_id) workgroup: vec3u,
+    @builtin(num_workgroups) groups: vec3u,
+    @builtin(local_invocation_index) localIndex: u32,
+) {
+    if (!lbvhHasTile(workgroup, groups)) {
+        return;
+    }
+    let tile = lbvhTile(workgroup, groups);
+    let mesh = tile.mesh;
+    let position = tile.first + localIndex;
+    if (position >= mesh.triangleCount) {
+        return;
+    }
+    let parent = lbvhFindParent(mesh, position, position + 1u);
+    let box = lbvhPrimitiveBox(mesh, lbvhValues[mesh.triangleStart + position]);
+    let base = (mesh.innerStart + parent.split) * LBVH_SCRATCH_NODE_WORDS + parent.side * LBVH_SLOT_WORDS;
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+        lbvhScratchFill[base + LBVH_SLOT_MIN + axis] = bitcast<u32>(box.lower[axis]);
+        lbvhScratchFill[base + LBVH_SLOT_MAX + axis] = bitcast<u32>(box.upper[axis]);
+    }
 }
 
 // Triangles in tree order, which for the LBVH is sorted order.

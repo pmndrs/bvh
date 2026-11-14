@@ -12,6 +12,11 @@
  *    soup) built in one batch, read back, and run through the layout checker
  *    (src/layout-check.ts). Each tree's SAH cost is compared with
  *    the CPU twin's (lbvh-cpu.ts) and with tinybvh's (B0).
+ * 4. **Indexed triangles:** the same batch built with `triangleLeaves:
+ *    'indexed'` (the emit reads leaf boxes from the slots `lbvhLeafBoxes` fills)
+ *    must give the records build's nodes and parents byte for byte, and its
+ *    records converted (`indexedFromRecords`) as its triangles, and pass the
+ *    layout check.
  *
  * The ray oracle for B1 trees is the trace-oracle page (variant `watertight-lbvh`).
  */
@@ -20,6 +25,7 @@ import { createRadixSort, createRadixSortPipelines, sortTileTable } from '../../
 import { createScanBindGroups, createScanPipelines, encodeScan, scanParams, scanTileSumWords } from '../../../../src/gpu-scan.ts';
 import { GpuLbvhBuilder } from '../../../../src/gpu-lbvh.ts';
 import { checkGpuLayout, treeSahCost } from '../../../../src/layout-check.ts';
+import { indexedFromRecords } from '../../../../src/indexed-leaves.ts';
 import { buildLbvhOnCpu } from '../../../../src/lbvh-cpu.ts';
 import { createTinyBvhBuilder } from '../../../../src/tinybvh.ts';
 import { assert, runGpuTest } from '../../client.ts';
@@ -34,6 +40,13 @@ async function readBuffer(device: GPUDevice, source: GPUBuffer, byteLength: numb
     const copy = readback.getMappedRange().slice(0);
     readback.destroy();
     return copy;
+}
+
+/** Whether two buffers (or views) hold the same bytes. */
+function sameBytes(a: ArrayBuffer | ArrayBufferView, b: ArrayBuffer | ArrayBufferView): boolean {
+    const x = ArrayBuffer.isView(a) ? new Uint8Array(a.buffer, a.byteOffset, a.byteLength) : new Uint8Array(a);
+    const y = ArrayBuffer.isView(b) ? new Uint8Array(b.buffer, b.byteOffset, b.byteLength) : new Uint8Array(b);
+    return x.length === y.length && x.every((value, at) => value === y[at]);
 }
 
 async function checkScan(device: GPUDevice, log: (message: string) => void): Promise<string[]> {
@@ -170,9 +183,36 @@ await runGpuTest(
                     `SAH ${cost.toFixed(2)} (twin ${twinCost.toFixed(2)}, tinybvh ${tinyCost.toFixed(2)}), ${problems.length === 0 ? 'valid' : 'INVALID'}`,
             );
         }
+        // 4. The same batch with indexed triangles, written by the GPU: the records build's tree, converted.
+        const indexedStart = performance.now();
+        const indexedBuilt = await builder.buildMany(
+            cases.map((entry) => entry.input ?? entry.geometry),
+            { triangleLeaves: 'indexed' },
+        );
+        const indexedBatchMs = performance.now() - indexedStart;
+        const indexedLayouts = await builder.readLayouts(indexedBuilt);
+        indexedBuilt.destroy();
+        let indexedSame = 0;
+        for (const [index, layout] of indexedLayouts.entries()) {
+            const { name, geometry } = cases[index];
+            const records = layouts[index];
+            if (!layout || !records) {
+                if (layout || records) failures.push(`indexed ${name}: one build refused it, the other not (${indexedBuilt.meshes[index].problem})`);
+                continue;
+            }
+            if (layout.triangleLeaves !== 'indexed') failures.push(`indexed ${name}: the layout says ${String(layout.triangleLeaves)}`);
+            for (const problem of checkGpuLayout(layout, geometry)) failures.push(`indexed ${name}: ${problem}`);
+            const expected = indexedFromRecords(records, geometry);
+            const nodesSame = sameBytes(layout.nodes, records.nodes);
+            const parentsSame = sameBytes(layout.parents, records.parents);
+            const trianglesSame = sameBytes(layout.triangles, expected.triangles);
+            if (nodesSame && parentsSame && trianglesSame) indexedSame++;
+            else failures.push(`indexed ${name}: not the records tree converted (nodes ${nodesSame}, parents ${parentsSame}, triangles ${trianglesSame})`);
+        }
+        log(`indexed: ${indexedSame} of ${cases.length} trees are the records trees converted, byte for byte (${Math.round(indexedBatchMs)} ms)`);
         for (const buffer of owned) buffer.destroy();
         assert(failures.length === 0, failures.slice(0, 15).join('\n'));
-        return { batchMs: Math.round(batchMs), trees, subgroupMinSize: device.adapterInfo.subgroupMinSize, subgroupMaxSize: device.adapterInfo.subgroupMaxSize };
+        return { batchMs: Math.round(batchMs), indexedBatchMs: Math.round(indexedBatchMs), indexedSame, trees, subgroupMinSize: device.adapterInfo.subgroupMinSize, subgroupMaxSize: device.adapterInfo.subgroupMaxSize };
     },
     { optionalFeatures: ['subgroups'] },
 );

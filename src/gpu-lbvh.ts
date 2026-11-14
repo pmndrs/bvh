@@ -116,6 +116,7 @@ const KERNELS = [
     'lbvhEmit',
     'lbvhFinish',
     'lbvhTriangles',
+    'lbvhLeafBoxes',
 ] as const;
 type LbvhKernel = (typeof KERNELS)[number];
 
@@ -156,6 +157,7 @@ const KERNEL_BINDINGS: Record<LbvhKernel, readonly BindingName[]> = {
     lbvhEmit: ['nodeInfo', 'rank', 'outNodes', 'outTriangles', 'outParents', 'params', 'tables', 'scratchView', 'statsView'],
     lbvhFinish: ['primitiveBoxes', 'rank', 'stats', 'params', 'tables'],
     lbvhTriangles: ['positions', 'indices', 'flags', 'values', 'outTriangles', 'params', 'tables'],
+    lbvhLeafBoxes: ['primitiveBoxes', 'keys', 'values', 'params', 'tables', 'scratchFill'],
 };
 
 export function checkOptions(options: GpuBuildOptions): Required<GpuBuildOptions> {
@@ -364,10 +366,6 @@ export class GpuLbvhBuilder {
         if (!this.pipelines || !this.sortPipelines) throw new Error('@pmndrs/bvh: call prepare() before building');
         if (geometries.length === 0) throw new RangeError('a batch needs at least one mesh');
         const settings = checkOptions(options);
-        if (settings.triangleLeaves === 'indexed') {
-            // Its emit pass reads leaf boxes back from the 48-byte records, and has no binding left for positions (8 per stage).
-            throw new RangeError("the GPU LBVH writes records only; build indexed trees with the GPU H-PLOC, or convert records with indexedFromRecords");
-        }
         geometries.forEach(checkGeometry);
         const plan = planGpuLbvhBatches(this.device, geometries);
         if (plan.batches.length !== 1 || plan.tooBig.length > 0) {
@@ -904,8 +902,11 @@ export class GpuLbvhBatch {
         });
         stage('mark', (pass) => run(pass, 'lbvhMark', this.tileCount));
         stage('rank', (pass) => encodeScan(pass, this.sortPipelines.scan, this.rankScan, maxPerDimension));
-        // The triangles go first: the emit pass reads its leaves' boxes from them.
-        stage('triangles', (pass) => run(pass, 'lbvhTriangles', this.tileCount));
+        // The triangles go first: the emit pass reads its leaves' boxes from them (indexed: from the slots lbvhLeafBoxes fills).
+        stage('triangles', (pass) => {
+            run(pass, 'lbvhTriangles', this.tileCount);
+            if (this.triangleLeaves === 'indexed') run(pass, 'lbvhLeafBoxes', this.tileCount);
+        });
         stage('emit', (pass) => {
             run(pass, 'lbvhEmit', this.tileCount);
             run(pass, 'lbvhFinish', perMesh);
