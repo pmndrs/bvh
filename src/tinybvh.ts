@@ -12,7 +12,9 @@
  * - `build`: the tree's shape (`MeshTreeTopology`, the Builder contract's plain description);
  * - `buildLayout` (stage B0b): the tracer's GPU layout, written inside the WASM.
  *   It replaces a JavaScript pass over every node and triangle, which was
- *   memory-bound and slow on big meshes (timings: PROGRESS.md, B0b).
+ *   memory-bound and slow on big meshes (timings: PROGRESS.md, B0b). Indexed
+ *   triangles and quantized nodes are written there too (`tbvh_write_layout_as`),
+ *   when the .wasm has it ({@link TinyBvhBuilder.formatsInWasm}).
  *
  * tinybvh (https://github.com/jbikker/tinybvh, MIT, Jacco Bikker). Commit and
  * hashes: native/build-wasm.ts and THIRD_PARTY.md. Licence texts (tinybvh's and
