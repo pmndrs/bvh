@@ -41,6 +41,20 @@ Raw WebGPU and `@pmndrs/bvh` only: no three, no engine.
 | [`three/inspector`](https://github.com/pmndrs/bvh/tree/main/examples/three/inspector) | tinybvh, H-PLOC and LBVH on one mesh: build times, SAH, depth, bytes, `MeshBVHHelper` and a heat map of nodes per ray. |
 | [`three/sdf`](https://github.com/pmndrs/bvh/tree/main/examples/three/sdf) | A [signed distance field](/tracing/sdf) generated on the GPU from the scene's trees into a three 3D texture, shown by a TSL raymarch or a slice with contours; resolution, margin and the inside rule live. [`compare/sdf`](https://github.com/pmndrs/bvh/tree/main/examples/compare/sdf) times the generation against three-mesh-bvh's `webgpu_sdfGeneration`. |
 
+### three-mesh-bvh examples, ported
+
+Each of these is one of three-mesh-bvh's examples (MIT) running on `@pmndrs/bvh/three`, and says on the page what it demonstrates. Pages with a way to check themselves (a brute-force pass, three's own raycast) do so in the smoke run. Models are procedural unless noted: the originals download theirs.
+
+| Page | Shows |
+| --- | --- |
+| [`three/clippedEdges`](https://github.com/pmndrs/bvh/tree/main/examples/three/clippedEdges) | `tree.shapecast` with a plane: a clipping plane sweeps a model, `intersectsBounds` keeps the boxes it crosses and `intersectsTriangle` turns each crossed triangle into an outline segment, capped with the stencil trick. Ported from three-mesh-bvh's `clippedEdges`. |
+| [`three/collectTriangles`](https://github.com/pmndrs/bvh/tree/main/examples/three/collectTriangles) | `tree.shapecast` with a sphere as a paint brush on a mesh of hundreds of thousands of triangles; `CONTAINED` boxes hand over their triangles untested. From `collectTriangles`. |
+| [`three/edgeIntersect`](https://github.com/pmndrs/bvh/tree/main/examples/three/edgeIntersect) | `tree.bvhcast` walks two trees against each other and `ExtendedTriangle.intersectsTriangle` gives the segment where every pair of triangles crosses: two spinning torus knots and the line where they meet. From `edgeIntersect`. |
+| [`three/lineIntersection`](https://github.com/pmndrs/bvh/tree/main/examples/three/lineIntersection) | Raycasting a polyline of up to a million segments with a pick threshold. There is no `LineBVH` here, so each segment is a degenerate triangle and `tree.shapecast` does the ray-segment test; three's `Line.raycast` is the comparison. From `lineIntersection`. |
+| [`three/triangleIntersect`](https://github.com/pmndrs/bvh/tree/main/examples/three/triangleIntersect) | `ExtendedTriangle.intersectsTriangle` on its own: two triangles with draggable corners and the segment where they cross. From `triangleIntersect`. |
+| [`three/voxelize`](https://github.com/pmndrs/bvh/tree/main/examples/three/voxelize) | `tree.intersectsBox(box, boxToMesh)` for the voxels on a surface and `tree.raycastFirst(ray, DoubleSide)` for the ones inside, filled a few milliseconds per frame; a dropped glTF builds its tree in `GenerateMeshBvhWorker`. From `voxelize`. |
+| [`three/batchedMesh`](https://github.com/pmndrs/bvh/tree/main/examples/three/batchedMesh) | `computeBatchedBoundsTree` and `acceleratedRaycast` on a `BatchedMesh` of three geometries with hundreds of raycasters firing every frame, against three's own `BatchedMesh.raycast`. From `batchedMesh`. |
+
 ## Babylon.js
 
 Basic: [`@pmndrs/bvh/babylon`](/engines/babylon) is "it works", not polish.
