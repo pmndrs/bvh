@@ -40,6 +40,7 @@
         "examples:dev": "vite --config examples/vite.config.ts",
         "examples:build": "vite build --config examples/vite.config.ts",
         "examples:smoke": "node tests/gpu/run.ts --examples",
+        "examples:bake": "node --experimental-transform-types --no-warnings --import ./compare/node/register.mjs examples/node/bake/cli.ts",
         "compare:node": "node --max-old-space-size=24000 --experimental-transform-types --no-warnings --import ./compare/node/register.mjs compare/node/run.ts",
         "bvh:wasm": "node native/build-wasm.ts",
         "docs:api": "typedoc",

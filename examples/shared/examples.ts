@@ -184,6 +184,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         description: 'SDF generation time on the GPU against three-mesh-bvh\'s webgpu_sdfGeneration kernel at several resolutions, in paired rounds, distances and signs checked; the scene\'s GPU-built tree straight into a three texture, shown as a slice.',
         timeoutMs: 240_000,
     },
+    {
+        name: 'node-bake',
+        path: 'node/bake',
+        title: 'Node bake',
+        description: 'A tree baked in Node (pnpm examples:bake: tinybvh, serializeLayout, a file) loaded here with no build at all: builtBy is the baked file, and the walk traces it. Drop another .bvh, or open ?bake=<url>.',
+        timeoutMs: 90_000,
+    },
 ];
 
 /** Where an example's source is browsed. */
