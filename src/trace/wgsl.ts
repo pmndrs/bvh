@@ -942,8 +942,10 @@ export interface TraceModuleOptions {
      * The spatial queries (query-wgsl.ts; docs/tracing/gpu-queries.mdx), compiled in
      * beside the walk: `bvhClosestPoint(point, maxDistance) -> BvhClosestHit`,
      * `bvhIntersectsSphere(center, radius)`, `bvhIntersectsBox(boxMin, boxMax)`
-     * and `bvhIntersectsOrientedBox(center, halfSize, rotation)`, with
-     * `*Masked` forms unless `rayMasks: false`. Default false: the module is
+     * and `bvhIntersectsOrientedBox(center, halfSize, rotation)`, and the
+     * inside test, `bvhRayCrossings(origin, direction)`,
+     * `bvhInsideVotes(point)` and `bvhIsInside(point)` (docs/tracing/sdf.mdx),
+     * with `*Masked` forms unless `rayMasks: false`. Default false: the module is
      * the ray walk alone, as before the queries existed.
      */
     readonly queries?: boolean;

@@ -75,6 +75,7 @@ import { createCpuTracer, CPU_TRACE_BACK_SIDE, CPU_TRACE_DOUBLE_SIDE, CPU_TRACE_
 import { buildMeshBvhWithTinyBvh } from '../trace/mesh-bvh-topology.ts';
 import { buildTopLevel, IDENTITY_TRANSFORM, type TopLevelBvh } from '../trace/top-level.ts';
 import type { TriangleCandidate } from '../trace/triangle-filter.ts';
+import { INSIDE_TEST_DIRECTIONS, INSIDE_TEST_MAJORITY, type InsideRule } from '../trace/query-wgsl.ts';
 import {
     alignedPackedBoxIntersectsBox,
     BvhBox3,
@@ -177,6 +178,37 @@ export interface BvhRayIntersection {
     readonly u: number;
     readonly v: number;
     readonly frontFace: boolean;
+}
+
+/** A ray's crossings with a mesh ({@link CpuMeshBvh.rayCrossings}), as the GPU's `BvhRayCrossings`. */
+export interface BvhRayCrossings {
+    /** Every triangle the ray crosses at `t >= 0`. */
+    readonly count: number;
+    /** +1 per triangle left through its front side, -1 per one entered through it. */
+    readonly winding: number;
+}
+
+/** The inside test's votes ({@link CpuMeshBvh.insideVotes}), each 0 to 3: 2 or more is inside. */
+export interface BvhInsideVotes {
+    readonly parity: number;
+    readonly winding: number;
+}
+
+/**
+ * The inside test's votes for `point` from a crossings function: one call per
+ * ray of `INSIDE_TEST_DIRECTIONS`. Several meshes vote as one solid when the
+ * function adds their crossings up.
+ */
+export function insideVotesOf(point: BvhVec3Like, crossings: (origin: readonly [number, number, number], direction: readonly [number, number, number]) => BvhRayCrossings): BvhInsideVotes {
+    const origin = readVec3(point);
+    let parity = 0;
+    let winding = 0;
+    for (const direction of INSIDE_TEST_DIRECTIONS) {
+        const ray = crossings(origin, direction);
+        parity += ray.count & 1;
+        winding += ray.winding !== 0 ? 1 : 0;
+    }
+    return { parity, winding };
 }
 
 /** Decides whether a hit counts, by original triangle and side. Used by {@link CpuMeshBvh.intersectRay}. */
@@ -589,6 +621,45 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
     /** The closest hit, or null. Arguments as {@link raycast}. */
     raycastFirst(ray: BvhRayLike, sideOrOptions?: number | BvhRaycastOptions, near?: number, far?: number): Hit | null {
         return this.cast(ray, sideOrOptions, near, far, true)[0] ?? null;
+    }
+
+    /**
+     * Every triangle the ray from `origin` along `direction` crosses at
+     * `t >= 0`, both faces: how many, and their signed sum (+1 for each
+     * triangle the ray leaves through its front side, -1 for each it enters
+     * through it). The CPU twin of the GPU's `bvhRayCrossings`: the same
+     * watertight walk, in doubles. A ray exactly on a shared edge counts both
+     * triangles, as the walk does.
+     */
+    rayCrossings(origin: BvhVec3Like, direction: BvhVec3Like): BvhRayCrossings {
+        const hits = this.intersectRay(readVec3(origin), readVec3(direction), 0, Infinity, false);
+        let winding = 0;
+        for (const hit of hits) winding += hit.frontFace ? -1 : 1;
+        return { count: hits.length, winding };
+    }
+
+    /**
+     * The inside test's votes for `point`: of the three rays
+     * ({@link INSIDE_TEST_DIRECTIONS}), how many see it inside by parity (an
+     * odd crossing count) and how many by winding (a non-zero signed sum).
+     * The CPU twin of the GPU's `bvhInsideVotes`. Three full ray walks.
+     */
+    insideVotes(point: BvhVec3Like): BvhInsideVotes {
+        return insideVotesOf(point, (origin, direction) => this.rayCrossings(origin, direction));
+    }
+
+    /**
+     * Whether `point` is inside the mesh: at least two of three rays vote it
+     * inside ({@link insideVotes}). `rule` is `'parity'` (the default; odd
+     * crossings, any winding) or `'winding'` (non-zero signed crossings;
+     * overlapping closed parts stay inside, triangles must be wound
+     * consistently). Exact for a closed mesh away from its surface; on an open
+     * mesh, rays through a hole disagree and the vote decides (docs/tracing/sdf.mdx).
+     * The CPU twin of the GPU's `bvhIsInside`.
+     */
+    isPointInside(point: BvhVec3Like, rule: InsideRule = 'parity'): boolean {
+        const votes = this.insideVotes(point);
+        return (rule === 'winding' ? votes.winding : votes.parity) >= INSIDE_TEST_MAJORITY;
     }
 
     private cast(ray: BvhRayLike, sideOrOptions: number | BvhRaycastOptions | undefined, nearArgument: number | undefined, farArgument: number | undefined, firstHitOnly: boolean): Hit[] {
