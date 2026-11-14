@@ -6,6 +6,7 @@
  *   BVH_ASSETS_DIR=... BVH_MANIFESTS_DIR=... node tools/memory-breakdown.ts sponza
  *   node tools/memory-breakdown.ts bistro-exterior --json out.json
  *   node tools/memory-breakdown.ts sponza --no-twins --no-tmbvh   (skip the slow parts)
+ *   node tools/memory-breakdown.ts sponza --no-scene-trees           (the BX.20 levers without SceneTrees runs)
  *
  * What it reports, per scene (all sizes are exact byte counts of the buffers or
  * typed arrays; "MiB" is 2^20 bytes, as SceneTrees.memory and the HANDOFF use):
@@ -24,7 +25,10 @@
  * - the CPU copy `GpuMeshRefit.setTree` needs, and the refit's GPU buffers;
  * - the worker pool: input copies and the WASM heap of one worker;
  * - three-mesh-bvh 0.9.18: node buffers (`_roots`), index, `estimateMemoryInBytes`,
- *   for CENTER leaf 10 (its defaults), SAH leaf 4 and 10, and indirect.
+ *   for CENTER leaf 10 (its defaults), SAH leaf 4 and 10, and indirect;
+ * - the BX.20 levers that keep the GPU layout, each against its default
+ *   (tools/memory-levers.ts; `--no-levers` skips them, `--no-scene-trees` skips
+ *   their runs of SceneTrees on the fake GPU, the slow part).
  */
 
 import { writeFileSync } from 'node:fs';
@@ -45,6 +49,7 @@ import { buildMeshBvhWithTinyBvh } from '../src/trace/mesh-bvh-topology.ts';
 import { buildTraceScene } from '../src/trace/scene-assembly.ts';
 import type { MeshBvh } from '../src/trace/mesh-bvh.ts';
 import { readSceneInstances } from './scene-meshes.ts';
+import { measureLevers } from './memory-levers.ts';
 
 const MIB = 1024 * 1024;
 const mib = (bytes: number): string => (bytes / MIB).toFixed(1);
@@ -272,6 +277,8 @@ async function main(): Promise<void> {
     const jsonPath = args.includes('--json') ? args[args.indexOf('--json') + 1] : null;
     const skipTwins = args.includes('--no-twins');
     const skipTmbvh = args.includes('--no-tmbvh');
+    const skipLevers = args.includes('--no-levers');
+    const skipSceneTrees = args.includes('--no-scene-trees');
     const out: Record<string, unknown> = { scene: sceneId };
 
     const { meshes: sceneMeshes, instances } = readSceneInstances(sceneId);
@@ -489,20 +496,12 @@ async function main(): Promise<void> {
     // Worker copies: the largest mesh's input (copied into a worker unless transferInput), and the WASM heap one worker keeps.
     {
         const biggest = geometries.reduce((best, g) => (g.indices.length > best.indices.length ? g : best), geometries[0]);
-        // tinybvh's WASM memory only grows: the size it has after the largest mesh is what a worker keeps for its life.
-        const memories: WebAssembly.Memory[] = [];
-        const instantiate = WebAssembly.instantiate;
-        (WebAssembly as { instantiate: unknown }).instantiate = async (...input: unknown[]) => {
-            const result = await (instantiate as (...a: unknown[]) => Promise<WebAssembly.Instance>)(...input);
-            const memory = (result.exports as { memory?: WebAssembly.Memory }).memory;
-            if (memory) memories.push(memory);
-            return result;
-        };
+        // tinybvh's WASM memory only grows: the size it has after the largest mesh is what a worker keeps for its life
+        // (the builder's own count: capturing the instance's memory no longer works, the module is instantiated another way).
         const fresh = await createTinyBvhBuilder();
-        (WebAssembly as { instantiate: unknown }).instantiate = instantiate;
-        const initialHeap = memories[0]?.buffer.byteLength ?? 0;
+        const initialHeap = fresh.lastBuildHeapBytes;
         fresh.buildLayout(biggest);
-        const after = memories[0]?.buffer.byteLength ?? 0;
+        const after = fresh.lastBuildHeapBytes;
         const largestOutput = tinyBvh.buildLayout(biggest).layout;
         out.worker = {
             largestMeshInputBytes: biggest.positions.byteLength + biggest.indices.byteLength,
@@ -514,6 +513,9 @@ async function main(): Promise<void> {
         const w = out.worker as { largestMeshInputBytes: number; largestMeshOutputBytes: number; wasmHeapAfterLargestMesh: number };
         console.log(`  one worker: input copy of the largest mesh ${mib(w.largestMeshInputBytes)} MiB, its output (transferred, not copied) ${mib(w.largestMeshOutputBytes)} MiB, WASM heap a worker keeps after it ${mib(w.wasmHeapAfterLargestMesh)} MiB`);
     }
+
+    // BX.20: the levers that keep the GPU layout, each against its default.
+    if (!skipLevers) await measureLevers(geometries, instances, out, { sceneTrees: !skipSceneTrees });
 
     // The CPU twins' leaves and tinybvh's tree shape are done; the comparison library.
     if (!skipTmbvh) {

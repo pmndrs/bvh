@@ -13,6 +13,14 @@
  *   `gpuMaxBatchBytes` of that many MiB, the build-peak lever (several
  *   batches one after another on one scratch pool).
  *
+ * The BX.20 levers that keep the layout (docs/internals/design/memory.md), as
+ * suffixes on any variant: `-trim` (`trimWhenRefined`: the node buffer packed
+ * after the swaps; `adopt-trim` against `adopt`), `-noparents` (`parents:
+ * 'refit'`: no parents output in the batches, the peak against the variant
+ * without), `-qbatch` (`quantizeJobs: 'batched'`: one quantize pass per update;
+ * `quantized-copy-default-qbatch` against `quantized-copy-default`, first trees
+ * and GPU build times).
+ *
  * Each loads the scene with `holdRefinements`, so the GPU trees are in use on
  * their own first, then releases tinybvh's trees. Recorded, from the first update:
  *
@@ -67,7 +75,12 @@ try {
     adapter = requested.adapter;
     const device = requested.device;
     deviceErrors = watchDevice(device);
-    const variants = (new URLSearchParams(location.search).get('variants') ?? 'copy,adopt,copy-merged,copy-default,copy-cap512,copy-cap256,copy-cap128,indexed-copy-default,indexed-packed-copy-default,indexed-copy-merged').split(',');
+    const variants = (
+        new URLSearchParams(location.search).get('variants') ??
+        'copy,adopt,copy-merged,copy-default,copy-cap512,copy-cap256,copy-cap128,indexed-copy-default,indexed-packed-copy-default,indexed-copy-merged,' +
+            // BX.20 (memory.md): the node trim, no parents output, batched quantize passes.
+            'adopt-trim,copy-default-trim,copy-default-noparents,copy-noparents,quantized-copy-default,quantized-copy-default-qbatch'
+    ).split(',');
     const scene = await loadBenchScene('sponza', 'scene');
     log(`sponza: ${scene.meshes.length} meshes, ${scene.instances.length} instances, ${scene.uniqueTriangles} triangles (load ${Math.round(scene.loadMs)} ms)`);
     // `indexed` variants (docs/internals/design/indexed-leaves.md): triangleLeaves 'indexed', with `packed` positions when the name says so.
@@ -122,11 +135,16 @@ try {
     // A first load (`warmup`, `copy`, not reported) compiles every pipeline, so no variant's times include it.
     for (const variant of ['warmup', ...variants]) {
         const pool = createBvhWorkerPool();
+        // The BX.20 lever suffixes, then the variant's base name.
+        const trim = /-trim\b/.test(variant);
+        const noParents = /-noparents\b/.test(variant);
+        const quantizeBatched = /-qbatch\b/.test(variant);
+        const base = variant.replace(/-(trim|noparents|qbatch)\b/g, '');
         // `-cap<MB>` sets a cap, `-default` leaves it out (256 MiB), and the rest turn it off (Infinity: one batch).
-        const isDefault = variant.endsWith('-default');
-        const capMB = isDefault ? String(DEFAULT_GPU_MAX_BATCH_BYTES / MB) : /-cap(\d+)/.exec(variant)?.[1];
-        const quantized = variant.startsWith('quantized-');
-        const name = quantized ? variant.slice('quantized-'.length) : variant;
+        const isDefault = base.endsWith('-default');
+        const capMB = isDefault ? String(DEFAULT_GPU_MAX_BATCH_BYTES / MB) : /-cap(\d+)/.exec(base)?.[1];
+        const quantized = base.startsWith('quantized-');
+        const name = quantized ? base.slice('quantized-'.length) : base;
         const indexed = name.startsWith('indexed');
         const positionLayout = name.includes('packed') ? 'packed' : 'vec4';
         const kernel = kernels[`${quantized ? 'quantized-' : ''}${indexed ? positionLayout : 'records'}`];
@@ -140,6 +158,9 @@ try {
             workers: pool,
             ...(indexed ? { triangleLeaves: 'indexed' as const, positionLayout } : {}),
             nodeFormat: quantized ? 'quantized' : 'f32',
+            ...(trim ? { trimWhenRefined: true } : {}),
+            ...(noParents ? { parents: 'refit' as const } : {}),
+            ...(quantizeBatched ? { quantizeJobs: 'batched' as const } : {}),
         });
         const meshes = scene.meshes.map((mesh) => trees.addMesh(mesh));
         scene.instances.forEach((instance, index) => trees.addInstance({ mesh: meshes[instance.meshIndex], instanceIndex: index, objectToWorld: instance.objectToWorld, static: true }));
@@ -184,6 +205,8 @@ try {
         frame();
         const settled = trees.memory;
         const settledWrong = await check('settled');
+        // `-trim`: the node buffer holds its trees and no more once every swap is in.
+        if (trim && settled.nodes !== settled.nodesInUse) failures.push(`${variant}: ${mb(settled.nodes)} MB of node buffer for ${mb(settled.nodesInUse)} MB in use after trimWhenRefined`);
         // The lever's promise: the peak is the storage plus one batch (the scratch pool and one batch's outputs), not more.
         let peakBoundMB: number | null = null;
         if (capMB) {
@@ -209,6 +232,7 @@ try {
             settled: summary(settled),
             peakMB: mb(settled.peak),
             peakBoundMB,
+            trims: trees.trimCount,
             disagreements: { gpuTrees: gpuWrong, settled: settledWrong },
         };
         log(`${variant}: first trees ${Math.round(trees.timeline.firstTreesMs ?? -1)} ms, ${counts.gpuBatches} GPU batches ${Math.round(counts.gpuBuildMs)} ms, tinybvh built ${Math.round(refinedAt ?? -1)} ms, GPU-tree state ${mb(gpuTreesMemory.total)} MB, peak ${mb(settled.peak)} MB, settled ${mb(settled.total)} MB`);
