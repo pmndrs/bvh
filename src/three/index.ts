@@ -77,4 +77,6 @@ export { getJSONStructure } from './debug.ts';
 export { meshBvhFromThreeMeshBvh, serializeThreeMeshBvh, type BvhJsonNode, type ThreeMeshBvhSerialized, type ThreeMeshBvhSerialized as SerializedBVH } from '../query/three-mesh-bvh-format.ts';
 
 // The walk in three's node system (three-mesh-bvh's BVHComputeData pattern), for TSL and wgslFn.
+// three-mesh-bvh's BVHComputeData.updateAsync: every build waited for and placed before the first traced frame.
+export { updateSceneTreesAsync, type SceneTreesAsyncTarget, type UpdateSceneTreesAsyncOptions } from './update-async.ts';
 export { BvhTraceNodes, bvhClosestPointHitStruct, bvhTraceHitStruct, type BvhTraceBuffers, type BvhTraceBufferSource, type BvhTraceNodesOptions, type BvhTslNode } from './trace-nodes.ts';

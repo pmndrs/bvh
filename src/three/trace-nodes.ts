@@ -62,6 +62,7 @@ import { CodeNode, REVISION, StorageBufferAttribute, StructTypeNode, type Node, 
 import { float, storage, wgslFn } from 'three/tsl';
 import { traceModuleWgsl, type AnyHitOrder } from '../trace/wgsl.ts';
 import { traceSourceFormats, type TraceSceneBuffers } from '../trace/trace-gpu.ts';
+import { updateSceneTreesAsync, type SceneTreesAsyncTarget, type UpdateSceneTreesAsyncOptions } from './update-async.ts';
 
 /** The buffers a source binds. `positions`: an indexed scene's fourth buffer (docs/internals/design/indexed-leaves.md); null or absent for records. */
 export interface BvhTraceBuffers {
@@ -487,6 +488,22 @@ export class BvhTraceNodes {
         this.bound = buffers;
         this.boundVersion = this.source.version;
         return true;
+    }
+
+    /**
+     * three-mesh-bvh's `await bvh.updateAsync()` (PARITY 8.4): with a
+     * `SceneTrees` source, {@link updateSceneTreesAsync} (the sync walked,
+     * every build started and waited for, the trees placed) and then
+     * {@link update}; with fixed buffers (an upload), just {@link update}.
+     */
+    async updateAsync(options: Omit<UpdateSceneTreesAsyncOptions, 'nodes'> = {}): Promise<void> {
+        const trees = this.source as Partial<SceneTreesAsyncTarget>;
+        if (typeof trees.whenBuilt === 'function' && typeof trees.whenRefined === 'function' && typeof trees.update === 'function' && trees.device) {
+            await updateSceneTreesAsync(trees as SceneTreesAsyncTarget, { ...options, nodes: this });
+            return;
+        }
+        if (options.sync) throw new Error('@pmndrs/bvh/three: BvhTraceNodes.updateAsync with a sync needs a SceneTrees source');
+        this.update();
     }
 
     /** Each stand-in three used still has our buffer, and three made none of its own. */
