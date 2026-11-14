@@ -1050,3 +1050,68 @@ export function decodeWideNode(format: WideNodeFormat, nodes: ArrayBuffer, node:
     }
     return out;
 }
+
+/**
+ * Checks a wide tree against its triangles (48-byte records, in the tree's order): every
+ * triangle reached exactly once, every decoded child box around every corner below it, CWBVH's
+ * leaves of 1-3 triangles in slot order, children after their parent. Returns the problems
+ * (empty when the tree is right), at most `limit`. For tests and the GPU pages.
+ */
+export function checkWideTree(format: WideNodeFormat, nodes: ArrayBuffer, nodeCount: number, records: ArrayBuffer, triangleCount: number, limit = 8): string[] {
+    const floats = new Float32Array(records);
+    const reached = new Uint32Array(triangleCount);
+    const problems: string[] = [];
+    const report = (problem: string): void => {
+        if (problems.length < limit) problems.push(problem);
+    };
+    let visited = 0;
+    const visit = (node: number): number[] => {
+        visited++;
+        const all = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+        const children = decodeWideNode(format, nodes, node);
+        if (children.length === 0) report(`node ${node} has no children`);
+        let cursor = -1;
+        for (const child of children) {
+            let exact = [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+            if (child.node >= 0) {
+                if (child.node <= node || child.node >= nodeCount) report(`node ${node} points at node ${child.node} of ${nodeCount}`);
+                else exact = visit(child.node);
+            } else {
+                if (child.triangleCount < 1 || (format === 'cwbvh8' && child.triangleCount > CWBVH_MAX_LEAF_TRIANGLES)) report(`node ${node}: a leaf of ${child.triangleCount}`);
+                if (format === 'cwbvh8') {
+                    if (cursor >= 0 && child.firstTriangle !== cursor) report(`node ${node}: leaf triangles not consecutive`);
+                    cursor = child.firstTriangle + child.triangleCount;
+                }
+                for (let k = 0; k < child.triangleCount; k++) {
+                    const slot = child.firstTriangle + k;
+                    if (slot >= triangleCount) {
+                        report(`node ${node}: triangle ${slot} of ${triangleCount}`);
+                        continue;
+                    }
+                    reached[slot]++;
+                    for (const corner of [0, 4, 8]) {
+                        for (let axis = 0; axis < 3; axis++) {
+                            const value = floats[slot * 12 + corner + axis];
+                            exact[axis] = Math.min(exact[axis], value);
+                            exact[axis + 3] = Math.max(exact[axis + 3], value);
+                        }
+                    }
+                }
+            }
+            for (let axis = 0; axis < 3; axis++) {
+                if (!(child.box[axis] <= exact[axis]) || !(child.box[axis + 3] >= exact[axis + 3])) {
+                    if (exact[axis] <= exact[axis + 3]) report(`node ${node} slot ${child.slot} axis ${axis}: [${child.box[axis]}, ${child.box[axis + 3]}] does not hold [${exact[axis]}, ${exact[axis + 3]}]`);
+                }
+                all[axis] = Math.min(all[axis], exact[axis]);
+                all[axis + 3] = Math.max(all[axis + 3], exact[axis + 3]);
+            }
+        }
+        return all;
+    };
+    visit(0);
+    if (visited !== nodeCount) report(`${visited} nodes reached of ${nodeCount}`);
+    const missing = reached.findIndex((count) => count !== 1);
+    if (missing >= 0) report(`triangle ${missing} reached ${reached[missing]} times`);
+    return problems;
+}
+
