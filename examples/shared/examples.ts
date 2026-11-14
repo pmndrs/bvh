@@ -193,6 +193,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         description: "Skinned characters kept on their pose every frame: three-mesh-bvh's SkinnedMeshBVH.refit() on the CPU against our GPU pose pass and refit (SceneTrees.setPose), CPU and GPU ms per frame; a plain WebGPU pass three never sees traces the refit trees.",
         timeoutMs: 240_000,
     },
+    {
+        name: 'compare-pathtracer',
+        path: 'compare/pathtracer',
+        title: 'compare/pathtracer',
+        description: "The same small path tracer on three-mesh-bvh/webgpu's WGSL BVH functions and on our walk (BvhTraceNodes): Mrays/s for the whole tracer, its closest-hit rays and its any-hit shadow rays, in paired rounds, first hits checked; the scene's GPU-built trees traced too.",
+        timeoutMs: 300_000,
+    },
     // ---- end of set 1.
     {
         name: 'node-bake',

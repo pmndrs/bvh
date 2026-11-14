@@ -422,6 +422,11 @@ app.loop(async (_now, delta) => {
         overlay.set('our refits', trees.deformingCounts.refits);
         overlay.set('our drift rebuilds', trees.deformingCounts.driftRebuilds);
     }
+    // Three's timestamp queries (trackTimestamp, for the measured frames) pile up unless resolved: drop the live frames'.
+    if (threeTimestamps && frame % 10 === 0) {
+        void renderer.resolveTimestampsAsync('render');
+        void renderer.resolveTimestampsAsync('compute');
+    }
     if (frame % 6 === 0 && !heightsBusy && mode !== 'three-mesh-bvh only') {
         overlay.set('top-down grid hits', drawHeights(await readHeights()));
     }
