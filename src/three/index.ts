@@ -30,6 +30,8 @@ export { SceneTreesObject3DSync, type Object3DPoseCounts, type Object3DSyncCount
 export { BvhPosePass, poseVertices, threeDeforms, type BvhPosePassLike, type BvhPosePassOptions } from './deform.ts';
 // Skinned and morphed meshes baked to a static geometry on the CPU (three-mesh-bvh's StaticGeometryGenerator), for CPU queries on the live pose.
 export { StaticGeometryGenerator } from './static-geometry.ts';
+// three-mesh-bvh's SkinnedMeshBVH: a CPU tree over a mesh's posed triangles, refitted to the pose.
+export { SkinnedMeshBVH } from './skinned-mesh-bvh.ts';
 
 // CPU raycasts (Q1) and the CPU tree: three-mesh-bvh-style drop-ins over the core's CpuMeshBvh.
 export {
