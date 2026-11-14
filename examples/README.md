@@ -122,7 +122,7 @@ three-mesh-bvh 0.9.18's own examples (`example/*.js`, MIT; THIRD_PARTY.md) on `@
 | `three/sculpt` | `acceleratedRaycast` for the brush, `shapecast` with `CONTAINED` / `INTERSECTED` / `NOT_INTERSECTED`, `refit()`; a generated matcap. Our refit is whole-tree: three-mesh-bvh's `refit(nodeIndices)` refits only the visited nodes | strokes move vertices, `validateBounds` holds after the refit, 64 rays at the sculpted band agree with three's own `Mesh.raycast` |
 | `three/selection` | the example's `computeSelectedTriangles` and tools ported (`three/selection/select.ts`) over `shapecast` and `raycastFirst(ray, DoubleSide)`; the knot stays indexed | a lasso in each mode selects the same triangles through the tree as without it; centroid-visible drops hidden ones |
 
-The smoke runs (SwiftShader, `BVH_CHROME_FLAGS="--no-sandbox --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --disable-gpu-compositing" BVH_ALLOW_SOFTWARE_ADAPTER=1`) use smaller meshes where a page asks for it (`compare/skinned` 160 rings, `three/sculpt` detail 40, `three/distancecast` resolution 30).
+The smoke runs (SwiftShader, `BVH_CHROME_FLAGS="--no-sandbox --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --disable-gpu-compositing" BVH_ALLOW_SOFTWARE_ADAPTER=1`) use smaller meshes where a page asks for it (`compare/skinned` 160 rings, `three/sculpt` detail 40, `three/distancecast` resolution 30). `three/distancecast` computes its volume in a smoke run but doesn't draw it: under SwiftShader, drawing three's `MarchingCubes` mesh stalled the GPU process until the runner gave up on the page (and on the pages after it in the same browser); not yet looked at on a real GPU, which these runs don't use.
 
 ## Public-API gaps the examples ran into
 
