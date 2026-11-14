@@ -104,6 +104,8 @@ Masks and the filter are on [Masks, the triangle filter and materials](/concepts
 | `triangleFilter` | `DEFAULT_TRIANGLE_FILTER_WGSL` (every triangle blocks) | Your `bvhTrianglePasses`, or `null` to declare it yourself. |
 | `rayMasks` | `true` | `false` compiles masks out. |
 | `triangleLeaves`, `positionLayout`, `nodeFormat` | records, `vec4`, `'quantized'` | Must match the scene. A scene's defaults are the same, so a scene and a walk made without these options agree. |
+| `anyHitOrder` | `'far'` | Which child any hit enters first: `'far'`, `'near'` or `'larger'` (below). |
+| `quantizedDecode` | `'exact'` | How quantized nodes become distances: `'exact'` decodes each plane, `'folded'` folds the frame into the ray once per instance (below). Not measured on a GPU yet; quantized nodes only, not with `anyHitOrder: 'larger'`. |
 
 Compile the walk for the scene it reads:
 
@@ -161,6 +163,15 @@ gains the counted declarations. Its times mean little (it carries and writes mor
   open space: 1.11-1.48x far-first on instanced trees on the RTX 3060 Laptop, but 0.80-0.87x on merged trees with rays
   from surfaces (Windows, headless Chrome 157, 2026-11-13, Sponza and Bistro interior).
 - **Boxes beyond the current closest hit are skipped.**
+- **Quantized nodes** (the default node format) store each child box as 16-bit planes on a per-mesh grid, read
+  from a frame slot when the walk enters an instance. By default each plane is decoded to its exact `f32`
+  (`origin + q * step`) and tested as an `f32` box. `quantizedDecode: 'folded'` folds the frame into the ray at instance
+  entry (`step / direction` and `(origin - rayOrigin) / direction` per axis), so a plane's distance along the ray is one
+  `fma`. The fold rounds its offset, which can move a plane inward by a few ulps of the mesh's size, so every folded box
+  is padded by `|offset| * 2^-21` per axis: it holds the real box and never loses a hit (a few more node visits at
+  worst; a closest hit at exactly the same `t` can name another triangle). It is the ray walk only: the spatial
+  queries and the shapecast keep the exact decode. It is opt-in and not yet timed on a GPU; the surface-ray pages time
+  it (section 9, `folded_over_exact`).
 
 ## The stack size
 

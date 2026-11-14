@@ -80,6 +80,8 @@ hit record measured 0.96-1.15x the 24-byte one.
 
 - On the RTX 3060: the correctness pages for the 2026-11 work, `SceneTrees` memory and the build-peak cap on D3D12,
   shader compile times, and quantized nodes and indexed leaves together.
+- `quantizedDecode: 'folded'` (the folded decode of quantized nodes, opt-in) on any GPU: the surface-ray pages time it
+  against the exact decode (`folded_over_exact`); it has only passed the correctness pages on SwiftShader.
 - The Intel UHD has not run the 2026-11 work at all.
 - The comparison suite against three-mesh-bvh and others (`compare/`) has run on the Apple M5 only.
 

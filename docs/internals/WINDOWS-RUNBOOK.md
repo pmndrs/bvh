@@ -63,6 +63,9 @@ $env:BVH_PAGE_QUERY = ''
 ### 2b'. Quantized nodes and indexed leaves together (section 8 of the page)
 The same pages time indexed leaves on quantized nodes against quantized records, the pairing the `triangleLeaves` default waits on (HANDOFF, Open). Rows `surface-rays/paired/quantized_indexed_over_quantized_records/...` and `quantized_indexed_packed_over_quantized_records/...` (above 1: indexed is faster), bytes in `surface-rays/combined_leaves/...`. The page fails if an answer differs from quantized records other than a tie. `skip=combined` leaves it out. `tools/windows-clean-run.ps1` runs it with the rest. **Dennis decides** the default from these ratios and the bytes.
 
+### 2b''. The folded decode of quantized nodes (section 9 of the page)
+The same pages time `quantizedDecode: 'folded'` against the exact decode on the quantized records scenes (and the quantized indexed ones when section 8 runs): rows `surface-rays/paired/folded_over_exact/...` and `folded_indexed_over_exact_indexed/...` (above 1: folded is faster). The page fails if an answer differs from the exact walk's other than a tie. `skip=folded` leaves it out. It has passed `trace-oracle` and `trace-inline` on SwiftShader only. **Dennis decides** whether it becomes the default.
+
 ### 2c. The 40-byte hit record
 Same pages as 2a (leave `skip=hit-record` out). Rows `surface-rays/paired/hit_record_40_over_24/...`; a ratio above 1 means the 40-byte record was faster. M5: 0.96-1.15, medians 1.02-1.11 ("It has not been measured on the RTX 3060 or on Intel", `docs/internals/design/memory.md`, "The 40-byte hit record"). No threshold is written: **Dennis decides.**
 
