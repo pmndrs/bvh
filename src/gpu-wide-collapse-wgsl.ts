@@ -40,7 +40,9 @@
  *   outward and checked in `f32` as the GPU decodes them), takes a consecutive block for its
  *   inner children from its mesh's node counter, copies its leaf triangles into slot order
  *   (CWBVH) from its mesh's triangle counter, and appends its inner children to the next
- *   frontier.
+ *   frontier. For a mesh that asked for a refit map (a deforming mesh's), it also writes where
+ *   each slot's box is in the binary tree and, for CWBVH, which binary triangle each copied one
+ *   was (`WideRefitMap`), which the GPU refit repacks from (gpu-wide-refit.ts).
  * - `bvhwArgs`: one thread; turns the next frontier's length into the next level's indirect
  *   dispatch and clears the length after it.
  *
@@ -53,7 +55,7 @@
  */
 
 import { GPU_LAYOUT_EMPTY_CHILD, GPU_LAYOUT_NODE_WORDS } from './gpu-layout.ts';
-import { BVH4_CHILD, BVH4_NODE_WORDS, CWBVH_NODE_WORDS, type WideNodeFormat } from './wide-nodes.ts';
+import { BVH4_CHILD, BVH4_NODE_WORDS, CWBVH_NODE_WORDS, WIDE_REFIT_NO_SLOT, WIDE_REFIT_ROOT_SLOT, type WideNodeFormat } from './wide-nodes.ts';
 
 /** Workgroup size of every entry point. */
 export const WIDE_COLLAPSE_WORKGROUP = 64;
@@ -80,8 +82,68 @@ struct BvhwMesh {
     dstNode: u32,        // its first wide node in the output (wide nodes); room for nodeCount
     dstTriangle: u32,    // CWBVH: its first triangle in the output's triangle region (units)
     scratchBase: u32,    // its first node in the scratch arrays (the meshes' node counts summed before it)
-    pad1: u32,
+    mapBase: u32,        // its refit map in the output (words; WIDE_COLLAPSE_NO_MAP: none): (nodeCount + 1) * M slot words, then CWBVH's triangle order
 }`;
+
+/** `BvhwMesh.mapBase` of a mesh that asked for no refit map. */
+export const WIDE_COLLAPSE_NO_MAP = 0xffffffff;
+
+/**
+ * The plane helpers the collapse and the refit's pack (gpu-wide-refit.ts) share: the exponent
+ * and the outward-rounded planes, each checked in `f32` as the walk decodes them, so a GPU pack
+ * gives the bytes the CPU's (wide-nodes.ts) does.
+ */
+export const WIDE_PLANES_WGSL = /* wgsl */ `
+const BVHW_BIG: f32 = 3.0e38;
+
+// 2^e, exactly (e in [-126, 127]): the bits of the f32 itself, not exp2, which may be approximate.
+fn bvhwPow2(e: i32) -> f32 {
+    return bitcast<f32>(u32(e + 127) << 23u);
+}
+
+// The plane exponent: the smallest e in [-126, 126] with lo + 255 * 2^e at or above hi, in f32.
+fn bvhwExponent(lo: f32, hi: f32) -> i32 {
+    if (!(hi > lo)) {
+        return -126;
+    }
+    var e = clamp(i32(ceil(log2((hi - lo) / 255.0))), -126, 126);
+    for (var guard = 0; guard < 4 && e > -126 && lo + 255.0 * bvhwPow2(e - 1) >= hi; guard += 1) {
+        e -= 1;
+    }
+    for (var guard = 0; guard < 8 && e < 126 && lo + 255.0 * bvhwPow2(e) < hi; guard += 1) {
+        e += 1;
+    }
+    return e;
+}
+
+// Outward-rounded planes, checked in f32 as the walk decodes them (p + f32(q) * scale): the tightest
+// plane the decode allows, searched both ways from the quotient's estimate (the CPU's quantizeMin and
+// quantizeMax do the same, so both write the same bytes).
+fn bvhwQuantizeMin(value: f32, p: f32, scale: f32) -> u32 {
+    var q = u32(clamp(floor((value - p) / scale), 0.0, 255.0));
+    for (var guard = 0u; guard < 8u && q > 0u && p + f32(q) * scale > value; guard += 1u) {
+        q -= 1u;
+    }
+    for (var guard = 0u; guard < 8u && q < 255u && p + f32(q + 1u) * scale <= value; guard += 1u) {
+        q += 1u;
+    }
+    return q;
+}
+fn bvhwQuantizeMax(value: f32, p: f32, scale: f32) -> u32 {
+    var q = u32(clamp(ceil((value - p) / scale), 0.0, 255.0));
+    for (var guard = 0u; guard < 8u && q < 255u && p + f32(q) * scale < value; guard += 1u) {
+        q += 1u;
+    }
+    for (var guard = 0u; guard < 8u && q > 0u && p + f32(q - 1u) * scale >= value; guard += 1u) {
+        q -= 1u;
+    }
+    return q;
+}
+
+fn bvhwEmpty(lo: vec3f, hi: vec3f) -> bool {
+    return !all(lo <= hi) || any(abs(lo) > vec3f(BVHW_BIG)) || any(abs(hi) > vec3f(BVHW_BIG));
+}
+`;
 
 export function wideCollapseWgsl(format: WideNodeFormat, unitWords: number): string {
     const M = format === 'cwbvh8' ? 8 : 4;
@@ -122,6 +184,10 @@ const COUNTER_WORDS: u32 = ${WIDE_COLLAPSE_COUNTER_WORDS}u;
 const PROBLEM_LEAF: u32 = ${WIDE_COLLAPSE_PROBLEM.leafTooLarge}u;
 const PROBLEM_FRONTIER: u32 = ${WIDE_COLLAPSE_PROBLEM.frontierFull}u;
 const PROBLEM_OUTPUT: u32 = ${WIDE_COLLAPSE_PROBLEM.outputFull}u;
+const NO_MAP: u32 = ${hex(WIDE_COLLAPSE_NO_MAP)};
+const MAP_NO_SLOT: u32 = ${hex(WIDE_REFIT_NO_SLOT)};
+const MAP_ROOT: u32 = ${hex(WIDE_REFIT_ROOT_SLOT)};
+const SELF_REF: u32 = 0xffffffffu;
 
 @group(0) @binding(0) var<storage, read> bvhwNodes: array<u32>;
 @group(0) @binding(1) var<storage, read> bvhwTriangles: array<u32>;
@@ -312,6 +378,14 @@ fn bvhwChildVnode(base: u32, n: u32, side: u32) -> u32 {
     return bvhwChildIndex(base + n, side);
 }
 
+// The vnode a decode reference stands for: child 'side' of local node 'n' for (n << 1) | side, or 'src'.
+fn bvhwRefVnode(base: u32, src: u32, reference: u32) -> u32 {
+    if (reference == SELF_REF) {
+        return src;
+    }
+    return bvhwChildVnode(base, reference >> 1u, reference & 1u);
+}
+
 fn bvhwTermOf(base: u32, scratch: u32, vnode: u32) -> BvhwTerm {
     if ((vnode & LEAF_SLOT) != 0u) {
         let n = (vnode & ~LEAF_SLOT) >> 1u;
@@ -328,46 +402,7 @@ fn bvhwTermOf(base: u32, scratch: u32, vnode: u32) -> BvhwTerm {
     return BvhwTerm(lo, hi, vnode, 0u, 0u);
 }
 
-// 2^e, exactly (e in [-126, 127]): the bits of the f32 itself, not exp2, which may be approximate.
-fn bvhwPow2(e: i32) -> f32 {
-    return bitcast<f32>(u32(e + 127) << 23u);
-}
-
-// The plane exponent: the smallest e in [-126, 126] with lo + 255 * 2^e at or above hi, in f32.
-fn bvhwExponent(lo: f32, hi: f32) -> i32 {
-    if (!(hi > lo)) {
-        return -126;
-    }
-    var e = clamp(i32(ceil(log2((hi - lo) / 255.0))), -126, 126);
-    for (var guard = 0; guard < 4 && e > -126 && lo + 255.0 * bvhwPow2(e - 1) >= hi; guard += 1) {
-        e -= 1;
-    }
-    for (var guard = 0; guard < 8 && e < 126 && lo + 255.0 * bvhwPow2(e) < hi; guard += 1) {
-        e += 1;
-    }
-    return e;
-}
-
-// Outward-rounded planes, checked in f32 as the walk decodes them (p + f32(q) * scale).
-fn bvhwQuantizeMin(value: f32, p: f32, scale: f32) -> u32 {
-    var q = u32(clamp(floor((value - p) / scale), 0.0, 255.0));
-    for (var guard = 0u; guard < 8u && q > 0u && p + f32(q) * scale > value; guard += 1u) {
-        q -= 1u;
-    }
-    return q;
-}
-fn bvhwQuantizeMax(value: f32, p: f32, scale: f32) -> u32 {
-    var q = u32(clamp(ceil((value - p) / scale), 0.0, 255.0));
-    for (var guard = 0u; guard < 8u && q < 255u && p + f32(q) * scale < value; guard += 1u) {
-        q += 1u;
-    }
-    return q;
-}
-
-fn bvhwEmpty(lo: vec3f, hi: vec3f) -> bool {
-    return !all(lo <= hi) || any(abs(lo) > vec3f(BIG)) || any(abs(hi) > vec3f(BIG));
-}
-
+${WIDE_PLANES_WGSL}
 fn bvhwOutput(word: u32, value: u32) {
     bvhwOut[word] = value;
 }
@@ -390,39 +425,42 @@ fn bvhwLevel(@builtin(global_invocation_id) id: vec3u) {
     let counters = CONTROL_HEADER + meshIndex * COUNTER_WORDS;
 
     // The decode walk (DecodeWalk): the binary nodes that become this node's children, in order.
+    // Tasks and terms are references: child 'side' of binary node 'n' is (n << 1) | side, whose box is at
+    // word ref * 8 of the binary nodes (the refit map's slot word); SELF_REF is 'src' itself.
     var terms: array<u32, ${M}>;
     var termCount = 0u;
     if ((src & LEAF_SLOT) == 0u && bvhwChildIndex(base + src, 1u) == EMPTY_CHILD) {
-        terms[0] = LEAF_SLOT | (src << 1u);   // a single-triangle tree: its leaf under the root (tinybvh adds the level)
+        terms[0] = src << 1u;   // a single-triangle tree: its leaf under the root (tinybvh adds the level)
         termCount = 1u;
     } else {
         var task: array<u32, ${M + 2}>;
         var taskSlots: array<u32, ${M + 2}>;
         var tasks = 1u;
-        task[0] = src;
+        task[0] = SELF_REF;
         taskSlots[0] = M;
         loop {
             if (tasks == 0u) {
                 break;
             }
             tasks -= 1u;
-            let c = task[tasks];
+            let reference = task[tasks];
             let slots = taskSlots[tasks];
+            let c = bvhwRefVnode(base, src, reference);
             if ((c & LEAF_SLOT) == 0u && slots > 1u) {
                 let k = (bvhwU[(scratch + c) * ${WIDE_COLLAPSE_INFO_WORDS}u] >> (4u * (slots - 1u))) & 15u;
                 if (k != 0u) {
                     // Right first, so left pops first.
-                    task[tasks] = bvhwChildVnode(base, c, 1u);
+                    task[tasks] = (c << 1u) | 1u;
                     taskSlots[tasks] = slots - k;
                     tasks += 1u;
-                    task[tasks] = bvhwChildVnode(base, c, 0u);
+                    task[tasks] = c << 1u;
                     taskSlots[tasks] = k;
                     tasks += 1u;
                     continue;
                 }
             }
             if (termCount < M) {
-                terms[termCount] = c;
+                terms[termCount] = reference;
                 termCount += 1u;
             }
         }
@@ -437,7 +475,7 @@ fn bvhwLevel(@builtin(global_invocation_id) id: vec3u) {
     var lo = vec3f(BIG);
     var hi = vec3f(-BIG);
     for (var j = 0u; j < termCount; j += 1u) {
-        let term = bvhwTermOf(base, scratch, terms[j]);
+        let term = bvhwTermOf(base, scratch, bvhwRefVnode(base, src, terms[j]));
         boxLo[j] = term.lo;
         boxHi[j] = term.hi;
         nodes[j] = term.node;
@@ -550,6 +588,20 @@ fn bvhwLevel(@builtin(global_invocation_id) id: vec3u) {
     var imask = 0u;
     var meta0 = 0u;
     var meta1 = 0u;
+    let mapped = mesh.mapBase != NO_MAP;
+    let mapOrder = mesh.mapBase + (mesh.nodeCount + 1u) * M;
+    // The refit map's slot words. A loop of its own: the same writes inside the packing loop below broke
+    // BVH4's child words on Apple's compiler (Chrome, Metal), though no thread ran them.
+    if (mapped) {
+        let mapSlots = mesh.mapBase + address * M;
+        for (var s = 0u; s < M; s += 1u) {
+            bvhwOut[mapSlots + s] = MAP_NO_SLOT;
+        }
+        for (var j = 0u; j < termCount; j += 1u) {
+            // Only the mesh's root can come out as its own child (a combined root of at most 3 triangles).
+            bvhwOut[mapSlots + slotOf[j]] = select(terms[j] * 8u, select(MAP_NO_SLOT, MAP_ROOT, src == 0u), terms[j] == SELF_REF);
+        }
+    }
     // Visit children in slot order, so CWBVH's inner children and leaf triangles follow their slots.
     for (var s = 0u; s < M; s += 1u) {
         var j = M;
@@ -593,6 +645,11 @@ fn bvhwLevel(@builtin(global_invocation_id) id: vec3u) {
             let triangleOut = bvhwParams.outputNodeWords + (mesh.dstTriangle + triangleBase + leafOffset) * UNIT_WORDS;
             for (var k = 0u; k < count * UNIT_WORDS; k += 1u) {
                 bvhwOut[triangleOut + k] = bvhwTriangles[(mesh.srcTriangle + firsts[j]) * UNIT_WORDS + k];
+            }
+            if (mapped) {
+                for (var k = 0u; k < count; k += 1u) {
+                    bvhwOut[mapOrder + triangleBase + leafOffset + k] = firsts[j] + k;
+                }
             }
             leafOffset += count;
         }

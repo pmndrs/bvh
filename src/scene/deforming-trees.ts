@@ -29,6 +29,12 @@
  * this refit takes the new tree's shape. A sway rarely holds long enough; a
  * bend that stays does.
  *
+ * **Wide scenes** (`nodeFormat: 'bvh4'` or `'cwbvh8'`; docs/internals/design/wide-nodes.md,
+ * section 2): the refit runs on an `f32` copy of the binary tree the wide one
+ * was collapsed from, then packs the wide nodes from it through the tree's
+ * refit map (the GPU collapse's, or `wideRefitMap` of tinybvh's). The drift
+ * rule reads the binary tree's cost, as everywhere else.
+ *
  * Needs subgroups (the refit). Without them a GPU pose is skipped (`SceneTrees`
  * counts the poses it skipped and warns once); `SceneTrees.setPoseCpu` refits
  * on the CPU instead, with or without subgroups.
@@ -40,6 +46,7 @@ import type { GpuMeshBuffers } from '../mesh-input.ts';
 import { relativeSahCost } from '../refit-cpu.ts';
 import { dequantizeNodes } from '../quantized-nodes.ts';
 import { BVH_NODE_WORDS } from '../trace/layout.ts';
+import type { WideNodeFormat, WideRefitMap } from '../wide-nodes.ts';
 
 /** Refit cost over the built tree's above which a pose counts as drifted (within 10% of a fresh build is the BVH's done-when). */
 export const DRIFT_THRESHOLD = 1.1;
@@ -55,6 +62,8 @@ export interface DeformingTreePlacement {
     /** Indexed scenes: the mesh's first vertex in the positions buffer, and the buffer's layout. */
     readonly vertexBase?: number;
     readonly positionLayout?: 'vec4' | 'packed';
+    /** The scene's node format (quantized and wide trees are refit on an f32 copy, then packed). */
+    readonly nodeFormat?: 'f32' | 'quantized' | WideNodeFormat;
 }
 
 export interface DeformingTreeCounts {
@@ -102,10 +111,11 @@ export class DeformingTrees {
     private refits = 0;
     private driftRebuilds = 0;
 
-    constructor(device: GPUDevice, options: { readonly label?: string } = {}) {
+    /** `wideFormat`: the scene's wide node format, whose pack the refits need. */
+    constructor(device: GPUDevice, options: { readonly label?: string; readonly wideFormat?: WideNodeFormat | null } = {}) {
         this.device = device;
         this.label = `${options.label ?? 'bvh'} mesh refit`;
-        this.kernels = new GpuMeshRefitKernels(device, this.label);
+        this.kernels = new GpuMeshRefitKernels(device, this.label, options.wideFormat ?? null);
     }
 
     prepare(): Promise<void> {
@@ -192,20 +202,22 @@ export class DeformingTrees {
      * A tree of the mesh was placed. With its layout on the CPU (tinybvh's
      * always; a GPU build's when read back) the refit takes its shape and
      * refits it at once from the latest pose; without one the mesh keeps the
-     * pose the tree was built in until a tree with a layout arrives.
+     * pose the tree was built in until a tree with a layout arrives. Wide
+     * scenes: `layout` is the binary tree, and `wide` the wide tree's refit
+     * map (without one the mesh keeps its pose too).
      */
-    treePlaced(slot: number, placement: DeformingTreePlacement, layout: GpuLayoutMeshBvh | null): void {
+    treePlaced(slot: number, placement: DeformingTreePlacement, layout: GpuLayoutMeshBvh | null, wide: WideRefitMap | null = null): void {
         const mesh = this.meshes.get(slot);
         if (!mesh) return;
         mesh.rebuilding = false;
         mesh.driftSince = -1;
         mesh.nextStatsFrame = 0;
-        if (!layout) {
+        if (!layout || (this.kernels.wide && !wide)) {
             mesh.placement = null;
             return;
         }
         mesh.shapeGeneration = this.nextShapeGeneration++;
-        mesh.refit.setTree(layout, { ...placement, generation: mesh.shapeGeneration });
+        mesh.refit.setTree(layout, { ...placement, generation: mesh.shapeGeneration, ...(wide ? { wide } : {}) });
         // The built tree's cost on f32 boxes (a quantized layout is decoded; SceneTrees hands deforming meshes f32 trees).
         const f32Nodes = dequantizeNodes(layout).nodes;
         const words = new Uint32Array(f32Nodes, 0, layout.nodeCount * BVH_NODE_WORDS);
@@ -213,6 +225,21 @@ export class DeformingTrees {
         mesh.builtCost = relativeSahCost(floats, words, 0, layout.nodeCount);
         mesh.placement = placement;
         mesh.refitDue = mesh.vertices !== null;
+    }
+
+    /**
+     * Wide scenes: packs the mesh's placed wide nodes from binary `f32` nodes
+     * refit on the CPU (`SceneTrees.setPoseCpu` on a tree whose wide nodes are
+     * only on the GPU, as the GPU collapse's). Returns false for a mesh with no
+     * placed tree to pack. Records its own pass in `encoder`.
+     */
+    encodePackFrom(encoder: GPUCommandEncoder, nodes: GPUBuffer, slot: number, binaryNodes: ArrayBuffer): boolean {
+        const mesh = this.meshes.get(slot);
+        if (!mesh?.placement || !this.kernels.ready || !this.kernels.wide) return false;
+        const pass = encoder.beginComputePass({ label: `${this.label} cpu pose pack` });
+        mesh.refit.encodePackFrom(pass, { nodes }, binaryNodes);
+        pass.end();
+        return true;
     }
 
     treeReleased(slot: number): void {

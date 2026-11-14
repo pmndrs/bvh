@@ -228,6 +228,13 @@ interface BinaryTree {
     right: Int32Array;
     first: Uint32Array;
     count: Uint32Array;
+    /**
+     * The word in the source layout's nodes where node `n`'s box is (its
+     * parent's child box: `parent * 16 + side * 8`), -1 for the root (whose
+     * box is its children's union). A split leaf's pieces keep their leaf's.
+     * What a refit map ({@link wideRefitMap}) points at.
+     */
+    boxWord: Int32Array;
 }
 
 function allocateBinary(capacity: number): BinaryTree {
@@ -238,6 +245,7 @@ function allocateBinary(capacity: number): BinaryTree {
         right: new Int32Array(capacity).fill(-1),
         first: new Uint32Array(capacity),
         count: new Uint32Array(capacity),
+        boxWord: new Int32Array(capacity).fill(-1),
     };
 }
 
@@ -254,6 +262,7 @@ function readBinary(layout: GpuLayoutMeshBvh, extraCapacity: number): BinaryTree
     const box = tree.box;
     const childBox = (node: number, side: number, out: number): void => {
         const at = node * GPU_LAYOUT_NODE_WORDS + side * GPU_LAYOUT_CHILD_STRIDE_WORDS;
+        tree.boxWord[out] = at;
         const o = out * 6;
         box[o] = floats[at + W.leftMin];
         box[o + 1] = floats[at + W.leftMin + 1];
@@ -354,6 +363,7 @@ function splitLeaves(tree: BinaryTree, maxPrims: number): BinaryTree {
     grown.right.set(tree.right.subarray(0, tree.size));
     grown.first.set(tree.first.subarray(0, tree.size));
     grown.count.set(tree.count.subarray(0, tree.size));
+    grown.boxWord.set(tree.boxWord.subarray(0, tree.size));
     grown.size = tree.size;
     for (let n = 0; n < grown.size; n++) {
         if (!isLeaf(grown, n) || grown.count[n] <= maxPrims) continue;
@@ -362,6 +372,8 @@ function splitLeaves(tree: BinaryTree, maxPrims: number): BinaryTree {
         grown.size += 2;
         grown.box.copyWithin(left * 6, n * 6, n * 6 + 6);
         grown.box.copyWithin(right * 6, n * 6, n * 6 + 6);
+        grown.boxWord[left] = grown.boxWord[n];
+        grown.boxWord[right] = grown.boxWord[n];
         grown.first[left] = grown.first[n];
         grown.count[left] = maxPrims;
         grown.first[right] = grown.first[n] + maxPrims;
@@ -573,17 +585,24 @@ function planeExponent(lo: number, hi: number): number {
     return e;
 }
 
-/** A min plane rounded down: the largest q with `f32(p + q * 2^e) <= value`. */
+/**
+ * A min plane rounded down: the largest q with `f32(p + q * 2^e) <= value`
+ * (the decode is monotone in q; the exact quotient's floor can be one short of
+ * it when the sum rounds down, so both directions are searched, as the GPU's
+ * `bvhwQuantizeMin` does, which makes the two write the same bytes).
+ */
 function quantizeMin(value: number, p: number, scale: number): number {
     let q = Math.max(0, Math.min(255, Math.floor((value - p) / scale)));
     while (q > 0 && Math.fround(p + q * scale) > value) q--;
+    while (q < 255 && Math.fround(p + (q + 1) * scale) <= value) q++;
     return q;
 }
 
-/** A max plane rounded up: the smallest q with `f32(p + q * 2^e) >= value`. */
+/** A max plane rounded up: the smallest q with `f32(p + q * 2^e) >= value` (both directions, as {@link quantizeMin}). */
 function quantizeMax(value: number, p: number, scale: number): number {
     let q = Math.max(0, Math.min(255, Math.ceil((value - p) / scale)));
     while (q < 255 && Math.fround(p + q * scale) < value) q++;
+    while (q > 0 && Math.fround(p + (q - 1) * scale) >= value) q--;
     if (Math.fround(p + q * scale) < value) throw new RangeError(`wide nodes: a child box does not fit its parent (${value} > ${Math.fround(p + q * scale)})`);
     return q;
 }
@@ -964,6 +983,132 @@ export function refitWide(tree: WideMeshTree, refitted: GpuLayoutMeshBvh): Array
     for (let address = 0; address < tree.nodeCount; address++) {
         if (tree.nodeFormat === 'cwbvh8') writeCwbvhBoxes(nodes, addressNode[address], slots!, address * 8, words, floats, bytes, address);
         else writeBvh4Boxes(nodes, addressNode[address], words, floats, address);
+    }
+    return buffer;
+}
+
+/**
+ * What a GPU refit of a wide tree needs besides its binary tree
+ * (gpu-mesh-refit.ts, gpu-wide-refit.ts; docs/internals/design/wide-nodes.md,
+ * section 2): every wide child box is a box of the binary tree it was
+ * collapsed from (a combined subtree's is its root's; a split leaf's pieces
+ * keep their leaf's, as tinybvh's `SplitLeafs` does), so after the binary
+ * refit each wide node is packed again from the boxes its slots point at.
+ * The CPU collapse makes one with {@link wideRefitMap}; the GPU collapse
+ * writes one for the meshes that ask (`WideCollapseInput.refitMap`).
+ */
+export interface WideRefitMap {
+    readonly nodeFormat: WideNodeFormat;
+    /** Wide nodes it covers (the tree's `nodeCount`). */
+    readonly nodeCount: number;
+    /**
+     * {@link wideRefitSlots} words per wide node: slot `s`'s box in the binary
+     * tree's nodes, as the word of its min (`node * 16 + side * 8`; the max is
+     * 4 words on), {@link WIDE_REFIT_ROOT_SLOT} for the binary root (a tree
+     * of at most 3 triangles combined into one leaf: its box is its two
+     * children's union), or {@link WIDE_REFIT_NO_SLOT} for an unused slot.
+     * BVH4's used slots come first, in its children's order.
+     */
+    readonly slots: Uint32Array;
+    /**
+     * CWBVH: wide triangle `k`'s triangle in the binary tree's order (the
+     * box the refit's triangle step writes for record `k`), as
+     * `WideMeshTree.triangleOrder`; null when the order is the binary's (BVH4).
+     */
+    readonly triangleOrder: Uint32Array | null;
+}
+
+/** A {@link WideRefitMap} slot word that is no child. */
+export const WIDE_REFIT_NO_SLOT = 0xffffffff;
+/** A {@link WideRefitMap} slot word for the binary root, whose box is the union of node 0's two child boxes (words 0 and 8). */
+export const WIDE_REFIT_ROOT_SLOT = 0xfffffffe;
+
+/** Slot words per wide node in a {@link WideRefitMap}: 4 (BVH4) or 8 (CWBVH). */
+export function wideRefitSlots(format: WideNodeFormat): 4 | 8 {
+    return format === 'cwbvh8' ? 8 : 4;
+}
+
+/**
+ * The refit map of a tree {@link convertToWide} made from `layout` (the same
+ * binary tree: its topology is read again, boxes don't matter). For a scene's
+ * deforming meshes, whose wide nodes the GPU refit repacks each pose.
+ */
+export function wideRefitMap(tree: WideMeshTree, layout: GpuLayoutMeshBvh): WideRefitMap {
+    const binary = tree.nodeFormat === 'cwbvh8' ? cwbvhBinary(layout) : readBinary(layout, 0);
+    const { nodes, addressNode, slots } = tree.topology;
+    const M = wideRefitSlots(tree.nodeFormat);
+    const map = new Uint32Array(tree.nodeCount * M).fill(WIDE_REFIT_NO_SLOT);
+    const boxOf = (c: number): number => {
+        const word = binary.boxWord[nodes.src[c]];
+        if (word >= 0) return word;
+        if (nodes.src[c] === 0) return WIDE_REFIT_ROOT_SLOT;
+        throw new Error(`wide nodes: wide child ${c} stands for binary node ${nodes.src[c]}, which has no box`);
+    };
+    for (let address = 0; address < tree.nodeCount; address++) {
+        const i = addressNode[address];
+        if (slots) {
+            for (let s = 0; s < 8; s++) {
+                const c = slots[address * 8 + s];
+                if (c >= 0) map[address * 8 + s] = boxOf(c);
+            }
+        } else {
+            for (let k = 0; k < nodes.childCount[i]; k++) map[address * 4 + k] = boxOf(nodes.childStart[i] + k);
+        }
+    }
+    return { nodeFormat: tree.nodeFormat, nodeCount: tree.nodeCount, slots: map, triangleOrder: tree.triangleOrder };
+}
+
+/** Scratch for {@link repackWide}: one node and its (at most 8) children. */
+const repackNodes = allocateWide(9);
+const repackSlots = new Int32Array(8);
+
+/**
+ * `nodes` (a copy; the input is left as it is) with every node's corner,
+ * exponents and planes packed again from `binaryNodes` through `map`: the CPU
+ * mirror of the GPU refit's pack (gpu-wide-refit.ts). Child words, CWBVH's
+ * imask, meta and bases stay. For a tree from {@link convertToWide} this is
+ * {@link refitWide} (`refitWide(tree, refitted)` equals
+ * `repackWide(tree.nodes, wideRefitMap(tree, layout), refitted.nodes)`).
+ */
+export function repackWide(nodes: ArrayBuffer, map: WideRefitMap, binaryNodes: ArrayBuffer): ArrayBuffer {
+    const buffer = nodes.slice(0);
+    const words = new Uint32Array(buffer);
+    const floats = new Float32Array(buffer);
+    const bytes = new Uint8Array(buffer);
+    const binary = new Float32Array(binaryNodes);
+    const M = wideRefitSlots(map.nodeFormat);
+    const temp = repackNodes;
+    temp.count = 9;
+    temp.childStart[0] = 1;
+    for (let address = 0; address < map.nodeCount; address++) {
+        let used = 0;
+        for (let s = 0; s < M; s++) {
+            const word = map.slots[address * M + s];
+            repackSlots[s] = -1;
+            const c = map.nodeFormat === 'cwbvh8' ? 1 + s : 1 + used;
+            if (word === WIDE_REFIT_NO_SLOT) {
+                if (map.nodeFormat === 'cwbvh8') temp.box.set([Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity], c * 6);
+                continue;
+            }
+            for (let axis = 0; axis < 3; axis++) {
+                if (word === WIDE_REFIT_ROOT_SLOT) {
+                    temp.box[c * 6 + axis] = Math.min(binary[axis], binary[8 + axis]);
+                    temp.box[c * 6 + 3 + axis] = Math.max(binary[4 + axis], binary[12 + axis]);
+                } else {
+                    temp.box[c * 6 + axis] = binary[word + axis];
+                    temp.box[c * 6 + 3 + axis] = binary[word + 4 + axis];
+                }
+            }
+            repackSlots[s] = c;
+            used++;
+        }
+        if (map.nodeFormat === 'cwbvh8') {
+            temp.childCount[0] = 8;
+            writeCwbvhBoxes(temp, 0, repackSlots, 0, words, floats, bytes, address);
+        } else {
+            temp.childCount[0] = used;
+            writeBvh4Boxes(temp, 0, words, floats, address);
+        }
     }
     return buffer;
 }

@@ -10,7 +10,7 @@ import type { MeshBvh, MeshGeometry } from './trace/mesh-bvh.ts';
 import { buildMeshBvhWithTinyBvh } from './trace/mesh-bvh-topology.ts';
 import { createRandom, randomTriangleSoup, tessellatedQuad } from './trace/oracle-fixtures.ts';
 import { buildLbvhOnCpu } from './lbvh-cpu.ts';
-import { convertToWide, decodeWideNode, refitWide, reorderTriangles, type WideMeshTree, type WideNodeFormat } from './wide-nodes.ts';
+import { convertToWide, decodeWideNode, refitWide, reorderTriangles, repackWide, WIDE_REFIT_NO_SLOT, WIDE_REFIT_ROOT_SLOT, wideRefitMap, wideRefitSlots, type WideMeshTree, type WideNodeFormat } from './wide-nodes.ts';
 import { refitLayoutToPose } from './refit-cpu.ts';
 import { buildMeshBvhAsync } from './trace/mesh-bvh-build.ts';
 import { meshBvhTransferables } from './trace/mesh-bvh.ts';
@@ -147,6 +147,29 @@ describe('wide nodes', () => {
             const refitted = { ...wide, nodes: refitWide(wide, { ...mesh, nodes: posed.nodes }) };
             const { reached } = checkTree(format, mesh, refitted, posed.triangles!);
             expect(reached.every((count) => count === 1)).toBe(true);
+        });
+    }
+
+    for (const format of ['bvh4', 'cwbvh8'] as const) {
+        it(`${format}: the refit map repacks what refitWide does (the GPU refit's pack, on the CPU)`, () => {
+            let splitLeaves = 0;
+            for (const geometry of meshes()) {
+                const mesh = build(geometry);
+                const wide = convertToWide(mesh, format);
+                const map = wideRefitMap(wide, mesh);
+                expect(map.slots.length).toBe(wide.nodeCount * wideRefitSlots(format));
+                expect(map.triangleOrder).toBe(wide.triangleOrder);
+                // Every slot word is a child box of a binary node: 8-word aligned, inside the nodes.
+                for (const word of map.slots) if (word !== WIDE_REFIT_NO_SLOT && word !== WIDE_REFIT_ROOT_SLOT) expect(word % 8 === 0 && word < mesh.nodeCount * 16).toBe(true);
+                const positions = geometry.positions.map((value, index) => value * 1.1 + Math.cos(index * 0.37) * 0.3);
+                const posed = refitLayoutToPose(mesh, positions, geometry.indices);
+                const refitted = { ...mesh, nodes: posed.nodes };
+                expect(new Uint32Array(repackWide(wide.nodes, map, posed.nodes))).toEqual(new Uint32Array(refitWide(wide, refitted)));
+                const counts = new Uint32Array(mesh.nodes, 0, mesh.nodeCount * 16);
+                for (let node = 0; node < mesh.nodeCount; node++) if (counts[node * 16 + 11] > 3 || counts[node * 16 + 15] > 3) splitLeaves++;
+            }
+            // tinybvh's leaves reach past 3 triangles here, so CWBVH's SplitLeafs pieces are covered.
+            if (format === 'cwbvh8') expect(splitLeaves).toBeGreaterThan(0);
         });
     }
 

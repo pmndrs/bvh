@@ -28,6 +28,7 @@ const requiredLicenseText = {
     'wide-nodes.js': ['tinybvh', 'Permission is hereby granted, free of charge'],
     'trace/wgsl-wide.js': ['tinybvh', 'Permission is hereby granted, free of charge'],
     'gpu-wide-collapse-wgsl.js': ['tinybvh', 'Permission is hereby granted, free of charge'],
+    'gpu-wide-refit.js': ['tinybvh', 'Permission is hereby granted, free of charge'],
 };
 for (const [name, lines] of Object.entries(requiredLicenseText)) {
     const file = resolve(dist, name);
@@ -88,4 +89,4 @@ if (problems.length) {
     console.error(problems.join('\n'));
     process.exit(1);
 }
-console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl, gpu-hploc-wgsl, wide-nodes, trace/wgsl-wide and gpu-wide-collapse-wgsl, no .ts imports, no tests, worker entries built (' + workerEntries.size + '), /three imports in Node.');
+console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl, gpu-hploc-wgsl, wide-nodes, trace/wgsl-wide, gpu-wide-collapse-wgsl and gpu-wide-refit, no .ts imports, no tests, worker entries built (' + workerEntries.size + '), /three imports in Node.');

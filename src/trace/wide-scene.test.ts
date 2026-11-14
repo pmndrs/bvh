@@ -80,7 +80,7 @@ describe('a wide scene', () => {
         }
     }
 
-    it('collapses smaller than f32 and is never refit', async () => {
+    it('collapses smaller than f32, and places a wide mesh for the refit', async () => {
         const { meshes, instances } = mixedScene(5);
         const trees = meshes.map(f32);
         const exact = assembleTraceScene(trees, instances);
@@ -89,7 +89,9 @@ describe('a wide scene', () => {
         expect(bvh4.nodes.byteLength).toBeLessThan(exact.nodes.byteLength);
         expect(cwbvh.nodes.byteLength).toBeLessThan(bvh4.nodes.byteLength);
         expect(cwbvh.triangles.byteLength).toBe(exact.triangles.byteLength);
-        expect(() => meshRefitPlacement(cwbvh, 0)).toThrow(/not refit/);
+        // The refit's placement: the wide root's word, in the scene's wide format (GpuMeshRefit then needs the refit map).
+        expect(meshRefitPlacement(cwbvh, 1)).toMatchObject({ nodeWordOffset: cwbvh.meshes[1].nodeOffset * 20, nodeFormat: 'cwbvh8', triangleWordOffset: cwbvh.meshes[1].triangleOffset * 12 });
+        expect(meshRefitPlacement(bvh4, 1)).toMatchObject({ nodeWordOffset: bvh4.meshes[1].nodeOffset * 16, nodeFormat: 'bvh4' });
         expect(() => assembleTraceScene(trees, instances, {}, { nodeFormat: 'cwbvh16' as never })).toThrow(RangeError);
         expect(() => traceModuleWgsl({ nodeFormat: 'bvh4', anyHitOrder: 'larger' })).toThrow(/larger/);
         expect(() => traceModuleWgsl({ nodeFormat: 'bvh4', wideStack: 'workgroup' })).toThrow(/cwbvh8/);

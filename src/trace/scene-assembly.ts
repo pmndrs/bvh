@@ -31,7 +31,7 @@ import {
     writeIndexedMeshHeader,
 } from './layout.ts';
 import { checkNodeFormat, quantizeNodes } from '../quantized-nodes.ts';
-import { convertToWide, isWideNodeFormat, reorderTriangles, wideNodeBytes, type WideMeshTree } from '../wide-nodes.ts';
+import { convertToWide, isWideNodeFormat, reorderTriangles, wideNodeBytes, type WideMeshTree, type WideNodeFormat } from '../wide-nodes.ts';
 import { WIDE_MESH_STACK_SIZE, WIDE_SINGLE_STACK_SIZE } from './wgsl-wide.ts';
 import type { NodeFormat } from './layout.ts';
 import { gpuLayoutNodeBytes, gpuLayoutNodeSlots, type GpuLayoutNodeFormat } from '../gpu-layout.ts';
@@ -635,8 +635,12 @@ export async function buildTraceScene(
 export interface MeshRefitPlacement {
     /** The mesh's root, in words (quantized scenes: its frame slot is the 8 words before). */
     readonly nodeWordOffset: number;
-    /** The scene's node format: `GpuMeshRefit` refits an `f32` copy and packs it into a quantized scene. */
-    readonly nodeFormat?: GpuLayoutNodeFormat;
+    /**
+     * The scene's node format: `GpuMeshRefit` refits an `f32` copy and packs
+     * it into a quantized or wide scene (a wide one also needs the tree's
+     * refit map, `wideRefitMap`, as `setTree`'s `wide`).
+     */
+    readonly nodeFormat?: GpuLayoutNodeFormat | WideNodeFormat;
     readonly triangleWordOffset: number;
     /** Indexed scenes: the mesh's first vertex in the scene's positions. */
     readonly vertexBase?: number;
@@ -656,7 +660,12 @@ export interface MeshRefitPlacement {
  * are never refit. Throws for a welded mesh of an indexed scene too: the
  * refit copies the app's vertex v to scene vertex `vertexBase + v`, which only
  * holds when the scene kept the app's numbering. Assemble meshes you will
- * refit with `weld: false` (and no `weldTolerance`).
+ * refit with `weld: false` (and no `weldTolerance`). A wide scene's mesh also
+ * needs its tree's refit map for `setTree`'s `wide`: `wideRefitMap(tree,
+ * layout)` of the wide tree the assembly placed (`convertToWide(layout,
+ * nodeFormat)`, which a build's `wideNodes` gives as well) and its binary
+ * layout; both are in `src/wide-nodes.ts`, not exported while the wide
+ * formats are experimental (`SceneTrees` does this itself).
  */
 export function meshRefitPlacement(
     scene: Pick<TraceSceneData, 'meshes'> & Partial<Pick<TraceSceneData, 'triangleLeaves' | 'positionLayout' | 'nodeFormat'>>,
@@ -671,11 +680,9 @@ export function meshRefitPlacement(
         );
     }
     if (placement.triangleCount === 0) throw new RangeError(`meshRefitPlacement: mesh ${meshIndex} has no tree in this scene`);
-    if (isWideNodeFormat(scene.nodeFormat)) {
-        throw new RangeError(`meshRefitPlacement: a ${scene.nodeFormat} scene is not refit (docs/internals/design/wide-nodes.md); rebuild the mesh and assemble again`);
-    }
-    const nodeWordOffset = placement.nodeOffset * (gpuLayoutNodeBytes(scene.nodeFormat) / 4);
-    const nodes = scene.nodeFormat === 'quantized' ? { nodeFormat: 'quantized' as const } : {};
+    const wide = isWideNodeFormat(scene.nodeFormat) ? scene.nodeFormat : null;
+    const nodeWordOffset = placement.nodeOffset * ((wide ? wideNodeBytes(wide) : gpuLayoutNodeBytes(scene.nodeFormat as GpuLayoutNodeFormat | undefined)) / 4);
+    const nodes = wide ? { nodeFormat: wide } : scene.nodeFormat === 'quantized' ? { nodeFormat: 'quantized' as const } : {};
     if (scene.triangleLeaves !== 'indexed') return { nodeWordOffset, ...nodes, triangleWordOffset: placement.triangleOffset * TRIANGLE_WORDS };
     if (placement.welded) {
         throw new RangeError(

@@ -9,6 +9,9 @@
  * one, the most a collapse can need), then, for CWBVH, each mesh's triangles in its leaves'
  * order from `dstTriangle`. BVH4 keeps the binary order, so its triangles are not copied. The
  * counts read back say how many nodes each mesh used, which is what a scene copies out.
+ *
+ * A mesh with `refitMap` also gets its {@link WideRefitMap} (after the triangle region, read
+ * back with the counts): what the GPU refit of a deforming mesh repacks its wide nodes from.
  */
 
 import { GPU_LAYOUT_INDEXED_TRIANGLE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES } from './gpu-layout.ts';
@@ -17,11 +20,12 @@ import {
     WIDE_COLLAPSE_COUNTER_WORDS,
     WIDE_COLLAPSE_INFO_WORDS,
     WIDE_COLLAPSE_MESH_WORDS,
+    WIDE_COLLAPSE_NO_MAP,
     WIDE_COLLAPSE_PROBLEM,
     WIDE_COLLAPSE_WORKGROUP,
     wideCollapseWgsl,
 } from './gpu-wide-collapse-wgsl.ts';
-import { wideNodeBytes, type WideNodeFormat } from './wide-nodes.ts';
+import { wideNodeBytes, wideRefitSlots, type WideNodeFormat, type WideRefitMap } from './wide-nodes.ts';
 
 const STORAGE = 0x80;
 const COPY_DST = 0x8;
@@ -42,6 +46,8 @@ export interface WideCollapseInput {
     readonly triangleCount: number;
     /** Levels of binary nodes on its longest path (the builder's `maxDepth`). */
     readonly maxDepth: number;
+    /** Also write and read back its {@link WideRefitMap} (a deforming mesh's, for the GPU refit). Default false. */
+    readonly refitMap?: boolean;
 }
 
 /** One mesh of a finished job: where its wide tree sits in the output, and how big it is. */
@@ -55,6 +61,8 @@ export interface WideCollapseOutput {
     readonly triangleCount: number;
     /** Stack entries the mesh walk needs (BVH4: siblings pushed; CWBVH: depth). */
     readonly stackNeed: number;
+    /** With `refitMap`: its refit map over the `nodeCount` wide nodes (mesh-local binary box words, as the read-back layout's). */
+    readonly refitMap?: WideRefitMap;
 }
 
 /** A recorded job: its output buffer, and its counts once the GPU is done. */
@@ -63,7 +71,7 @@ export interface WideCollapseRun {
     /** Bytes of the output's node region; the triangle region (CWBVH) starts here. */
     readonly nodeRegionBytes: number;
     readonly format: WideNodeFormat;
-    /** Reads the counts back (after the encoder was submitted). Throws on a problem flag. */
+    /** Reads the counts (and the refit maps asked for) back, after the encoder was submitted. Throws on a problem flag. */
     counts(): Promise<WideCollapseOutput[]>;
     /** Frees the job's buffers, the output included. */
     destroy(): void;
@@ -115,24 +123,37 @@ export class GpuWideCollapse {
         let dstNodes = 0;
         let dstTriangles = 0;
         let maxDepth = 1;
-        const table = new Uint32Array(meshes.length * WIDE_COLLAPSE_MESH_WORDS);
-        const outputs: { dstNode: number; dstTriangle: number; triangleCount: number }[] = [];
-        meshes.forEach((mesh, index) => {
-            const at = index * WIDE_COLLAPSE_MESH_WORDS;
-            table.set([mesh.srcNode, mesh.nodeCount, mesh.srcTriangle, mesh.triangleCount, dstNodes, dstTriangles, totalNodes, 0], at);
-            outputs.push({ dstNode: dstNodes, dstTriangle: cwbvh ? dstTriangles : -1, triangleCount: mesh.triangleCount });
-            totalNodes += mesh.nodeCount;
+        const outputs: { dstNode: number; dstTriangle: number; triangleCount: number; map: number }[] = [];
+        // Refit maps after the triangle region: (nodeCount + 1) * M slot words each, then CWBVH's triangle order.
+        let mapWords = 0;
+        const mapStarts = meshes.map((mesh) => {
+            if (!mesh.refitMap) return -1;
+            const start = mapWords;
+            mapWords += (mesh.nodeCount + 1) * M + (cwbvh ? mesh.triangleCount : 0);
+            return start;
+        });
+        meshes.forEach((mesh) => {
+            outputs.push({ dstNode: dstNodes, dstTriangle: cwbvh ? dstTriangles : -1, triangleCount: mesh.triangleCount, map: -1 });
             dstNodes += mesh.nodeCount + 1;
             if (cwbvh) dstTriangles += mesh.triangleCount;
-            maxDepth = Math.max(maxDepth, mesh.maxDepth);
         });
         const nodeRegionBytes = dstNodes * wideBytes;
+        const mapRegionWord = (nodeRegionBytes + dstTriangles * this.unitBytes) / 4;
+        const table = new Uint32Array(meshes.length * WIDE_COLLAPSE_MESH_WORDS);
+        meshes.forEach((mesh, index) => {
+            const map = mapStarts[index] < 0 ? WIDE_COLLAPSE_NO_MAP : mapRegionWord + mapStarts[index];
+            table.set([mesh.srcNode, mesh.nodeCount, mesh.srcTriangle, mesh.triangleCount, outputs[index].dstNode, Math.max(0, outputs[index].dstTriangle), totalNodes, map], index * WIDE_COLLAPSE_MESH_WORDS);
+            outputs[index].map = mapStarts[index];
+            totalNodes += mesh.nodeCount;
+            maxDepth = Math.max(maxDepth, mesh.maxDepth);
+        });
         const frontierCapacity = dstNodes;
         const meshTable = make('meshes', table.byteLength, STORAGE | COPY_DST);
         device.queue.writeBuffer(meshTable, 0, table);
         const scratchF = make('costs', totalNodes * (M + 6) * 4, STORAGE);
         const scratchU = make('info', totalNodes * WIDE_COLLAPSE_INFO_WORDS * 4, STORAGE | COPY_DST);
-        const output = device.createBuffer({ label: `${this.label} output`, size: Math.max(16, nodeRegionBytes + dstTriangles * this.unitBytes), usage: STORAGE | COPY_SRC | COPY_DST });
+        const output = device.createBuffer({ label: `${this.label} output`, size: Math.max(16, (mapRegionWord + mapWords) * 4), usage: STORAGE | COPY_SRC | COPY_DST });
+        const mapReadback = mapWords > 0 ? make('map readback', mapWords * 4, MAP_READ | COPY_DST) : null;
         const control = make('control', (WIDE_COLLAPSE_CONTROL_HEADER + meshes.length * WIDE_COLLAPSE_COUNTER_WORDS) * 4, STORAGE | COPY_SRC | COPY_DST);
         const frontier = make('frontier', 2 * frontierCapacity * 16, STORAGE | COPY_DST);
         const indirect = make('indirect', 16, STORAGE | INDIRECT | COPY_DST);
@@ -186,6 +207,7 @@ export class GpuWideCollapse {
         }
         pass.end();
         encoder.copyBufferToBuffer(control, 0, readback, 0, readback.size);
+        if (mapReadback) encoder.copyBufferToBuffer(output, mapRegionWord * 4, mapReadback, 0, mapWords * 4);
 
         const format = this.format;
         let destroyed = false;
@@ -194,9 +216,18 @@ export class GpuWideCollapse {
             nodeRegionBytes,
             format,
             async counts(): Promise<WideCollapseOutput[]> {
-                await readback.mapAsync(MAP_READ);
-                const words = new Uint32Array(readback.getMappedRange().slice(0));
-                readback.unmap();
+                const [words, maps] = await Promise.all([
+                    readback.mapAsync(MAP_READ).then(() => {
+                        const copy = new Uint32Array(readback.getMappedRange().slice(0));
+                        readback.unmap();
+                        return copy;
+                    }),
+                    mapReadback?.mapAsync(MAP_READ).then(() => {
+                        const copy = new Uint32Array(mapReadback.getMappedRange().slice(0));
+                        mapReadback.unmap();
+                        return copy;
+                    }) ?? null,
+                ]);
                 const problems = words[2];
                 if (problems !== 0) {
                     const names = Object.entries(WIDE_COLLAPSE_PROBLEM).filter(([, bit]) => (problems & bit) !== 0).map(([name]) => name);
@@ -206,7 +237,18 @@ export class GpuWideCollapse {
                     const at = WIDE_COLLAPSE_CONTROL_HEADER + index * WIDE_COLLAPSE_COUNTER_WORDS;
                     const used = words[at + 1];
                     if (cwbvh && used !== mesh.triangleCount) throw new Error(`GpuWideCollapse: mesh ${index}'s leaves hold ${used} of ${mesh.triangleCount} triangles`);
-                    return { dstNode: mesh.dstNode, nodeCount: words[at], dstTriangle: mesh.dstTriangle, triangleCount: mesh.triangleCount, stackNeed: words[at + 2] };
+                    const nodeCount = words[at];
+                    const counted = { dstNode: mesh.dstNode, nodeCount, dstTriangle: mesh.dstTriangle, triangleCount: mesh.triangleCount, stackNeed: words[at + 2] };
+                    if (mesh.map < 0 || !maps) return counted;
+                    const slotWords = wideRefitSlots(format);
+                    const orderAt = mesh.map + (meshes[index].nodeCount + 1) * slotWords;
+                    const refitMap: WideRefitMap = {
+                        nodeFormat: format,
+                        nodeCount,
+                        slots: maps.slice(mesh.map, mesh.map + nodeCount * slotWords),
+                        triangleOrder: cwbvh ? maps.slice(orderAt, orderAt + mesh.triangleCount) : null,
+                    };
+                    return { ...counted, refitMap };
                 });
             },
             destroy(): void {

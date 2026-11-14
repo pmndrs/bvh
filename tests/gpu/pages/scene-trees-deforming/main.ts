@@ -22,6 +22,13 @@
  * The cloth has per-triangle materials (every fourth triangle without one,
  * taking its instance's), so every check compares materials too, through the
  * refits and the drift rebuild (whose flags come from a buffer of their own).
+ *
+ * Each runs with records and indexed leaves, in `f32`, quantized, BVH4 and
+ * CWBVH nodes. Wide (docs/internals/design/wide-nodes.md, section 2): the
+ * cloth's GPU trees are collapsed on the GPU with their refit maps, tinybvh's
+ * in the workers (their maps made on arrival), and each refit packs the wide
+ * nodes from the refit binary tree; the CPU poses on the rebuilt GPU tree go
+ * through the same pack.
  */
 
 import { SceneTrees } from '../../../../src/scene/scene-trees.ts';
@@ -74,8 +81,18 @@ await runGpuTest(
         const results: Record<string, unknown> = {};
         // Records, then indexed leaves (the refit copies each pose into the scene's positions).
         // Then quantized nodes (docs/internals/design/compressed-nodes.md): the refit keeps an f32 copy and packs it into the scene.
-        for (const [triangleLeaves, nodeFormat] of [['records', 'f32'], ['indexed', 'f32'], ['records', 'quantized'], ['indexed', 'quantized']] as const) {
-            const label = nodeFormat === 'quantized' ? `quantized ${triangleLeaves}` : triangleLeaves;
+        const variants = [
+            ['records', 'f32'],
+            ['indexed', 'f32'],
+            ['records', 'quantized'],
+            ['indexed', 'quantized'],
+            ['records', 'bvh4'],
+            ['indexed', 'bvh4'],
+            ['records', 'cwbvh8'],
+            ['indexed', 'cwbvh8'],
+        ] as const;
+        for (const [triangleLeaves, nodeFormat] of variants) {
+            const label = nodeFormat === 'f32' ? triangleLeaves : `${nodeFormat} ${triangleLeaves}`;
             const kernel = await TraceBatchKernel.create(device, { triangleLeaves, nodeFormat });
             const rest = cloth();
             const rock: MeshGeometry = { positions: new Float32Array([-1, -1, -1, 1, -1, -1, 0, 1, -1, 0, 0, 1]), indices: new Uint32Array([0, 1, 2, 0, 1, 3, 1, 2, 3, 0, 2, 3]) };

@@ -117,7 +117,7 @@ import {
 import type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from '../trace/mesh-bvh.ts';
 import { nodeQuantizerFor, type QuantizeJob } from '../gpu-quantize.ts';
 import { quantizeNodes } from '../quantized-nodes.ts';
-import { convertToWide, isWideNodeFormat, refitWide, reorderTriangles, wideNodeBytes, type WideMeshTree, type WideNodeFormat } from '../wide-nodes.ts';
+import { convertToWide, isWideNodeFormat, refitWide, reorderTriangles, wideNodeBytes, wideRefitMap, type WideMeshTree, type WideNodeFormat, type WideRefitMap } from '../wide-nodes.ts';
 import { WIDE_MESH_STACK_SIZE } from '../trace/wgsl-wide.ts';
 import { GpuWideCollapse, type WideCollapseOutput, type WideCollapseRun } from '../gpu-wide-collapse.ts';
 import { weldPositions } from '../indexed-leaves.ts';
@@ -246,12 +246,14 @@ export interface SceneTreesOptions {
      * A coordinate of magnitude 2^100 or more, or a non-finite one, makes a quantized box empty on that axis (hits there are lost).
      *
      * Experimental (docs/internals/design/wide-nodes.md): `'bvh4'` and
-     * `'cwbvh8'`. Every tree comes from tinybvh in the workers and is
-     * collapsed on this thread when it arrives (there is no GPU collapse
-     * yet, so GPU first trees are off). Deforming meshes take CPU poses
-     * ({@link SceneTrees.setPoseCpu}: the binary tree refit, the wide nodes
-     * repacked in place); {@link SceneTrees.setPose} (the GPU refit) is
-     * skipped with a warning. Needs `gpuTreeOutputs: 'copy'`.
+     * `'cwbvh8'`. GPU first trees are H-PLOC's (CWBVH's with leaves of at
+     * most 3 triangles), collapsed on the GPU after each batch; tinybvh's
+     * are collapsed in the workers. Deforming meshes are refit on the GPU
+     * ({@link SceneTrees.setPose}): their binary tree, then their wide nodes
+     * packed again through the collapse's refit map; CPU poses
+     * ({@link SceneTrees.setPoseCpu}) refit the binary tree on the CPU and
+     * repack the wide nodes (on the CPU for tinybvh's trees, with the GPU pack
+     * for GPU-collapsed ones). Needs `gpuTreeOutputs: 'copy'`.
      */
     readonly nodeFormat?: NodeFormat;
     /**
@@ -434,8 +436,10 @@ interface CpuPose {
     readonly vertexCount: number;
     /** The placed tree's layout on the CPU (tinybvh's, or a GPU tree's read back), or null before one arrives. Wide scenes: the binary tree. */
     layout: GpuLayoutMeshBvh | null;
-    /** Wide scenes: the placed tree's wide form, which a pose repacks ({@link refitWide}). */
+    /** Wide scenes: the placed tree's wide form, which a pose repacks ({@link refitWide}); null for a GPU-collapsed tree. */
     wide: WideMeshTree | null;
+    /** Wide scenes, a GPU-collapsed tree: its refit map (the pose's triangle order, and the GPU pack's slots). */
+    wideMap: WideRefitMap | null;
     /** The latest CPU pose, or null. */
     positions: Float32Array | null;
     /** The pose still has to be written into the placed tree. */
@@ -761,8 +765,8 @@ export class SceneTrees {
         this.cpuTopLevel = this.createTopLevelBuffer(TOP_LEVEL_HEADER_BYTES);
         device.queue.writeBuffer(this.cpuTopLevel, 0, new Uint32Array(TOP_LEVEL_HEADER_WORDS));
         this.identity = new GpuMergedIdentity(device, this.label);
-        // Wide scenes have no GPU refit: deforming meshes take CPU poses (setPoseCpu).
-        this.deforming = !wideFormat && DeformingTrees.isSupported(device) ? new DeformingTrees(device, { label: this.label }) : null;
+        // Wide scenes: the refit packs the wide nodes after the binary refit (gpu-wide-refit.ts).
+        this.deforming = DeformingTrees.isSupported(device) ? new DeformingTrees(device, { label: this.label, wideFormat }) : null;
     }
 
     /** Compiles the GPU builder, the top level and the merged-identity pass, all at once. */
@@ -886,9 +890,7 @@ export class SceneTrees {
             if (!this.posesSkippedWarned) {
                 this.posesSkippedWarned = true;
                 this.warn(
-                    (this.wideFormat
-                        ? `@pmndrs/bvh: SceneTrees.setPose was skipped: nodeFormat '${this.wideFormat}' has no GPU refit, so the mesh is traced in the pose its tree was built in. `
-                        : '@pmndrs/bvh: SceneTrees.setPose was skipped: the device has no subgroups, so there is no GPU refit and the mesh is traced in the pose its tree was built in. ') +
+                    '@pmndrs/bvh: SceneTrees.setPose was skipped: the device has no subgroups, so there is no GPU refit and the mesh is traced in the pose its tree was built in. ' +
                         'Give the pose on the CPU with SceneTrees.setPoseCpu(mesh, positions) instead (deformingCounts.posesSkipped counts the skipped poses).',
                 );
             }
@@ -990,7 +992,7 @@ export class SceneTrees {
             triangleCount,
             bounds: geometryBounds(geometry.positions),
             materialCodes: this.triangleLeaves === 'indexed' ? materialCodes : null,
-            cpuPose: deforming ? { indices: geometry.indices ? geometry.indices.slice() : null, vertexCount: geometry.positions.length / 3, layout: null, wide: null, positions: null, due: false, moved: false } : null,
+            cpuPose: deforming ? { indices: geometry.indices ? geometry.indices.slice() : null, vertexCount: geometry.positions.length / 3, layout: null, wide: null, wideMap: null, positions: null, due: false, moved: false } : null,
             gpu: 'none',
             tinybvh: 'none',
             fallbackReason: null,
@@ -1469,16 +1471,8 @@ export class SceneTrees {
             // Deforming meshes' trees are read back too (the refit needs their shape), so they get a batch of their own.
             // Split by the mesh's own flag, not by the GPU refit: without subgroups a CPU pose (setPoseCpu) needs the layout as much.
             const others = states.filter((state) => !state.deforming).map(request);
-            // Wide scenes: a deforming mesh's CPU pose repacks the collapse's own topology (refitWide), which only the
-            // CPU collapse keeps; it waits for tinybvh's tree.
-            const deforming = this.wideFormat ? [] : states.filter((state) => state.deforming).map(request);
-            if (this.wideFormat) {
-                for (const state of states) {
-                    if (!state.deforming) continue;
-                    state.gpu = 'none';
-                    state.fallbackReason = `a deforming mesh in a ${this.wideFormat} scene takes tinybvh's tree (its CPU poses repack the CPU collapse's topology)`;
-                }
-            }
+            // Wide scenes: their GPU collapse writes the refit map too (gpuBatchFinished).
+            const deforming = states.filter((state) => state.deforming).map(request);
             if (others.length > 0) this.startGpuBuilds(builder, others, { readLayouts: false, rebuild: false });
             if (deforming.length > 0) this.startGpuBuilds(builder, deforming, { readLayouts: true, rebuild: false });
         }
@@ -1554,7 +1548,15 @@ export class SceneTrees {
                 encoder,
                 outputs.nodes,
                 outputs.triangles,
-                trees.map((built) => ({ srcNode: built.tree.nodeOffset, nodeCount: built.tree.nodeCount, srcTriangle: built.tree.triangleOffset, triangleCount: built.tree.triangleCount, maxDepth: built.tree.maxDepth })),
+                // A deforming mesh's tree gets its refit map: the GPU refit and CPU poses repack its wide nodes through it.
+                trees.map((built) => ({
+                    srcNode: built.tree.nodeOffset,
+                    nodeCount: built.tree.nodeCount,
+                    srcTriangle: built.tree.triangleOffset,
+                    triangleCount: built.tree.triangleCount,
+                    maxDepth: built.tree.maxDepth,
+                    refitMap: this.deformingSlot(built.slot),
+                })),
             );
             this.device.queue.submit([encoder.finish()]);
             return run.counts().then(
@@ -2382,10 +2384,17 @@ export class SceneTrees {
                 }
                 continue;
             }
+            if (this.wideFormat && !pose.wide && !pose.wideMap) {
+                // A GPU-collapsed tree without its refit map (a custom first-tree builder, say): the pose waits for one that has it.
+                continue;
+            }
             const posed = refitLayoutToPose(pose.layout, pose.positions, pose.indices);
             if (pose.wide) {
                 // Wide: the binary tree refit, then the same wide nodes repacked in place (refitWide).
                 this.stagedCopy(encoder, this.nodes, placed.nodeOffset, refitWide(pose.wide, { ...pose.layout, nodes: posed.nodes }));
+            } else if (pose.wideMap) {
+                // A GPU-collapsed tree: its wide nodes are only on the GPU, so the refit's pack writes them from the CPU-refit binary nodes.
+                if (!this.deforming?.encodePackFrom(encoder, this.nodes.buffer, state.slot, posed.nodes)) continue;
             } else if (this.nodeFormat === 'quantized') {
                 const quantized = quantizeNodes({ ...pose.layout, nodes: posed.nodes, nodeFormat: 'f32' });
                 this.stagedCopy(encoder, this.nodes, placed.nodeOffset - 1, quantized.nodes);
@@ -2394,7 +2403,7 @@ export class SceneTrees {
             }
             if (posed.triangles) {
                 // Records: the posed corners, in the placed tree's order (CWBVH reorders them).
-                this.stagedCopy(encoder, this.triangles, placed.triangleOffset, reorderTriangles(posed.triangles, TRIANGLE_BYTES, pose.wide?.triangleOrder ?? null));
+                this.stagedCopy(encoder, this.triangles, placed.triangleOffset, reorderTriangles(posed.triangles, TRIANGLE_BYTES, pose.wide?.triangleOrder ?? pose.wideMap?.triangleOrder ?? null));
             } else if (this.positions && state.vertices) {
                 // Indexed: deforming meshes are never welded, so pose vertex v is scene vertex base + v.
                 const stride = positionStrideFloats(this.positionLayout);
@@ -2453,8 +2462,12 @@ export class SceneTrees {
         };
         this.placed.set(tree.slot, placed);
         this.gpuTopLevel?.setMeshTree(tree.slot, placed);
+        // Wide scenes: the refit runs on the binary tree (tinybvh's before the collapse; a GPU tree's read back), through the wide tree's map.
+        const binaryLayout: GpuLayoutMeshBvh | null = tree.source === 'tinybvh' ? (tree.wide?.binary ?? tree.bvh) : (tree.built.layout ?? null);
+        const gpuMap = tree.source === 'gpu' ? (tree.wide?.count.refitMap ?? null) : null;
         if (this.deforming?.has(tree.slot)) {
-            const layout: GpuLayoutMeshBvh | null = tree.source === 'tinybvh' ? tree.bvh : tree.built.layout;
+            const layout = binaryLayout;
+            const wideMap = !this.wideFormat || !layout ? null : tree.source === 'tinybvh' ? (tree.wide ? wideRefitMap(tree.wide.tree, layout) : null) : gpuMap;
             // meshRefitPlacement refuses merged meshes: merged ranges are never refit.
             // Indexed: the refit copies the pose to the mesh's vertex base (deforming meshes are unwelded, so pose vertex v is scene vertex base + v).
             const placement = meshRefitPlacement(
@@ -2475,12 +2488,13 @@ export class SceneTrees {
                 },
                 0,
             );
-            this.deforming.treePlaced(tree.slot, placement, layout);
+            this.deforming.treePlaced(tree.slot, placement, layout, wideMap);
         }
         if (state.cpuPose) {
             // A CPU pose given before is written into the new tree too, at this update.
-            state.cpuPose.layout = tree.source === 'tinybvh' ? (tree.wide?.binary ?? tree.bvh) : tree.built.layout;
+            state.cpuPose.layout = binaryLayout;
             state.cpuPose.wide = tree.source === 'tinybvh' ? (tree.wide?.tree ?? null) : null;
+            state.cpuPose.wideMap = gpuMap;
             state.cpuPose.moved = false;
             state.cpuPose.due = state.cpuPose.positions !== null;
         }

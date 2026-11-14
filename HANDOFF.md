@@ -79,9 +79,18 @@ Everything below is on `main` and pushed to origin. No release, tag or npm publi
   - Each `f32` tree is collapsed when a scene is assembled or a `SceneTrees` tree arrives.
   - Planes are decoded exactly, so hits equal the binary walk's (ties apart).
   - `wideStack: 'private' | 'workgroup'` for CWBVH.
-- **Works with:** `SceneTrees`, merged groups, indexed leaves, CPU poses (`refitWide`), `/three`, and the CPU walk. In `SceneTrees`, H-PLOC's first trees are collapsed on the GPU (`src/gpu-wide-collapse.ts`) and tinybvh's in the workers; deforming meshes take tinybvh's trees only.
-- **Not built:** the GPU wide refit (`setPose` is skipped with a warning).
-- **Gates on the M5:** `trace-oracle` full (every wide variant, the L1 and L7 ones included: 0 of 2M shared-edge slips; seams at most records'); `trace-wide-compile` (largest kernel 43.9 KB); `scene-trees-mid-swap` (132 wide states with GPU-collapsed first trees, 0 disagreements); `bvh-wide-collapse` (the GPU collapse: hits equal f32's).
+- **Works with:** `SceneTrees`, merged groups, indexed leaves, GPU and CPU poses, `/three`, and the CPU walk.
+  - In `SceneTrees`, H-PLOC's first trees are collapsed on the GPU (`src/gpu-wide-collapse.ts`) and tinybvh's in the workers.
+  - Deforming meshes are refit on the GPU (`setPose`, drift rebuilds included): the binary tree's `f32` copy is refit, then every wide node is packed again (`src/gpu-wide-refit.ts`). The pack follows a refit map from each wide slot to its box in the binary tree; the GPU collapse writes it for deforming meshes, and `wideRefitMap` makes it for tinybvh's trees.
+  - CPU poses (`setPoseCpu`) repack tinybvh's trees on the CPU (`refitWide`) and GPU-collapsed ones with the GPU pack.
+- **Gates on the M5:**
+  - `trace-oracle` full (every wide variant, the L1 and L7 ones included: 0 of 2M shared-edge slips; seams at most records').
+  - `trace-wide-compile` (largest kernel 43.9 KB).
+  - `scene-trees-mid-swap` (132 wide states with GPU-collapsed first trees, 0 disagreements).
+  - `bvh-wide-collapse` (the GPU collapse: hits equal f32's).
+  - `bvh-wide-refit` (the GPU refit's nodes and records equal the CPU's word for word, for CPU- and GPU-collapsed trees).
+  - `scene-trees-deforming` with BVH4 and CWBVH, records and indexed (GPU poses, the swap, a drift rebuild and CPU poses: 0 disagreements).
+- **Planes:** every plane is the tightest the `f32` decode allows, searched both ways, on the CPU and the GPU alike (2026-11-14; before, the GPU could land one step tighter than the CPU, both valid).
 - **Memory, Sponza:** nodes 185.1 → 74.5 MiB (BVH4) → 40.5 MiB (CWBVH).
 - **Collapse time, Sponza, one core:** 1.35 s (BVH4), 1.83 s (CWBVH).
 - **Speed, best effort** (M5, 2026-11-14, under the lock but with Chrome open; three runs per scene; design note section 8). Closest hit on incoherent rays, wide over f32:
