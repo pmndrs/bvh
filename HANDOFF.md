@@ -26,9 +26,42 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
   - Check every consumer request against this rule. Per-triangle materials passed because the material is only a number.
   - `examples/three/pathtracer` is a demo of the walk. It and its pending compare page may move to the new repo.
 
-## Current state (2026-11-13). Read this first.
+## The build-out (2026-11-14, Windows laptop). Read this first.
 
-Everything below is on `main` and pushed to origin. No release, tag or npm publish.
+Dennis asked for full feature coverage as planned before more hand-offs. Everything below is on local `main` (not pushed): lint, typecheck, 842 unit tests, `docs:check`, `build` (licence checks) and `examples:build` pass. Every new GPU page and example passed on **SwiftShader only**: the downsampler had the real GPUs, so nothing of this has run on the RTX 3060 or the Intel UHD. That run is `tools/windows-clean-run.ps1` (below).
+
+**Built** (each with tests, docs and a PARITY row; design notes in `docs/internals/design/`):
+- **Babylon (P6):** `@pmndrs/bvh/babylon` (`bvhSceneFromBabylon`, `BabylonBvhPicker` returning `PickingInfo`, `deviceFromEngine`, `createTraceComputeShader`, `wgslForBabylon`); examples `babylon/picking` (WebGL too) and `babylon/gpu-trace`; `docs/engines/babylon.mdx`. `@babylonjs/core` 9.35.0 dev, peer `>=9.35.0 <10`.
+- **SDF (8.10):** GPU inside test (`bvhIsInside`, three-ray parity vote or winding) and its `CpuMeshBvh` twin; `SdfGenerator`, `generateSdfCpu`; `/three` `generateSdfTexture`; `three/sdf`, `compare/sdf`; page `sdf-oracle`. On SwiftShader three-mesh-bvh's SDF was 1.7-2.8x faster: check on the RTX.
+- **ClusteredBVH (8.9):** `clusterTraceScene` / `meshClusters` (three-mesh-bvh's cut on our layout, the walk unchanged), page `trace-clustered`; not in `SceneTrees` or the sync yet.
+- **Parity on `/three` and the CPU:** scene shapecast (5.3), `computeBatchedBoundsTree` (5.5), `StaticGeometryGenerator` (6.3), three-mesh-bvh's serialize format (7.1), `getJSONStructure` (7.5), `updateSceneTreesAsync` / `updateAsync` (8.4), `getShapecastFn` with TSL hooks (8.6, page `three-shapecast`), `SkinnedMeshBVH` (3.4), `BatchedMesh` raycast without the `Mesh` patch.
+- **Points and lines (3.2, 3.3):** `CpuPointsBvh`, `CpuSegmentsBvh` (centre split, three's threshold rules), `/three` `PointsBVH`, `LineSegmentsBVH`, `LineLoopBVH`, `LineBVH`; CPU only by design (`docs/internals/design/points-and-lines.md`).
+- **PARITY: 45 have, 2 partial (4.3 `maxDepth`, 4.7 `onProgress`: accepted), 0 missing, 5 won't.**
+- **API from the examples' gaps:** `GpuRays` and `TraceSource`; `SceneTrees.update(encoder, { timestampWrites })`, builder `prepare()`; build events (`onBuild` on `SceneTrees` and the pool); `meshHandles`; `SceneTrees.rebuild`, `placeTree` (`builtBy: 'app'`), `refine: false`; `MeshLayoutBuilder.fallback`; walk counters (`traceModuleWgsl({ counters: true })`).
+- **Serialization:** `readSerializedHeader`, `isSerializedCurrent`, scene files (`serializeTraceScene`, 'PBVS' v1), geometry hash checked on load, baked trees into `SceneTrees` via `placeTree`, indexed bakes; `node/bake` and `pnpm examples:bake [--scene]`.
+- **Memory levers (BX.20), all off by default, measured in Node** (`docs/internals/design/memory.md`, "BX.20"): pool `idleTimeoutMs`, `deformingLayouts: 'compact'`, `parents: 'refit'`, `trim()` / `trimWhenRefined`, `refitBoxes: 'shared'`, `quantizeJobs: 'batched'`.
+- **Indexed and quantized not-built items:** GPU LBVH writes indexed leaves (no CPU conversion), `CpuMeshBvh({ corners: 'positions' })`, adopt in every format, `positionsBuffer` (the app's positions), H-PLOC `quantizeOnEmit` (params word 12; `writeParents` is word 11), opt-in `quantizedDecode: 'folded'`.
+- **WASM:** the Windows build is now byte-identical to Linux (`-fmacro-prefix-map`, `-fno-file-reproducible`), so the committed `.wasm` (SHA-256 `0043b9e5…`) was built here; it adds `tbvh_write_layout_as` (indexed and quantized output). Not yet built with the new flags on Linux/macOS: the next CI `--check` is the proof.
+- **Examples:** `compare/skinned`, `compare/pathtracer`; three-mesh-bvh ports `shapecast`, `distancecast`, `characterMovement`, `physics`, `sculpt`, `selection`, `clippedEdges`, `collectTriangles`, `edgeIntersect`, `lineIntersection` (on `LineBVH`), `triangleIntersect`, `voxelize`, `batchedMesh`, `point-cloud`. Nothing in the plan's example lists is left unbuilt. SwiftShader screenshots show no canvas, so no page has been looked at by eye.
+- **Docs:** `docs/builders/adding-a-builder.mdx`, `HISTORY.md`, README contents list, introduction rewritten, stale claims removed, `docs:site` fixed on Windows; publishing steps in `docs/internals/README.md`.
+- **Benches:** surface-ray section 8 (indexed on quantized against quantized records, what the `triangleLeaves` default waits on) and section 9 (folded decode); `scene-trees-sponza` lever variants; `bvh-hploc-profile` emit against the quantize pass.
+- **Windows:** README and docs kept LF (the docs test passes on CRLF checkouts); SwiftShader flags that work on Windows Chrome 157 in `tests/gpu/README.md`.
+
+**The clean run:** `pwsh tools/windows-clean-run.ps1 -Commit main` pins a worktree (`..\bvh-clean-run`), waits until no downsampler process runs and the RTX is idle for 5 minutes, then runs every correctness page on the RTX and the Intel UHD, `scene-trees-sponza`, the surface-ray benches 3 times each and the examples; results in `bench/runs/<date>-<commit>/summary.md`. Then Dennis decides the defaults (below).
+
+**For Dennis to decide** (from the build-out; each agent's reasoning is in the design notes):
+- Defaults after the clean run: `triangleLeaves` (section 8), the six BX.20 levers, `quantizeOnEmit`, folded decode, `positionsBuffer`.
+- SDF default sign `'parity'` (or `'winding'` for overlapping instances).
+- `builtBy: 'app'` added to `TreeBuilder` (code indexing by `builtBy` must handle it); `GpuRayHit.material` uses `NO_MATERIAL`.
+- `BvhBoundsTree.deserialize` takes either format; `StaticGeometryGenerator` re-bakes on morph-weight-only changes (three-mesh-bvh doesn't).
+- Scene files are snapshots (the top level is baked); the description part is JSON; the geometry hash covers positions and indices only.
+- Points and lines count as "have" CPU-only (as three-mesh-bvh's); their own centre-split builder and file format.
+- Adopt in quantized scenes turns on the quantized emit; `positionsBuffer` turns weld and merge off.
+- Publishing the docs: Pages source GitHub Actions, domain `bvh.docs.pmnd.rs`, CNAME `bvh.docs` to `pmndrs.github.io`, run `docs.yml` by hand.
+
+## Current state (2026-11-13)
+
+Everything below was on `main` and pushed to origin on 2026-11-13. No release, tag or npm publish.
 
 **Dennis's decisions**
 - **Source of truth:** this repo, for BVH and walk code. webgpu-ddgi's copy is frozen until P3 (split point `d288adf`).
@@ -103,24 +136,16 @@ Everything below is on `main` and pushed to origin. No release, tag or npm publi
 - **pathtracer** (pmndrs/pathtracer): its trace core (P1.1, `6ecd315`) builds on bvh through a `link:` dependency; its requests are pmndrs/bvh#1 (its TASKS X2). Under Vite dev it needs the bvh checkout in `server.fs.allow` (or `optimizeDeps.exclude` once installed) to get workers.
 - **three-bvh-csg, homefig, drei, three-gpu-pathtracer:** the CPU features they use exist (shapecast, `bvhcast`, `ExtendedTriangle`, closest point); none has switched.
 
-**Open**
-- **RTX 3060 surface-ray benches done** (2026-11-13, `bd8ba54`, runbook section 7), and the defaults flipped on them (see Dennis's decisions): merged on, quantized nodes on, records, the 40-byte record and `'far'` kept.
-- **`triangleLeaves` default: waits for the next Windows pass.** Indexed leaves stay off until the RTX 3060 runs quantized nodes and indexed leaves together (the surface-ray pages time each variant alone against `f32` records today; a combined section, or `quantized` + `indexed` against `quantized` records, is needed). Dennis decides from that run.
-- **Windows still to run:** the section 1 correctness pages (not reported in the push; the defaults changed since, so `trace-oracle`, `trace-inline` and the `scene-trees-*` pages should run on this commit), section 3 `scene-trees-sponza` (memory and the cap on D3D12, now with quantized nodes the default), compile times, the Intel UHD, and quantized and indexed together (above).
-- **Publishing the docs** (Dennis): Pages settings and DNS.
-- **pmndrs/bvh#1 on the Mac:** run `wgsl-f32-arithmetic` and `trace-cpu-agreement` on the M5 (Metal's relaxed math fuses written products too, DIVERGENCES T1; the agreement on primary rays is the claim to check), and `trace-oracle` once on the branch (the seam rays are unchanged bit for bit, so no slip is expected). No WGSL changed on the branch, so the watertight check has nothing new to clear. Webpack and esbuild dev servers are untested with the worker handshake.
-- **Pre-existing on Windows:** `docs/snippets/snippets.test.ts` fails 2 tests in a `core.autocrlf=true` checkout (CRLF in the MDX); they pass on an LF checkout. Branch `windows-test-portability` is about this.
-- **Old worktree** `~/Developer/bvh-worktrees/reflections-integration`: reflections no longer uses it; Dennis removes it (a session couldn't delete it).
-- **Compare pages left:** `skinned`, `pathtracer`, `sdf` (can start on `bvhClosestPoint`).
-- **Where others still win:** three-mesh-bvh's CPU refit on Sponza (1.3-1.5x; level on the knot and the room since the CPU query pass, was 1.6-2x: our 48-byte records and 3M 64-byte nodes against its 1.7M 32-byte nodes over the app's positions) and memory (our CPU trees hold 9-10x more; GPU scenes about 7x on Sponza with quantized nodes, 355.5 against 51.2 MiB); its furnished-room GPU closest-hit (1.1-1.2x) and, with SAH, its CPU sphere queries on the knot and Sponza (1.05-1.13x and 0.95-1.24x; unchanged by the pass); Rapier's CPU closest-hit rays on the knot and the room, and its closest point on the knot (a tie, 0.99-1.04x); bvh.js's scene build (3x). Rapier's box queries (were 2.3-2.7x) and closest point (were 1.7-2.4x) and three-mesh-bvh's box queries (were 1.2-1.4x) now trail ours (0.23-0.88x).
-- **Vanilla examples:** all of the plan's are built (`examples/vanilla`, a three-free shell in `examples/shared/vanilla`): `hello`, `raytrace`, `instances`, `builders`, `refit` (a compute-posed mesh refit with `GpuMeshRefit` in the scene's buffers via `meshRefitPlacement`; drift against the built tree and a fresh build; rebuild now and auto rebuild), `fast-first` (GPU first trees, tinybvh swapped in, a per-mesh timeline), `workers-cpu` (main thread, one worker, a pool) and `workers-gpu` (the plan's three ways: render device adopted, a worker's own device transferred, a worker with an `OffscreenCanvas`; against tinybvh alone). The plan's `refit` (b), thousands of moving instances with the top-level refit's GPU time, is `instances` (`?count=10000`; the update's GPU time from a timestamp bracket). Every vanilla frame runs in a validation error scope. `raytrace` has no AO, because sampling is out of scope. API gaps they hit: `examples/README.md`.
-- **Not started:** `three/sdf` (GPU closest point exists now; the sign needs an inside test), Babylon (P6). ddgi P3 is off the list until Dennis says otherwise.
-- **Quantize jobs:** `SceneTrees` runs one per copied GPU tree (`copyGpuTree`); batching an update's jobs into one dispatch would cut per-tree buffers and passes.
-- **`scene-trees-mid-swap`:** one unexplained failure after 405 s under a parallel `pnpm build` (message not captured; page limit 900 s); passed 3 times since. If it fails again, keep the full log.
-- **Indexed leaves, not built:** WASM writer for tinybvh, indexed output from the GPU LBVH, `CpuMeshBvh` reading through positions, adopt lever with indexed scenes, binding the app's positions.
-- **Quantized nodes, not built:** H-PLOC emitting them directly, packing inside the tinybvh WASM, the folded decode.
-- **`bvh:wasm --check`** needs the pinned emsdk, not on every machine.
-- **`/three` to do:** Windows compile cost of the pose pass, `ObjectBVH.shapecast` (PARITY 5.3), a browser look at `MeshBVHHelper`.
+**Open** (rewritten 2026-11-14 after the build-out; the 2026-11-13 list is in git history)
+- **The clean run on the RTX 3060 and the Intel UHD** (`tools/windows-clean-run.ps1`): every page added on 2026-11-14 has run on SwiftShader only. The run covers the correctness pages, `scene-trees-sponza` (memory, the cap, lever variants), the surface-ray benches (merged, records against indexed, quantized, section 8 combined, section 9 folded, hit record, any-hit order) and the examples. Defaults wait on it (above).
+- **pmndrs/bvh#1 on the Mac:** `wgsl-f32-arithmetic` and `trace-cpu-agreement` on the M5, and `trace-oracle` once. Webpack and esbuild dev servers are untested with the worker handshake.
+- **CI has never run on GitHub** (nothing pushed since the jobs were written). Its SwiftShader flags work on Linux; on Windows Chrome 157 `--use-angle=swiftshader` gives no adapter (`tests/gpu/README.md`). Consider adding `sdf-oracle`, `trace-clustered` and `three-shapecast` to the CI job.
+- **WASM on Linux/macOS:** the first `pnpm bvh:wasm --check` there with the new prefix-map flags.
+- **Publishing the docs** (Dennis; steps above).
+- **Not built, by decision:** GPU points and lines (design note); `ClusteredBVH` inside `SceneTrees` and the sync; per-node `refit(nodeIndices)` on `BvhBoundsTree` (the `sculpt` port refits the whole tree); a CPU copy of `SceneTrees`' trees (no SAH per tree in overlays); LBVH skipping its parents output (H-PLOC only); `onProgress` from tinybvh (needs a WASM callback).
+- **`scene-trees-mid-swap`:** one unexplained failure on 2026-11-13 under a parallel `pnpm build`; the full page ran past 900 s on SwiftShader under load on 2026-11-14 (variants passed alone). If it fails on a real GPU, keep the full log.
+- **`three-load-gltf` on SwiftShader** fails "no mesh got a GPU first tree" (tinybvh wins the race on a CPU adapter); expected to pass on a real GPU.
+- **Old worktree** `~/Developer/bvh-worktrees/reflections-integration` on the Mac: Dennis removes it.
+- **Agent worktrees** under `.claude/worktrees/` on this laptop: all merged into `main`; safe to remove with `git worktree remove`.
 - **API tidy:** `export *` in `src/trace/index.ts`, batch helpers in `gpu-lbvh.ts`, merging the two layout files.
-- **Later CPU queries (P8):** CPU `StaticGeometryGenerator` (PARITY 8), three-mesh-bvh-format `serialize` and `getJSONStructure` (12).
-
+- **Where others still win** (2026-11-13 numbers, before the levers): three-mesh-bvh's CPU refit on Sponza and memory; Rapier's CPU closest-hit on the knot and the room; bvh.js's scene build. Re-measure after the clean run picks defaults.
