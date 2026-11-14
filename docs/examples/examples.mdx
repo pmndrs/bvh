@@ -65,7 +65,8 @@ Each of these is one of three-mesh-bvh's examples (MIT) running on `@pmndrs/bvh/
 ## Comparisons with three-mesh-bvh
 
 The [comparison](/performance/comparison) pages in `examples/compare/` (raycast, build, tree quality, queries, scene, GPU,
-SDF) put the same geometry through both libraries; the method is on that page. Two more:
+SDF) put the same geometry through both libraries (`compare/build` also covers the plan's async builds: worker builds and
+their main-thread stalls, ours and three-mesh-bvh's); the method is on that page. Two more:
 
 | Page | Compares |
 | --- | --- |
@@ -88,7 +89,3 @@ A Node CLI plus the page that loads what it wrote. [Serialization and baking](/s
 | Page | Shows |
 | --- | --- |
 | [`node/bake`](https://github.com/pmndrs/bvh/tree/main/examples/node/bake) | `pnpm examples:bake` builds a model's tree with tinybvh in Node (no GPU) and writes it with `serializeLayout`, or with `--scene` the whole scene with `serializeTraceScene`; the page checks the header with `readSerializedHeader`, loads either kind with no build at all, and its overlay says `builtBy: baked tree` or `baked scene`. An indexed tree loads next to its geometry. Traced by the WGSL walk, with the header's versions shown. `?bake=<url>` or a dropped `.bvh` loads another. |
-
-## Planned
-
-- **Comparisons with three-mesh-bvh** (`compare/`): async builds (`compare/async-build`).
