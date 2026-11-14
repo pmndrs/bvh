@@ -116,7 +116,7 @@ import {
     type TriangleLeaves,
 } from '../trace/layout.ts';
 import type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from '../trace/mesh-bvh.ts';
-import { nodeQuantizerFor, type QuantizeJob } from '../gpu-quantize.ts';
+import { nodeQuantizerFor, type QuantizeJob, type QuantizeMesh } from '../gpu-quantize.ts';
 import { quantizeNodes } from '../quantized-nodes.ts';
 import { weldPositions } from '../indexed-leaves.ts';
 import { meshRefitPlacement, type TraceSceneMeshPlacement } from '../trace/scene-assembly.ts';
@@ -280,6 +280,15 @@ export interface SceneTreesOptions {
      * triangles, and saves position memory. Default true.
      */
     readonly weld?: boolean;
+    /**
+     * Quantized scenes: how GPU trees are packed on their way into the
+     * storage. `'per-tree'` (the default) records one quantize pass per tree,
+     * each with its own mesh table and uniform; `'batched'` gathers every tree
+     * an update (or a capped batch's own copy) places and records one pass,
+     * with one job per batch's node buffer. Same nodes bit for bit; fewer
+     * buffers, bind groups and passes (P9, docs/internals/design/memory.md).
+     */
+    readonly quantizeJobs?: 'per-tree' | 'batched';
 }
 
 /** A tree was placed: a mesh's (or merged group's) first, or a swap. */
@@ -623,6 +632,33 @@ class StorageReserve {
     }
 }
 
+/**
+ * GPU trees' quantize work gathered for one encoder (`quantizeJobs: 'batched'`),
+ * by source buffer (a batch's `f32` nodes): {@link flush} records one job per
+ * source, all in one compute pass.
+ */
+class PendingQuantize {
+    private readonly bySource = new Map<GPUBuffer, QuantizeMesh[]>();
+
+    add(source: GPUBuffer, mesh: QuantizeMesh): void {
+        const meshes = this.bySource.get(source) ?? [];
+        meshes.push(mesh);
+        this.bySource.set(source, meshes);
+    }
+
+    /** Records the gathered jobs into `encoder` in one pass, writing `target`; returns them (destroy after the submit). */
+    flush(device: GPUDevice, encoder: GPUCommandEncoder, target: GPUBuffer, label: string): QuantizeJob[] {
+        if (this.bySource.size === 0) return [];
+        const quantizer = nodeQuantizerFor(device);
+        const jobs = [...this.bySource].map(([source, meshes]) => quantizer.prepare(source, target, meshes, label));
+        this.bySource.clear();
+        const pass = encoder.beginComputePass({ label });
+        for (const job of jobs) job.dispatch(pass);
+        pass.end();
+        return jobs;
+    }
+}
+
 /** A pool of free slot numbers, lowest first. */
 class SlotPool {
     private next = 0;
@@ -696,6 +732,8 @@ export class SceneTrees {
     private readonly nodeLeading: number;
     /** Quantize passes recorded into the caller's encoder (GPU trees placed), freed at the next update. */
     private quantizeJobsToRelease: QuantizeJob[] = [];
+    /** `quantizeJobs: 'batched'`: one quantize pass per encoder, not per tree. */
+    private readonly batchQuantize: boolean;
     private readonly weld: boolean;
     private readonly positions: GrowableStorage | null;
     /** Removed meshes' position ranges, freed at the next update. */
@@ -827,6 +865,9 @@ export class SceneTrees {
             );
         }
         this.nodeBytes = this.nodeFormat === 'quantized' ? QUANTIZED_NODE_BYTES : BVH_NODE_BYTES;
+        const quantizeJobs = options.quantizeJobs ?? 'per-tree';
+        if (quantizeJobs !== 'per-tree' && quantizeJobs !== 'batched') throw new RangeError(`quantizeJobs must be 'per-tree' or 'batched', got ${String(quantizeJobs)}`);
+        this.batchQuantize = quantizeJobs === 'batched';
         this.nodeLeading = this.nodeFormat === 'quantized' ? 1 : 0;
         this.nodes = new GrowableStorage(device, `${this.label} trace nodes`, this.nodeBytes, INITIAL_NODES);
         this.triangles = new GrowableStorage(device, `${this.label} trace triangles`, this.triangleBytes, indexed ? INITIAL_TRIANGLES * 3 : INITIAL_TRIANGLES);
@@ -2126,6 +2167,8 @@ export class SceneTrees {
         // nothing in `encoder` touches), so its outputs go now and the queue behind it starts this frame.
         const ownCopies = this.maxBatchBytes !== undefined ? this.device.createCommandEncoder({ label: `${this.label} waiting batch copy` }) : null;
         const copiedNow: GpuTreeOutputs[] = [];
+        const quantizeHere = this.pendingQuantize();
+        const quantizeOwn = this.pendingQuantize();
         arrived.forEach((tree, index) => {
             const size = sizes[index];
             if (tree.source === 'gpu' && tree.stored) {
@@ -2145,10 +2188,10 @@ export class SceneTrees {
                     this.triangles.write(triangleOffset, tree.bvh.triangles, size.triangleCount * TRIANGLE_BYTES);
                 }
             } else if (ownCopies) {
-                this.copyGpuTree(ownCopies, tree, size, nodeOffset, triangleOffset);
+                this.copyGpuTree(ownCopies, tree, size, nodeOffset, triangleOffset, quantizeOwn);
                 copiedNow.push(tree.built.outputs);
             } else {
-                this.copyGpuTree(encoder, tree, size, nodeOffset, triangleOffset);
+                this.copyGpuTree(encoder, tree, size, nodeOffset, triangleOffset, quantizeHere);
                 // Let go of at the next update, once the caller has submitted these copies.
                 this.outputsToRelease.push(tree.built.outputs);
                 this.encoderWritesStorage = true;
@@ -2156,17 +2199,29 @@ export class SceneTrees {
             // The tree's own sizes, at the scene's offsets (a GPU tree's range also carries its offsets in the batch's buffers).
             this.recordPlacement(tree, size, nodeOffset, triangleOffset, replaced.get(tree.slot) ?? null, leadings[at]);
         });
+        if (quantizeHere) this.quantizeJobsToRelease.push(...quantizeHere.flush(this.device, encoder, this.nodes.buffer, `${this.label} quantize`));
         if (ownCopies && copiedNow.length > 0) {
+            if (quantizeOwn) this.quantizeJobsToRelease.push(...quantizeOwn.flush(this.device, ownCopies, this.nodes.buffer, `${this.label} quantize`));
             this.device.queue.submit([ownCopies.finish()]);
             for (const outputs of copiedNow) this.releaseOutputs(outputs);
         }
         this.reconcileReserve();
     }
 
-    /** Records a GPU tree's copy out of its batch's buffers into the scene's, and a merged group's identity pass after it. */
-    private copyGpuTree(encoder: GPUCommandEncoder, tree: GpuArrivedTree, size: TreeSize, nodeOffset: number, triangleOffset: number): void {
+    /** `quantizeJobs: 'batched'`: a gatherer for one encoder's quantize work; null per tree. */
+    private pendingQuantize(): PendingQuantize | null {
+        return this.batchQuantize && this.nodeFormat === 'quantized' ? new PendingQuantize() : null;
+    }
+
+    /**
+     * Records a GPU tree's copy out of its batch's buffers into the scene's, and a merged group's identity pass after it.
+     * Quantized: its nodes are packed by a pass of their own, or (`quantize`, batched) by the pass the caller flushes into the encoder after.
+     */
+    private copyGpuTree(encoder: GPUCommandEncoder, tree: GpuArrivedTree, size: TreeSize, nodeOffset: number, triangleOffset: number, quantize: PendingQuantize | null = null): void {
         const { outputs, tree: built } = tree.built;
-        if (this.nodeFormat === 'quantized') {
+        if (this.nodeFormat === 'quantized' && quantize) {
+            quantize.add(outputs.nodes, { sourceNodeOffset: built.nodeOffset, targetRootSlot: nodeOffset, nodeCount: size.nodeCount });
+        } else if (this.nodeFormat === 'quantized') {
             // The batch's nodes are f32: packed into the frame slot and the nodes on the way in.
             const job = nodeQuantizerFor(this.device).prepare(outputs.nodes, this.nodes.buffer, [{ sourceNodeOffset: built.nodeOffset, targetRootSlot: nodeOffset, nodeCount: size.nodeCount }], `${this.label} quantize`);
             job.encode(encoder);
@@ -2371,7 +2426,9 @@ export class SceneTrees {
         const growth = this.grow(encoder, nodeRanges === null ? nodeCounts : null, triangleRanges === null ? triangleCounts : null, sizes, trees);
         const nodeOffsets = nodeRanges?.offsets ?? growth.nodeOffsets!;
         const triangleOffsets = triangleRanges?.offsets ?? growth.triangleOffsets!;
-        trees.forEach((tree, index) => this.copyGpuTree(encoder, tree, sizes[index], nodeOffsets[index] + this.nodeLeading, triangleOffsets[index] + leadings[index]));
+        const quantize = this.pendingQuantize();
+        trees.forEach((tree, index) => this.copyGpuTree(encoder, tree, sizes[index], nodeOffsets[index] + this.nodeLeading, triangleOffsets[index] + leadings[index], quantize));
+        if (quantize) this.quantizeJobsToRelease.push(...quantize.flush(this.device, encoder, this.nodes.buffer, `${this.label} quantize`));
         this.device.queue.submit([encoder.finish()]);
         // The copies are submitted: the outputs can go (a buffer destroyed after a submit stays alive for it).
         for (const tree of trees) this.releaseOutputs(tree.built.outputs);

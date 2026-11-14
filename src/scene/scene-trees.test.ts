@@ -14,9 +14,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { createFakeGpu, type FakeBinding, type FakeBuffer, type FakeGpu } from '../../tests/support/fake-gpu.ts';
+import { createFakeGpu, type FakeBuffer, type FakeGpu } from '../../tests/support/fake-gpu.ts';
 import { createCpuTracer, type CpuHit } from '../trace/cpu-traversal.ts';
-import { INDEXED_FLAG_SHIFT, INDEXED_ID_MASK, INSTANCE_FLAG, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS, TRIANGLE_WORD, TRIANGLE_WORDS } from '../trace/layout.ts';
+import { INSTANCE_FLAG, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS } from '../trace/layout.ts';
 import { MERGED_INSTANCE_INDEX } from '../trace/static-merge.ts';
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
 import type { MeshGeometry } from '../trace/mesh-bvh.ts';
@@ -25,77 +25,13 @@ import type { TraceRay } from '../trace/rays.ts';
 import { assembleTraceScene, type TraceSceneData, type TraceSceneInstance } from '../trace/scene-assembly.ts';
 import type { TopLevelBvh } from '../trace/top-level.ts';
 import { GpuFirstTrees, GpuTreeOutputs, type FirstTreeBuilder, type GpuTreeBatchResult, type GpuTreeBuildOptions, type GpuTreeBuilds, type GpuTreeRequest } from './gpu-first-trees.ts';
-import { MERGED_SOURCE_WORDS } from './merged-identity-gpu.ts';
 import { DEFAULT_GPU_MAX_BATCH_BYTES, SceneTrees, type SceneInstanceDescriptor, type SceneTreeEvent, type SceneTreesOptions } from './scene-trees.ts';
 import type { GpuMeshTreeRange } from '../mesh-input.ts';
 import { gatherStandIn } from '../../tests/support/top-level-gather.ts';
-import { quantizeNodeWords } from '../quantized-nodes.ts';
+import { mergedIdentityIndexedStandIn, mergedIdentityStandIn, quantizeStandIn } from '../../tests/support/scene-stand-ins.ts';
 import { FakeHploc, settle } from '../../tests/support/fake-hploc.ts';
 import { addToTally, compareClosest, newTally } from '../trace/oracle-compare.ts';
 import { buildReferenceScene, traceClosestReference } from '../trace/reference-tracer.ts';
-
-/** The merged-identity WGSL, line by line on the CPU. */
-function mergedIdentityStandIn(bindings: ReadonlyMap<number, FakeBinding>): void {
-    const triangles = new Uint32Array(bindings.get(0)!.buffer.bytes.buffer);
-    const sources = new Uint32Array(bindings.get(1)!.buffer.bytes.buffer);
-    const [wordOffset, count, sourceCount] = new Uint32Array(bindings.get(2)!.buffer.bytes.buffer);
-    for (let slot = 0; slot < count; slot++) {
-        const base = wordOffset + slot * TRIANGLE_WORDS;
-        const merged = triangles[base + TRIANGLE_WORD.originalIndex];
-        let low = 0;
-        let high = sourceCount;
-        while (high - low > 1) {
-            const middle = (low + high) >> 1;
-            if (sources[middle * MERGED_SOURCE_WORDS] <= merged) low = middle;
-            else high = middle;
-        }
-        const at = low * MERGED_SOURCE_WORDS;
-        triangles[base + TRIANGLE_WORD.originalIndex] = merged - sources[at];
-        triangles[base + TRIANGLE_WORD.padding] = sources[at + 1];
-        triangles[base + TRIANGLE_WORD.flags] = (triangles[base + TRIANGLE_WORD.flags] | sources[at + 2] | (materialOf(bindings, merged) << 16)) >>> 0;
-    }
-}
-
-/** A merged triangle's material code from the identity pass's per-triangle table (binding 3, two codes to a word). */
-function materialOf(bindings: ReadonlyMap<number, FakeBinding>, merged: number): number {
-    const table = new Uint32Array(bindings.get(3)!.buffer.bytes.buffer);
-    return (table[merged >> 1] >>> ((merged & 1) * 16)) & 0xffff;
-}
-
-/** The quantize pass (gpu-quantize.ts, `bvhqQuantize`) on the CPU: the CPU encoder it matches bit for bit (bvh-blas-refit checks that on GPUs). */
-function quantizeStandIn(bindings: ReadonlyMap<number, FakeBinding>): void {
-    const source = bindings.get(0)!.buffer.bytes;
-    const target = new Uint32Array(bindings.get(1)!.buffer.bytes.buffer);
-    const table = new Uint32Array(bindings.get(2)!.buffer.bytes.buffer);
-    const [meshCount] = new Uint32Array(bindings.get(3)!.buffer.bytes.buffer);
-    for (let mesh = 0; mesh < meshCount; mesh++) {
-        const [sourceNodeOffset, rootSlot, nodeCount] = table.subarray(mesh * 4, mesh * 4 + 3);
-        const words = new Uint32Array(source.buffer.slice(source.byteOffset + sourceNodeOffset * 64, source.byteOffset + (sourceNodeOffset + nodeCount) * 64));
-        quantizeNodeWords(new Float32Array(words.buffer), words, 0, nodeCount, target, (rootSlot - 1) * 8);
-    }
-}
-
-/** The indexed merged-identity WGSL (`bvhMergedIdentityIndexed`), line by line on the CPU. */
-function mergedIdentityIndexedStandIn(bindings: ReadonlyMap<number, FakeBinding>): void {
-    const triangles = new Uint32Array(bindings.get(0)!.buffer.bytes.buffer);
-    const sources = new Uint32Array(bindings.get(1)!.buffer.bytes.buffer);
-    const [wordOffset, count, sourceCount, sideWordOffset] = new Uint32Array(bindings.get(2)!.buffer.bytes.buffer);
-    for (let slot = 0; slot < count; slot++) {
-        const word = wordOffset + slot * 4 + 3;
-        const merged = triangles[word] & INDEXED_ID_MASK;
-        let low = 0;
-        let high = sourceCount;
-        while (high - low > 1) {
-            const middle = (low + high) >> 1;
-            if (sources[middle * MERGED_SOURCE_WORDS] <= merged) low = middle;
-            else high = middle;
-        }
-        const at = low * MERGED_SOURCE_WORDS;
-        const flags = (triangles[word] >>> INDEXED_FLAG_SHIFT) | (sources[at + 2] & 2);
-        triangles[word] = ((merged - sources[at]) | (flags << INDEXED_FLAG_SHIFT)) >>> 0;
-        triangles[sideWordOffset + slot] = (low | (materialOf(bindings, merged) << 16)) >>> 0;
-    }
-}
 
 /** A first-tree builder that answers when the test says so; each `build` is one batch. */
 class StandInGpuBuilder implements FirstTreeBuilder {
