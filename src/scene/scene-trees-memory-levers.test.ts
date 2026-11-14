@@ -11,7 +11,9 @@ import { describe, expect, it } from 'vitest';
 import { createFakeGpu, type FakeBuffer, type FakeGpu } from '../../tests/support/fake-gpu.ts';
 import { FakeHploc } from '../../tests/support/fake-hploc.ts';
 import { SCENE_KERNELS } from '../../tests/support/scene-stand-ins.ts';
+import { compactPoseLayout, refitLayoutToPose } from '../refit-cpu.ts';
 import { createCpuTracer, type CpuHit } from '../trace/cpu-traversal.ts';
+import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
 import { TOP_HEADER_WORD } from '../trace/layout.ts';
 import type { MeshGeometry } from '../trace/mesh-bvh.ts';
 import { createRandom, randomAffine, randomRays, tessellatedQuad } from '../trace/oracle-fixtures.ts';
@@ -258,6 +260,86 @@ describe('SceneTrees.trim and trimWhenRefined (the node buffer packed after the 
             expect(trimmedHits.filter((hit) => hit.startsWith('50/')).length).toBeGreaterThan(200);
             expect(scenes[1].scene.memory.nodes).toBe(scenes[1].scene.memory.nodesInUse);
             for (const { scene } of scenes) scene.dispose();
+        });
+    }
+});
+
+describe("compactPoseLayout and deformingLayouts: 'compact' (a deforming mesh keeps nodes, parents and 4 bytes per triangle)", () => {
+    /** A quad with app flags (bit 0) on some triangles, materials on others, and the padding word set by hand on a few slots. */
+    const flagged = (cells: number): MeshGeometry => {
+        const quad = tessellatedQuad(cells, 1);
+        const triangles = quad.indices!.length / 3;
+        return { ...quad, triangleFlags: Uint32Array.from({ length: triangles }, (_, index) => index % 3 === 0 ? 1 : 0), triangleMaterials: Uint16Array.from({ length: triangles }, (_, index) => (index % 4 === 3 ? 0xffff : index % 5)) };
+    };
+
+    for (const triangleLeaves of ['records', 'indexed'] as const) {
+        for (const nodeFormat of ['f32', 'quantized'] as const) {
+            it(`${triangleLeaves}, ${nodeFormat}: refitLayoutToPose gives the same posed tree from the pose layout as from the whole layout`, async () => {
+                for (const geometry of [flagged(7), tessellatedQuad(5, 1)]) {
+                    const tree = await buildMeshBvhAsync(geometry, { triangleLeaves, nodeFormat });
+                    if (triangleLeaves === 'records') {
+                        // Padding words are kept too (a merged record's source instance lives there; any non-zero word must survive).
+                        const words = new Uint32Array(tree.triangles);
+                        for (let slot = 0; slot < tree.triangleCount; slot += 7) words[slot * 12 + 11] = 1000 + slot;
+                    }
+                    const compact = compactPoseLayout(tree);
+                    expect(compact.slotTriangles.byteLength).toBe(tree.triangleCount * 4);
+                    expect('triangles' in compact).toBe(false);
+                    expect(compact.nodes).toBe(tree.nodes);
+                    expect(compact.parents).toBe(tree.parents);
+                    if (triangleLeaves === 'indexed' || geometry.triangleFlags === undefined) expect(compact.slotFlags).toBeNull();
+                    const moved = hill(geometry);
+                    const whole = refitLayoutToPose(tree, moved, geometry.indices);
+                    const posed = refitLayoutToPose(compact, moved, geometry.indices);
+                    expect(new Uint8Array(posed.nodes)).toEqual(new Uint8Array(whole.nodes));
+                    expect(posed.triangles === null ? null : new Uint8Array(posed.triangles)).toEqual(whole.triangles === null ? null : new Uint8Array(whole.triangles));
+                    expect(posed.bounds).toEqual(whole.bounds);
+                }
+            });
+        }
+    }
+
+    for (const triangleLeaves of ['records', 'indexed'] as const) {
+        it(`${triangleLeaves}: setPoseCpu writes the same buffers with 'compact' as with 'full', which keeps 48 bytes per triangle more`, async () => {
+            const results: Record<string, { nodes: Uint8Array; triangles: Uint8Array; positions: Uint8Array | null; kept: number; hits: string[] }> = {};
+            const geometry = flagged(9);
+            const rays: TraceRay[] = Array.from({ length: 400 }, (_, index) => ({ origin: [-0.95 + 0.1 * (index % 20), -0.95 + 0.1 * Math.floor(index / 20), 4], direction: [0, 0, -1], tMin: 0, tMax: 100 }));
+            for (const deformingLayouts of ['full', 'compact'] as const) {
+                const { scene, frame } = await setUp({ triangleLeaves, deformingLayouts, mergeStaticInstances: false });
+                const cloth = scene.addMesh(geometry, { deforming: true });
+                scene.addInstance({ mesh: cloth, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], instanceIndex: 5 });
+                // A pose on the GPU tree (its layout read back), then on tinybvh's.
+                frame();
+                await scene.whenBuilt();
+                scene.setPoseCpu(cloth, hill(geometry));
+                frame();
+                await scene.whenRefined();
+                scene.releaseRefinements();
+                frame();
+                scene.setPoseCpu(cloth, hill({ ...geometry, positions: hill(geometry) }));
+                frame();
+                expect(scene.deformingCounts.cpuPoses).toBe(2);
+                const internal = scene as unknown as { meshes: Map<number, { cpuPose: { layout: { triangles?: ArrayBuffer; slotTriangles?: Uint32Array; slotFlags?: Uint32Array | null; slotPadding?: Uint32Array | null } } }> };
+                const layout = internal.meshes.get(cloth)!.cpuPose.layout;
+                const kept = (layout.triangles?.byteLength ?? 0) + (layout.slotTriangles?.byteLength ?? 0) + (layout.slotFlags?.byteLength ?? 0) + (layout.slotPadding?.byteLength ?? 0);
+                results[deformingLayouts] = {
+                    nodes: bytesOf(scene.buffers.nodes).slice(),
+                    triangles: bytesOf(scene.buffers.triangles).slice(),
+                    positions: scene.buffers.positions ? bytesOf(scene.buffers.positions).slice() : null,
+                    kept,
+                    hits: hits(scene, rays),
+                };
+                scene.dispose();
+            }
+            expect(results.compact.nodes).toEqual(results.full.nodes);
+            expect(results.compact.triangles).toEqual(results.full.triangles);
+            expect(results.compact.positions).toEqual(results.full.positions);
+            expect(results.compact.hits).toEqual(results.full.hits);
+            expect(results.full.hits.filter((hit) => hit.startsWith('5/')).length).toBeGreaterThan(300);
+            const triangles = geometry.indices!.length / 3;
+            // Records: 48 bytes per triangle against 4 (original) + 4 (flags, some non-zero here); indexed: 16 against 4.
+            expect(results.full.kept).toBe(triangles * (triangleLeaves === 'records' ? 48 : 16));
+            expect(results.compact.kept).toBe(triangles * (triangleLeaves === 'records' ? 8 : 4));
         });
     }
 });

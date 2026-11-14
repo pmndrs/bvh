@@ -95,7 +95,7 @@
  */
 
 import { checkTriangleFlags, packedTriangleFlags, triangleMaterialCodes } from '../mesh-input.ts';
-import { refitLayoutToPose } from '../refit-cpu.ts';
+import { compactPoseLayout, refitLayoutToPose, type PoseLayout } from '../refit-cpu.ts';
 import {
     BVH_NODE_BYTES,
     checkInstanceMask,
@@ -305,6 +305,15 @@ export interface SceneTreesOptions {
      * recorded one after another in the update's pass). Same boxes, same trees.
      */
     readonly refitBoxes?: 'per-mesh' | 'shared';
+    /**
+     * What a deforming mesh keeps on the CPU for {@link SceneTrees.setPoseCpu}
+     * once its tree is placed: `'full'` (the default) keeps the tree's layout
+     * as it came (nodes, 48-byte records, parents); `'compact'` keeps the
+     * nodes and parents and 4 bytes per triangle (its original triangle, and
+     * the flags and padding words only where any is non-zero), and rebuilds
+     * the records a pose needs (`compactPoseLayout`). Same poses bit for bit.
+     */
+    readonly deformingLayouts?: 'full' | 'compact';
 }
 
 /** A tree was placed: a mesh's (or merged group's) first, or a swap. */
@@ -540,8 +549,8 @@ interface CpuPose {
     /** The mesh's own indices (a copy: the geometry may move into a worker), or null for a triangle list. */
     readonly indices: Uint16Array | Uint32Array | null;
     readonly vertexCount: number;
-    /** The placed tree's layout on the CPU (tinybvh's, or a GPU tree's read back), or null before one arrives. */
-    layout: GpuLayoutMeshBvh | null;
+    /** The placed tree's layout on the CPU (tinybvh's, or a GPU tree's read back; its pose layout with `deformingLayouts: 'compact'`), or null before one arrives. */
+    layout: GpuLayoutMeshBvh | PoseLayout | null;
     /** The latest CPU pose, or null. */
     positions: Float32Array | null;
     /** The pose still has to be written into the placed tree. */
@@ -755,6 +764,8 @@ export class SceneTrees {
     private readonly trimWhenRefined: boolean;
     /** Node buffer trims done ({@link trim}, `trimWhenRefined`). */
     private trims = 0;
+    /** `deformingLayouts: 'compact'`: deforming meshes keep {@link PoseLayout}s, not whole layouts. */
+    private readonly compactPoseLayouts: boolean;
     private readonly weld: boolean;
     private readonly positions: GrowableStorage | null;
     /** Removed meshes' position ranges, freed at the next update. */
@@ -890,6 +901,9 @@ export class SceneTrees {
         if (quantizeJobs !== 'per-tree' && quantizeJobs !== 'batched') throw new RangeError(`quantizeJobs must be 'per-tree' or 'batched', got ${String(quantizeJobs)}`);
         this.batchQuantize = quantizeJobs === 'batched';
         this.trimWhenRefined = options.trimWhenRefined ?? false;
+        const deformingLayouts = options.deformingLayouts ?? 'full';
+        if (deformingLayouts !== 'full' && deformingLayouts !== 'compact') throw new RangeError(`deformingLayouts must be 'full' or 'compact', got ${String(deformingLayouts)}`);
+        this.compactPoseLayouts = deformingLayouts === 'compact';
         this.nodeLeading = this.nodeFormat === 'quantized' ? 1 : 0;
         this.nodes = new GrowableStorage(device, `${this.label} trace nodes`, this.nodeBytes, INITIAL_NODES);
         this.triangles = new GrowableStorage(device, `${this.label} trace triangles`, this.triangleBytes, indexed ? INITIAL_TRIANGLES * 3 : INITIAL_TRIANGLES);
@@ -2786,7 +2800,8 @@ export class SceneTrees {
         }
         if (state.cpuPose) {
             // A CPU pose given before is written into the new tree too, at this update.
-            state.cpuPose.layout = tree.source === 'tinybvh' ? tree.bvh : tree.built.layout;
+            const layout = tree.source === 'tinybvh' ? tree.bvh : tree.built.layout;
+            state.cpuPose.layout = layout && this.compactPoseLayouts ? compactPoseLayout(layout) : layout;
             state.cpuPose.moved = false;
             state.cpuPose.due = state.cpuPose.positions !== null;
         }
