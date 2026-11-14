@@ -115,6 +115,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         timeoutMs: 90_000,
     },
     {
+        name: 'three-point-cloud',
+        path: 'three/point-cloud',
+        title: 'Point cloud',
+        description: "three-mesh-bvh's pointCloudIntersection, ported: a PointsBVH over a scanned point cloud, the pointer picked every frame through acceleratedRaycast with Raycaster.params.Points.threshold, BVHHelper boxes, and three's own Points.raycast when the tree is off.",
+        timeoutMs: 90_000,
+    },
+    {
         name: 'babylon-picking',
         path: 'babylon/picking',
         title: 'Babylon picking',
