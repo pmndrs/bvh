@@ -1,0 +1,4 @@
+{
+    "description": "Clustered top level (clusterTraceScene, PARITY 8.9): the unchanged walk on scenes whose meshes are cut into clusters (limits 1, 4 on every record, 64), in f32 and quantized nodes, records and indexed leaves, merged; against the CPU reference on the oracle cases, the plain scene's GPU answers ray for ray, shared-edge quads (no slips) and the closest-point query's distances.",
+    "timeoutMs": 600000
+}
