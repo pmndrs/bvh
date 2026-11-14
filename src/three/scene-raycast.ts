@@ -49,7 +49,7 @@
  * (it still answers from the last `update()`); moved objects aren't detected.
  */
 
-import { BackSide, type BufferGeometry, DoubleSide, FrontSide, Vector3, type BatchedMesh, type Frustum, type Intersection, type Mesh, type Object3D, type Raycaster } from 'three';
+import { BackSide, Box3, type BufferGeometry, DoubleSide, FrontSide, Vector3, type BatchedMesh, type Frustum, type Intersection, type Mesh, type Object3D, type Raycaster } from 'three';
 import { CpuSceneBvh, type CpuSceneHit } from '../query/cpu-scene.ts';
 import type { TinyBvhBuilder } from '../tinybvh.ts';
 import { buildMeshBvhWithTinyBvh } from '../trace/mesh-bvh-topology.ts';
@@ -64,6 +64,14 @@ export interface BvhSceneRaycasterOptions extends BvhSceneFromObject3DOptions {
     readonly builder?: TinyBvhBuilder;
     /** Hit hidden objects too, as three's `Raycaster` does. Default true; false skips objects that aren't `visible` with every ancestor. */
     readonly includeHidden?: boolean;
+}
+
+/** The callbacks of {@link BvhSceneRaycaster.shapecast}: three-mesh-bvh's `ObjectBVH.shapecast` callbacks, with three's `Box3`. */
+export interface BvhSceneShapecastCallbacks {
+    intersectsBounds(box: Box3, isLeaf: boolean, score: number | undefined, depth: number, nodeIndex: number): unknown;
+    intersectsObject?(object: Object3D, instanceId: number, contained: boolean, depth: number, source: BvhThreeSource): unknown;
+    intersectsRange?(offset: number, count: number, contained: boolean, depth: number, nodeIndex: number, box: Box3): unknown;
+    boundsTraverseOrder?(box: Box3): number;
 }
 
 /** One instance of the scene: its three source and mesh range. */
@@ -263,6 +271,42 @@ export class BvhSceneRaycaster {
             out.push(source);
         }
         return out;
+    }
+
+    /**
+     * three-mesh-bvh's `ObjectBVH.shapecast(callbacks)` (PARITY 5.3): a walk
+     * over the scene's world boxes (the top level the raycast uses, one box
+     * per object, instance or group, as of the last {@link update}) with
+     * three-mesh-bvh's contract: `intersectsBounds(box, isLeaf, score, depth,
+     * nodeIndex)` with a `Box3` (scratch, valid during the call) decides which
+     * boxes to enter (`CONTAINED` takes a box's subtree whole),
+     * `boundsTraverseOrder(box)` which child first, and
+     * `intersectsObject(object, instanceId, contained, depth, source)` gets
+     * each object in an entered leaf: `instanceId` is the `InstancedMesh` or
+     * `BatchedMesh` instance, else 0 as in three-mesh-bvh; `source` is ours
+     * (a multi-material mesh with `multiMaterial: 'groups'` comes once per
+     * group). `intersectsRange(offset, count, contained, depth, nodeIndex,
+     * box)` gets top-level positions (`cpuScene.instanceAt`). A truthy return
+     * from either stops the cast; returns true when stopped. Hidden objects
+     * are left out as in the raycast (`includeHidden`).
+     */
+    shapecast(callbacks: BvhSceneShapecastCallbacks): boolean {
+        const bvh = this.bvh;
+        if (!bvh) return false;
+        const { intersectsObject, ...rest } = callbacks;
+        return bvh.shapecastWith<Box3>(
+            {
+                ...rest,
+                intersectsBounds: callbacks.intersectsBounds,
+                intersectsInstance: intersectsObject
+                    ? (instance, contained, depth) => {
+                          const source = this.entries[instance].source;
+                          return intersectsObject.call(callbacks, source.object, source.instanceId >= 0 ? source.instanceId : 0, contained, depth, source);
+                      }
+                    : undefined,
+            },
+            new Box3(),
+        );
     }
 
     /** Warns once (until the next update) when a geometry's positions or index changed since update(). */

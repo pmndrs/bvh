@@ -58,7 +58,7 @@ export {
     type BvhSplitStrategy,
 } from './raycast.ts';
 // A ray against the whole scene on the CPU (three-mesh-bvh's ObjectBVH.raycast), and frustum culling over the top level.
-export { BvhSceneRaycaster, raycastScene, type BvhSceneRaycasterOptions } from './scene-raycast.ts';
+export { BvhSceneRaycaster, raycastScene, type BvhSceneRaycasterOptions, type BvhSceneShapecastCallbacks } from './scene-raycast.ts';
 // Shapecast and bvhcast (Q2): three-mesh-bvh's shape classes with three's types, over the core's math.
 export { ExtendedTriangle, OrientedBox, SeparatingAxisBounds } from './shapes.ts';
 // three-mesh-bvh's names for what intersectsBounds returns.
