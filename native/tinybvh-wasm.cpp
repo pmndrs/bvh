@@ -16,6 +16,13 @@
 //   This replaces a JavaScript pass over every node and triangle, which was
 //   bound by memory traffic and object handling; the timings are in PROGRESS.md
 //   (B0b).
+//   tbvh_write_layout_as can write the layout's other formats instead: 16-byte
+//   indexed triangles (docs/internals/design/indexed-leaves.md; the 48-byte
+//   records are then never allocated) and quantized nodes, a frame slot and
+//   32-byte nodes packed from the 64-byte ones in place
+//   (docs/internals/design/compressed-nodes.md). Both are byte for byte what
+//   src/indexed-leaves.ts and src/quantized-nodes.ts make from the default
+//   layout; tests in src/tinybvh-formats.test.ts check it.
 //
 // The GPU layout is defined in src/trace/layout.ts
 // (and the WGSL generated from it). The structs below repeat it; a test there
@@ -66,6 +73,19 @@ enum Status : uint32_t {
     STATUS_TOO_LARGE = 8,
     // tbvh_build was asked for a builder it does not have (see Builder).
     STATUS_BAD_BUILDER = 9,
+    // tbvh_write_layout_as was asked for a format bit it does not have (see LayoutFormat).
+    STATUS_BAD_FORMAT = 10,
+    // A node did not fit the quantized format (a child box outside its root's, or a
+    // reference past 28 bits); tbvh_error_detail() is the node.
+    STATUS_QUANTIZE_FAILED = 11,
+};
+
+// The layout's formats, bits of tbvh_write_layout_as's `format`. Mirrored in src/tinybvh.ts.
+enum LayoutFormat : uint32_t {
+    // 16-byte indexed triangles instead of 48-byte records.
+    LAYOUT_INDEXED_TRIANGLES = 1,
+    // A frame slot and 32-byte quantized nodes instead of 64-byte nodes.
+    LAYOUT_QUANTIZED_NODES = 2,
 };
 
 // Which of tinybvh's builders tbvh_build runs. Mirrored in src/tinybvh.ts.
@@ -156,6 +176,45 @@ static_assert(offsetof(GpuTriangle, flags) == offsetof(GpuTriangle, vertex1) + 1
 static_assert(offsetof(GpuTriangle, padding) == offsetof(GpuTriangle, vertex2) + 12, "word after corner 2");
 static_assert(offsetof(GpuTriangle, vertex2) + 16 == sizeof(GpuTriangle), "the last 16-byte store stays inside the triangle");
 
+// One indexed triangle in tree order (GPU_LAYOUT_INDEXED_TRIANGLE_WORD): the
+// mesh's own vertex indices of its three corners, then the original index in
+// bits 0-27 with the flags' bits 0-1 (filter, flip) in bits 28-29.
+struct GpuIndexedTriangle {
+    uint32_t vertex[3];
+    uint32_t idFlags;
+};
+static_assert(sizeof(GpuIndexedTriangle) == 16, "INDEXED_TRIANGLE_BYTES");
+static_assert(offsetof(GpuIndexedTriangle, vertex) == 0 && offsetof(GpuIndexedTriangle, idFlags) == 3 * 4, "INDEXED_TRIANGLE_WORD");
+// GPU_LAYOUT_INDEXED_ID_MASK and GPU_LAYOUT_INDEXED_FLAG_SHIFT.
+static const uint32_t INDEXED_ID_MASK = 0x0fffffffu;
+static const uint32_t INDEXED_FLAG_SHIFT = 28;
+static const uint32_t INDEXED_MOVED_FLAGS = 3;
+
+// One quantized node (GPU_LAYOUT_QUANTIZED_NODE_WORD): per child, an axis word
+// per axis (min plane in bits 0-15, max in 16-31) and the stack reference
+// (index in bits 0-27, count in 28-31).
+struct GpuQuantizedNode {
+    uint32_t left[3];
+    uint32_t leftReference;
+    uint32_t right[3];
+    uint32_t rightReference;
+};
+static_assert(sizeof(GpuQuantizedNode) == 32, "QUANTIZED_NODE_BYTES");
+static_assert(offsetof(GpuQuantizedNode, leftReference) == 3 * 4 && offsetof(GpuQuantizedNode, right) == 4 * 4, "QUANTIZED_NODE_WORD");
+static_assert(offsetof(GpuQuantizedNode, rightReference) == 7 * 4, "QUANTIZED_NODE_WORD.rightReference");
+
+// The frame slot before a quantized tree's root (GPU_LAYOUT_NODE_FRAME_WORD).
+struct GpuNodeFrame {
+    float origin[3];
+    uint32_t zero0;
+    float step[3];
+    uint32_t zero1;
+};
+static_assert(sizeof(GpuNodeFrame) == sizeof(GpuQuantizedNode), "the frame takes one node slot");
+static_assert(offsetof(GpuNodeFrame, origin) == 0 && offsetof(GpuNodeFrame, step) == 4 * 4, "NODE_FRAME_WORD");
+// Packing in place (packQuantizedNodes) needs two quantized slots per 64-byte node.
+static_assert(2 * sizeof(GpuQuantizedNode) == sizeof(GpuNode), "a 64-byte node holds two quantized slots");
+
 // `index` of a right child that does not exist (only a one-triangle mesh has one).
 static const uint32_t EMPTY_CHILD_INDEX = 0xffffffffu;
 // Parent of the root.
@@ -178,8 +237,12 @@ struct CurrentBuild {
 };
 
 struct CurrentLayout {
+    // 64-byte nodes, or (LAYOUT_QUANTIZED_NODES) the frame slot then 32-byte nodes, packed in the same memory.
     GpuNode* nodes = nullptr;
+    // One of the two is written: records, or (LAYOUT_INDEXED_TRIANGLES) indexed triangles.
     GpuTriangle* triangles = nullptr;
+    GpuIndexedTriangle* indexedTriangles = nullptr;
+    uint32_t format = 0;
     uint32_t* parents = nullptr;
     uint32_t nodeCount = 0;
     uint32_t maxDepth = 0;
@@ -198,6 +261,7 @@ static void releaseLayout()
 {
     free(layout.nodes);
     free(layout.triangles);
+    free(layout.indexedTriangles);
     free(layout.parents);
     layout = CurrentLayout();
 }
@@ -550,6 +614,25 @@ private:
     {
         v128_t low = EMPTY_LOW;
         v128_t high = EMPTY_HIGH;
+        if (layout.indexedTriangles) {
+            // Indexed: the vertex indices and the id word; the box from the same corners, in the same order.
+            for (uint32_t position = start; position < start + count; position++) {
+                const uint32_t original = order[position];
+                GpuIndexedTriangle& triangle = layout.indexedTriangles[position];
+                for (uint32_t corner = 0; corner < 3; corner++) {
+                    const uint32_t vertex = current.indices ? current.indices[original * 3 + corner] : original * 3 + corner;
+                    const v128_t xyzw = wasm_v128_load(&current.vertices[vertex]);
+                    low = keepSmaller(low, xyzw);
+                    high = keepLarger(high, xyzw);
+                    triangle.vertex[corner] = vertex;
+                }
+                const uint32_t flags = triangleFlags ? triangleFlags[original] : 0;
+                triangle.idFlags = (original & INDEXED_ID_MASK) | ((flags & INDEXED_MOVED_FLAGS) << INDEXED_FLAG_SHIFT);
+            }
+            storeXyz(slot.boxMin, low);
+            storeXyz(slot.boxMax, high);
+            return;
+        }
         for (uint32_t position = start; position < start + count; position++) {
             const uint32_t original = order[position];
             GpuTriangle& triangle = layout.triangles[position];
@@ -609,15 +692,170 @@ static bool isPermutation(const uint32_t* order, uint32_t triangleCount, uint8_t
     return true;
 }
 
-// Writes the last build's tree in the GPU layout. `triangleFlags` holds one
-// word per original triangle, or is null for all zeros. Leaves larger than
-// `maxLeafPrimitives` are cut in half until they fit. Returns a Status; on
-// success the tbvh_layout_* functions describe the result until tbvh_release
-// or the next build.
-EXPORT uint32_t tbvh_write_layout(const uint32_t* triangleFlags, uint32_t maxLeafPrimitives)
+// ---------------------------------------------------------------------------
+// Quantized nodes: src/quantized-nodes.ts (nodeFrameOf, quantizeAxis,
+// quantizeNodeWords) in C, step for step and in doubles as there, so the
+// words come out the same. Every value tested is a float divided by a power
+// of two, which is exact.
+// ---------------------------------------------------------------------------
+
+// FRAME_MAX_SPAN, FRAME_EXACT_STEPS, FRAME_MIN_EXPONENT, FRAME_LIMIT, QUANTIZE_MARGIN_STEPS, QUANTIZED_EMPTY_AXIS.
+static const double FRAME_MAX_SPAN = 65532.0;
+static const double FRAME_EXACT_STEPS = 8388608.0;  // 2^23
+static const int FRAME_MIN_EXPONENT = -100;
+static const double FRAME_LIMIT = 1267650600228229401496703205376.0;  // 2^100
+static const double QUANTIZE_MARGIN_STEPS = 1.0 / 1024.0;
+static const uint32_t QUANTIZED_EMPTY_AXIS = 0xffffffffu;
+// The reference's count shift and index mask (trace/layout.ts).
+static const uint32_t REFERENCE_COUNT_SHIFT = 28;
+static const uint32_t REFERENCE_INDEX_MASK = 0x0fffffffu;
+
+static bool isEmptyAxis(double low, double high)
+{
+    return !(low <= high) || !(fabs(low) < FRAME_LIMIT) || !(fabs(high) < FRAME_LIMIT);
+}
+
+// floor(log2(x)) - 1 for a positive finite x: a lower bound, which is all the search needs.
+static int exponentBelow(double x)
+{
+    return ilogb(x) - 1;
+}
+
+struct AxisFrame {
+    double origin;
+    double step;
+};
+
+static AxisFrame axisFrame(double low, double high)
+{
+    if (isEmptyAxis(low, high)) return { 0.0, 1.0 };
+    // Any start at or below the answer gives the answer: the rule is monotone in the exponent.
+    int exponent = FRAME_MIN_EXPONENT;
+    const double largest = fabs(low) > fabs(high) ? fabs(low) : fabs(high);
+    if (largest > 0) exponent = exponentBelow(largest) - 24 > exponent ? exponentBelow(largest) - 24 : exponent;
+    if (high > low) exponent = exponentBelow(high - low) - 17 > exponent ? exponentBelow(high - low) - 17 : exponent;
+    for (;;) {
+        const double step = ldexp(1.0, exponent);
+        const bool exact = fabs(low) < FRAME_EXACT_STEPS * step && fabs(high) < FRAME_EXACT_STEPS * step;
+        if (exact && ceil(high / step) - floor(low / step) <= FRAME_MAX_SPAN) return { (floor(low / step) - 1) * step, step };
+        exponent++;
+    }
+}
+
+// One axis of a child box as an axis word, rounded outward with the margin. False if it doesn't fit the frame.
+static bool quantizeAxis(double low, double high, const AxisFrame& frame, uint32_t& word)
+{
+    if (isEmptyAxis(low, high)) {
+        word = QUANTIZED_EMPTY_AXIS;
+        return true;
+    }
+    const double base = frame.origin / frame.step;
+    const double lowSteps = low / frame.step;
+    const double highSteps = high / frame.step;
+    double qMin = floor(lowSteps) - base;
+    if (lowSteps - floor(lowSteps) < QUANTIZE_MARGIN_STEPS) qMin--;
+    double qMax = ceil(highSteps) - base;
+    if (ceil(highSteps) - highSteps < QUANTIZE_MARGIN_STEPS) qMax++;
+    if (qMin < 0 || qMax > 65535) return false;
+    word = uint32_t(qMin) | (uint32_t(qMax) << 16);
+    return true;
+}
+
+// Math.min and Math.max as JavaScript runs them on the root's boxes (-0 below +0).
+static double jsMin(double running, double value)
+{
+    return value < running || (value == running && signbit(value)) ? value : running;
+}
+
+static double jsMax(double running, double value)
+{
+    return value > running || (value == running && !signbit(value)) ? value : running;
+}
+
+// One quantized node from a 64-byte node, in `frame`. False if a child doesn't fit.
+static bool quantizeNode(const GpuNode& node, const AxisFrame* frame, GpuQuantizedNode& out)
+{
+    const float* const mins[2] = { node.leftMin, node.rightMin };
+    const float* const maxes[2] = { node.leftMax, node.rightMax };
+    const uint32_t indices[2] = { node.leftIndex, node.rightIndex };
+    const uint32_t counts[2] = { node.leftCount, node.rightCount };
+    uint32_t* const words[2] = { out.left, out.right };
+    uint32_t* const references[2] = { &out.leftReference, &out.rightReference };
+    for (uint32_t side = 0; side < 2; side++) {
+        if (indices[side] == EMPTY_CHILD_INDEX) {
+            words[side][0] = words[side][1] = words[side][2] = QUANTIZED_EMPTY_AXIS;
+            *references[side] = EMPTY_CHILD_INDEX;
+            continue;
+        }
+        for (uint32_t axis = 0; axis < 3; axis++) {
+            if (!quantizeAxis(mins[side][axis], maxes[side][axis], frame[axis], words[side][axis])) return false;
+        }
+        if (indices[side] > REFERENCE_INDEX_MASK || counts[side] >= 15) return false;
+        *references[side] = (counts[side] << REFERENCE_COUNT_SHIFT) | indices[side];
+    }
+    return true;
+}
+
+// Packs layout.nodes in place into the frame slot and 32-byte nodes: slot i + 1
+// (node i) lies inside 64-byte node (i + 1) / 2, which is node i or one before
+// it, so each node is read before anything overwrites it. Node 0 is read whole
+// before the frame and its slot are written over it. Returns a Status.
+static uint32_t packQuantizedNodes()
+{
+    GpuNode root;
+    memcpy(&root, layout.nodes, sizeof(root));
+    double box[6] = { INFINITY, INFINITY, INFINITY, -INFINITY, -INFINITY, -INFINITY };
+    const float* const mins[2] = { root.leftMin, root.rightMin };
+    const float* const maxes[2] = { root.leftMax, root.rightMax };
+    const uint32_t indices[2] = { root.leftIndex, root.rightIndex };
+    for (uint32_t side = 0; side < 2; side++) {
+        if (indices[side] == EMPTY_CHILD_INDEX) continue;
+        for (uint32_t axis = 0; axis < 3; axis++) {
+            const double low = mins[side][axis];
+            const double high = maxes[side][axis];
+            if (isEmptyAxis(low, high)) continue;
+            box[axis] = jsMin(box[axis], low);
+            box[axis + 3] = jsMax(box[axis + 3], high);
+        }
+    }
+    AxisFrame frame[3];
+    for (uint32_t axis = 0; axis < 3; axis++) frame[axis] = axisFrame(box[axis], box[axis + 3]);
+
+    GpuQuantizedNode first;
+    if (!quantizeNode(root, frame, first)) {
+        errorDetail = 0;
+        return STATUS_QUANTIZE_FAILED;
+    }
+    // Through memcpy only: the same bytes are read as GpuNode and written as slots.
+    uint8_t* const bytes = reinterpret_cast<uint8_t*>(layout.nodes);
+    GpuNodeFrame frameSlot;
+    for (uint32_t axis = 0; axis < 3; axis++) {
+        frameSlot.origin[axis] = float(frame[axis].origin);
+        frameSlot.step[axis] = float(frame[axis].step);
+    }
+    frameSlot.zero0 = 0;
+    frameSlot.zero1 = 0;
+    memcpy(bytes, &frameSlot, sizeof(frameSlot));
+    memcpy(bytes + sizeof(GpuQuantizedNode), &first, sizeof(first));
+    for (uint32_t index = 1; index < layout.nodeCount; index++) {
+        GpuNode node;
+        memcpy(&node, bytes + size_t(index) * sizeof(GpuNode), sizeof(node));
+        GpuQuantizedNode packed;
+        if (!quantizeNode(node, frame, packed)) {
+            errorDetail = index;
+            return STATUS_QUANTIZE_FAILED;
+        }
+        memcpy(bytes + size_t(index + 1) * sizeof(GpuQuantizedNode), &packed, sizeof(packed));
+    }
+    return STATUS_OK;
+}
+
+// tbvh_write_layout and tbvh_write_layout_as: the layout in `format` (LayoutFormat bits).
+static uint32_t writeLayout(const uint32_t* triangleFlags, uint32_t maxLeafPrimitives, uint32_t format)
 {
     releaseLayout();
     errorDetail = 0;
+    if ((format & ~uint32_t(LAYOUT_INDEXED_TRIANGLES | LAYOUT_QUANTIZED_NODES)) != 0) return STATUS_BAD_FORMAT;
     if (!current.bvh) return STATUS_NOTHING_BUILT;
     if (maxLeafPrimitives < 1 || maxLeafPrimitives > MAX_LEAF_PRIMITIVES) return STATUS_BAD_LEAF_LIMIT;
     const tinybvh::BVH& bvh = *current.bvh;
@@ -629,13 +867,20 @@ EXPORT uint32_t tbvh_write_layout(const uint32_t* triangleFlags, uint32_t maxLea
     size_t nodeBytes = 0;
     size_t parentBytes = 0;
     size_t triangleBytes = 0;
+    const bool indexed = (format & LAYOUT_INDEXED_TRIANGLES) != 0;
     if (!arrayBytes(maxNodes, sizeof(GpuNode), nodeBytes) || !arrayBytes(maxNodes, sizeof(uint32_t), parentBytes) ||
-        !arrayBytes(triangleCount, sizeof(GpuTriangle), triangleBytes)) {
+        !arrayBytes(triangleCount, indexed ? sizeof(GpuIndexedTriangle) : sizeof(GpuTriangle), triangleBytes)) {
         return STATUS_TOO_LARGE;
     }
+    layout.format = format;
     layout.nodes = static_cast<GpuNode*>(malloc(nodeBytes));
     layout.parents = static_cast<uint32_t*>(malloc(parentBytes));
-    layout.triangles = static_cast<GpuTriangle*>(malloc(triangleBytes));
+    // Only the triangles of the format asked for: indexed, the 48-byte records are never allocated.
+    if (indexed) {
+        layout.indexedTriangles = static_cast<GpuIndexedTriangle*>(malloc(triangleBytes));
+    } else {
+        layout.triangles = static_cast<GpuTriangle*>(malloc(triangleBytes));
+    }
     // Scratch: which triangles the order has listed, which tinybvh nodes the walk has
     // reached, and which positions a leaf covers.
     uint8_t* const seenTriangles = static_cast<uint8_t*>(calloc(triangleCount, 1));
@@ -643,7 +888,7 @@ EXPORT uint32_t tbvh_write_layout(const uint32_t* triangleFlags, uint32_t maxLea
     uint8_t* const coveredPositions = static_cast<uint8_t*>(calloc(triangleCount, 1));
 
     uint32_t status = STATUS_OK;
-    if (!layout.nodes || !layout.parents || !layout.triangles || !seenTriangles || !seenTinyNodes || !coveredPositions) {
+    if (!layout.nodes || !layout.parents || (!layout.triangles && !layout.indexedTriangles) || !seenTriangles || !seenTinyNodes || !coveredPositions) {
         status = STATUS_OUT_OF_MEMORY;
     } else if (!isPermutation(bvh.primIdx, triangleCount, seenTriangles)) {
         // Checked first: writing a leaf looks up each original triangle's vertices.
@@ -660,11 +905,48 @@ EXPORT uint32_t tbvh_write_layout(const uint32_t* triangleFlags, uint32_t maxLea
         return status;
     }
     writeInnerBoxes();
+    if (format & LAYOUT_QUANTIZED_NODES) {
+        // After the boxes and the mesh's box: the frame comes from the root's exact children.
+        status = packQuantizedNodes();
+        if (status != STATUS_OK) {
+            releaseLayout();
+            return status;
+        }
+    }
     return STATUS_OK;
 }
 
-// The layout's parts: nodeCount nodes of 64 bytes, triangleCount triangles of 48 bytes,
-// nodeCount parent indices, and six floats of mesh box.
+// Writes the last build's tree in the GPU layout. `triangleFlags` holds one
+// word per original triangle, or is null for all zeros. Leaves larger than
+// `maxLeafPrimitives` are cut in half until they fit. Returns a Status; on
+// success the tbvh_layout_* functions describe the result until tbvh_release
+// or the next build.
+EXPORT uint32_t tbvh_write_layout(const uint32_t* triangleFlags, uint32_t maxLeafPrimitives)
+{
+    return writeLayout(triangleFlags, maxLeafPrimitives, 0);
+}
+
+// tbvh_write_layout in other formats: `format` is a sum of LayoutFormat bits
+// (0 is tbvh_write_layout). The tree, the leaf boxes and every f32 box are the
+// same; LAYOUT_INDEXED_TRIANGLES writes 16-byte indexed triangles instead of the
+// records (the flags' bits 0-1 only: materials are the scene's), and
+// LAYOUT_QUANTIZED_NODES packs the nodes afterwards, in place, into the frame
+// slot and nodeCount 32-byte nodes.
+EXPORT uint32_t tbvh_write_layout_as(const uint32_t* triangleFlags, uint32_t maxLeafPrimitives, uint32_t format)
+{
+    return writeLayout(triangleFlags, maxLeafPrimitives, format);
+}
+
+// The format the last layout was written in (0 after tbvh_write_layout).
+EXPORT uint32_t tbvh_layout_format()
+{
+    return layout.format;
+}
+
+// The layout's parts: nodeCount nodes of 64 bytes (LAYOUT_QUANTIZED_NODES: the
+// frame slot then nodeCount nodes of 32 bytes), triangleCount triangles of 48
+// bytes (LAYOUT_INDEXED_TRIANGLES: 16), nodeCount parent indices, and six
+// floats of mesh box.
 EXPORT const GpuNode* tbvh_layout_nodes()
 {
     return layout.nodes;
@@ -675,9 +957,9 @@ EXPORT uint32_t tbvh_layout_node_count()
     return layout.nodeCount;
 }
 
-EXPORT const GpuTriangle* tbvh_layout_triangles()
+EXPORT const void* tbvh_layout_triangles()
 {
-    return layout.triangles;
+    return layout.indexedTriangles ? static_cast<const void*>(layout.indexedTriangles) : static_cast<const void*>(layout.triangles);
 }
 
 EXPORT const uint32_t* tbvh_layout_parents()

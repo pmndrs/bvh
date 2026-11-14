@@ -17,6 +17,7 @@ It uses tinybvh's default builder, which with SIMD is Bonsai (Ganestam et al., 2
   - The bytes are exactly what `src/trace/`'s `buildMeshBvhFromTopology` makes from `build`'s shape. A test checks it (`src/trace/mesh-bvh-tinybvh-layout.test.ts`).
   - As there, the boxes are recomputed from the triangles, not taken from tinybvh.
   - It is several times faster than doing the conversion in JavaScript. The JavaScript walks every node and triangle through typed arrays and is bound by memory traffic; the WASM packs each leaf's triangles and computes its box in one pass, with SIMD compares instead of branches.
+- `buildLayout(geometry, { triangleLeaves: 'indexed', nodeFormat: 'quantized' })` (either or both) writes the layout's other formats inside the WASM too (`tbvh_write_layout_as`, since 2026-11-14): 16-byte indexed triangles in place of the records, which are then never allocated (the leaf boxes still come from the corners as they are read), and the frame slot and 32-byte quantized nodes, packed in place after the `f32` boxes by `src/quantized-nodes.ts`'s rule in C. The bytes are exactly what `indexedFromRecords` and `quantizeNodes` make from the default layout (`src/tinybvh-formats.test.ts`, 11 meshes and 3 leaf sizes). `createTinyBvhBuilder({ formatsInWasm: false })`, or a `.wasm` without the export (checked by name at start-up), keeps the JavaScript conversions. On Sponza (`tools/tinybvh-formats.ts`, Windows, a loaded CPU, indicative): 0.89x the time per mesh; as one mesh of 5.7M triangles (a merged group's size) 0.82x, and the WASM memory's peak 1,315.8 to 1,140.4 MiB (the 48-byte records, 175 MiB).
 - `buildLayout(geometry, { builder: 'hploc' })` runs tinybvh's scalar `BuildHPLOC` instead (leaves of one triangle). It is slow, and is there only as the oracle for the GPU H-PLOC (B2).
 
 `tools/layout-identity.ts` rebuilds every mesh of Sponza and both Bistro scenes both ways and reports how many differ (it should be none):
@@ -43,16 +44,16 @@ pnpm bvh:wasm --check   # build, and fail unless it matches the committed .wasm
    - If that folder is missing it clones emsdk there and runs `emsdk install 6.0.13` and `emsdk activate 6.0.13` inside it, which downloads about 700 MB.
    - It never uses or touches any other Emscripten on the machine: it drops every `EM*` variable from the environment and sets its own config and cache, both inside `tools/emsdk/`.
 2. **Sources.** It downloads tinybvh's headers at commit `c9be3103cc9693b456b0a0353927c11cac7d710f` and checks each one's SHA-256.
-3. **Build.** It compiles `native/tinybvh-wasm.cpp` (our small C interface) with the flags listed, with a reason for each, in `BUILD_FLAGS`: `-O3`, no threads, and `-msimd128 -mavx`.
+3. **Build.** It compiles `native/tinybvh-wasm.cpp` (our small C interface) with the flags listed, with a reason for each, in `BUILD_FLAGS`: `-O3`, no threads, `-msimd128 -mavx`, and `-fmacro-prefix-map=.\=./ -fno-file-reproducible` (below).
    - Emscripten turns tinybvh's AVX code into WASM SIMD.
    - AVX turns on tinybvh's fast builders. Without it tinybvh falls back to its scalar reference builder, which is about 3 times slower on Sponza.
    - The build runs in a temporary folder with relative paths only, so no folder name ends up in the output.
 
 Needs: Node 24, git and network access. On Linux and macOS it also needs Python 3, because emsdk brings its own Python only on Windows.
 
-**Reproducibility.** The reference is the Linux build (SHA-256 `f2cf8c5c...47ed`); CI rebuilds it on ubuntu-latest and macos-latest and both give those exact bytes (`--check` passes, and each job uploads its rebuilt `.wasm` as an artifact).
+**Reproducibility.** Windows builds the same bytes as Linux and macOS since 2026-11-14, so `pnpm bvh:wasm` and `--check` work there too. CI rebuilds on ubuntu-latest and macos-latest (`--check`, and each job uploads its rebuilt `.wasm` as an artifact). The committed `.wasm` is 135,700 bytes, SHA-256 `0043b9e5...e8ad9`, built on Windows with `tbvh_write_layout_as`. Before that change, the Windows build with the two flags below reproduced the Linux-built reference (`f2cf8c5c...47ed`) byte for byte. That the flags leave a Linux or macOS build unchanged follows from what they do (no path there starts with `.\`), and has not been run there yet: CI's `--check` on the next push is the confirmation.
 
-A Windows build differs in exactly two bytes, in the data section: tinybvh puts `__FILE__` into its error messages, and clang spells the path of an included header `./tiny_bvh_base.h` on Linux and macOS but `.\tiny_bvh_base.h` on Windows (the `/` becomes `\`). Every other section, the code included, is identical (compared section by section on 2026-11-11). So a Windows `pnpm bvh:wasm --check` reports a different hash; that is expected, and it is not a sign of a different compiler or different code. Rebuild the committed file on Linux or macOS (or take the CI artifact), not on Windows. The `.wasm` committed before 2026-11-11 was built on Windows and had these two bytes.
+How Windows got there: tinybvh puts `__FILE__` into its error messages, and clang spells the path of an included header `./tiny_bvh_base.h` on Linux and macOS but `.\tiny_bvh_base.h` on Windows, so a Windows build used to differ in exactly two bytes of the data section. `-fmacro-prefix-map=.\=./` maps the Windows spelling to the Linux one (no Linux or macOS path starts with `.\`). A prefix map also turns on clang's `-ffile-reproducible`, which drops the `./` on every OS (`tiny_bvh_base.h`, and every string after it moves); `-fno-file-reproducible` turns it off again. The `.wasm` committed before 2026-11-11 was built on Windows without the flags and had the two bytes. Two Windows-only fixes in `native/build-wasm.ts` came with it: emsdk is started as `.\emsdk.bat` (cmd.exe skips the current folder when `NoDefaultCurrentDirectoryInExePath` is set), and the licence check and the module's licence comment read the licence files with LF line endings (a `core.autocrlf` checkout has CRLF).
 
 ### How the licences travel with the .wasm
 
@@ -95,6 +96,10 @@ The tracer's top level (ddgi-core's `trace/top-level-gpu.ts`, still in webgpu-dd
 
 **Handing words between threads.** Every word one climbing thread hands to another goes through atomics with a bounded wait, as in the B1a refit. A tree whose wait ran out is refused (`problem`), never used.
 
+**Indexed triangles** (`triangleLeaves: 'indexed'`, since 2026-11-14; before, it wrote records only and `createMeshLayoutBuilder` converted them after the readback). The emit pass takes a leaf's box from the triangle record at its sorted position, and has no binding left (8 storage buffers per stage) for the primitive boxes an indexed tree needs instead. So `lbvhLeafBoxes`, an extra dispatch before the emit in indexed batches only, writes each leaf's primitive box into the leaf's own child slot of its parent in the climb's scratch (the parent found as the climb finds it). The climb never writes or reads a leaf's slot (a leaf hands nothing over; its sibling's thread reads the leaf with `lbvhLeafChild`), so the slot is free, and the emit reads it through the scratch view it already binds. The box is the min and max over the same three corners in the same order, so the same bits: `bvh-lbvh` checks that every indexed tree is the records tree converted (`indexedFromRecords`), byte for byte, and the CPU twin (which stores leaves in their slots too) is unit-tested the same way. One batch of all of Sponza: 1,504.3 to 1,329.0 MiB (output triangles 263.0 to 87.7).
+
+**Gaps before meshes** (`triangleLeading`, both GPU builders): per mesh, output triangles left free before its own, so a scene that adopts the batch's buffers can write what an indexed scene keeps there (each mesh's 16-byte header, a merged group's side tables). The mesh table's word 11 (`outTriangleStart`) is where the mesh's triangles go; every other triangle-indexed buffer is unchanged. `SceneTrees` asks for it with `gpuTreeOutputs: 'adopt'` and indexed leaves.
+
 **Subgroup size.** Workgroup scans number threads in subgroup order (`src/gpu-workgroup-scan.ts`), so nothing depends on the subgroup size (Intel's UHD runs 8 or 16 wide) or the lane layout. The builder needs `subgroups`.
 
 **Fallback.** `src/mesh-builder.ts` (`createMeshLayoutBuilder`) picks a GPU builder when the device has subgroups and tinybvh (B0) otherwise. It also sends single meshes to tinybvh when they are too big for the device or the GPU refused them. The result says which builder made each tree.
@@ -130,6 +135,7 @@ The smallest subgroup size comes from `device.adapterInfo.subgroupMinSize`. If t
 
 - `mortonCodes`: `'cubic-30'` (B1's codes, the default) or `'tinybvh-63'` (tinybvh's 63-bit codes, two sort words).
 - `tieBreak`: `'pairs'` (the default) or `'tinybvh'`. On exactly equal merged areas tinybvh's rule chains the tree: 3000 identical triangles give depth 128, twice the tracer's stack. `'pairs'` pairs ties up and keeps the tree balanced.
+- `quantizeOnEmit` (default false; needs `nodeFormat: 'quantized'`): the emit pass writes the quantized nodes itself instead of `f32` nodes that `finish` then packs with the quantize pass ([compressed-nodes.md](compressed-nodes.md)). Each thread of `hplocEmit` derives its mesh's frame from the root's two children (the climb is done, so their boxes are known) by the quantize pass's rule (`QUANTIZE_WGSL`: the union of the non-empty children's non-empty axes, `bvhqAxisFrame`, then `bvhqAxisWord` with the margin per child), so every frame and node is the pass's word for word (the `bvh-hploc` page compares them, records and indexed, with a refused mesh in the batch). The output node buffer has a 32-byte slot per radix-tree node and per mesh: mesh `m`'s frame is at its `f32` node offset plus `m`, its root the slot after (`nodeOffset`), its parents where the `f32` build puts them (`parentOffset`); a refused mesh gets `nodeOffset: 0, nodeCount: 0`. The batch never holds 64-byte nodes and runs no quantize pass: on one Sponza batch the output nodes go from 350.6 to 175.3 MiB (the batch from 1,482.4 to 1,307.1 MiB). The buffer is not compacted (one slot per radix-tree node, where the pass packs only the kept nodes), which matters only to a caller that keeps the batch's buffers. The climbs still hand `f32` boxes over, as they must. `bvh-hploc-profile` times both ways on a real GPU (not run yet). The flag is `HplocParams.quantizedNodes`, word 12: word 11 (the old `unused`) is `writeParents` (`GpuHplocBatchOptions.parents`, BX.20), so the block grew from 48 to 64 bytes (words 13-15 unused; the record is 256 bytes apart either way). The two combine: with `parents: false` the read-back layouts find their parents from the decoded quantized nodes, and `bvh-hploc` checks that combination against the pass word for word too. In `SceneTrees`, `gpuQuantizeOnEmit` copies the emitted frame slot and nodes as they are, so `quantizeJobs: 'batched'` only packs the `f32` batches left (a deforming mesh's own).
 
 **The oracle.** `src/hploc-cpu.ts` is H-PLOC on the CPU, step for step, with the same options.
 
@@ -164,11 +170,13 @@ T is triangles and I is radix-tree inner nodes, `max(1, T - 1)` per mesh (so I i
 | climb scratch | 52 (3 words per I, a 9-word record and a cluster per T) | 76 (19 words per I) | scratch: handed-over words, records, clusters |
 | links (H-PLOC) / node info + rank (LBVH) | 28 (two scans, 2 children, 2 parents, tree order) | 16 | scratch |
 | **scratch** | **136** | **140** | |
-| output nodes | 64 per I | 64 | output |
+| output nodes | 64 per I (32 per I and per mesh with `quantizeOnEmit`) | 64 | output |
 | output triangle records | 48 | 48 | output |
 | output parents | 4 per I | 4 | output |
-| **outputs** | **116** | **116** | |
-| **total** | **252 + inputs** | **256 + inputs** | Sponza: 270.6 and 274.6 B/tri with its 18.5 of inputs |
+| **outputs** | **116** (84 with `quantizeOnEmit`) | **116** | |
+| **total** | **252 + inputs** (220 with `quantizeOnEmit`) | **256 + inputs** | Sponza: 270.6 and 274.6 B/tri with its 18.5 of inputs |
+
+With indexed triangles (16 bytes, not 48) every H-PLOC output and total above is 32 lower: outputs 84, or 52 with `quantizeOnEmit` too.
 
 **Predicted against measured.** One H-PLOC batch of all of Sponza: inputs 101.3 + scratch 745.6 + outputs 635.5 = **1,482.4 MiB** predicted (`hplocBatchBytes`, printed by the `scene-trees-sponza` page). `SceneTrees.memory.peak` measured **1,482.7 MiB** in every mode (`copy`, `adopt`, `copy-merged`). The 0.3 MiB difference is the scene's empty buffers and top level. The peak comes while the batch builds, before the scene's own buffers hold anything.
 

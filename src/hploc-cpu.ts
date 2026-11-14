@@ -91,6 +91,15 @@ export interface HplocOptions extends GpuBuildOptions {
     readonly mortonCodes?: HplocMortonCodes;
     /** Default `'pairs'`. */
     readonly tieBreak?: HplocTieBreak;
+    /**
+     * GPU builder only, with `nodeFormat: 'quantized'`: the emit pass writes
+     * each mesh's frame slot and 32-byte quantized nodes itself, so the batch
+     * never holds 64-byte `f32` nodes and no quantize pass runs (a batch's
+     * output nodes take 32 bytes per node and 32 per mesh instead of 64 per
+     * node). The words are the quantize pass's, bit for bit. Default false:
+     * `f32` nodes, then the quantize pass. The CPU twin ignores it.
+     */
+    readonly quantizeOnEmit?: boolean;
 }
 
 /**

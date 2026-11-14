@@ -126,7 +126,9 @@ export function countedWalkWgsl(walk: string, kind: 'closest' | 'any', rayMasks:
         `fn ${name}Counted(${parameters}) -> BvhWalkCounts {\n    var counts = BvhWalkCounts();\n    var hitInThisInstance = false;`,
     );
     text = replaceAnchor(text, '    loop {\n        let count = current >> BVH_REF_COUNT_SHIFT;', '    loop {\n        counts.steps += 1u;\n        let count = current >> BVH_REF_COUNT_SHIFT;');
-    text = replaceAnchor(text, 'node = bvhLoadMeshNode(instance.rootNodeOffset + index);', 'node = bvhLoadMeshNode(instance.rootNodeOffset + index);\n                counts.meshNodes += 1u;');
+    // The folded decode (quantizedDecode: 'folded') loads mesh nodes with bvhLoadMeshNodeFolded.
+    const meshLoad = walk.includes('node = bvhLoadMeshNodeFolded(') ? 'node = bvhLoadMeshNodeFolded(instance.rootNodeOffset + index);' : 'node = bvhLoadMeshNode(instance.rootNodeOffset + index);';
+    text = replaceAnchor(text, meshLoad, `${meshLoad}\n                counts.meshNodes += 1u;`);
     text = replaceAnchor(text, 'node = bvhLoadTopLevelNode(firstTopLevelNode, index);', 'node = bvhLoadTopLevelNode(firstTopLevelNode, index);\n                counts.topLevelNodes += 1u;');
     text = replaceAnchor(text, 'stack[stackSize] = BVH_REF_INSTANCE_MARKER;', 'stack[stackSize] = BVH_REF_INSTANCE_MARKER;\n                counts.instanceEntries += 1u;\n                hitInThisInstance = false;');
     text = replaceAnchor(text, 'let triangle = bvhLoadTriangle(slot, meshVertexBase);', 'let triangle = bvhLoadTriangle(slot, meshVertexBase);\n                counts.triangleTests += 1u;');

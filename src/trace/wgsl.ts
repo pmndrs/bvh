@@ -509,6 +509,125 @@ fn bvhIntersectWatertight(triangle: BvhTriangle, setup: BvhRaySetup, tMin: f32, 
 ${TRIANGLE_HELPERS_WGSL}
 `;
 
+/** The walk's inner-node step: both children's boxes by the slab test (every node format; the default). */
+const EXACT_NODE_TEST_WGSL = `            var node: BvhNode;
+            if (insideInstance) {
+                node = bvhLoadMeshNode(instance.rootNodeOffset + index);
+            } else {
+                node = bvhLoadTopLevelNode(firstTopLevelNode, index);
+            }
+
+            // Only a tree with a single primitive has an empty child, and it is the right one.
+            let leftEntry = bvhBoxEntry(node.leftMin, node.leftMax, setup, ray.tMin, farthest);
+            var rightEntry = BVH_BOX_MISS;
+            if (node.rightIndex != BVH_EMPTY_CHILD) {
+                rightEntry = bvhBoxEntry(node.rightMin, node.rightMax, setup, ray.tMin, farthest);
+            }
+`;
+
+/**
+ * The inner-node step with `quantizedDecode: 'folded'` (quantized nodes only):
+ * a mesh node's children come back from `bvhLoadMeshNodeFolded` as the ray's
+ * distances to their planes (near sides where the box's min is, far sides
+ * where its max is), so only the interval test is left. Top-level nodes are
+ * `f32` and keep the slab test.
+ */
+const FOLDED_NODE_TEST_WGSL = `            var node: BvhNode;
+            var leftEntry: f32;
+            var rightEntry = BVH_BOX_MISS;
+            // Only a tree with a single primitive has an empty child, and it is the right one.
+            if (insideInstance) {
+                node = bvhLoadMeshNodeFolded(instance.rootNodeOffset + index);
+                leftEntry = bvhFoldedEntry(node.leftMin, node.leftMax, ray.tMin, farthest);
+                if (node.rightIndex != BVH_EMPTY_CHILD) {
+                    rightEntry = bvhFoldedEntry(node.rightMin, node.rightMax, ray.tMin, farthest);
+                }
+            } else {
+                node = bvhLoadTopLevelNode(firstTopLevelNode, index);
+                leftEntry = bvhBoxEntry(node.leftMin, node.leftMax, setup, ray.tMin, farthest);
+                if (node.rightIndex != BVH_EMPTY_CHILD) {
+                    rightEntry = bvhBoxEntry(node.rightMin, node.rightMax, setup, ray.tMin, farthest);
+                }
+            }
+`;
+
+/**
+ * The folded decode's loaders (`quantizedDecode: 'folded'`,
+ * docs/internals/design/compressed-nodes.md, question 6), added beside the
+ * quantized loaders (which the queries keep: they test boxes, not rays).
+ *
+ * On instance entry, per axis: `scale = step * invDir` (exact: the step is a
+ * power of two) and `offset = (origin - rayOrigin) * invDir`. A plane `q` is
+ * then at `t = fma(q, scale, offset)`: one conversion and one FMA instead of
+ * the decode's FMA, a subtraction and a product. The decoded plane is an
+ * exact `f32`, but `offset` is rounded twice, an error of up to about
+ * `2u * |offset|` (u = 2^-24) that does not shrink with `t` (the frame origin
+ * can lie a mesh's width from the ray's origin while the plane is next to it),
+ * so the relative exit padding of the slab test does not cover it. Each
+ * near side starts from `offset - pad` and each far side from
+ * `offset + pad`, with `pad = |offset| * 2^-21` (8u, about three times the
+ * bound with the rounding of the pad and of an unfused `fma`); the relative
+ * part (the FMA's own rounding) keeps `BVH_BOX_EXIT_PADDING`. So a folded box
+ * holds the exact box's interval, a little wider: more visits at worst,
+ * never a lost hit. The pad is capped so an overflowing `offset` (a direction
+ * component near `BVH_MIN_DIRECTION` and geometry far away) never makes
+ * `inf - inf`. With a negative `invDir` the max plane is the near side, so
+ * the two planes swap per axis (`bvhFoldFlip`). An empty axis word (both
+ * planes 65535) stays a zero-width slab at the grid's top, as decoded.
+ */
+const FOLDED_NODE_LOADERS_WGSL = /* wgsl */ `
+// 2^-21: the folded decode's pad, a fraction of |offset| (see quantizedDecode).
+const BVH_FOLD_PAD: f32 = 4.76837158203125e-7;
+const BVH_FOLD_PAD_MAX: f32 = 1.0e38;
+
+var<private> bvhFoldScale: vec3f;
+var<private> bvhFoldNear: vec3f;
+var<private> bvhFoldFar: vec3f;
+var<private> bvhFoldFlip: vec3<bool>;
+
+fn bvhEnterMeshNodesFolded(rootNodeOffset: u32, setup: BvhRaySetup) {
+    bvhEnterMeshNodes(rootNodeOffset);
+    let offset = (bvhMeshFrameOrigin - setup.origin) * setup.inverseDirection;
+    let pad = min(abs(offset) * BVH_FOLD_PAD, vec3f(BVH_FOLD_PAD_MAX));
+    bvhFoldScale = bvhMeshFrameStep * setup.inverseDirection;
+    bvhFoldNear = offset - pad;
+    bvhFoldFar = offset + pad;
+    bvhFoldFlip = setup.inverseDirection < vec3f(0.0);
+}
+
+// The ray's distances to a child's near planes (min planes, max where the direction is negative).
+fn bvhFoldNearSides(planes: vec3u) -> vec3f {
+    let q = select(planes & vec3u(0xffffu), planes >> vec3u(16u), bvhFoldFlip);
+    return fma(vec3f(q), bvhFoldScale, bvhFoldNear);
+}
+
+fn bvhFoldFarSides(planes: vec3u) -> vec3f {
+    let q = select(planes >> vec3u(16u), planes & vec3u(0xffffu), bvhFoldFlip);
+    return fma(vec3f(q), bvhFoldScale, bvhFoldFar);
+}
+
+// A node whose child boxes are distances along the ray: min the near sides, max the far sides.
+fn bvhLoadMeshNodeFolded(nodeIndex: u32) -> BvhNode {
+    let base = nodeIndex * BVH_QUANTIZED_VEC4_PER_NODE;
+    let left = bvhTraceNodes[base];
+    let right = bvhTraceNodes[base + 1u];
+    let rightEmpty = right.w == BVH_EMPTY_CHILD;
+    return BvhNode(
+        bvhFoldNearSides(left.xyz), left.w & BVH_REF_INDEX_MASK,
+        bvhFoldFarSides(left.xyz), select(right.w & BVH_REF_INDEX_MASK, BVH_EMPTY_CHILD, rightEmpty),
+        bvhFoldNearSides(right.xyz), left.w >> BVH_REF_COUNT_SHIFT,
+        bvhFoldFarSides(right.xyz), select(right.w >> BVH_REF_COUNT_SHIFT, 0u, rightEmpty),
+    );
+}
+
+// bvhBoxEntry's interval test on distances already taken: near and far sides per axis.
+fn bvhFoldedEntry(nearSides: vec3f, farSides: vec3f, tMin: f32, tMax: f32) -> f32 {
+    let tEnter = max(max(nearSides.x, max(nearSides.y, nearSides.z)), tMin);
+    let tExit = min(min(farSides.x, min(farSides.y, farSides.z)) * BVH_BOX_EXIT_PADDING, tMax);
+    return select(BVH_BOX_MISS, tEnter, tEnter <= tExit);
+}
+`;
+
 /**
  * The walk, written once and generated as two functions:
  *
@@ -525,8 +644,10 @@ ${TRIANGLE_HELPERS_WGSL}
  * On the bench scenes far-first made any-hit much faster than near-first, with
  * every answer unchanged (numbers: PROGRESS, T1.3, and bench/results/trace.csv).
  * `anyHitOrder` compiles another order into the same walk (see {@link AnyHitOrder}).
+ * `folded` (`quantizedDecode: 'folded'`) swaps the inner-node step and the
+ * instance entry for {@link FOLDED_NODE_TEST_WGSL}'s; the rest is the same text.
  */
-function walkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrder: AnyHitOrder = 'far'): string {
+function walkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrder: AnyHitOrder = 'far', folded = false): string {
     const closest = kind === 'closest';
     // Which child a walk enters first when both are hit (the other is pushed).
     const leftFirst =
@@ -595,20 +716,7 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
 
         if (count == 0u) {
             // An inner node: test both children, then go to one and push the other.
-            var node: BvhNode;
-            if (insideInstance) {
-                node = bvhLoadMeshNode(instance.rootNodeOffset + index);
-            } else {
-                node = bvhLoadTopLevelNode(firstTopLevelNode, index);
-            }
-
-            // Only a tree with a single primitive has an empty child, and it is the right one.
-            let leftEntry = bvhBoxEntry(node.leftMin, node.leftMax, setup, ray.tMin, farthest);
-            var rightEntry = BVH_BOX_MISS;
-            if (node.rightIndex != BVH_EMPTY_CHILD) {
-                rightEntry = bvhBoxEntry(node.rightMin, node.rightMax, setup, ray.tMin, farthest);
-            }
-            let leftReference = bvhMakeReference(node.leftIndex, node.leftCount);
+${folded ? FOLDED_NODE_TEST_WGSL : EXACT_NODE_TEST_WGSL}            let leftReference = bvhMakeReference(node.leftIndex, node.leftCount);
             let rightReference = bvhMakeReference(node.rightIndex, node.rightCount);
             let hitLeft = leftEntry < BVH_BOX_MISS;
             let hitRight = rightEntry < BVH_BOX_MISS;
@@ -648,7 +756,7 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
                     bvhTransformDirection(instance, ray.direction),
                 );
                 meshVertexBase = bvhMeshVertexBase(instance.triangleOffset);
-                bvhEnterMeshNodes(instance.rootNodeOffset);
+                ${folded ? 'bvhEnterMeshNodesFolded(instance.rootNodeOffset, setup);' : 'bvhEnterMeshNodes(instance.rootNodeOffset);'}
                 stack[stackSize] = BVH_REF_INSTANCE_MARKER;
                 stackSize += 1u;
                 insideInstance = true;
@@ -942,6 +1050,13 @@ export interface TraceModuleOptions {
      */
     readonly anyHitOrder?: AnyHitOrder;
     /**
+     * How the ray walk decodes quantized mesh nodes, compiled in like
+     * `rayMasks` (see {@link QuantizedDecode}). Default `'exact'`: the walk's
+     * text is unchanged. `'folded'` needs `nodeFormat: 'quantized'` and an
+     * `anyHitOrder` other than `'larger'`.
+     */
+    readonly quantizedDecode?: QuantizedDecode;
+    /**
      * The spatial queries (query-wgsl.ts; docs/tracing/gpu-queries.mdx), compiled in
      * beside the walk: `bvhClosestPoint(point, maxDistance) -> BvhClosestHit`,
      * `bvhIntersectsSphere(center, radius)`, `bvhIntersectsBox(boxMin, boxMax)`
@@ -1002,6 +1117,23 @@ export interface TraceModuleOptions {
  */
 export type AnyHitOrder = 'far' | 'near' | 'larger';
 
+/**
+ * How the ray walk turns a quantized node's planes into distances along the
+ * ray (`TraceModuleOptions.quantizedDecode`; docs/internals/design/compressed-nodes.md,
+ * question 6). Both give the same hits; only the work per node changes.
+ *
+ * - `'exact'` (the default): each plane is decoded to its exact `f32`
+ *   (`origin + q * step`), then the slab test as for `f32` nodes.
+ * - `'folded'`: the frame is folded into the ray once per instance entered
+ *   (`step / direction` and `(origin - rayOrigin) / direction`), so a plane
+ *   is one `fma` from its distance. Its boxes are a few ulps wider (a pad
+ *   that covers the rounding of the fold), so it never loses a hit; ties at
+ *   equal `t` can name another triangle. The ray walk only: the spatial
+ *   queries and the shapecast test boxes, not rays, and keep the exact decode.
+ *   Not with `anyHitOrder: 'larger'`. A measured lever, off by default.
+ */
+export type QuantizedDecode = 'exact' | 'folded';
+
 const DEFAULT_TRACE_SLOT: BindingSlot = { group: 0, firstBinding: 0 };
 
 /**
@@ -1032,6 +1164,7 @@ export function traceModuleWgsl(options: TraceModuleOptions = {}): string {
     if (anyHitOrder !== 'far' && anyHitOrder !== 'near' && anyHitOrder !== 'larger') {
         throw new RangeError(`traceModuleWgsl: anyHitOrder must be 'far', 'near' or 'larger', got ${String(anyHitOrder)}`);
     }
+    const folded = checkQuantizedDecode(options.quantizedDecode, nodeFormat, anyHitOrder, 'traceModuleWgsl') === 'folded';
     return /* wgsl */ `${COMMON_WGSL}
 ${GEOMETRY_WGSL}
 // Nodes and triangles are read as plain vec4s, so every load is one 16-byte
@@ -1058,7 +1191,7 @@ const BVH_TRIANGLE_FLAG_FLIP_FRONT_FACE: u32 = ${TRIANGLE_FLAG_FLIP_FRONT_FACE}u
 // Instance flags bit 3: a merged mesh; the hit's instance is the triangle's padding word.
 const BVH_INSTANCE_FLAG_MERGED: u32 = ${INSTANCE_FLAG.merged}u;
 
-${quantized ? QUANTIZED_NODE_LOADERS_WGSL : F32_NODE_LOADERS_WGSL}
+${quantized ? QUANTIZED_NODE_LOADERS_WGSL : F32_NODE_LOADERS_WGSL}${folded ? FOLDED_NODE_LOADERS_WGSL : ''}
 
 ${indexed ? indexedLoadersWgsl(packed) : RECORD_LOADERS_WGSL}
 
@@ -1167,19 +1300,28 @@ fn bvhBoxEntry(boxMin: vec3f, boxMax: vec3f, setup: BvhRaySetup, tMin: f32, tMax
 
 ${rayMasks ? INSTANCE_MASK_WGSL : ''}
 ${anyHitOrder === 'larger' ? BOX_HALF_AREA_WGSL : ''}
-${walkWgsl('closest', rayMasks)}
-${walkWgsl('any', rayMasks, anyHitOrder)}
+${walkWgsl('closest', rayMasks, 'far', folded)}
+${walkWgsl('any', rayMasks, anyHitOrder, folded)}
 ${rayMasks ? MASKED_TRACE_WGSL : UNMASKED_TRACE_WGSL}
 ${triangleFilter ?? '// bvhTrianglePasses is supplied by the kernel.'}
-${queriesWgsl({ rayMasks, queries: options.queries ?? false, shapecast: options.shapecast })}${options.counters ? countersWgsl(rayMasks, anyHitOrder) : ''}`;
+${queriesWgsl({ rayMasks, queries: options.queries ?? false, shapecast: options.shapecast })}${options.counters ? countersWgsl(rayMasks, anyHitOrder, folded) : ''}`;
+}
+
+/** Checks `quantizedDecode`: `'folded'` needs quantized nodes, and has no box areas for `anyHitOrder: 'larger'`. */
+function checkQuantizedDecode(decode: QuantizedDecode | undefined, nodeFormat: NodeFormat, anyHitOrder: AnyHitOrder, where: string): QuantizedDecode {
+    if (decode === undefined || decode === 'exact') return 'exact';
+    if (decode !== 'folded') throw new RangeError(`${where}: quantizedDecode must be 'exact' or 'folded', got ${String(decode)}`);
+    if (nodeFormat !== 'quantized') throw new RangeError(`${where}: quantizedDecode: 'folded' needs nodeFormat: 'quantized' (f32 nodes have nothing to fold)`);
+    if (anyHitOrder === 'larger') throw new RangeError(`${where}: quantizedDecode: 'folded' can't be used with anyHitOrder: 'larger' (folded nodes carry distances, not boxes to compare)`);
+    return 'folded';
 }
 
 /** The counted walk's declarations (walk-counters.ts): cut from this module's own walk text, so they never drift from it. */
-function countersWgsl(rayMasks: boolean, anyHitOrder: AnyHitOrder): string {
+function countersWgsl(rayMasks: boolean, anyHitOrder: AnyHitOrder, folded: boolean): string {
     return `
 ${walkCountsTypesWgsl(rayMasks)}
-${countedWalkWgsl(walkWgsl('closest', rayMasks), 'closest', rayMasks)}
-${countedWalkWgsl(walkWgsl('any', rayMasks, anyHitOrder), 'any', rayMasks)}`;
+${countedWalkWgsl(walkWgsl('closest', rayMasks, 'far', folded), 'closest', rayMasks)}
+${countedWalkWgsl(walkWgsl('any', rayMasks, anyHitOrder, folded), 'any', rayMasks)}`;
 }
 
 /**
@@ -1460,6 +1602,8 @@ export interface BatchKernelOptions {
     readonly nodeFormat?: NodeFormat;
     /** The any-hit walk's child order (`TraceModuleOptions.anyHitOrder`). Default `'far'`. */
     readonly anyHitOrder?: AnyHitOrder;
+    /** How the walk decodes quantized nodes (`TraceModuleOptions.quantizedDecode`). Default `'exact'`. */
+    readonly quantizedDecode?: QuantizedDecode;
     /**
      * The counted walk (`TraceModuleOptions.counters`): each ray's result is a
      * `BvhWalkCounts` ({@link WALK_COUNTS_BYTES}, words in
@@ -1489,7 +1633,7 @@ export function batchKernelWgsl(mode: 'closest' | 'any', options: BatchKernelOpt
     rejectOldPositionalCall('batchKernelWgsl', options);
     const rayMasks = options.rayMasks ?? true;
     const counters = options.counters ?? false;
-    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat, anyHitOrder: options.anyHitOrder, counters })}
+    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat, anyHitOrder: options.anyHitOrder, quantizedDecode: options.quantizedDecode, counters })}
 ${batchEntryWgsl(mode, 1, rayMasks, options.hitNormal ?? true, counters)}`;
 }
 

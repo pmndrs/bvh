@@ -60,8 +60,15 @@ with `f32` nodes, both under the default 256 MiB cap (Apple M5).
 The GPU build is the biggest number. One H-PLOC batch of all of Sponza holds 1,482.4 MiB (inputs 101.3, scratch 745.6,
 outputs 635.5), and `SceneTrees.memory.peak` measured 1,482.7. The default [build-peak cap](/builders/fallbacks-and-limits#the-build-peak-cap)
 (256 MiB batches, one after another) takes the peak to 613.2 MiB with the default quantized nodes (711.0 with `f32`
-nodes), with the first trees no later (Apple M5, indicative). GPU batches still write 64-byte nodes and pack them on the
-way into storage, so the batches are the same size either way.
+nodes), with the first trees no later (Apple M5, indicative). By default GPU batches still write 64-byte nodes and pack
+them on the way into storage, so the batches are the same size either way.
+
+`gpuQuantizeOnEmit: true` (off by default) has H-PLOC write the quantized nodes itself, in its emit pass: a batch holds
+32-byte nodes and a frame slot per mesh instead of 64-byte nodes, and no quantize pass runs as the trees are copied in.
+The trees are the same bit for bit. One batch of all of Sponza goes from 1,482.4 to 1,307.1 MiB (output nodes 350.6 to
+175.3), and from 1,307.1 to 1,131.8 with indexed leaves; under a cap each batch is smaller by the same 32 bytes per
+node. Deforming meshes' builds stay `f32` (their refit needs the copy). Predicted from the allocation code; not yet
+timed on a GPU.
 
 ## Other memory
 
@@ -73,8 +80,21 @@ way into storage, so the batches are the same size either way.
   none of it.
 - **Merged static instances** (on by default, for instances added with `static: true`): the same resident bytes as
   instanced, plus a CPU plan of 161.6 MiB on Sponza while the merged mesh builds.
+- **CPU trees (`CpuMeshBvh`):** 64-byte nodes and 48-byte triangle records by default, each record a copy of its
+  corners. `corners: 'positions'` keeps 16-byte indexed triangles and reads corners from the source's own positions,
+  with no copy: 32 bytes less per triangle (175.3 MiB less for all of Sponza's 5.74M triangles; the furnished room's
+  tree 21.0 to 12.4 MB). Same answers bit for bit; query times level with records within a loaded CPU's noise, refits
+  0.76-0.95x the time (`bench/cpu-corners.ts`, indicative). The source must stay alive and unchanged between refits.
 - **`gpuTreeOutputs: 'adopt'`:** no copy at load, but the node buffer keeps one node per triangle: 613.6 MiB settled on
-  Sponza against 470.0 (both `f32`), unless `trimWhenRefined` packs it afterwards (448.1). It needs `nodeFormat: 'f32'`.
+  Sponza against 470.0 (both `f32`), unless `trimWhenRefined` packs it afterwards (448.1). Every format adopts since 2026-11-14: a quantized scene adopts batches whose nodes
+  H-PLOC wrote quantized (`'adopt'` turns on `gpuQuantizeOnEmit`), and an indexed scene's builds leave each mesh's
+  16-byte header free before its triangles (132 headers, 2.1 KiB on Sponza), which the scene writes at the adoption. Not
+  measured on Sponza yet (`scene-trees-sponza` variants `quantized-adopt` and `quantized-indexed-adopt`).
+- **The app's own positions** (`positionsBuffer`, indexed scenes): the walk binds the app's positions buffer instead of
+  the scene's copy, which is then never made: 45.2 MiB less on Sponza (`vec4`; 33.9 packed). The app keeps every mesh's
+  vertices as `f32` in that one buffer, in the walk's stride, each mesh from the `vertexBase` it gives `addMesh`; the
+  scene then doesn't weld (the welded copy was 2.96M vertices against the app's 3.11M), merge static instances or take
+  deforming meshes. See [Scene trees](/scenes/scene-trees).
 
 ## Levers
 
@@ -84,6 +104,8 @@ way into storage, so the batches are the same size either way.
 | Quantized nodes (`nodeFormat: 'quantized'`) | **on** | 92.6 MiB resident | closest 1.02-1.22x, any 0.98-1.03x; M5 0.93-0.97x. SAH +0.01-0.66% |
 | Indexed leaves (`triangleLeaves: 'indexed'`) | off | 130 MiB resident (141 with packed positions) | 0.92-0.97x (`vec4`), 0.82-0.95x (packed); M5 0.83-0.99x, 0.75-0.92x |
 | Both | quantized only | 222.6 MiB resident against `f32` records | not measured together yet |
+| Quantized nodes from H-PLOC's emit (`gpuQuantizeOnEmit`) | off | 175.3 MiB of an uncapped batch; 32 bytes per node of any batch | none on traces (same trees); build time not measured yet |
+| The app's positions (`positionsBuffer`, indexed only) | off | 45.2 MiB resident (`vec4`) | none (the same walk) |
 | Compact hit records (`hitNormal: false`) | off | 16 bytes per ray in a batch | the 40-byte record costs 6-12% (0.88-0.94x); M5 0.96-1.15x |
 | Smaller leaves (`maxLeafPrimitives`) | 8 | nothing: tinybvh picks about 1.9 per leaf anyway (8 against 4 saved 0.5 MiB) | |
 

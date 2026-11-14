@@ -63,6 +63,8 @@ interface Format {
      * Absent: neither is given one, so the page checks that the two defaults agree (both quantized).
      */
     readonly nodeFormat?: 'f32' | 'quantized';
+    /** The module's quantized decode (quantizedDecode); default exact. */
+    readonly quantizedDecode?: 'exact' | 'folded';
 }
 const FORMATS: readonly Format[] = [
     { name: 'records', triangleLeaves: 'records', nodeFormat: 'f32' },
@@ -71,6 +73,8 @@ const FORMATS: readonly Format[] = [
     { name: 'defaults', triangleLeaves: 'records' },
     { name: 'quantized', triangleLeaves: 'records', nodeFormat: 'quantized' },
     { name: 'quantized-indexed', triangleLeaves: 'indexed', nodeFormat: 'quantized' },
+    { name: 'folded', triangleLeaves: 'records', nodeFormat: 'quantized', quantizedDecode: 'folded' },
+    { name: 'folded-indexed-packed', triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'quantized', quantizedDecode: 'folded' },
 ];
 
 const KERNEL_WGSL = /* wgsl */ `
@@ -209,7 +213,7 @@ await runGpuTest(async ({ device, log }) => {
     const references = [];
     for (const oracleCase of oracleCases) references.push(await computeReferenceAnswersYielding(oracleCase));
     for (const format of FORMATS) {
-        const module = traceModuleWgsl({ traceSlot: { group: 0, firstBinding: 0 }, triangleFilter: null, triangleLeaves: format.triangleLeaves, positionLayout: format.positionLayout, nodeFormat: format.nodeFormat });
+        const module = traceModuleWgsl({ traceSlot: { group: 0, firstBinding: 0 }, triangleFilter: null, triangleLeaves: format.triangleLeaves, positionLayout: format.positionLayout, nodeFormat: format.nodeFormat, quantizedDecode: format.quantizedDecode });
         const pipeline = await device.createComputePipelineAsync({
             label: `trace-inline ${format.name}`,
             layout: 'auto',

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { checkGpuLayout, treeSahCost } from './layout-check.ts';
 import { buildLbvhOnCpu, mortonCode, mortonCodes, stableSortByKey, triangleBoxes } from './lbvh-cpu.ts';
 import { createTinyBvhBuilder } from './tinybvh.ts';
+import { indexedFromRecords } from './indexed-leaves.ts';
 import type { MeshInput } from './mesh-input.ts';
 
 /** A random triangle soup, `x, y, z` per vertex, three vertices per triangle (deterministic). */
@@ -64,6 +65,28 @@ describe('LBVH on the CPU (the GPU builder written plainly)', () => {
             for (const maxLeafPrimitives of [1, 4, 8]) {
                 const layout = buildLbvhOnCpu(geometry, { maxLeafPrimitives });
                 expect(checkGpuLayout(layout, geometry, { maxLeafPrimitives }), `${name}, leaves of ${maxLeafPrimitives}`).toEqual([]);
+            }
+        }
+    });
+
+    it('writes indexed triangles as the records tree converted (what the GPU LBVH must match)', () => {
+        // The twin stores every leaf's box in its parent's slot, as lbvhLeafBoxes does on the GPU for indexed builds.
+        const cases: MeshInput[] = [
+            { positions: randomSoup(1, 11) },
+            { positions: randomSoup(2, 12) },
+            { positions: randomSoup(2500, 13) },
+            grid(30),
+            { positions: randomSoup(64, 14), triangleFlags: Uint32Array.from({ length: 64 }, (_, index) => index % 2) },
+        ];
+        for (const geometry of cases) {
+            for (const maxLeafPrimitives of [1, 8]) {
+                const records = buildLbvhOnCpu(geometry, { maxLeafPrimitives });
+                const indexed = buildLbvhOnCpu(geometry, { maxLeafPrimitives, triangleLeaves: 'indexed' });
+                expect(indexed.triangleLeaves).toBe('indexed');
+                expect(new Uint8Array(indexed.nodes)).toEqual(new Uint8Array(records.nodes));
+                expect(indexed.parents).toEqual(records.parents);
+                expect(new Uint8Array(indexed.triangles)).toEqual(new Uint8Array(indexedFromRecords(records, geometry).triangles));
+                expect(checkGpuLayout(indexed, geometry, { maxLeafPrimitives })).toEqual([]);
             }
         }
     });

@@ -63,6 +63,9 @@ $env:BVH_PAGE_QUERY = ''
 ### 2b'. Quantized nodes and indexed leaves together (section 8 of the page)
 The same pages time indexed leaves on quantized nodes against quantized records, the pairing the `triangleLeaves` default waits on (HANDOFF, Open). Rows `surface-rays/paired/quantized_indexed_over_quantized_records/...` and `quantized_indexed_packed_over_quantized_records/...` (above 1: indexed is faster), bytes in `surface-rays/combined_leaves/...`. The page fails if an answer differs from quantized records other than a tie. `skip=combined` leaves it out. `tools/windows-clean-run.ps1` runs it with the rest. **Dennis decides** the default from these ratios and the bytes.
 
+### 2b''. The folded decode of quantized nodes (section 9 of the page)
+The same pages time `quantizedDecode: 'folded'` against the exact decode on the quantized records scenes (and the quantized indexed ones when section 8 runs): rows `surface-rays/paired/folded_over_exact/...` and `folded_indexed_over_exact_indexed/...` (above 1: folded is faster). The page fails if an answer differs from the exact walk's other than a tie. `skip=folded` leaves it out. It has passed `trace-oracle` and `trace-inline` on SwiftShader only. **Dennis decides** whether it becomes the default.
+
 ### 2c. The 40-byte hit record
 Same pages as 2a (leave `skip=hit-record` out). Rows `surface-rays/paired/hit_record_40_over_24/...`; a ratio above 1 means the 40-byte record was faster. M5: 0.96-1.15, medians 1.02-1.11 ("It has not been measured on the RTX 3060 or on Intel", `docs/internals/design/memory.md`, "The 40-byte hit record"). No threshold is written: **Dennis decides.**
 
@@ -75,6 +78,13 @@ pnpm test:gpu:page scene-trees-sponza --gpu nvidia
 ```
 Manual page, 900 s limit. It reports `SceneTrees` memory (GPU-tree state, peak, settled) and times for copy, adopt and merged modes, uncapped (`Infinity`), the default 256 MiB cap and caps of 512, 256 and 128 MiB, and the quantized and indexed variants. Gate: the GPU walk matches the CPU reference; a capped row's peak is gated at storage plus one batch. M5 references: default cap peak 711 MiB, settled 458.6; quantized 360.8 (peak 613.2); indexed 327.1 (peak 580); both 230.0 (peak 483); uncapped peak 1,482.6 (`docs/internals/design/compressed-nodes.md`, `docs/internals/design/bvh-builders.md`).
 - Rule written: "Default: 256 MiB (Dennis's decision)" (`docs/internals/design/bvh-builders.md`), weighed against first trees arriving later (M5: 166 against 171 ms, no cost now). Whether it holds on D3D12: **Dennis decides** (no threshold written). Also compare tinybvh arrival times (quantized 439 ms against 351 on the M5).
+- Levers built 2026-11-14, not in the default variant list (off by default; correctness passed on SwiftShader only). Run them by name:
+  ```
+  $env:BVH_PAGE_QUERY = 'variants=quantized-copy,quantized-copy-emit,quantized-copy-default,quantized-copy-emit-default,quantized-adopt,quantized-indexed-copy,quantized-indexed-adopt'
+  pnpm test:gpu:page scene-trees-sponza --gpu nvidia --json sponza-trees-levers.json
+  $env:BVH_PAGE_QUERY = ''
+  ```
+  `-emit` is `gpuQuantizeOnEmit` (H-PLOC writes the quantized nodes; predicted one uncapped batch 1,482.4 to 1,307.1 MiB): compare `peak`, `firstTreesMs` and `gpuBuildMs` with the same name without `-emit`. `quantized-adopt` and `quantized-indexed-adopt` are the adopt lever in quantized and indexed scenes (adoption implies the emit): compare `peak` and `settled` with the `-copy` rows. Also `bvh-hploc-profile` (manual) times the quantize pass against the emit. **Dennis decides** whether any of them becomes a default.
 
 ## 4. Appending rows to `bench/results/trace.csv`
 
@@ -85,7 +95,7 @@ Columns: `date,commit,device,browser,scene,metric,value`. Without `--append` it 
 
 ## 5. Windows caveats and bench practice
 
-- **`.wasm`:** the committed `.wasm` is the Linux build, the reference CI reproduces. A Windows build differs in exactly 2 bytes: tinybvh's `__FILE__` spells an included header `.\tiny_bvh_base.h` on Windows and `./tiny_bvh_base.h` on Linux and macOS (`docs/internals/design/bvh-builders.md`). Every other section is identical, so do not commit a Windows-built `.wasm`.
+- **`.wasm`:** since 2026-11-14 a Windows build is byte for byte the Linux and macOS one: `-fmacro-prefix-map=.\=./` with `-fno-file-reproducible` gives tinybvh's `__FILE__` the Linux spelling (`./tiny_bvh_base.h`, not `.\tiny_bvh_base.h`), so `pnpm bvh:wasm --check` passes here and a Windows-built `.wasm` may be committed (`docs/internals/design/bvh-builders.md`, "Reproducibility"). `pnpm bvh:wasm` installs the pinned emsdk into `tools/emsdk` (gitignored, about 700 MB) on first use.
 - **D3D12 compile times:** the walks and kernels compile through Dawn to D3D12. Note the time to the first result of each page on a cold run; the pose pass's compile cost on Windows is unmeasured (HANDOFF). `docs/internals/DIVERGENCES.md` row L9 records one D3D12 trap: an atomic load is a read-modify-write there, so many threads reading one word serialise. The `webgpu-tsl-compile` skill covers slow first frames.
 - **Bench lock, loaded GPU:** `docs/internals/design/bvh-package-split.md` (Rules): "Medians of several runs, on the RTX 3060 with the GPU loaded (the hardware rules in `ddgi-hardware-target`)". The M5 numbers were taken "under the radiance-cache lane's bench lock" (HANDOFF). The lock's own rules are not written in this repository (`ddgi-hardware-target` is not here), so: run one bench page at a time and nothing else on the GPU; no `pnpm build` or other work in parallel (the one suspect in the unexplained `scene-trees-mid-swap` failure); same power mode every run; three runs per page, then the median of the paired medians. The Intel UHD is for correctness only, with no speed target (`README.md`). `loaded-timing.ts` submits dispatches back to back so the GPU runs at its loaded clock.
 - **Leftovers:** if the runner was killed with `taskkill`, delete the leftover `bvh-gpu-chrome-*` folder in the temp directory and end any headless `chrome.exe` (`tests/gpu/RUNNER.md`).

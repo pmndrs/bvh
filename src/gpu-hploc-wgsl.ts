@@ -100,6 +100,7 @@
 import { GPU_LAYOUT_MAX_LEAF_PRIMITIVES } from './gpu-layout.ts';
 import { HPLOC_MAX_CLUSTERS, HPLOC_MERGE_THRESHOLD, HPLOC_SEARCH_RADIUS } from './hploc-cpu.ts';
 import { LBVH_STAT, LBVH_STATS_WORDS, LBVH_WORKGROUP_SIZE, lbvhKernelsWgsl } from './gpu-lbvh-wgsl.ts';
+import { QUANTIZE_WGSL } from './gpu-quantize.ts';
 
 export { HPLOC_MAX_CLUSTERS, HPLOC_MERGE_THRESHOLD, HPLOC_SEARCH_RADIUS };
 
@@ -149,7 +150,7 @@ export const HPLOC_MORTON = { 'cubic-30': 0, 'tinybvh-63': 1 } as const;
 export const HPLOC_TIE_BREAK = { pairs: 0, tinybvh: 1 } as const;
 
 /** Bytes of the uniform block (`HplocParams`). */
-export const HPLOC_PARAMS_BYTES = 48;
+export const HPLOC_PARAMS_BYTES = 64;
 
 /** Slots per lane for a device whose subgroups are at least `minSubgroupSize` wide. */
 export function hplocSlotsFor(minSubgroupSize: number): number {
@@ -180,6 +181,10 @@ struct HplocParams {
     leafRunsOffset: u32,       // where each made node's leaf triangles (then, scanned, their first position) start in hplocLinks
     scratchQuads: u32,        // hplocScratch's length in vec4s, which the clear fills
     writeParents: u32,         // 1: hplocEmit writes each node's parent (lbvhOutParents); 0: the batch has no parents output (P9)
+    quantizedNodes: u32,      // 1: hplocEmit writes each mesh's frame slot and 32-byte quantized nodes (quantizeOnEmit), 0: 64-byte f32 nodes
+    unused0: u32,
+    unused1: u32,
+    unused2: u32,
 }
 
 // Per sorted position: the split metric between it and the next, (high, low).
@@ -1039,6 +1044,69 @@ fn hplocMark(
 
 // ---- 7. The tracer's layout -----------------------------------------------------------
 
+// ---- Quantized nodes written by the emit (quantizeOnEmit; compressed-nodes.md) ----
+// The same frame and words as the quantize pass (gpu-quantize.ts, bvhqQuantize) makes
+// from the f32 nodes this emit would write: the frame from the union of the root's
+// non-empty children's non-empty axes, each child rounded outward with the margin.
+// Mesh m's frame goes to slot (its first kept node's scanned rank + m), its node i to
+// the slot i + 1 after that: one frame slot per mesh of the batch, before its nodes.
+${QUANTIZE_WGSL}
+
+const HPLOC_QUANTIZED_NODE_WORDS: u32 = 8u;
+
+// A mesh's frame, from its root's two children (a one-triangle mesh: the triangle, its right child empty).
+fn hplocMeshFrame(mesh: LbvhMesh, root: u32) -> array<BvhqAxis, 3> {
+    var lo = vec3f(3.0e38);
+    var hi = vec3f(-3.0e38);
+    for (var side = 0u; side < 2u; side += 1u) {
+        var box: LbvhBox;
+        if (mesh.triangleCount == 1u) {
+            if (side == 1u) {
+                continue;
+            }
+            box = lbvhPrimitiveBox(mesh, 0u);
+        } else {
+            box = hplocBoxOf(mesh, hplocLinks[hplocChildWord(mesh, root - mesh.triangleCount, side)]);
+        }
+        for (var axis = 0u; axis < 3u; axis += 1u) {
+            if (!bvhqEmptyAxis(box.lower[axis], box.upper[axis])) {
+                lo[axis] = min(lo[axis], box.lower[axis]);
+                hi[axis] = max(hi[axis], box.upper[axis]);
+            }
+        }
+    }
+    return array<BvhqAxis, 3>(bvhqAxisFrame(lo.x, hi.x), bvhqAxisFrame(lo.y, hi.y), bvhqAxisFrame(lo.z, hi.z));
+}
+
+fn hplocWriteFrame(slot: u32, axes: array<BvhqAxis, 3>) {
+    var frame = axes;
+    let at = slot * HPLOC_QUANTIZED_NODE_WORDS;
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+        let step = ldexp(1.0, frame[axis].exponent);
+        lbvhOutNodes[at + axis] = bitcast<u32>(frame[axis].base * step);
+        lbvhOutNodes[at + 4u + axis] = bitcast<u32>(step);
+    }
+    lbvhOutNodes[at + 3u] = 0u;
+    lbvhOutNodes[at + 7u] = 0u;
+}
+
+// One child of a quantized node: three axis words and the reference (index | count << 28).
+fn hplocWriteQuantizedChild(slot: u32, side: u32, lower: vec3f, upper: vec3f, index: u32, count: u32, axes: array<BvhqAxis, 3>) {
+    var frame = axes;
+    let at = slot * HPLOC_QUANTIZED_NODE_WORDS + side * 4u;
+    if (index == BVHQ_EMPTY_CHILD) {
+        lbvhOutNodes[at] = BVHQ_EMPTY_AXIS;
+        lbvhOutNodes[at + 1u] = BVHQ_EMPTY_AXIS;
+        lbvhOutNodes[at + 2u] = BVHQ_EMPTY_AXIS;
+        lbvhOutNodes[at + 3u] = BVHQ_EMPTY_CHILD;
+        return;
+    }
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+        lbvhOutNodes[at + axis] = bvhqAxisWord(lower[axis], upper[axis], frame[axis]);
+    }
+    lbvhOutNodes[at + 3u] = index | (count << 28u);
+}
+
 fn hplocBoxOf(mesh: LbvhMesh, cluster: u32) -> LbvhBox {
     if (cluster < mesh.triangleCount) {
         return lbvhPrimitiveBox(mesh, lbvhValues[mesh.triangleStart + cluster]);
@@ -1098,12 +1166,22 @@ fn hplocEmit(
     }
     // The mesh's run of node numbers starts at the scanned value of its first made node.
     let nodeOffset = hplocLinks[hplocRankWord(mesh, 0u)];
+    let quantized = hplocParams.quantizedNodes == 1u;
+    // Quantized: the mesh's frame slot, then its nodes, after every earlier mesh's frame slot.
+    let frameSlot = nodeOffset + mesh.index;
     if (mesh.triangleCount == 1u) {
         // One triangle: the root holds it on the left and nothing on the right.
         let box = lbvhPrimitiveBox(mesh, 0u);
-        let out = nodeOffset * LBVH_NODE_WORDS;
-        lbvhWriteChild(out, 0u, box.lower, box.upper, 0u, 1u);
-        lbvhWriteChild(out, 1u, vec3f(0.0), vec3f(0.0), LBVH_EMPTY_CHILD, 0u);
+        if (quantized) {
+            let frame = hplocMeshFrame(mesh, 0u);
+            hplocWriteFrame(frameSlot, frame);
+            hplocWriteQuantizedChild(frameSlot + 1u, 0u, box.lower, box.upper, 0u, 1u, frame);
+            hplocWriteQuantizedChild(frameSlot + 1u, 1u, vec3f(0.0), vec3f(0.0), LBVH_EMPTY_CHILD, 0u, frame);
+        } else {
+            let out = nodeOffset * LBVH_NODE_WORDS;
+            lbvhWriteChild(out, 0u, box.lower, box.upper, 0u, 1u);
+            lbvhWriteChild(out, 1u, vec3f(0.0), vec3f(0.0), LBVH_EMPTY_CHILD, 0u);
+        }
         if (hplocParams.writeParents != 0u) {
             lbvhOutParents[nodeOffset] = LBVH_NO_PARENT;
         }
@@ -1118,6 +1196,13 @@ fn hplocEmit(
     let root = hplocRootOf(mesh);
     let rootRank = hplocLinks[hplocRankWord(mesh, root - mesh.triangleCount)] - nodeOffset;
     let out = hplocOutputIndex(mesh, cluster, nodeOffset, rootRank);
+    var frame: array<BvhqAxis, 3>;
+    if (quantized) {
+        frame = hplocMeshFrame(mesh, root);
+        if (out == 0u) {
+            hplocWriteFrame(frameSlot, frame);
+        }
+    }
     // This node's leaves' run of triangle positions, within the mesh's.
     var placed = hplocLinks[hplocLeafRunWord(mesh, made)] - hplocLinks[hplocLeafRunWord(mesh, 0u)];
     for (var side = 0u; side < 2u; side += 1u) {
@@ -1133,14 +1218,20 @@ fn hplocEmit(
         } else {
             index = hplocOutputIndex(mesh, child, nodeOffset, rootRank);
         }
-        lbvhWriteChild((nodeOffset + out) * LBVH_NODE_WORDS, side, box.lower, box.upper, index, count);
+        if (quantized) {
+            hplocWriteQuantizedChild(frameSlot + 1u + out, side, box.lower, box.upper, index, count, frame);
+        } else {
+            lbvhWriteChild((nodeOffset + out) * LBVH_NODE_WORDS, side, box.lower, box.upper, index, count);
+        }
     }
     var parent = LBVH_NO_PARENT;
     if (cluster != root) {
         parent = hplocOutputIndex(mesh, hplocLinks[hplocParentWord(mesh, cluster)], nodeOffset, rootRank);
     }
     if (hplocParams.writeParents != 0u) {
+        if (hplocParams.writeParents != 0u) {
         lbvhOutParents[nodeOffset + out] = parent;
+    }
     }
 }
 

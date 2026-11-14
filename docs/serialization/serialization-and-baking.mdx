@@ -183,6 +183,10 @@ const cpu = new CpuMeshBvh(tree, { source: geometry }); // the CPU walk reads th
 // SceneTrees takes it too: SceneTrees.create(device, { triangleLeaves: 'indexed', weld: false }), then placeTree.
 ```
 
+`new CpuMeshBvh(tree, { source: geometry })` expands the tree to 48-byte records once; add `corners: 'positions'` to
+keep its 16-byte triangles and read every corner from the geometry's positions instead (the same answers,
+[CPU raycast](/cpu-queries/raycast)).
+
 `deserializeLayout(bytes, { geometry })` checks that the geometry fits the tree:
 
 - the triangle count matches;

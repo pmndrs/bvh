@@ -205,7 +205,9 @@ const trees = await SceneTrees.create(device, {
 | Option | Default | What it does |
 | --- | --- | --- |
 | `gpuFirstTrees` | `true` | H-PLOC first trees on a device with subgroups. `false`: tinybvh only. |
-| `gpuTreeOutputs` | `'copy'` | `'adopt'` makes the load batch's output buffers the scene's own (no copy), for a lower load peak and more node memory after the swaps. It needs `nodeFormat: 'f32'`. |
+| `gpuTreeOutputs` | `'copy'` | `'adopt'` makes the load batch's output buffers the scene's own (no copy), for a lower load peak and more node memory after the swaps. Any node and triangle format: quantized scenes adopt batches whose nodes H-PLOC wrote quantized (it turns on `gpuQuantizeOnEmit`), and indexed scenes' builds leave room for each mesh's header. |
+| `gpuQuantizeOnEmit` | `false` (`true` with `'adopt'`) | Quantized scenes: H-PLOC writes the first trees' nodes quantized itself, so a batch holds 32-byte nodes, not 64, and no quantize pass runs (the same trees). Deforming meshes' builds stay `f32`. |
+| `positionsBuffer` | none | Indexed scenes: bind [your own positions buffer](#your-own-positions-buffer) instead of the scene's copy. |
 | `gpuMaxBatchBytes` | 256 MiB | [The build-peak cap](/builders/fallbacks-and-limits#the-build-peak-cap). `Infinity` turns it off. |
 | `workers` | a pool of its own | A `BvhWorkerPool` to share, or options for the one it makes (and disposes). |
 | `transferGeometry` | `false` | Move each mesh's arrays into the worker instead of copying them. |
@@ -214,10 +216,27 @@ const trees = await SceneTrees.create(device, {
 | `holdRefinements` | `false` | tinybvh trees wait until `releaseRefinements()`, for tools that check a scene mid-swap. |
 | `gpuMaxDepth` | `GPU_TREE_MAX_DEPTH` (47) | Deeper trees are refused, keeping every tree within the walk's stack. |
 | `topLevel` | `'auto'` | The GPU top level with subgroups, the CPU one without. `'cpu'`: always the CPU one. |
-| `triangleLeaves`, `positionLayout`, `nodeFormat`, `weld` | records, `vec4`, `'quantized'`, `true` | [Layout variants](/concepts/gpu-layout#variants). Indexed and quantized need `gpuTreeOutputs: 'copy'`. Compile your walk from `trees.nodeFormat` (or leave the walk's default, also quantized). |
+| `triangleLeaves`, `positionLayout`, `nodeFormat`, `weld` | records, `vec4`, `'quantized'`, `true` | [Layout variants](/concepts/gpu-layout#variants). Compile your walk from `trees.nodeFormat` (or leave the walk's default, also quantized). |
 | `diagnostics` | `false` | Read the top level's refit stats back. |
 | `timestamps` | `false` | Time each GPU build batch with timestamp queries (`counts.gpuBuildTimestampMs`; see [GPU time](#gpu-time)). |
 | `onTree`, `onBuild`, `warn`, `label` | | Events (trees placed; [builds](#build-events)), where problems are reported, GPU object labels. |
+
+## Your own positions buffer
+
+An indexed scene (`triangleLeaves: 'indexed'`) keeps a copy of every mesh's vertices for the walk, `buffers.positions`
+(45.2 MiB on Sponza with `vec4` positions). An app that already keeps all its vertices in one `f32` storage buffer can
+have the walk bind that buffer instead, with `positionsBuffer`, and the copy is never made:
+
+- the buffer holds every mesh's vertices in the walk's stride (`positionLayout: 'vec4'`, 16 bytes per vertex, the `w`
+  unused; or `'packed'`, 12), each mesh's from the `vertexBase` given to `addMesh(geometry, { vertexBase })`, with
+  exactly the bits of `geometry.positions` (the trees are built from the geometry, the walk reads the buffer);
+- it needs `STORAGE` usage, and must stay alive and unchanged while the scene uses it;
+- the scene doesn't weld (`weld` is false; the trees name the app's own vertices), doesn't merge static instances
+  (`mergeStaticInstances` is false: a merged group's world-space vertices aren't in the buffer) and takes no deforming
+  meshes (their refit writes each pose into the scene's copy). Asking for any of these throws.
+
+`trees.buffers.positions` is then your buffer, and `memory.positions` is 0. A three.js app can't use it today: three
+keeps each attribute in a buffer of its own, without storage usage.
 
 ## What it holds
 

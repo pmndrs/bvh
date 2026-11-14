@@ -21,6 +21,17 @@
  * `quantized-copy-default-qbatch` against `quantized-copy-default`, first trees
  * and GPU build times).
  *
+ * Name parts that combine with the above: a `quantized-` prefix
+ * (`nodeFormat: 'quantized'`), `indexed` (`triangleLeaves: 'indexed'`, with
+ * `packed` positions when the name says so), `-emit` (`gpuQuantizeOnEmit`:
+ * H-PLOC writes the quantized nodes, no `f32` batch nodes and no quantize
+ * pass), and `adopt` anywhere (a quantized adopt implies the emit). Not in the
+ * default list, for the real-GPU clean run (2026-11-14): `quantized-copy-emit`
+ * against `quantized-copy` (batch bytes and first-tree time),
+ * `quantized-copy-emit-default` against `quantized-copy-default` (the capped
+ * peak), and `quantized-adopt`, `quantized-indexed-adopt` against
+ * `quantized-copy`, `quantized-indexed-copy` (peak and settled).
+ *
  * Each loads the scene with `holdRefinements`, so the GPU trees are in use on
  * their own first, then releases tinybvh's trees. Recorded, from the first update:
  *
@@ -147,13 +158,17 @@ try {
         const name = quantized ? base.slice('quantized-'.length) : base;
         const indexed = name.startsWith('indexed');
         const positionLayout = name.includes('packed') ? 'packed' : 'vec4';
+        const adopt = /(^|-)adopt(-|$)/.test(name);
+        // A quantized adopt writes its nodes in the emit (SceneTrees turns it on); `-emit` asks for it in copy mode.
+        const emit = quantized && (adopt || name.includes('-emit'));
         const kernel = kernels[`${quantized ? 'quantized-' : ''}${indexed ? positionLayout : 'records'}`];
         const leaves = indexed ? ('indexed' as const) : ('records' as const);
         const trees = await SceneTrees.create(device, {
             gpuMaxBatchBytes: isDefault ? undefined : capMB ? Number(capMB) * MB : Infinity,
             label: `sponza ${variant}`,
             holdRefinements: true,
-            gpuTreeOutputs: name.startsWith('adopt') ? 'adopt' : 'copy',
+            gpuTreeOutputs: adopt ? 'adopt' : 'copy',
+            ...(emit ? { gpuQuantizeOnEmit: true } : {}),
             mergeStaticInstances: variant.includes('merged'),
             workers: pool,
             ...(indexed ? { triangleLeaves: 'indexed' as const, positionLayout } : {}),
@@ -210,10 +225,10 @@ try {
         // The lever's promise: the peak is the storage plus one batch (the scratch pool and one batch's outputs), not more.
         let peakBoundMB: number | null = null;
         if (capMB) {
-            const plan = planGpuHplocBatches(device, scene.meshes, { maxBatchBytes: Number(capMB) * MB, triangleLeaves: leaves });
+            const plan = planGpuHplocBatches(device, scene.meshes, { maxBatchBytes: Number(capMB) * MB, triangleLeaves: leaves, quantizeOnEmit: emit, parents: !noParents });
             const groups = plan.batches.map((batch) => batch.map((index) => scene.meshes[index]));
             const pool = Object.values<number>(hplocScratchPoolBytes(groups)).reduce((sum, bytes) => sum + bytes, 0);
-            const largestOutputs = Math.max(...groups.map((group) => hplocBatchBytes(geometryTotals(group), 'cubic-30', leaves).outputs));
+            const largestOutputs = Math.max(...groups.map((group) => hplocBatchBytes(geometryTotals(group), 'cubic-30', leaves, !noParents, emit).outputs));
             // Storage as the GPU trees left it (with its reservation), plus 5% for retired buffers and rounding.
             const bound = (gpuTreesMemory.resident + pool + largestOutputs) * 1.05;
             peakBoundMB = mb(bound);
@@ -221,6 +236,7 @@ try {
         }
         if (variant !== 'warmup') results[variant] = {
             capMB: capMB ? Number(capMB) : null,
+            quantizeOnEmit: emit,
             firstTreesMs: Math.round(trees.timeline.firstTreesMs ?? -1),
             gpuBatches: counts.gpuBatches,
             gpuBuildMs: Math.round(counts.gpuBuildMs),

@@ -47,13 +47,24 @@
  * upload it will redo from them later.
  *
  * **Indexed trees** (`triangleLeaves: 'indexed'`, docs/internals/design/indexed-leaves.md)
- * are taken with their geometry (`options.source`) and expanded to records
- * once, in the constructor (`recordsFromIndexed`): the queries, the
- * depth-first reorder and {@link CpuMeshBvh.refit} all read corners from the
- * records. So a CPU tree costs 48 bytes per triangle whichever format it was
- * built in, `layout` is always records, and {@link CpuMeshBvh.serialize}
- * writes records. Reading corners through the source's own positions instead
- * (16 bytes per triangle) is a later step.
+ * are taken with their geometry (`options.source`). `options.corners` says
+ * where the queries read corners:
+ *
+ * - `'records'` (the default): the tree is expanded to records once, in the
+ *   constructor (`recordsFromIndexed`). A CPU tree costs 48 bytes per triangle
+ *   whichever format it was built in, `layout` is records, and
+ *   {@link CpuMeshBvh.serialize} writes records. The corners are a copy, so
+ *   editing the source changes nothing until {@link CpuMeshBvh.refit}.
+ * - `'positions'`: the tree keeps its 16-byte indexed triangles (a records
+ *   tree is converted, `indexedFromRecords`), and every corner is read
+ *   through its vertex indices from `source.positions`, by reference, with no
+ *   copy: 16 bytes per triangle beyond the geometry. Every query gives the
+ *   records path's answer bit for bit (the same `f32` corners, the same
+ *   arithmetic). The corners are the source's live values: after editing
+ *   them, call {@link CpuMeshBvh.refit} before querying, since only the refit
+ *   makes the boxes fit them again. `layout` is indexed and
+ *   {@link CpuMeshBvh.serialize} writes an indexed file (load it with the same
+ *   geometry as `source`).
  *
  * **Quantized trees** (`nodeFormat: 'quantized'`, docs/internals/design/compressed-nodes.md)
  * are decoded to 64-byte nodes once, in the constructor (`dequantizeNodes`).
@@ -64,12 +75,26 @@
  * and {@link CpuMeshBvh.serialize} writes `f32` nodes.
  */
 
-import { GPU_LAYOUT_CHILD_STRIDE_WORDS, GPU_LAYOUT_EMPTY_CHILD, GPU_LAYOUT_MAX_LEAF_PRIMITIVES, GPU_LAYOUT_NO_PARENT, GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_NODE_WORD, GPU_LAYOUT_NODE_WORDS, GPU_LAYOUT_TRIANGLE_BYTES, GPU_LAYOUT_TRIANGLE_WORD, type GpuLayoutMeshBvh } from '../gpu-layout.ts';
+import {
+    GPU_LAYOUT_CHILD_STRIDE_WORDS,
+    GPU_LAYOUT_EMPTY_CHILD,
+    GPU_LAYOUT_INDEXED_ID_MASK,
+    GPU_LAYOUT_INDEXED_TRIANGLE_BYTES,
+    GPU_LAYOUT_INDEXED_TRIANGLE_WORD,
+    GPU_LAYOUT_MAX_LEAF_PRIMITIVES,
+    GPU_LAYOUT_NO_PARENT,
+    GPU_LAYOUT_NODE_BYTES,
+    GPU_LAYOUT_NODE_WORD,
+    GPU_LAYOUT_NODE_WORDS,
+    GPU_LAYOUT_TRIANGLE_BYTES,
+    GPU_LAYOUT_TRIANGLE_WORD,
+    type GpuLayoutMeshBvh,
+} from '../gpu-layout.ts';
 import type { MeshInput } from '../mesh-input.ts';
 import { dequantizeNodes } from '../quantized-nodes.ts';
 import { BVH_FLOAT_MAX, refitOrderOf } from '../refit-cpu.ts';
 import { deserializeLayout, serializeLayout } from '../serialize.ts';
-import { recordsFromIndexed } from '../indexed-leaves.ts';
+import { indexedFromRecords, recordsFromIndexed } from '../indexed-leaves.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
 import { createCpuTracer, CPU_TRACE_BACK_SIDE, CPU_TRACE_DOUBLE_SIDE, CPU_TRACE_FRONT_SIDE, type CpuTraceOptions, type CpuTracer } from '../trace/cpu-traversal.ts';
 import { buildMeshBvhWithTinyBvh } from '../trace/mesh-bvh-topology.ts';
@@ -104,6 +129,11 @@ import {
 } from './shapes.ts';
 
 const TRIANGLE_WORDS = GPU_LAYOUT_TRIANGLE_BYTES / 4;
+/** Words of an indexed triangle: vertex indices at 0-2, id and flags at 3. */
+const INDEXED_WORDS = GPU_LAYOUT_INDEXED_TRIANGLE_BYTES / 4;
+const INDEXED_ID_WORD = GPU_LAYOUT_INDEXED_TRIANGLE_WORD.idFlags;
+/** {@link CpuMeshBvh.getTriangle}'s and readTriangleInto's corner offsets (they run no user code). */
+const CORNER_SCRATCH = new Int32Array(3);
 /** Scratch for closestPointToPoint and intersectsBox, which run no user code (so they can't be re-entered mid-call). */
 /** The query point (0-2), the point found on a triangle (3-5) and its sliver flag (6): {@link closestOnTriangle}'s numbers. */
 const CLOSEST_NEAR = new Float64Array(7);
@@ -114,7 +144,6 @@ const BOX_QUERY_NODE_BOX = new BvhBox3();
 /** Words from a left child's index and count to the right child's (3 to 7, 11 to 15). */
 const SIDE_REFERENCE_STRIDE = GPU_LAYOUT_NODE_WORD.rightIndex - GPU_LAYOUT_NODE_WORD.leftIndex;
 if (GPU_LAYOUT_NODE_WORD.rightCount - GPU_LAYOUT_NODE_WORD.leftCount !== SIDE_REFERENCE_STRIDE) throw new Error('CpuMeshBvh: the node layout changed');
-const CORNER_WORDS = [GPU_LAYOUT_TRIANGLE_WORD.vertex0, GPU_LAYOUT_TRIANGLE_WORD.vertex1, GPU_LAYOUT_TRIANGLE_WORD.vertex2] as const;
 const VERTEX0 = GPU_LAYOUT_TRIANGLE_WORD.vertex0;
 const VERTEX1 = GPU_LAYOUT_TRIANGLE_WORD.vertex1;
 const VERTEX2 = GPU_LAYOUT_TRIANGLE_WORD.vertex2;
@@ -350,6 +379,8 @@ export interface CpuMeshBvhBuildOptions {
      * call into WebAssembly and reports nothing in between.
      */
     readonly onProgress?: (progress: number) => void;
+    /** As {@link CpuMeshBvhOptions.corners}. `'positions'` builds indexed triangles directly (tinybvh writes them). Default `'records'`. */
+    readonly corners?: CpuMeshBvhCorners;
 }
 
 export interface CpuMeshBvhOptions {
@@ -359,7 +390,19 @@ export interface CpuMeshBvhOptions {
      * Kept by reference, not copied.
      */
     readonly source?: MeshInput | null;
+    /**
+     * Where the queries read triangle corners (see the file comment):
+     * `'records'` (the default: 48 bytes per triangle, a copy of the corners)
+     * or `'positions'` (16 bytes per triangle: the tree's indexed triangles,
+     * corners read from `source.positions` by reference; needs `source`).
+     * Answers are the same bit for bit; `'positions'` follows the source's
+     * edits, so refit after editing it.
+     */
+    readonly corners?: CpuMeshBvhCorners;
 }
+
+/** Where a {@link CpuMeshBvh} reads its triangles' corners: a records copy, or the source's positions. */
+export type CpuMeshBvhCorners = 'records' | 'positions';
 
 /** `[x, y, z]` from an array or a three `Vector3`. */
 export function readVec3(value: BvhVec3Like): [number, number, number] {
@@ -432,6 +475,10 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
     private readonly nodeWords: Uint32Array;
     private readonly triangleFloats: Float32Array;
     private readonly triangleWords: Uint32Array;
+    /** `corners: 'positions'`: the triangles are indexed and {@link cornerFloats} is the source's positions. */
+    private readonly positionCorners: boolean;
+    /** Where corners are read: the records' floats, or (`corners: 'positions'`) `source.positions`. */
+    private cornerFloats: Float32Array;
     private topLevel: TopLevelBvh;
     /** The walk with no triangle filter: closest-hit raycasts that need no per-triangle decision (side culling is native). */
     private tracer: CpuTracer;
@@ -451,16 +498,25 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
     private scoreStack: Float64Array | null = null;
 
     constructor(input: GpuLayoutMeshBvh, options: CpuMeshBvhOptions = {}) {
-        // Indexed trees are queried as records: the CPU queries, the depth-first reorder and the
-        // refit read corners from the records (docs/internals/design/indexed-leaves.md, "CpuMeshBvh").
+        const corners = options.corners ?? 'records';
+        if (corners !== 'records' && corners !== 'positions') throw new RangeError(`CpuMeshBvh: corners must be 'records' or 'positions', got ${String(corners)}`);
+        const positionCorners = corners === 'positions';
+        // 'records' (the default): indexed trees are queried as records, and the queries, the depth-first reorder and
+        // the refit read corners from the records. 'positions': indexed triangles, corners read from the source's
+        // positions (docs/internals/design/indexed-leaves.md, "CpuMeshBvh").
         if (input.triangleLeaves === 'indexed' && !options.source) throw new RangeError('CpuMeshBvh: an indexed tree needs its geometry (options.source) for its corners');
+        if (positionCorners && !options.source) throw new RangeError("CpuMeshBvh: corners: 'positions' needs the geometry (options.source) to read corners from");
         // Quantized nodes are decoded once (docs/internals/design/compressed-nodes.md, "CpuMeshBvh"): CPU trees
         // stay 64 bytes per node, and every box the queries see contains the exact one.
         const decoded = dequantizeNodes(input);
-        const layout = decoded.triangleLeaves === 'indexed' ? recordsFromIndexed(decoded, options.source!.positions) : decoded;
+        const indexed = decoded.triangleLeaves === 'indexed';
+        let layout: GpuLayoutMeshBvh;
+        if (positionCorners) layout = indexed ? decoded : indexedFromRecords(decoded, options.source!);
+        else layout = indexed ? recordsFromIndexed(decoded, options.source!.positions) : decoded;
         if (layout.nodes.byteLength !== layout.nodeCount * GPU_LAYOUT_NODE_BYTES) throw new RangeError(`CpuMeshBvh: ${layout.nodeCount} nodes need ${layout.nodeCount * GPU_LAYOUT_NODE_BYTES} bytes, got ${layout.nodes.byteLength}`);
-        if (layout.triangles.byteLength !== layout.triangleCount * GPU_LAYOUT_TRIANGLE_BYTES) {
-            throw new RangeError(`CpuMeshBvh: ${layout.triangleCount} triangles need ${layout.triangleCount * GPU_LAYOUT_TRIANGLE_BYTES} bytes, got ${layout.triangles.byteLength}`);
+        const triangleBytes = positionCorners ? GPU_LAYOUT_INDEXED_TRIANGLE_BYTES : GPU_LAYOUT_TRIANGLE_BYTES;
+        if (layout.triangles.byteLength !== layout.triangleCount * triangleBytes) {
+            throw new RangeError(`CpuMeshBvh: ${layout.triangleCount} triangles need ${layout.triangleCount * triangleBytes} bytes, got ${layout.triangles.byteLength}`);
         }
         if (layout.nodeCount < 1 || layout.triangleCount < 1) throw new RangeError('CpuMeshBvh: the tree is empty');
         if (layout.parents.length !== layout.nodeCount) throw new RangeError(`CpuMeshBvh: ${layout.nodeCount} nodes need ${layout.nodeCount} parents, got ${layout.parents.length}`);
@@ -471,7 +527,10 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
         this.nodeWords = new Uint32Array(layout.nodes);
         this.triangleFloats = new Float32Array(layout.triangles);
         this.triangleWords = new Uint32Array(layout.triangles);
-        this.treeDepth = checkTreeShape(this.nodeWords, this.triangleWords, layout.nodeCount, layout.triangleCount, layout.parents);
+        this.positionCorners = positionCorners;
+        this.cornerFloats = positionCorners ? options.source!.positions : this.triangleFloats;
+        if (positionCorners) checkVertexIndices(this.triangleWords, layout.triangleCount, Math.floor(options.source!.positions.length / 3));
+        this.treeDepth = checkTreeShape(this.nodeWords, this.triangleWords, layout.nodeCount, layout.triangleCount, layout.parents, positionCorners);
         this.topLevel = this.makeTopLevel();
         this.tracer = this.makeTracer(false);
         this.filterTracer = this.makeTracer(true);
@@ -479,7 +538,7 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
 
     /** Builds a tree with tinybvh (`createTinyBvhBuilder()`), on this thread. Keeps `input` as its source. */
     static build(input: MeshInput, builder: TinyBvhBuilder, options: CpuMeshBvhBuildOptions = {}): CpuMeshBvh {
-        return new CpuMeshBvh(CpuMeshBvh.buildLayout(input, builder, options), { source: input });
+        return new CpuMeshBvh(CpuMeshBvh.buildLayout(input, builder, options), { source: input, corners: options.corners });
     }
 
     /** As {@link build}, loading tinybvh first. For many builds, keep one builder and use {@link build}. */
@@ -495,7 +554,7 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
     /** The tinybvh build behind {@link build}, for subclasses: progress 0, the layout, progress 1. */
     protected static buildLayout(input: MeshInput, builder: TinyBvhBuilder, options: CpuMeshBvhBuildOptions = {}): GpuLayoutMeshBvh {
         options.onProgress?.(0);
-        const layout = buildMeshBvhWithTinyBvh(input, builder, { maxLeafPrimitives: options.maxLeafPrimitives });
+        const layout = buildMeshBvhWithTinyBvh(input, builder, { maxLeafPrimitives: options.maxLeafPrimitives, ...(options.corners === 'positions' ? { triangleLeaves: 'indexed' as const } : {}) });
         options.onProgress?.(1);
         return layout;
     }
@@ -539,14 +598,38 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
         return out;
     }
 
-    /** Bytes this object holds: the layout (nodes, triangle records, parents), the one-instance top level and lookups made so far. Not the source geometry. */
+    /**
+     * Bytes this object holds: the layout (nodes; triangles, 48-byte records or with `corners: 'positions'` 16 bytes;
+     * parents), the one-instance top level and lookups made so far. Not the source geometry.
+     */
     estimateMemoryInBytes(): number {
         return this.layout.nodes.byteLength + this.layout.triangles.byteLength + this.layout.parents.byteLength + this.layout.bounds.byteLength + this.topLevel.buffer.byteLength + (this.positions?.byteLength ?? 0);
     }
 
     /** The original triangle index at a tree position (as {@link traverse} reports them). */
     resolveTriangleIndex(treePosition: number): number {
+        if (this.positionCorners) return this.triangleWords[treePosition * INDEXED_WORDS + INDEXED_ID_WORD] & GPU_LAYOUT_INDEXED_ID_MASK;
         return this.triangleWords[treePosition * TRIANGLE_WORDS + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
+    }
+
+    /**
+     * Word offsets of the corners at a tree position in {@link cornerFloats},
+     * into `out[0..2]`: in the record, or (`corners: 'positions'`) the
+     * vertices in the source's positions.
+     */
+    private cornerWords(treePosition: number, out: Int32Array): void {
+        if (this.positionCorners) {
+            const words = this.triangleWords;
+            const base = treePosition * INDEXED_WORDS;
+            out[0] = words[base] * 3;
+            out[1] = words[base + 1] * 3;
+            out[2] = words[base + 2] * 3;
+        } else {
+            const base = treePosition * TRIANGLE_WORDS;
+            out[0] = base + VERTEX0;
+            out[1] = base + VERTEX1;
+            out[2] = base + VERTEX2;
+        }
     }
 
     /** The tree position of an original triangle. */
@@ -562,9 +645,11 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
 
     /** The corners of the triangle at a tree position, as the tree stores them: 9 numbers into `target`. */
     getTriangle(treePosition: number, target: Float32Array | number[] = new Float32Array(9)): Float32Array | number[] {
-        const base = treePosition * TRIANGLE_WORDS;
+        const words = CORNER_SCRATCH;
+        this.cornerWords(treePosition, words);
+        const floats = this.cornerFloats;
         for (let corner = 0; corner < 3; corner++) {
-            for (let axis = 0; axis < 3; axis++) target[corner * 3 + axis] = this.triangleFloats[base + CORNER_WORDS[corner] + axis];
+            for (let axis = 0; axis < 3; axis++) target[corner * 3 + axis] = floats[words[corner] + axis];
         }
         return target;
     }
@@ -950,11 +1035,12 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
 
     /** Loads the corners at a tree position into a triangle (as the tree stores them) and sets its `needsUpdate`. */
     readTriangleInto(treePosition: number, triangle: ExtendedTriangleState): void {
-        const floats = this.triangleFloats;
-        const base = treePosition * TRIANGLE_WORDS;
+        const floats = this.cornerFloats;
+        const words = CORNER_SCRATCH;
+        this.cornerWords(treePosition, words);
         const points = triangle.points;
         for (let corner = 0; corner < 3; corner++) {
-            const word = base + CORNER_WORDS[corner];
+            const word = words[corner];
             const point = points[corner];
             point.x = floats[word];
             point.y = floats[word + 1];
@@ -971,7 +1057,7 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
     intersectsBox(box: BvhBox3Like, boxToMesh?: BvhMatrix4Like | null): boolean {
         // The shapecast above, flattened (it runs no user code): the same boxes tested in the same
         // walk, with the oriented box's numbers packed once and each triangle tested from the
-        // records' corners (packedBoxIntersectsTriangle: the same axes and arithmetic). An
+        // corners (records, or the source's positions; packedBoxIntersectsTriangle: the same axes and arithmetic). An
         // axis-aligned box with finite corners tests node boxes on the aligned axes only
         // (alignedPackedBoxIntersectsBox says why that is the same answer).
         const obb = BOX_QUERY_OBB.set(box.min, box.max, boxToMesh);
@@ -1028,7 +1114,15 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
 
     /** Whether a packed box meets any triangle at tree positions `offset` to `offset + count - 1`. */
     private packedBoxMeetsRange(packed: Float64Array, offset: number, count: number): boolean {
-        const t = this.triangleFloats;
+        const t = this.cornerFloats;
+        if (this.positionCorners) {
+            const words = this.triangleWords;
+            for (let position = offset, end = offset + count; position < end; position++) {
+                const b = position * INDEXED_WORDS;
+                if (packedBoxIntersectsTriangle(packed, t, words[b] * 3, words[b + 1] * 3, words[b + 2] * 3)) return true;
+            }
+            return false;
+        }
         for (let position = offset, end = offset + count; position < end; position++) {
             const b = position * TRIANGLE_WORDS;
             if (packedBoxIntersectsTriangle(packed, t, b + VERTEX0, b + VERTEX1, b + VERTEX2)) return true;
@@ -1191,15 +1285,16 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
         }
         // The shapecast described above, flattened (it runs no user code): the same walk, the same
         // child order and scores, the same triangles in the same order, three's closest-point
-        // arithmetic on the records' corners (closestOnTriangle), so the same answer bit for bit.
+        // arithmetic on the same f32 corners (closestOnTriangle), so the same answer bit for bit.
         // A child is pushed only if its score passes the test it would meet when popped: the best
         // distance only shrinks, so a box that fails now fails then.
         const minThresholdSq = minThreshold * minThreshold;
         const maxThresholdSq = maxThreshold * maxThreshold;
         const words = this.nodeWords;
         const floats = this.nodeFloats;
-        const t = this.triangleFloats;
+        const t = this.cornerFloats;
         const triangleWords = this.triangleWords;
+        const indexed = this.positionCorners;
         const near = CLOSEST_NEAR;
         near[0] = px;
         near[1] = py;
@@ -1232,8 +1327,21 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
             if (leaf >= 0) {
                 let stop = false;
                 for (let position = leaf, end = leaf + leafCount; position < end; position++) {
-                    const b = position * TRIANGLE_WORDS;
-                    closestOnTriangle(t, b, near);
+                    let a: number, b: number, c: number, original: number;
+                    if (indexed) {
+                        const w = position * INDEXED_WORDS;
+                        a = triangleWords[w] * 3;
+                        b = triangleWords[w + 1] * 3;
+                        c = triangleWords[w + 2] * 3;
+                        original = triangleWords[w + INDEXED_ID_WORD] & GPU_LAYOUT_INDEXED_ID_MASK;
+                    } else {
+                        const w = position * TRIANGLE_WORDS;
+                        a = w + VERTEX0;
+                        b = w + VERTEX1;
+                        c = w + VERTEX2;
+                        original = triangleWords[w + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
+                    }
+                    closestOnTriangle(t, a, b, c, near);
                     const dx = px - near[3];
                     const dy = py - near[4];
                     const dz = pz - near[5];
@@ -1243,7 +1351,7 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
                         bestY = near[4];
                         bestZ = near[5];
                         best = distanceSq;
-                        bestTriangle = triangleWords[b + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
+                        bestTriangle = original;
                     }
                     if (distanceSq < minThresholdSq) {
                         stop = true;
@@ -1453,6 +1561,12 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
      * place). The triangle count and the index buffer's meaning must not have
      * changed. A tree refitted after large moves stays correct but gets slower
      * to walk; rebuild it then.
+     *
+     * With `corners: 'positions'` there are no records to write: the leaf
+     * boxes are recomputed from the positions through the tree's own vertex
+     * indices (`input`'s index buffer only has to have the same triangle
+     * count), and `input`, when given, becomes the source the queries read
+     * corners from. The boxes are the records path's bit for bit.
      */
     refit(input?: MeshInput): void {
         const source = input ?? this.source;
@@ -1462,6 +1576,19 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
         if (sourceTriangles !== this.triangleCount) throw new RangeError(`CpuMeshBvh.refit: the source has ${sourceTriangles} triangles, the tree ${this.triangleCount}`);
         const vertexCount = Math.floor(positions.length / 3);
         const triangleCount = this.triangleCount;
+        if (this.positionCorners) {
+            // Validation only reads (a throw leaves the tree as it was): the tree's vertex indices, then the positions.
+            checkVertexIndices(this.triangleWords, triangleCount, vertexCount, 'CpuMeshBvh.refit');
+            if (!refitSourceLooksValid(positions, null, triangleCount, vertexCount)) this.checkRefitSource(positions, null, vertexCount);
+            this.source = source;
+            this.cornerFloats = positions;
+            this.refitOrder ??= childrenFollowParents(this.nodeWords, this.nodeCount) ? REVERSE_NODE_ORDER : refitOrderOf(this.layout.parents, this.nodeCount);
+            refitIndexedTreeFromSource(this.nodeFloats, this.nodeWords, this.nodeCount, this.refitOrder === REVERSE_NODE_ORDER ? null : this.refitOrder, this.triangleWords, positions, this.layout.bounds);
+            this.topLevel = this.makeTopLevel();
+            this.tracer = this.makeTracer(false);
+            this.filterTracer = this.makeTracer(true);
+            return;
+        }
         // Validation only reads, so a refit that throws leaves the tree as it was. Two straight
         // scans (every index in range, every position finite) pass for nearly every mesh; only
         // when one fails does the per-triangle check run, which throws for a used vertex only (an
@@ -1481,10 +1608,12 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
         const words = this.triangleWords;
         const triangleCount = this.triangleCount;
         for (let position = 0; position < triangleCount; position++) {
-            const triangle = words[position * TRIANGLE_WORDS + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
-            const a = indices ? indices[triangle * 3] : triangle * 3;
-            const b = indices ? indices[triangle * 3 + 1] : triangle * 3 + 1;
-            const c = indices ? indices[triangle * 3 + 2] : triangle * 3 + 2;
+            const triangle = this.resolveTriangleIndex(position);
+            // corners: 'positions': the tree's own vertex indices (`indices` is null then).
+            const at = position * INDEXED_WORDS;
+            const a = this.positionCorners ? words[at] : indices ? indices[triangle * 3] : triangle * 3;
+            const b = this.positionCorners ? words[at + 1] : indices ? indices[triangle * 3 + 1] : triangle * 3 + 1;
+            const c = this.positionCorners ? words[at + 2] : indices ? indices[triangle * 3 + 2] : triangle * 3 + 2;
             if (a >= vertexCount || b >= vertexCount || c >= vertexCount) {
                 const vertex = a >= vertexCount ? a : b >= vertexCount ? b : c;
                 throw new RangeError(`CpuMeshBvh.refit: triangle ${triangle} uses vertex ${vertex}, past the ${vertexCount} positions`);
@@ -1540,8 +1669,13 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
     }
 
     private makeTracer(filtered: boolean): CpuTracer {
-        const scene = { nodes: this.layout.nodes, triangles: this.layout.triangles, topLevel: this.topLevel };
-        return filtered ? createCpuTracer(scene, { triangleFilter: (candidate) => this.passes(candidate), filterEveryTriangle: true }) : createCpuTracer(scene);
+        // corners: 'positions': the walk's indexed loader over the tree's own triangles (no mesh header: vertex base 0)
+        // and the source's positions, packed: the same f32 corners as the records, so the same hits bit for bit.
+        const scene = this.positionCorners
+            ? { nodes: this.layout.nodes, triangles: this.layout.triangles, topLevel: this.topLevel, triangleLeaves: 'indexed' as const, positions: this.cornerFloats, positionLayout: 'packed' as const }
+            : { nodes: this.layout.nodes, triangles: this.layout.triangles, topLevel: this.topLevel };
+        const indexed = { indexedWithoutHeaders: this.positionCorners };
+        return filtered ? createCpuTracer(scene, { ...indexed, triangleFilter: (candidate) => this.passes(candidate), filterEveryTriangle: true }) : createCpuTracer(scene, indexed);
     }
 }
 
@@ -1565,12 +1699,16 @@ function readSlot(words: Uint32Array, slot: number): { index: number; count: num
  * tree-position order, rewrites the triangle records and leaf indices in that
  * order, so each subtree's triangles are one run.
  */
-function checkTreeShape(words: Uint32Array, triangleWords: Uint32Array, nodeCount: number, triangleCount: number, parents: Uint32Array): number {
+function checkTreeShape(words: Uint32Array, triangleWords: Uint32Array, nodeCount: number, triangleCount: number, parents: Uint32Array, indexed: boolean): number {
     const fail = (problem: string): never => {
         throw new RangeError(`CpuMeshBvh: the layout is not a valid tree: ${problem}`);
     };
+    // Records (48 bytes) or, with corners: 'positions', indexed triangles (16): the reorder moves whole triangles.
+    const stride = indexed ? INDEXED_WORDS : TRIANGLE_WORDS;
     for (let position = 0; position < triangleCount; position++) {
-        const original = triangleWords[position * TRIANGLE_WORDS + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
+        const original = indexed
+            ? triangleWords[position * INDEXED_WORDS + INDEXED_ID_WORD] & GPU_LAYOUT_INDEXED_ID_MASK
+            : triangleWords[position * TRIANGLE_WORDS + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
         if (original >= triangleCount) fail(`the triangle at tree position ${position} has original index ${original}, past the ${triangleCount} triangles`);
     }
     if (parents[0] !== GPU_LAYOUT_NO_PARENT) fail(`the root has parent ${parents[0]}`);
@@ -1625,7 +1763,7 @@ function checkTreeShape(words: Uint32Array, triangleWords: Uint32Array, nodeCoun
         for (const slot of leaves) {
             const indexWord = (slot >> 1) * GPU_LAYOUT_NODE_WORDS + ((slot & 1) === 0 ? GPU_LAYOUT_NODE_WORD.leftIndex : GPU_LAYOUT_NODE_WORD.rightIndex);
             const { index, count } = readSlot(words, slot);
-            triangleWords.set(copy.subarray(index * TRIANGLE_WORDS, (index + count) * TRIANGLE_WORDS), at * TRIANGLE_WORDS);
+            triangleWords.set(copy.subarray(index * stride, (index + count) * stride), at * stride);
             words[indexWord] = at;
             at += count;
         }
@@ -1730,6 +1868,76 @@ function refitTreeFromSource(
 const ROOT_BOX = new Float32Array(8);
 
 /**
+ * `corners: 'positions'`: throws unless every vertex index of the
+ * `triangleCount` indexed triangles is below `vertexCount` (the corners are
+ * read through them, so one past the positions would read nothing).
+ */
+function checkVertexIndices(triangleWords: Uint32Array, triangleCount: number, vertexCount: number, where = 'CpuMeshBvh'): void {
+    for (let w = 0, end = triangleCount * INDEXED_WORDS; w < end; w += INDEXED_WORDS) {
+        for (let corner = 0; corner < 3; corner++) {
+            const vertex = triangleWords[w + corner];
+            if (vertex >= vertexCount) {
+                const triangle = triangleWords[w + INDEXED_ID_WORD] & GPU_LAYOUT_INDEXED_ID_MASK;
+                throw new RangeError(`${where}: triangle ${triangle} uses vertex ${vertex}, past the ${vertexCount} positions`);
+            }
+        }
+    }
+}
+
+/**
+ * {@link refitTreeFromSource} for `corners: 'positions'`: the same pass and
+ * the same boxes, with each leaf's corners read through the indexed
+ * triangles' own vertex indices and nothing written but the boxes.
+ */
+function refitIndexedTreeFromSource(floats: Float32Array, words: Uint32Array, nodeCount: number, order: Uint32Array | null, triangleWords: Uint32Array, positions: Float32Array, bounds: Float32Array): void {
+    for (let k = 0; k < nodeCount; k++) {
+        const nodeWord = (order ? order[k] : nodeCount - 1 - k) * GPU_LAYOUT_NODE_WORDS;
+        const left = words[nodeWord + GPU_LAYOUT_NODE_WORD.leftIndex];
+        const leftCount = words[nodeWord + GPU_LAYOUT_NODE_WORD.leftCount];
+        if (leftCount > 0) refitIndexedLeafSlot(floats, nodeWord, triangleWords, left, leftCount, positions);
+        else unionOfChild(floats, words, left * GPU_LAYOUT_NODE_WORDS, floats, nodeWord);
+        const right = words[nodeWord + GPU_LAYOUT_NODE_WORD.rightIndex];
+        if (right === GPU_LAYOUT_EMPTY_CHILD) continue;
+        const rightCount = words[nodeWord + GPU_LAYOUT_NODE_WORD.rightCount];
+        if (rightCount > 0) refitIndexedLeafSlot(floats, nodeWord + GPU_LAYOUT_CHILD_STRIDE_WORDS, triangleWords, right, rightCount, positions);
+        else unionOfChild(floats, words, right * GPU_LAYOUT_NODE_WORDS, floats, nodeWord + GPU_LAYOUT_CHILD_STRIDE_WORDS);
+    }
+    unionOfChild(floats, words, 0, ROOT_BOX, 0);
+    bounds[0] = ROOT_BOX[0];
+    bounds[1] = ROOT_BOX[1];
+    bounds[2] = ROOT_BOX[2];
+    bounds[3] = ROOT_BOX[4];
+    bounds[4] = ROOT_BOX[5];
+    bounds[5] = ROOT_BOX[6];
+}
+
+/** One leaf slot of {@link refitIndexedTreeFromSource}: the box around its triangles' corners (as {@link refitLeafSlot}'s). */
+function refitIndexedLeafSlot(floats: Float32Array, slot: number, triangleWords: Uint32Array, first: number, count: number, positions: Float32Array): void {
+    const max = BVH_FLOAT_MAX;
+    let c0 = max, c1 = max, c2 = max, d0 = -max, d1 = -max, d2 = -max;
+    for (let r = first * INDEXED_WORDS, end = (first + count) * INDEXED_WORDS; r < end; r += INDEXED_WORDS) {
+        const a3 = triangleWords[r] * 3;
+        const b3 = triangleWords[r + 1] * 3;
+        const c3 = triangleWords[r + 2] * 3;
+        const ax = positions[a3], ay = positions[a3 + 1], az = positions[a3 + 2];
+        const bx = positions[b3], by = positions[b3 + 1], bz = positions[b3 + 2];
+        const cx = positions[c3], cy = positions[c3 + 1], cz = positions[c3 + 2];
+        c0 = Math.min(c0, ax, bx, cx);
+        d0 = Math.max(d0, ax, bx, cx);
+        c1 = Math.min(c1, ay, by, cy);
+        d1 = Math.max(d1, ay, by, cy);
+        c2 = Math.min(c2, az, bz, cz);
+        d2 = Math.max(d2, az, bz, cz);
+    }
+    floats[slot] = c0;
+    floats[slot + 1] = c1;
+    floats[slot + 2] = c2;
+    floats[slot + 4] = d0;
+    floats[slot + 5] = d1;
+    floats[slot + 6] = d2;
+}
+
+/**
  * One leaf slot of {@link refitTreeFromSource}: its records' corners from
  * `positions`, and the box around them (`refitInOrder`'s leaf box: min and
  * max from the largest float, over the `f32` corners).
@@ -1823,7 +2031,9 @@ function boxDistanceSq(floats: Float32Array, minWord: number, px: number, py: nu
 const SLIVER_SINE_SQ = 1e-7;
 
 /**
- * The point of the record at `base` closest to `io[0..2]`, into `io[3..5]`.
+ * The point of the triangle whose corners start at words `a`, `b`, `c` of
+ * `floats` (a record's, or the source's positions) closest to `io[0..2]`,
+ * into `io[3..5]`.
  * Numbers go through `io`, not arguments: V8 doesn't inline a function this
  * size, and every number argument of a call that isn't inlined is boxed.
  *
@@ -1839,9 +2049,9 @@ const SLIVER_SINE_SQ = 1e-7;
  * falls to 2e-6 at most. Ties keep three's point. The GPU takes the edges
  * alone on slivers; the two agree to within the sliver's height.
  */
-function closestOnTriangle(records: Float32Array, base: number, out: Float64Array): void {
-    closestByRegions(records, base, out);
-    if (out[6] !== 0) closestOnEdges(records, base, out);
+function closestOnTriangle(floats: Float32Array, a: number, b: number, c: number, out: Float64Array): void {
+    closestByRegions(floats, a, b, c, out);
+    if (out[6] !== 0) closestOnEdges(floats, a, b, c, out);
 }
 
 /**
@@ -1849,14 +2059,14 @@ function closestOnTriangle(records: Float32Array, base: number, out: Float64Arra
  * (`a-b`, `a-c`, `b-c`, the first strictly nearest) when that is strictly
  * nearer to `io[0..2]`, or when `io[3..5]` isn't a number.
  */
-function closestOnEdges(records: Float32Array, base: number, out: Float64Array): void {
+function closestOnEdges(records: Float32Array, a: number, b: number, c: number, out: Float64Array): void {
     const px = out[0], py = out[1], pz = out[2];
     let dx = out[3] - px, dy = out[4] - py, dz = out[5] - pz;
     let best = dx * dx + dy * dy + dz * dz;
     if (best !== best) best = Infinity;
     for (let side = 0; side < 3; side++) {
-        const s = base + (side === 2 ? VERTEX1 : VERTEX0);
-        const e = base + (side === 0 ? VERTEX1 : VERTEX2);
+        const s = side === 2 ? b : a;
+        const e = side === 0 ? b : c;
         const sx = records[s], sy = records[s + 1], sz = records[s + 2];
         const ex = records[e] - sx, ey = records[e + 1] - sy, ez = records[e + 2] - sz;
         const lengthSq = ex * ex + ey * ey + ez * ez;
@@ -1878,14 +2088,14 @@ function closestOnEdges(records: Float32Array, base: number, out: Float64Array):
 
 /**
  * Three's `Triangle.closestPointToPoint` (`triangleClosestPointToPoint`) on the
- * record at `base`, plain numbers, the same operations in the same order: the
+ * corners at `a`, `b`, `c`, plain numbers, the same operations in the same order: the
  * same bits. `io[6]` is set to 1 when the triangle is a sliver (squared sine at
  * `a` at most {@link SLIVER_SINE_SQ}), else 0.
  */
-function closestByRegions(records: Float32Array, base: number, out: Float64Array): void {
-    const ax = records[base + VERTEX0], ay = records[base + VERTEX0 + 1], az = records[base + VERTEX0 + 2];
-    const bx = records[base + VERTEX1], by = records[base + VERTEX1 + 1], bz = records[base + VERTEX1 + 2];
-    const cx = records[base + VERTEX2], cy = records[base + VERTEX2 + 1], cz = records[base + VERTEX2 + 2];
+function closestByRegions(records: Float32Array, a: number, b: number, c: number, out: Float64Array): void {
+    const ax = records[a], ay = records[a + 1], az = records[a + 2];
+    const bx = records[b], by = records[b + 1], bz = records[b + 2];
+    const cx = records[c], cy = records[c + 1], cz = records[c + 2];
     const px = out[0], py = out[1], pz = out[2];
     const abx = bx - ax, aby = by - ay, abz = bz - az;
     const acx = cx - ax, acy = cy - ay, acz = cz - az;
