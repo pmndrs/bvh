@@ -71,6 +71,15 @@ const TINYBVH_FILES: Record<string, string> = {
  * - `-sSTANDALONE_WASM --no-entry`: a plain .wasm with no JS glue; src/tinybvh.ts instantiates it.
  * - `-sALLOW_MEMORY_GROWTH -sMAXIMUM_MEMORY=4GB`: big meshes need hundreds of MB.
  * - `-fno-exceptions`: tinybvh does not use them.
+ * - `-fmacro-prefix-map=.\=./`: the same `__FILE__` on every OS. tinybvh puts
+ *   `__FILE__` into its error messages, and clang spells an included header
+ *   `./tiny_bvh_base.h` on Linux and macOS but `.\tiny_bvh_base.h` on Windows,
+ *   which made a Windows build differ from the reference in two bytes. This maps
+ *   the Windows spelling to the Linux one; elsewhere no path starts with `.\`, so
+ *   it changes nothing there.
+ * - `-fno-file-reproducible`: with a prefix map clang also turns on
+ *   `-ffile-reproducible`, which drops the `./` (`tiny_bvh_base.h`) and so
+ *   changes every OS's bytes; this keeps `__FILE__` as the plain build spells it.
  */
 export const BUILD_FLAGS = [
     '-O3',
@@ -79,6 +88,8 @@ export const BUILD_FLAGS = [
     '-msimd128',
     '-mavx',
     '-fno-exceptions',
+    '-fmacro-prefix-map=.\\=./',
+    '-fno-file-reproducible',
     '-sSTANDALONE_WASM',
     '--no-entry',
     '-sALLOW_MEMORY_GROWTH=1',
@@ -95,6 +106,11 @@ const EMSDK_FOLDER = join(REPOSITORY_ROOT, 'tools', 'emsdk');
 /** Licence texts that travel inside the generated module (and so inside every bundle of it). */
 const LICENSE_FILES = [join(PACKAGE_ROOT, 'licenses', 'tinybvh.txt'), join(PACKAGE_ROOT, 'licenses', 'emscripten-runtime.txt')];
 const IS_WINDOWS = process.platform === 'win32';
+
+/** A text file with LF line endings, whatever the checkout's core.autocrlf, so every OS writes the same module. */
+function readText(file: string): string {
+    return readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+}
 
 function sha256(bytes: Buffer): string {
     return createHash('sha256').update(bytes).digest('hex');
@@ -117,8 +133,9 @@ function run(command: string, args: string[], options: { cwd: string; env?: Node
 function runEmsdk(args: string[]): void {
     console.log(`emsdk ${args.join(' ')}`);
     // Node does not start .bat files without a shell; cmd.exe runs it with plain arguments.
+    // `.\` because cmd.exe skips the current folder when NoDefaultCurrentDirectoryInExePath is set.
     const output = IS_WINDOWS
-        ? run('cmd.exe', ['/d', '/c', 'emsdk.bat', ...args], { cwd: EMSDK_FOLDER })
+        ? run('cmd.exe', ['/d', '/c', '.\\emsdk.bat', ...args], { cwd: EMSDK_FOLDER })
         : run('./emsdk', args, { cwd: EMSDK_FOLDER });
     console.log(output.trim().split('\n').slice(-3).join('\n'));
 }
@@ -172,9 +189,9 @@ async function downloadHeaders(folder: string): Promise<void> {
         if (actual !== expected) throw new Error(`${file} has SHA-256 ${actual}, expected ${expected}`);
         writeFileSync(join(folder, file), bytes);
     }
-    // The committed copy of tinybvh's licence must be the one this build uses.
-    const committedLicense = readFileSync(LICENSE_FILES[0]);
-    if (!committedLicense.equals(readFileSync(join(folder, 'LICENSE')))) {
+    // The committed copy of tinybvh's licence must be the one this build uses
+    // (line endings aside: a Windows checkout with core.autocrlf has CRLF).
+    if (readText(LICENSE_FILES[0]) !== readText(join(folder, 'LICENSE'))) {
         throw new Error(`${LICENSE_FILES[0]} differs from tinybvh's LICENSE at ${TINYBVH_COMMIT}`);
     }
 }
@@ -184,7 +201,7 @@ async function downloadHeaders(folder: string): Promise<void> {
  * notices reach every file the WASM ends up in.
  */
 function licenseComment(): string {
-    const texts = LICENSE_FILES.map((file) => readFileSync(file, 'utf8').trimEnd().replace(/\*\//g, '* /'));
+    const texts = LICENSE_FILES.map((file) => readText(file).trimEnd().replace(/\*\//g, '* /'));
     const lines = [
         `The WebAssembly below is tinybvh (${TINYBVH_REPOSITORY}) plus a little of Emscripten's runtime.`,
         'Their licences follow: tinybvh first, then the runtime.',
