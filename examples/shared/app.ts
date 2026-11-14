@@ -98,7 +98,7 @@ export async function createApp(title: string, folder: string, options: { readon
 
 const raycaster = new Raycaster();
 
-/** The camera ray through `ndc` (-1..1), packed for `GpuRays.traceClosest` (gpu-rays.ts). */
+/** The camera ray through `ndc` (-1..1), packed for `GpuRays.traceClosest` (@pmndrs/bvh). */
 export function cameraRay(camera: Camera, ndc: Vector2, out = new Float32Array(RAY_FLOATS), at = 0): Float32Array {
     raycaster.setFromCamera(ndc, camera);
     const { origin, direction } = raycaster.ray;

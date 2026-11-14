@@ -25,9 +25,9 @@
  * build that comes back after another run started is dropped.
  */
 
-import { assembleTraceScene, createCpuTracer, createTinyBvhBuilder, SceneTrees, uploadTraceScene, type GpuLayoutMeshBvh, type TraceSceneBuffers, type TraceSceneInstance } from '@pmndrs/bvh';
+import { assembleTraceScene, createCpuTracer, createTinyBvhBuilder, SceneTrees, traceBuffersOf, uploadTraceScene, type GpuLayoutMeshBvh, type TraceSceneBuffers, type TraceSceneInstance, type TraceSource } from '@pmndrs/bvh';
 import { createBvhWorkerPool, type BvhWorkerPool } from '@pmndrs/bvh/worker';
-import { assembleLayouts, traceSourceOf, type TraceSource } from '../../shared/gpu-rays.ts';
+import { assembleLayouts } from '../../shared/builders.ts';
 import { bytes, type TreeInfo } from '../../shared/overlay.ts';
 import { fail, isSmoke, ready } from '../../shared/smoke.ts';
 import { layoutInfo, SceneTreesLog, sumInfo } from '../../shared/stats.ts';
@@ -91,14 +91,20 @@ function dropTreeAnswers(id: number): void {
 
 type Current =
     | { readonly kind: 'trees'; readonly id: number; readonly trees: SceneTrees; readonly pool: BvhWorkerPool; readonly log: SceneTreesLog }
-    | { readonly kind: 'uploaded'; readonly id: number; readonly buffers: TraceSceneBuffers; readonly source: TraceSource; readonly tree: TreeInfo }
+    | { readonly kind: 'uploaded'; readonly id: number; readonly buffers: TraceSceneBuffers; readonly source: TraceSceneBuffers; readonly tree: TreeInfo }
     | { readonly kind: 'worker canvas'; readonly id: number; readonly element: HTMLCanvasElement; readonly camera: OrbitCamera; stats: Extract<FromWorker, { type: 'stats' }> | null };
 let current: Current | null = null;
 
 /** One ray-cast view per node format: a scene swap never meets a kernel compiled for the other format. */
 const views = new Map<string, RayCastView>();
+/** The formats a ray-cast view is compiled for. */
+function formatsKey(source: TraceSource): string {
+    const { triangleLeaves, positionLayout, nodeFormat } = traceBuffersOf(source);
+    return `${triangleLeaves}/${positionLayout}/${nodeFormat}`;
+}
+
 async function viewFor(source: TraceSource): Promise<RayCastView> {
-    const key = `${source.triangleLeaves}/${source.positionLayout}/${source.nodeFormat}`;
+    const key = formatsKey(source);
     let view = views.get(key);
     if (!view) {
         view = RayCastView.create(device, app.format);
@@ -254,7 +260,7 @@ async function runWorkerDevice(id: number, started: number): Promise<RunResult |
     const data = assembleLayouts(message.layouts as GpuLayoutMeshBvh[], instances, scene.meshes);
     const buffers = uploadTraceScene(device, data, 'workers-gpu transferred');
     const assemblyMs = performance.now() - mainStart;
-    const source = traceSourceOf(device, buffers);
+    const source = buffers;
     await viewFor(source);
     if (id !== runId) {
         buffers.destroy(); // never on screen
@@ -366,7 +372,7 @@ app.loop({
         }
         if (on.kind === 'trees') on.trees.update(encoder);
         const source = sourceOf(on)!;
-        const view = views.get(`${source.triangleLeaves}/${source.positionLayout}/${source.nodeFormat}`)!;
+        const view = views.get(formatsKey(source))!;
         view.trace(encoder, source, camera.basis(canvas.width / canvas.height), { mode: 'material', shadows: true, sun, highlight: null, sceneRadius: radius }, canvas.width, canvas.height, { measure: frame % 15 === 0 });
         view.draw(encoder, target);
         activeView = view;

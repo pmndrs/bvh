@@ -9,6 +9,7 @@
  */
 
 import {
+    assembleTraceScene,
     createTinyBvhBuilder,
     GpuHplocBuilder,
     GpuLbvhBuilder,
@@ -17,13 +18,26 @@ import {
     type GpuLayoutNodeFormat,
     type GpuLayoutTriangleLeaves,
     type GpuTreeBuffers,
+    type MeshGeometry,
     type MeshInput,
     type MeshLayoutBuilderKind,
     type TinyBvhBuilder,
+    type TraceSceneData,
+    type TraceSceneInstance,
 } from '@pmndrs/bvh';
 import { GpuTimer } from './gpu-timer.ts';
 
 export type BuilderKind = MeshLayoutBuilderKind;
+
+/**
+ * `assembleTraceScene` for trees of any builder's defaults: an indexed tree
+ * makes an indexed scene, which needs each mesh's positions (`geometries`,
+ * parallel to `layouts`); records trees take no geometries.
+ */
+export function assembleLayouts(layouts: readonly GpuLayoutMeshBvh[], instances: readonly TraceSceneInstance[], geometries: readonly MeshGeometry[]): TraceSceneData {
+    const indexed = layouts.some((layout) => layout.triangleLeaves === 'indexed');
+    return assembleTraceScene(layouts, instances, {}, indexed ? { geometries } : {});
+}
 export const BUILDER_KINDS: readonly BuilderKind[] = ['tinybvh', 'gpu-hploc', 'gpu-lbvh'];
 
 /** The builders' common options; left out, each builder's own default. */

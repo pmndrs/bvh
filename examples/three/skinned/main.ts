@@ -15,10 +15,9 @@
  */
 
 import { Bone, Float32BufferAttribute, Group, Mesh, MeshBasicMaterial, MeshStandardMaterial, Raycaster, Skeleton, SkinnedMesh, SphereGeometry, Uint16BufferAttribute, Vector2, Vector3, type BufferGeometry, type Intersection } from 'three';
-import { SceneTrees } from '@pmndrs/bvh';
+import { GpuRays, SceneTrees } from '@pmndrs/bvh';
 import { SceneTreesObject3DSync } from '@pmndrs/bvh/three';
 import { cameraRay, createApp } from '../../shared/app.ts';
-import { GpuRays } from '../../shared/gpu-rays.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 
@@ -106,7 +105,7 @@ const trees = await SceneTrees.create(device, { label: 'skinned', onTree: log.on
 // last pose (here, the rest pose) and counts it in poseCounts.waiting. `await sync.ready` would have them
 // posed from the first update; the page doesn't wait, and the first frames' trees are in the rest pose.
 const sync = new SceneTreesObject3DSync(trees, world, { renderer });
-const rays = await GpuRays.create(trees);
+const rays = await GpuRays.create(device, trees);
 function updateTrees(): number {
     const start = performance.now();
     scene.updateMatrixWorld();

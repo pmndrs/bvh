@@ -14,11 +14,10 @@
  */
 
 import { Color, Group, IcosahedronGeometry, Mesh, MeshStandardMaterial, SphereGeometry, TorusKnotGeometry, Vector3, type Object3D } from 'three';
-import { RAY_FLOATS, SceneTrees, type SceneTreeEvent } from '@pmndrs/bvh';
+import { GpuRays, RAY_FLOATS, SceneTrees, type SceneTreeEvent } from '@pmndrs/bvh';
 import { SceneTreesObject3DSync } from '@pmndrs/bvh/three';
 import { createBvhWorkerPool, defaultWorkerPoolSize, type BvhWorkerPool } from '@pmndrs/bvh/worker';
 import { createApp } from '../../shared/app.ts';
-import { GpuRays } from '../../shared/gpu-rays.ts';
 import { enableDrop, frameObject, loadGltf, meshesOf, requestedModel, type LoadedModel } from '../../shared/loader.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
@@ -126,7 +125,7 @@ async function load(root: Object3D, label: string, loadMs: number | null): Promi
     const log = new SceneTreesLog();
     const trees = await SceneTrees.create(device, { label: 'load-gltf', workers: pool, gpuFirstTrees: gpuFirst, onTree: log.onTree });
     const sync = new SceneTreesObject3DSync(trees, root, { static: true });
-    const rays = await GpuRays.create(trees);
+    const rays = await GpuRays.create(device, trees);
     current = { root, trees, sync, pool, log, rays };
     // Start the builds, then compile the scene's materials before its first frame (compileAsync), placing trees
     // as they arrive meanwhile. Otherwise the first render compiles every pipeline synchronously, and no

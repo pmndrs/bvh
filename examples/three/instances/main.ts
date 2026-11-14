@@ -13,10 +13,9 @@
  */
 
 import { BatchedMesh, BoxGeometry, Color, ConeGeometry, IcosahedronGeometry, InstancedMesh, Matrix4, MeshStandardMaterial, Quaternion, TorusGeometry, Vector2, Vector3, type Mesh } from 'three';
-import { SceneTrees } from '@pmndrs/bvh';
+import { GpuRays, SceneTrees } from '@pmndrs/bvh';
 import { SceneTreesObject3DSync } from '@pmndrs/bvh/three';
 import { cameraRay, createApp } from '../../shared/app.ts';
-import { GpuRays } from '../../shared/gpu-rays.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 
@@ -95,7 +94,7 @@ const trees = await SceneTrees.create(device, { label: 'instances', onTree: log.
 const syncStart = performance.now();
 const sync = new SceneTreesObject3DSync(trees, scene);
 const syncMs = performance.now() - syncStart;
-const rays = await GpuRays.create(trees);
+const rays = await GpuRays.create(device, trees);
 function updateTrees(): number {
     const start = performance.now();
     scene.updateMatrixWorld();

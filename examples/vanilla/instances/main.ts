@@ -20,8 +20,7 @@
  * shown by instance by default.
  */
 
-import { createRandom, SceneTrees, type MeshGeometry } from '@pmndrs/bvh';
-import { GpuRays } from '../../shared/gpu-rays.ts';
+import { createRandom, GpuRays, SceneTrees, type MeshGeometry } from '@pmndrs/bvh';
 import { GpuBracket, gpuMsText } from '../../shared/gpu-timer.ts';
 import { bytes } from '../../shared/overlay.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
@@ -139,7 +138,7 @@ submitUpdate();
 const view = RayCastView.create(device, app.format);
 // A SceneTrees is a trace source as it is: its buffers and formats are read every frame.
 await view.prepare(trees);
-const rays = await GpuRays.create(trees);
+const rays = await GpuRays.create(device, trees);
 camera.frame([-FIELD - 4, -FIELD - 4, -FIELD - 4, FIELD + 4, FIELD + 4, FIELD + 4]);
 camera.distance *= 0.5;
 

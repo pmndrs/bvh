@@ -24,6 +24,7 @@ import {
     createCpuTracer,
     createMeshLayoutBuilder,
     createRandom,
+    GpuRays,
     HIT_RECORD_BYTES,
     HIT_RECORD_WORD,
     IDENTITY_TRANSFORM,
@@ -36,7 +37,7 @@ import {
     type TraceSceneData,
 } from '@pmndrs/bvh';
 import { requestedModel } from '../../shared/assets.ts';
-import { assembleLayouts, GpuRays, traceSourceOf } from '../../shared/gpu-rays.ts';
+import { assembleLayouts } from '../../shared/builders.ts';
 import { GpuTimer } from '../../shared/gpu-timer.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 import { layoutInfo } from '../../shared/stats.ts';
@@ -175,14 +176,14 @@ async function swapScene(scene: VanillaScene): Promise<void> {
     // One instance at the origin: the scene the walk reads, in the formats the tree came in (the builder's defaults).
     const data = assembleLayouts([result.layout], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }], [mesh]);
     const buffers = uploadTraceScene(device, data, 'hello');
-    const source = traceSourceOf(device, buffers);
+    const source = buffers; // an uploaded scene names its formats
     // Everything new is made before anything old goes: the frames go on with the old scene meanwhile.
     const formats = `${source.triangleLeaves}/${source.positionLayout}/${source.nodeFormat}`;
     const kernel =
         batchKernel && formats === kernelFormats
             ? batchKernel
             : await TraceBatchKernel.create(device, { label: 'hello batch', triangleLeaves: source.triangleLeaves, positionLayout: source.positionLayout, nodeFormat: source.nodeFormat });
-    const newPicks = await GpuRays.create(source);
+    const newPicks = await GpuRays.create(device, buffers, { label: 'hello picks' });
 
     const positions = device.createBuffer({ label: 'hello positions', size: mesh.positions.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     const indices = device.createBuffer({ label: 'hello indices', size: mesh.indices.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });

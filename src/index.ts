@@ -247,4 +247,17 @@ export {
     type TreeBuilder,
 } from './scene/scene-trees.ts';
 export { DRIFT_HOLD_FRAMES, DRIFT_THRESHOLD, STATS_EVERY_FRAMES, type DeformingTreeCounts } from './scene/deforming-trees.ts';
+// Picking and ray batches over a SceneTrees or an uploaded scene (one source type), with readback and hit decoding.
+export {
+    GpuRays,
+    traceBuffersOf,
+    type GpuAnyHits,
+    type GpuClosestHits,
+    type GpuPickOptions,
+    type GpuRayHit,
+    type GpuRaysOptions,
+    type GpuRaysTiming,
+    type GpuTraceOptions,
+    type TraceSource,
+} from './scene/gpu-rays.ts';
 export { GpuFirstTrees, GpuTreeOutputs, type FirstTreeBuilder, type GpuBuiltTree, type GpuTreeBatchResult, type GpuTreeBuilds, type GpuTreeRequest } from './scene/gpu-first-trees.ts';

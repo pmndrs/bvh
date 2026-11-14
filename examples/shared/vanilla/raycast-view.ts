@@ -16,9 +16,8 @@
  * bind groups are made again when the scene's buffers change.
  */
 
-import { traceModuleEntries, traceModuleWgsl, type TraceSceneBuffers } from '@pmndrs/bvh';
+import { traceBuffersOf, traceModuleEntries, traceModuleWgsl, type TraceSceneBuffers, type TraceSource } from '@pmndrs/bvh';
 import { GpuTimer } from '../gpu-timer.ts';
-import type { TraceSource } from '../gpu-rays.ts';
 import type { CameraBasis } from './camera.ts';
 
 export const VIEW_MODES = ['normal', 'material', 'instance', 'triangle', 'depth'] as const;
@@ -56,7 +55,7 @@ const VIEW_BYTES = 96;
 const NO_HIGHLIGHT = 0xffffffff;
 const MODE_INDEX: Readonly<Record<ViewMode, number>> = { normal: 0, material: 1, instance: 2, triangle: 3, depth: 4 };
 
-function kernelWgsl(source: TraceSource): string {
+function kernelWgsl(source: TraceSceneBuffers): string {
     const walk = traceModuleWgsl({ traceSlot: { group: 0, firstBinding: 0 }, triangleLeaves: source.triangleLeaves, positionLayout: source.positionLayout, nodeFormat: source.nodeFormat });
     return /* wgsl */ `
 ${walk}
@@ -201,7 +200,8 @@ export class RayCastView {
     }
 
     /** Compiles the kernel for `source`'s formats (again only when they change). Call before {@link trace}. */
-    async prepare(source: TraceSource): Promise<void> {
+    async prepare(sceneSource: TraceSource): Promise<void> {
+        const source = traceBuffersOf(sceneSource);
         const key = `${source.triangleLeaves}/${source.positionLayout}/${source.nodeFormat}`;
         if (this.pipeline && key === this.pipelineKey) return;
         const entries = traceModuleEntries({ triangleLeaves: source.triangleLeaves });
@@ -293,7 +293,7 @@ export class RayCastView {
         const timestampWrites = measure ? this.timer?.pass() : undefined;
         const pass = encoder.beginComputePass({ label: 'raycast view', timestampWrites });
         pass.setPipeline(this.pipeline);
-        pass.setBindGroup(0, this.bindScene(source.traceBuffers));
+        pass.setBindGroup(0, this.bindScene(traceBuffersOf(source)));
         pass.setBindGroup(1, this.ioGroup!);
         pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
         pass.end();
