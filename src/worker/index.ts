@@ -13,6 +13,7 @@ export {
     createBvhWorkerPool,
     defaultWorkerPoolSize,
     type BvhBuildRequest,
+    type BvhPoolBuildEvent,
     type BvhWorkerPool,
     type BvhWorkerPoolOptions,
     type BvhWorkerPoolStats,

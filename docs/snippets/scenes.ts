@@ -40,6 +40,43 @@ export async function waitForTrees(trees: SceneTrees, frame: () => void): Promis
     // #endregion
 }
 
+export async function buildEvents(device: GPUDevice): Promise<SceneTrees> {
+    // #region build-events
+    const trees = await SceneTrees.create(device, {
+        // Each mesh's build, per builder: 'requested' (in an update), 'started', 'finished' (with its outcome).
+        onBuild: (event) => {
+            const who = event.mesh !== null ? `mesh ${event.mesh}` : `merged group ${event.group}`;
+            if (event.phase !== 'finished') console.log(who, event.builder, event.phase);
+            else console.log(who, event.builder, event.outcome, `${event.ms.toFixed(0)} ms`, event.reason ?? '', event.gpuMs ?? '');
+        },
+        // Placed: what rays see from the next frame.
+        onTree: (event) => console.log(`mesh ${event.mesh}: ${event.builtBy} tree placed`),
+    });
+    // #endregion
+    return trees;
+}
+
+export async function timing(device: GPUDevice): Promise<void> {
+    // #region timing
+    // timestamps: each GPU build batch's pass, summed in counts.gpuBuildTimestampMs (needs timestamp-query).
+    const trees = await SceneTrees.create(device, { timestamps: true });
+    const querySet = device.createQuerySet({ type: 'timestamp', count: 2 });
+    const resolved = device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+    const read = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+
+    const encoder = device.createCommandEncoder();
+    // A timestamp before and after everything the update records (copies, refits, the top level).
+    trees.update(encoder, { timestampWrites: { querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } });
+    encoder.resolveQuerySet(querySet, 0, 2, resolved, 0);
+    encoder.copyBufferToBuffer(resolved, 0, read, 0, 16);
+    device.queue.submit([encoder.finish()]);
+    await read.mapAsync(GPUMapMode.READ);
+    const [start, end] = new BigInt64Array(read.getMappedRange());
+    console.log(`update: ${Number(end - start) / 1e6} ms on the GPU; builds so far: ${trees.counts.gpuBuildTimestampMs ?? '-'} ms`);
+    // #endregion
+    read.unmap();
+}
+
 export function bindings(trees: SceneTrees, rebind: (buffers: SceneTrees['buffers']) => void): void {
     // #region version
     let boundVersion = -1;
@@ -101,6 +138,34 @@ export function deformingOnCpu(trees: SceneTrees, cloth: MeshGeometry, posedPosi
     // the next trees.update(encoder) refits the tree on the CPU, uploads it and moves the top-level box.
     console.log(trees.deformingCounts.cpuPoses);
     // #endregion
+}
+
+export function rebuildNow(trees: SceneTrees, mesh: number): void {
+    // #region rebuild
+    // After a big pose change (a ragdoll, a cut): rebuilt from the latest GPU pose at the next update, drift or not.
+    if (!trees.rebuild(mesh)) console.log('nothing to rebuild from: no subgroups, no GPU pose or no tree yet');
+    // #endregion
+}
+
+export async function placeOwnTree(device: GPUDevice, crate: MeshGeometry, crateLayout: GpuLayoutMeshBvh, matrix: Float32Array): Promise<SceneTrees> {
+    // #region place-tree
+    const trees = await SceneTrees.create(device);
+    const mesh = trees.addMesh(crate);
+    // A tree you built (another device, a file, any builder of the GPU layout) from the same geometry:
+    // given before the first update, the mesh starts no builds; later, its builds are cancelled or dropped.
+    trees.placeTree(mesh, crateLayout);
+    trees.addInstance({ mesh, objectToWorld: matrix });
+    // The next update places it: trees.meshStatus(mesh).builtBy === 'app'.
+    // #endregion
+    return trees;
+}
+
+export async function gpuOnly(device: GPUDevice): Promise<SceneTrees> {
+    // #region gpu-only
+    // GPU trees only: tinybvh builds just the meshes the GPU refuses (and every mesh without subgroups).
+    const trees = await SceneTrees.create(device, { refine: false });
+    // #endregion
+    return trees;
 }
 
 export async function options(device: GPUDevice): Promise<SceneTrees> {

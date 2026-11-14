@@ -73,6 +73,20 @@ mesh is rebuilt with H-PLOC from the current pose. A sway rarely holds that long
 
 `driftRatio(mesh)` gives the latest ratio. `deformingCounts` counts refits, rebuilds and poses skipped.
 
+To rebuild without waiting for the drift rule (after a pose change you know is big: a ragdoll, a cut, a teleported
+limb), `rebuild(mesh)` asks for it: the next update starts an H-PLOC build from the latest GPU pose, and the update after
+its batch comes back places it, as a drift rebuild is (`onBuild` reports it with `rebuild: true`;
+`deformingCounts.driftRebuilds` counts both). One rebuild starts per update, so several asked at once go one after
+another. It returns false, and does nothing, when there is nothing to rebuild from: no `subgroups` (no GPU builder;
+CPU poses are refit only), no `setPose` yet, or no tree placed yet. `meshStatus(mesh).deforming` says which meshes
+deform.
+
+{/* snippet: rebuild */}
+```ts
+// After a big pose change (a ragdoll, a cut): rebuilt from the latest GPU pose at the next update, drift or not.
+if (!trees.rebuild(mesh)) console.log('nothing to rebuild from: no subgroups, no GPU pose or no tree yet');
+```
+
 ## Rules
 
 - Deforming meshes never merge, and each posed object needs its own mesh (its own pose).

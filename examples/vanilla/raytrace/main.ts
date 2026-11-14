@@ -21,7 +21,7 @@
 
 import { createCpuTracer, createMeshLayoutBuilder, RAY_FLOATS, uploadTraceScene, type MeshLayoutBuilder, type MeshLayoutBuilderKind, type TraceSceneBuffers, type TraceSceneData } from '@pmndrs/bvh';
 import { requestedModel } from '../../shared/assets.ts';
-import { assembleLayouts, traceSourceOf, type TraceSource } from '../../shared/gpu-rays.ts';
+import { assembleLayouts } from '../../shared/builders.ts';
 import { bytes } from '../../shared/overlay.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 import { layoutInfo, sumInfo } from '../../shared/stats.ts';
@@ -43,7 +43,7 @@ const settings = {
 };
 const view = RayCastView.create(device, app.format);
 let scene: VanillaScene;
-let current: { data: TraceSceneData; buffers: TraceSceneBuffers; source: TraceSource; radius: number } | null = null;
+let current: { data: TraceSceneData; buffers: TraceSceneBuffers; source: TraceSceneBuffers; radius: number } | null = null;
 
 // One chooser per builder, made once: making one prepares its GPU pipelines (not part of a build's time).
 const choosers = new Map<MeshLayoutBuilderKind, Promise<MeshLayoutBuilder>>();
@@ -70,7 +70,7 @@ async function rebuildNow(): Promise<void> {
     const by = new Map<string, number>();
     for (const result of results) by.set(result.builtBy, (by.get(result.builtBy) ?? 0) + 1);
     // tinybvh asked for by name is no fallback; a GPU builder the device can't run is.
-    const reasons = new Set([settings.builder === 'tinybvh' ? null : builder.fallbackReason, ...results.map((result) => result.fallbackReason)].filter((reason): reason is string => !!reason));
+    const reasons = new Set([builder.fallback ? builder.fallbackReason : null, ...results.map((result) => result.fallbackReason)].filter((reason): reason is string => !!reason));
     overlay.build({ builtBy: [...by].map(([kind, count]) => `${kind} ×${count}`).join(', '), fallbackReason: reasons.size ? [...reasons].join('; ') : null, cpuMs });
     overlay.tree(sumInfo(results.map((result) => layoutInfo(result.layout))));
 
@@ -81,7 +81,7 @@ async function rebuildNow(): Promise<void> {
         target.meshes,
     );
     const buffers = uploadTraceScene(device, data, 'raytrace');
-    const source = traceSourceOf(device, buffers);
+    const source = buffers;
     await view.prepare(source);
     // No await from here: the next frame traces the new scene with the kernel just made for it.
     const old = current;

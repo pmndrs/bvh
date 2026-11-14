@@ -29,8 +29,23 @@ describe('createMeshLayoutBuilder', () => {
         const forced = await createMeshLayoutBuilder(device, { prefer: 'tinybvh' });
         expect(forced.kind).toBe('tinybvh');
         expect(forced.fallbackReason).toMatch(/asked/);
+        // Asked for, not a fallback; the others are.
+        expect(forced.fallback).toBe(false);
+        expect((await createMeshLayoutBuilder(null)).fallback).toBe(true);
+        expect((await createMeshLayoutBuilder(null, { prefer: 'tinybvh' })).fallback).toBe(false);
+        expect((await createMeshLayoutBuilder({ features: new Set<string>() } as unknown as GPUDevice, { prefer: 'gpu-lbvh' })).fallback).toBe(true);
         // Asking for either GPU builder on a device without subgroups still gives tinybvh.
         const withoutSubgroups = { features: new Set<string>() } as unknown as GPUDevice;
         for (const prefer of ['gpu-hploc', 'gpu-lbvh'] as const) expect((await createMeshLayoutBuilder(withoutSubgroups, { prefer })).kind).toBe('tinybvh');
+    });
+
+    it('has a separate prepare step, and never reports GPU batches for tinybvh', async () => {
+        const builder = await createMeshLayoutBuilder(null, { prepare: false });
+        expect(builder.ready).toBe(true);
+        await builder.prepare();
+        const batches: unknown[] = [];
+        const [result] = await builder.buildLayouts([{ positions: randomSoup(50, 3) }], { onGpuBatch: (batch) => batches.push(batch), maxLeafPrimitives: 2 });
+        expect(result.builtBy).toBe('tinybvh');
+        expect(batches).toEqual([]);
     });
 });

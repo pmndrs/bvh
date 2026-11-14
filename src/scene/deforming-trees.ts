@@ -89,6 +89,8 @@ interface DeformingMesh {
     sampleFrame: number;
     judgedStats: object | null;
     rebuilding: boolean;
+    /** The app asked for a rebuild now (`SceneTrees.rebuild`): due at the next update, drift or not. */
+    rebuildAsked: boolean;
 }
 
 export class DeformingTrees {
@@ -162,6 +164,7 @@ export class DeformingTrees {
             sampleFrame: 0,
             judgedStats: null,
             rebuilding: false,
+            rebuildAsked: false,
         });
     }
 
@@ -249,12 +252,26 @@ export class DeformingTrees {
         return true;
     }
 
-    /** The mesh to rebuild this update, if any: the one drifted longest, once held for {@link DRIFT_HOLD_FRAMES}. */
+    /**
+     * Asks for the mesh's rebuild at the next update, whatever its drift
+     * (`SceneTrees.rebuild`). False when there is nothing to rebuild from: no
+     * GPU pose, or no tree placed yet.
+     */
+    requestRebuild(slot: number): boolean {
+        const mesh = this.meshes.get(slot);
+        if (!mesh?.vertices || !mesh.placement) return false;
+        mesh.rebuildAsked = true;
+        return true;
+    }
+
+    /** The mesh to rebuild this update, if any: one the app asked for, else the one drifted longest, once held for {@link DRIFT_HOLD_FRAMES}. */
     rebuildDue(frame: number): number | null {
         let chosen: DeformingMesh | null = null;
         for (const mesh of this.meshes.values()) {
             this.readDrift(mesh);
-            if (mesh.rebuilding || !mesh.placement || !mesh.vertices || mesh.driftSince < 0) continue;
+            if (mesh.rebuilding || !mesh.placement || !mesh.vertices) continue;
+            if (mesh.rebuildAsked) return mesh.slot;
+            if (mesh.driftSince < 0) continue;
             if (frame - mesh.driftSince < DRIFT_HOLD_FRAMES) continue;
             if (!chosen || mesh.driftSince < chosen.driftSince) chosen = mesh;
         }
@@ -277,6 +294,7 @@ export class DeformingTrees {
         const mesh = this.meshes.get(slot);
         if (!mesh) return;
         mesh.driftSince = -1;
+        mesh.rebuildAsked = false;
         if (!started) return;
         mesh.rebuilding = true;
         this.driftRebuilds++;

@@ -335,6 +335,16 @@ export class SceneTreesObject3DSync {
     }
 
     /**
+     * The `SceneTrees` mesh handles the sync holds now, one per mesh it added
+     * (a shared geometry range, or a posed object's own), for
+     * `SceneTrees.meshStatus` and stats. A new array each time; a
+     * {@link sync} can add and remove handles.
+     */
+    get meshHandles(): number[] {
+        return [...this.meshes.values()].map((mesh) => mesh.handle);
+    }
+
+    /**
      * Walks the scene again: adds new meshes and instances, removes gone ones,
      * then pushes changes as {@link update} does (and material indices). The
      * walk and the plan come first, so a throwing `material` callback changes

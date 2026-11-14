@@ -12,7 +12,8 @@
  *   the pool was asked to the moment it answered (queued, then building), a
  *   blue tick when the mesh's GPU tree was placed, an orange one when
  *   tinybvh's was. The pool is the page's own (`createBvhWorkerPool`, passed
- *   to `SceneTrees` as `workers`), wrapped to see those calls.
+ *   to `SceneTrees` as `workers`); the bars come from `SceneTrees`' `onBuild`
+ *   events (each tinybvh build's request and finish).
  * - **The view**, by material, paints each mesh by the tree it is on now:
  *   blue for the GPU's, orange for tinybvh's (the timeline's colours).
  * - **Controls:** hold tinybvh's trees back (`holdRefinements`) and release
@@ -33,7 +34,6 @@ import { bytes } from '../../shared/overlay.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
 import { createVanillaApp } from '../../shared/vanilla/app.ts';
-import { watchPool } from '../../shared/vanilla/watched-pool.ts';
 import { checkViewAgainstCpu } from '../../shared/vanilla/check.ts';
 import { galleryScene, torusKnot, type IndexedMesh, type VanillaScene } from '../../shared/vanilla/geometry.ts';
 import { enableSceneDrop, loadGltfScene } from '../../shared/vanilla/gltf.ts';
@@ -83,8 +83,6 @@ interface Run {
     floorLane: number;
     /** Tree events, applied before the next update (painting inside `onTree` would change the scene during its own update). */
     readonly pending: SceneTreeEvent[];
-    /** Positions array → timeline lane, for the pool's calls. */
-    readonly lanes: Map<Float32Array, number>;
     nextLane: number;
     nextInstance: number;
     live: boolean;
@@ -100,11 +98,7 @@ const settings = { gpuFirst: true, hold: isSmoke, mode: 'material' as ViewMode, 
 
 async function createRun(target: VanillaScene): Promise<Run> {
     let run: Run | null = null;
-    // The page's pool, wrapped: each build's call and answer go on the timeline, by the geometry's positions array.
-    const pool = watchPool(createBvhWorkerPool(), (geometry, asked) => {
-        const lane = run?.lanes.get(geometry.positions);
-        if (run?.live && lane !== undefined) timeline.span(lane, 'worker', asked);
-    });
+    const pool = createBvhWorkerPool();
     const log = new SceneTreesLog();
     const pending: SceneTreeEvent[] = [];
     let trees: SceneTrees;
@@ -118,12 +112,18 @@ async function createRun(target: VanillaScene): Promise<Run> {
                 log.onTree(event);
                 pending.push(event);
             },
+            // Each tinybvh build that came back goes on the timeline, from its request (queued, then building) to its answer.
+            onBuild: (event) => {
+                if (event.builder !== 'tinybvh' || event.phase !== 'finished' || event.outcome !== 'built' || event.mesh === null) return;
+                const lane = run?.meshes.get(event.mesh)?.lane;
+                if (run?.live && lane !== undefined) timeline.span(lane, 'worker', performance.now() - event.ms);
+            },
         });
     } catch (error) {
         pool.dispose(); // the scene that would own it never came
         throw error;
     }
-    run = { trees, pool, log, meshes: new Map(), gpuFirst: settings.gpuFirst, pending, lanes: new Map(), floorLane: -1, nextLane: 0, nextInstance: 0, live: true, framesTraced: 0, framesTracedLoading: 0 };
+    run = { trees, pool, log, meshes: new Map(), gpuFirst: settings.gpuFirst, pending, floorLane: -1, nextLane: 0, nextInstance: 0, live: true, framesTraced: 0, framesTracedLoading: 0 };
     const handles = target.meshes.map((geometry) => addMesh(run!, geometry).handle);
     // A gallery's last mesh is its floor: grey whatever tree it is on.
     run.floorLane = target.name.startsWith('gallery') ? target.meshes.length - 1 : -1;
@@ -133,7 +133,6 @@ async function createRun(target: VanillaScene): Promise<Run> {
 
 function addMesh(run: Run, geometry: IndexedMesh): MeshEntry {
     const lane = run.nextLane++;
-    run.lanes.set(geometry.positions, lane);
     const entry: MeshEntry = { lane, handle: run.trees.addMesh(geometry), geometry, instances: [] };
     run.meshes.set(entry.handle, entry);
     if (run === current) timeline.grow(run.nextLane);

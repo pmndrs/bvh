@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import { createFakeGpu } from '../../tests/support/fake-gpu.ts';
 import { FakeHploc, settle } from '../../tests/support/fake-hploc.ts';
+import { addFakeTimestamps } from '../../tests/support/fake-timestamps.ts';
 import { tessellatedQuad } from '../trace/oracle-fixtures.ts';
 import type { MeshGeometry } from '../trace/mesh-bvh.ts';
 import { GpuFirstTrees, type GpuTreeBatchResult, type GpuTreeBuilds, type GpuTreeRequest } from './gpu-first-trees.ts';
@@ -154,5 +155,46 @@ describe('GpuFirstTrees: the capped queue', () => {
         await settle();
         expect(hploc.events.filter((event) => event.startsWith('start'))).toEqual(['start 0']);
         expect(hploc.poolsAlive).toBe(0);
+    });
+});
+
+describe('GpuFirstTrees: timing and batch starts', () => {
+    it('times each batch with timestamps when asked (capped and not), and says when each batch is submitted', async () => {
+        const { gpu, hploc, builder, requests } = setUp();
+        // Without timestamp-query, batches carry no GPU time.
+        const plain = builder.build(requests([2]), { timestamps: true });
+        const [untimed] = await Promise.all(plain.batches);
+        expect(untimed.gpuMs ?? null).toBeNull();
+        copyOut(untimed);
+
+        const counts = addFakeTimestamps(gpu, 2.5);
+        const started: number[][] = [];
+        const onBatchStart = (members: readonly GpuTreeRequest[]) => started.push(members.map((member) => member.slot));
+        const uncapped = builder.build(requests([2, 3]), { timestamps: true, onBatchStart });
+        expect(started).toEqual([[1, 2]]); // one batch, submitted at once
+        const [timed] = await Promise.all(uncapped.batches);
+        expect(timed.gpuMs).toBeCloseTo(2.5, 6);
+        expect(counts.resolves).toBe(1);
+        copyOut(timed);
+
+        hploc.manual = true;
+        const capped = builder.build(requests([2, 2]), { maxBatchBytes: SMALL_CAP, timestamps: true, onBatchStart });
+        expect(started).toEqual([[1, 2], [3]]); // the second batch waits in the queue
+        await hploc.finishNext();
+        const first = await capped.batches[0];
+        expect(first.gpuMs).toBeCloseTo(2.5, 6);
+        copyOut(first);
+        await settle();
+        expect(started).toEqual([[1, 2], [3], [4]]);
+        await hploc.finishNext();
+        copyOut(await capped.batches[1]);
+
+        // Not asked: no query set made, no time.
+        hploc.manual = false;
+        const before = counts.querySets;
+        const [result] = await Promise.all(builder.build(requests([2])).batches);
+        expect(result.gpuMs ?? null).toBeNull();
+        expect(counts.querySets).toBe(before);
+        copyOut(result);
     });
 });

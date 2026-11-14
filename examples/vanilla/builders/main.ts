@@ -32,8 +32,7 @@ import {
     type TraceSceneData,
 } from '@pmndrs/bvh';
 import { requestedModel } from '../../shared/assets.ts';
-import { BUILDER_KINDS, MeshBuilds, type BuilderKind, type TimedBuild } from '../../shared/builders.ts';
-import { assembleLayouts, traceSourceOf, type TraceSource } from '../../shared/gpu-rays.ts';
+import { assembleLayouts, BUILDER_KINDS, MeshBuilds, type BuilderKind, type TimedBuild } from '../../shared/builders.ts';
 import { GpuTimer } from '../../shared/gpu-timer.ts';
 import { bytes, type TreeInfo } from '../../shared/overlay.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
@@ -64,7 +63,7 @@ interface Row {
     readonly info: TreeInfo;
     readonly data: TraceSceneData;
     readonly buffers: TraceSceneBuffers;
-    readonly source: TraceSource;
+    readonly source: TraceSceneBuffers;
     readonly traceMs: number | null;
     readonly timing: 'timestamps' | 'submit to done';
     /** t per ray (negative: a miss) and the hit triangle. */
@@ -181,7 +180,7 @@ function bounds(positions: Float32Array): number[] {
     return b;
 }
 
-async function kernelFor(source: TraceSource): Promise<TraceBatchKernel> {
+async function kernelFor(source: TraceSceneBuffers): Promise<TraceBatchKernel> {
     const key = `${source.triangleLeaves}/${source.positionLayout}/${source.nodeFormat}`;
     let kernel = kernels.get(key);
     if (!kernel) {
@@ -192,14 +191,14 @@ async function kernelFor(source: TraceSource): Promise<TraceBatchKernel> {
 }
 
 /** The rays through one tree: the median of timed dispatches, then the hits read back. */
-async function trace(source: TraceSource, rays: Rays): Promise<{ ms: number | null; timing: Row['timing']; t: Float32Array; triangles: Uint32Array }> {
+async function trace(source: TraceSceneBuffers, rays: Rays): Promise<{ ms: number | null; timing: Row['timing']; t: Float32Array; triangles: Uint32Array }> {
     const kernel = await kernelFor(source);
     const { buffer, results, read } = rays;
     timer?.reset(); // a trace that failed midway (jobs run one at a time, so none is in flight)
     const times: number[] = [];
     for (let run = 0; run < DISPATCHES + 1; run++) {
         const encoder = device.createCommandEncoder({ label: 'builders trace' });
-        kernel.encode(encoder, source.traceBuffers, { mode: 'closest', rays: buffer, results, count: RAY_COUNT, timestampWrites: timer?.pass() });
+        kernel.encode(encoder, source, { mode: 'closest', rays: buffer, results, count: RAY_COUNT, timestampWrites: timer?.pass() });
         timer?.resolveInto(encoder);
         const start = performance.now();
         device.queue.submit([encoder.finish()]);
@@ -235,7 +234,7 @@ async function buildRow(kind: BuilderKind, mesh: IndexedMesh, rays: Rays): Promi
     const built = await builds.build(kind, mesh, leaf);
     const data = assembleLayouts([built.layout], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }], [mesh]);
     const buffers = uploadTraceScene(device, data, kind);
-    const source = traceSourceOf(device, buffers);
+    const source = buffers;
     const traced = await trace(source, rays);
     const element = document.createElement('tr');
     const row: Row = { kind, built, info: layoutInfo(built.layout), data, buffers, source, traceMs: traced.ms, timing: traced.timing, t: traced.t, triangles: traced.triangles, agree: null, element };

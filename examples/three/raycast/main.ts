@@ -12,10 +12,9 @@
  */
 
 import { BufferAttribute, BufferGeometry, Mesh, MeshStandardMaterial, Points, PointsMaterial, Raycaster, SphereGeometry, Vector2, Vector3, type Intersection, type Object3D, MeshBasicMaterial, Group, TorusKnotGeometry } from 'three';
-import { RAY_FLOATS, SceneTrees } from '@pmndrs/bvh';
+import { GpuRays, RAY_FLOATS, SceneTrees } from '@pmndrs/bvh';
 import { SceneTreesObject3DSync, acceleratedRaycast, computeBoundsTree, prepareBoundsTrees, type BvhBoundsTree } from '@pmndrs/bvh/three';
 import { createApp } from '../../shared/app.ts';
-import { GpuRays } from '../../shared/gpu-rays.ts';
 import { enableDrop, frameObject, loadGltf, meshesOf, requestedModel, type LoadedModel } from '../../shared/loader.ts';
 import { layoutInfo, SceneTreesLog, sumInfo } from '../../shared/stats.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
@@ -89,7 +88,7 @@ async function useScene(next: Object3D, label: string): Promise<void> {
     log = new SceneTreesLog();
     trees = await SceneTrees.create(device, { label: 'raycast', onTree: log.onTree });
     sync = new SceneTreesObject3DSync(trees, root);
-    gpuRays = await GpuRays.create(trees);
+    gpuRays = await GpuRays.create(device, trees);
     updateTrees();
     await trees.whenBuilt();
     updateTrees();

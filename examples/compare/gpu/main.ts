@@ -9,7 +9,7 @@
  */
 
 import { BufferAttribute, BufferGeometry, Group, Points, PointsMaterial } from 'three';
-import { RAY_FLOATS, SceneTrees } from '@pmndrs/bvh';
+import { GpuRays, RAY_FLOATS, SceneTrees } from '@pmndrs/bvh';
 import { SceneTreesObject3DSync } from '@pmndrs/bvh/three';
 import { agreementText, checkFirst, emptyAgreement } from '../../../compare/core/agree.ts';
 import { diagonal } from '../../../compare/core/geometry.ts';
@@ -18,7 +18,6 @@ import type { Measurement } from '../../../compare/core/suites.ts';
 import { createOursGpu, createTmbvhGpu, packRaysFor, type GpuTracer } from '../../../compare/gpu/gpu-trace.ts';
 import { gpuSuite } from '../../../compare/gpu/gpu-suite.ts';
 import type { WorkPerRay } from '../../../compare/gpu/gpu-counts.ts';
-import { GpuRays } from '../../shared/gpu-rays.ts';
 import { createComparePage, expectAgreement, quick } from '../../shared/compare.ts';
 import { ready } from '../../shared/smoke.ts';
 
@@ -108,7 +107,7 @@ sync.update();
 encoder = app.device.createCommandEncoder();
 trees.update(encoder);
 app.device.queue.submit([encoder.finish()]);
-const gpuRays = await GpuRays.create(trees);
+const gpuRays = await GpuRays.create(app.device, trees);
 const sample = packed.subarray(0, Math.min(count, 65_536) * RAY_FLOATS);
 const built = await gpuRays.traceClosest(sample);
 tracers[0].setRays('closest', sample);

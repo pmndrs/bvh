@@ -43,7 +43,6 @@ import {
     type TraceSceneData,
     type TraceSceneInstance,
 } from '@pmndrs/bvh';
-import { traceSourceOf, type TraceSource } from '../../shared/gpu-rays.ts';
 import { gpuMsText, GpuTimer } from '../../shared/gpu-timer.ts';
 import { bytes } from '../../shared/overlay.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
@@ -208,7 +207,7 @@ const instances: TraceSceneInstance[] = [
 interface Current {
     readonly data: TraceSceneData;
     readonly buffers: TraceSceneBuffers;
-    readonly source: TraceSource;
+    readonly source: TraceSceneBuffers;
     readonly refit: GpuMeshRefit;
     readonly built: Built;
     readonly generation: number;
@@ -243,7 +242,7 @@ async function rebuildNow(reason: 'button' | 'auto' | 'start'): Promise<void> {
     const buffers = uploadTraceScene(device, data, 'refit');
     const refit = new GpuMeshRefit(device, { label: 'refit knot', kernels, diagnostics: true });
     const placement = meshRefitPlacement(data, 0); // offsets and the scene's node format
-    const next: Current = { data, buffers, source: traceSourceOf(device, buffers), refit, built, generation: ++generation };
+    const next: Current = { data, buffers, source: buffers, refit, built, generation: ++generation };
     refit.setTree(built.layout, { ...placement, generation: next.generation });
     // Swapped between frames (nothing here awaits): the next frame refits and traces the new scene.
     const old = current;

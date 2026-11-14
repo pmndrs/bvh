@@ -87,11 +87,13 @@ export interface FakeBinding {
  * submit with the dispatch's bindings (group 0, by binding number) and its
  * workgroup counts.
  */
-export type FakeKernel = (bindings: ReadonlyMap<number, FakeBinding>, workgroupsX: number, workgroupsY: number) => void;
+export type FakeKernel = (bindings: ReadonlyMap<number, FakeBinding>, workgroupsX: number, workgroupsY: number, groups: ReadonlyMap<number, ReadonlyMap<number, FakeBinding>>) => void;
 
 interface RecordedDispatch {
     entryPoint: string;
     bindings: ReadonlyMap<number, FakeBinding>;
+    /** Every bind group's buffers, by group (group 0 is `bindings`). */
+    groups: ReadonlyMap<number, ReadonlyMap<number, FakeBinding>>;
     workgroupsX: number;
     workgroupsY: number;
 }
@@ -151,26 +153,31 @@ export class FakeEncoder {
     /** Records dispatches; bind group 0's buffers are what a kernel stand-in gets. */
     beginComputePass(): GPUComputePassEncoder {
         let pipeline: FakePipeline | null = null;
-        let group: FakeBindGroup | null = null;
+        const groups = new Map<number, FakeBindGroup>();
+        const buffersOf = (group: FakeBindGroup): Map<number, FakeBinding> => {
+            const bindings = new Map<number, FakeBinding>();
+            for (const entry of group.entries) {
+                // Texture views and samplers (the texture store's) have nothing for a kernel stand-in.
+                if (!('buffer' in (entry.resource as object))) continue;
+                const resource = entry.resource as GPUBufferBinding;
+                const buffer = resource.buffer as unknown as FakeBuffer;
+                const offset = resource.offset ?? 0;
+                bindings.set(entry.binding, { buffer, offset, size: resource.size ?? buffer.size - offset });
+            }
+            return bindings;
+        };
         const pass = {
             setPipeline: (value: GPUComputePipeline) => {
                 pipeline = value as unknown as FakePipeline;
             },
             setBindGroup: (index: number, value: GPUBindGroup) => {
-                if (index === 0) group = value as unknown as FakeBindGroup;
+                groups.set(index, value as unknown as FakeBindGroup);
             },
             dispatchWorkgroups: (workgroupsX: number, workgroupsY = 1) => {
-                if (!pipeline || !group) throw new Error('dispatch without a pipeline and bind group 0');
-                const bindings = new Map<number, FakeBinding>();
-                for (const entry of group.entries) {
-                    // Texture views and samplers (the texture store's) have nothing for a kernel stand-in.
-                    if (!('buffer' in (entry.resource as object))) continue;
-                    const resource = entry.resource as GPUBufferBinding;
-                    const buffer = resource.buffer as unknown as FakeBuffer;
-                    const offset = resource.offset ?? 0;
-                    bindings.set(entry.binding, { buffer, offset, size: resource.size ?? buffer.size - offset });
-                }
-                this.commands.push({ dispatch: { entryPoint: pipeline.entryPoint, bindings, workgroupsX, workgroupsY } });
+                // A pipeline with no bindings (a pass that only writes timestamps) needs no bind group.
+                if (!pipeline) throw new Error('dispatch without a pipeline');
+                const all = new Map([...groups].map(([index, bound]) => [index, buffersOf(bound)] as const));
+                this.commands.push({ dispatch: { entryPoint: pipeline.entryPoint, bindings: all.get(0) ?? new Map(), groups: all, workgroupsX, workgroupsY } });
             },
             end: () => {},
         };
@@ -211,9 +218,9 @@ export function createFakeGpu(limits: Partial<GPUSupportedLimits> = {}, options:
     const run = (encoder: GPUCommandEncoder): void => {
         for (const command of (encoder as unknown as FakeEncoder).commands) {
             if ('dispatch' in command) {
-                const { entryPoint, bindings, workgroupsX, workgroupsY } = command.dispatch;
-                for (const binding of bindings.values()) if (binding.buffer.destroyed) throw new Error('submit uses a destroyed buffer');
-                options.kernels?.[entryPoint]?.(bindings, workgroupsX, workgroupsY);
+                const { entryPoint, bindings, groups, workgroupsX, workgroupsY } = command.dispatch;
+                for (const group of groups.values()) for (const binding of group.values()) if (binding.buffer.destroyed) throw new Error('submit uses a destroyed buffer');
+                options.kernels?.[entryPoint]?.(bindings, workgroupsX, workgroupsY, groups);
                 continue;
             }
             if ('clear' in command) {

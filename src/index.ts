@@ -74,7 +74,15 @@ export { deserializeLayout, SERIALIZED_FORMAT_VERSION, serializedLayoutBytes, se
 export { singleLeafTopology, TOPOLOGY_EMPTY_CHILD, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from './topology.ts';
 
 // Builders. createMeshLayoutBuilder picks one for you.
-export { createMeshLayoutBuilder, type MeshLayoutBuilder, type MeshLayoutBuilderKind, type MeshLayoutResult } from './mesh-builder.ts';
+export {
+    createMeshLayoutBuilder,
+    type MeshLayoutBuilder,
+    type MeshLayoutBuilderKind,
+    type MeshLayoutBuilderOptions,
+    type MeshLayoutBuildOptions,
+    type MeshLayoutGpuBatch,
+    type MeshLayoutResult,
+} from './mesh-builder.ts';
 export {
     createTinyBvhBuilder,
     TINYBVH_RELEASE_ABOVE_BYTES,
@@ -241,6 +249,7 @@ export {
     type GpuTreeOutputsMode,
     type SceneInstanceChange,
     type SceneInstanceDescriptor,
+    type SceneBuildEvent,
     type SceneInstanceStatus,
     type SceneMeshOptions,
     type SceneMeshStatus,
@@ -249,7 +258,24 @@ export {
     type SceneTreesMemory,
     type SceneTreesOptions,
     type SceneTreesTimeline,
+    type SceneTreesUpdateOptions,
     type TreeBuilder,
 } from './scene/scene-trees.ts';
 export { DRIFT_HOLD_FRAMES, DRIFT_THRESHOLD, STATS_EVERY_FRAMES, type DeformingTreeCounts } from './scene/deforming-trees.ts';
+// Picking and ray batches over a SceneTrees or an uploaded scene (one source type), with readback and hit decoding.
+export {
+    GpuRays,
+    traceBuffersOf,
+    type GpuAnyHits,
+    type GpuClosestHits,
+    type GpuCountOptions,
+    type GpuPickOptions,
+    type GpuRayHit,
+    type GpuRaysOptions,
+    type GpuRaysTiming,
+    type GpuTraceOptions,
+    type GpuWalkCount,
+    type GpuWalkCounts,
+    type TraceSource,
+} from './scene/gpu-rays.ts';
 export { GpuFirstTrees, GpuTreeOutputs, type FirstTreeBuilder, type GpuBuiltTree, type GpuTreeBatchResult, type GpuTreeBuilds, type GpuTreeRequest } from './scene/gpu-first-trees.ts';

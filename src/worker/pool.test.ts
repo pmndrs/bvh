@@ -4,7 +4,7 @@ import type { BuildRequest, BuildResponse, WorkerReady } from '../trace/mesh-bvh
 import { createMeshBvhBuilder } from '../trace/mesh-bvh-async.ts';
 import { meshBvhTransferables, type MeshGeometry } from '../trace/mesh-bvh.ts';
 import { tessellatedQuad } from '../trace/oracle-fixtures.ts';
-import { createBvhWorkerPool, defaultWorkerPoolSize } from './pool.ts';
+import { createBvhWorkerPool, defaultWorkerPoolSize, type BvhPoolBuildEvent } from './pool.ts';
 
 const quad = (cells: number): MeshGeometry => tessellatedQuad(cells, 1);
 
@@ -325,6 +325,64 @@ describe('createBvhWorkerPool', () => {
         expect(FakeWorker.started.length).toBeGreaterThan(0);
         expect(FakeWorker.started.every((worker) => worker.terminated)).toBe(true);
         expect(pool.stats).toMatchObject({ queued: 0, running: 0, workers: 0 });
+    });
+});
+
+describe('per-build events', () => {
+    const summary = (events: readonly BvhPoolBuildEvent[]) => events.map((event) => `${event.id} ${event.phase}${event.outcome ? ` ${event.outcome}` : ''}${event.phase === 'started' ? (event.inWorker ? ' worker' : ' inline') : ''}`);
+
+    it('reports each build queued, started and finished (built, failed, cancelled), inline and on workers, and calls onStart', async () => {
+        const events: BvhPoolBuildEvent[] = [];
+        const inline = createBvhWorkerPool({ onBuild: (event) => events.push(event) });
+        const geometry = quad(3);
+        const starts: number[] = [];
+        const controller = new AbortController();
+        const builds = [
+            inline.build(geometry, {}, { onStart: () => starts.push(1) }),
+            inline.build(quad(2), {}, { signal: controller.signal, onStart: () => starts.push(2) }),
+            inline.build({ positions: new Float32Array(4) }, {}, { onStart: () => starts.push(3) }), // not triangles: fails in the build
+        ];
+        controller.abort(); // the second never starts
+        const settled = await Promise.allSettled(builds);
+        expect(settled.map((result) => result.status)).toEqual(['fulfilled', 'rejected', 'rejected']);
+        expect(summary(events)).toEqual(['1 queued', '2 queued', '3 queued', '2 finished cancelled', '1 started inline', '1 finished built', '3 started inline', '3 finished failed']);
+        expect(starts).toEqual([1, 3]);
+        expect(events[0].geometry).toBe(geometry);
+        expect(events[0].triangleCount).toBe(18);
+        expect(events[0].ms).toBe(0);
+        expect(events.find((event) => event.id === 1 && event.phase === 'finished')!.ms).toBeGreaterThan(0);
+        expect(events.at(-1)!.error).toBeTruthy();
+
+        vi.stubGlobal('Worker', FakeWorker);
+        const workerEvents: BvhPoolBuildEvent[] = [];
+        const pool = createBvhWorkerPool({ size: 2, onBuild: (event) => workerEvents.push(event) });
+        await Promise.all([pool.build(quad(2)), pool.build(quad(3)), pool.build(quad(4))]);
+        expect(workerEvents.filter((event) => event.phase === 'queued').every((event) => event.inWorker)).toBe(true);
+        expect(workerEvents.filter((event) => event.phase === 'started').every((event) => event.inWorker)).toBe(true);
+        expect(workerEvents.filter((event) => event.phase === 'finished').map((event) => event.outcome)).toEqual(['built', 'built', 'built']);
+        // Disposed with a build queued: it finishes as cancelled.
+        const late = pool.build(quad(2));
+        pool.dispose();
+        await expect(late).rejects.toThrow('disposed');
+        expect(workerEvents.at(-1)).toMatchObject({ phase: 'finished', outcome: 'cancelled' });
+    });
+
+    it('keeps going when a listener throws', async () => {
+        const errors: unknown[] = [];
+        const onError = (error: unknown) => errors.push(error);
+        process.on('uncaughtException', onError);
+        try {
+            const pool = createBvhWorkerPool({
+                onBuild: () => {
+                    throw new Error('listener failed');
+                },
+            });
+            expect((await pool.build(quad(2))).triangleCount).toBe(8);
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            expect(errors.length).toBeGreaterThan(0);
+        } finally {
+            process.off('uncaughtException', onError);
+        }
     });
 });
 

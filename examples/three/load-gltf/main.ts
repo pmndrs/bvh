@@ -14,11 +14,10 @@
  */
 
 import { Color, Group, IcosahedronGeometry, Mesh, MeshStandardMaterial, SphereGeometry, TorusKnotGeometry, Vector3, type Object3D } from 'three';
-import { RAY_FLOATS, SceneTrees, type SceneTreeEvent } from '@pmndrs/bvh';
+import { GpuRays, RAY_FLOATS, SceneTrees, type SceneTreeEvent } from '@pmndrs/bvh';
 import { SceneTreesObject3DSync } from '@pmndrs/bvh/three';
 import { createBvhWorkerPool, defaultWorkerPoolSize, type BvhWorkerPool } from '@pmndrs/bvh/worker';
 import { createApp } from '../../shared/app.ts';
-import { GpuRays } from '../../shared/gpu-rays.ts';
 import { enableDrop, frameObject, loadGltf, meshesOf, requestedModel, type LoadedModel } from '../../shared/loader.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
@@ -64,7 +63,7 @@ function drawTimeline(events: readonly SceneTreeEvent[]): void {
     const height = (canvas.height = canvas.clientHeight * devicePixelRatio);
     const context = canvas.getContext('2d')!;
     context.clearRect(0, 0, width, height);
-    const meshes = new Map<number, { triangles: number; gpu?: number; tinybvh?: number }>();
+    const meshes = new Map<number, { triangles: number; gpu?: number; tinybvh?: number; app?: number }>();
     for (const event of events) {
         if (event.mesh === null) continue;
         const entry = meshes.get(event.mesh) ?? { triangles: event.triangleCount };
@@ -126,7 +125,7 @@ async function load(root: Object3D, label: string, loadMs: number | null): Promi
     const log = new SceneTreesLog();
     const trees = await SceneTrees.create(device, { label: 'load-gltf', workers: pool, gpuFirstTrees: gpuFirst, onTree: log.onTree });
     const sync = new SceneTreesObject3DSync(trees, root, { static: true });
-    const rays = await GpuRays.create(trees);
+    const rays = await GpuRays.create(device, trees);
     current = { root, trees, sync, pool, log, rays };
     // Start the builds, then compile the scene's materials before its first frame (compileAsync), placing trees
     // as they arrive meanwhile. Otherwise the first render compiles every pipeline synchronously, and no
@@ -199,9 +198,9 @@ enableDrop(async (model) => {
 
 function refresh(): void {
     if (!current) return;
-    const { trees, log, pool } = current;
+    const { trees, log, pool, sync } = current;
     overlay.build(log.build(trees));
-    overlay.tree(log.tree(trees));
+    overlay.tree(log.tree(trees, sync.meshHandles));
     const counts = trees.counts;
     overlay.set('swaps', `${counts.swaps} (${counts.tinybvhBuilding} tinybvh building, ${pool.stats.queued} queued)`);
     const timeline = trees.timeline;

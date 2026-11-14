@@ -1,9 +1,55 @@
 ---
 title: Ray batches and the CPU walk
-description: TraceBatchKernel for many rays in one dispatch, its hit records, and the same walk in TypeScript.
+description: GpuRays for picking and batches, TraceBatchKernel for many rays in one dispatch, its hit records, and the same walk in TypeScript.
 nav: 61
 sourcecode: src/trace/trace-gpu.ts
 ---
+
+## GpuRays: picking and batches
+
+`GpuRays` is for an app that wants hits on the CPU: picking under the pointer, a batch of visibility tests, a
+hundred thousand rays for a tool. It owns the ray, result and readback buffers, runs the package's batch kernel
+(the same WGSL walk), reads the results back and decodes them. It traces a `SceneTrees` or an uploaded scene
+(`uploadTraceScene`'s buffers): both are a `TraceSource`, and `traceBuffersOf(source)` gives the buffers a source
+holds now.
+
+{/* snippet: gpu-rays */}
+```ts
+import { GpuRays, packRays, uploadTraceScene, type TraceSceneData } from '@pmndrs/bvh';
+
+// A SceneTrees, or an uploaded scene: both are a TraceSource.
+const rays = await GpuRays.create(device, trees);
+const uploaded = await GpuRays.create(device, uploadTraceScene(device, data));
+
+// Picking: one ray, its closest hit or null.
+const hit = await rays.pick([0, 1, 5], [0, 0, -1]);
+if (hit) console.log(hit.instance, hit.triangle, hit.t, hit.material, hit.normal);
+
+// A batch: any number of rays in one dispatch, read back and decoded.
+const batch = packRays(Array.from({ length: 4096 }, (_, i) => ({ origin: [i * 0.01, 1, 5], direction: [0, 0, -1], tMin: 0, tMax: 1e30 })));
+const closest = await rays.traceClosest(batch);
+console.log(`${closest.hits} of ${closest.count} hit, ${closest.gpuMs ?? closest.wallMs} ms`, closest.hit(0));
+const shadows = await uploaded.traceAny(batch, { mask: 0x1 });
+console.log(`${shadows.blockedCount} blocked`, shadows.blocked(0));
+rays.destroy();
+```
+
+- **What it compiles:** one batch kernel for the source's formats, read from its buffers (records or indexed, `f32`
+  or quantized nodes). Options: `triangleFilter`, `anyHitOrder`, `label`, and `timestamps` (default true).
+- **Results:** `traceClosest` gives `hits`, `hit(i)` (`{ t, instance, triangle, frontFace, barycentrics, material,
+  normal }` or null) and the raw `records`; `traceAny` gives `blockedCount`, `blocked(i)` and the words. Both say
+  `gpuMs` (timestamps, where the device has `timestamp-query`, else null) and `wallMs` (submit to results on the CPU).
+- **The walk's work:** `countWalk(rays, { mode })` traces with the [counted walk](/tracing/wgsl-walk#the-counted-walk)
+  (its own kernel, compiled at the first call) and gives `counts(i)` (the hit, steps, nodes, instance entries, triangle
+  tests), `meanSteps` and `maxSteps`: a heat map's numbers.
+- **One trace at a time** per `GpuRays`: calls queue up, and `pending` says one is in flight, so a frame loop can skip
+  a trace rather than build a backlog. `retire()` frees it once the queued traces are done (a page swapping scenes);
+  `destroy()` at once.
+- **When it sees the scene:** a `SceneTrees` is traced as of its last submitted `update`; its buffers are read again at
+  each trace, so a scene whose buffers grew is traced in the new ones.
+- **Limits:** a readback per trace, so it suits picking, tools and checks, not a renderer's rays (use
+  `TraceBatchKernel` or the WGSL walk in your own kernel and keep the hits on the GPU). Closest-hit records are always
+  the 40-byte ones.
 
 ## TraceBatchKernel
 
@@ -40,6 +86,8 @@ device.queue.submit([encoder.finish()]);
 - **Any-hit results:** one `u32` per ray, 1 when blocked.
 - **Masks:** one ray mask per batch (`mask`), a uniform; there is no per-ray mask buffer.
 - **Timing:** pass `timestampWrites` to time the dispatch's pass.
+- **Counters:** a kernel made with `counters: true` runs the [counted walk](/tracing/wgsl-walk#the-counted-walk) and writes
+  one `BvhWalkCounts` (`WALK_COUNTS_BYTES`) per ray in either mode.
 - **Sizes:** `encode` throws a `RangeError` when `rays` or `results` holds fewer than `count` items.
 
 The 40-byte record is the default: a hit carries its material and normal unless you say otherwise. It has a cost on

@@ -24,6 +24,7 @@ import {
     createCpuTracer,
     createMeshLayoutBuilder,
     createRandom,
+    GpuRays,
     HIT_RECORD_BYTES,
     HIT_RECORD_WORD,
     IDENTITY_TRANSFORM,
@@ -36,7 +37,7 @@ import {
     type TraceSceneData,
 } from '@pmndrs/bvh';
 import { requestedModel } from '../../shared/assets.ts';
-import { assembleLayouts, GpuRays, traceSourceOf } from '../../shared/gpu-rays.ts';
+import { assembleLayouts } from '../../shared/builders.ts';
 import { GpuTimer } from '../../shared/gpu-timer.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 import { layoutInfo } from '../../shared/stats.ts';
@@ -159,14 +160,16 @@ function useScene(scene: VanillaScene): Promise<void> {
 async function swapScene(scene: VanillaScene): Promise<void> {
     const mesh = mergeToWorld(scene);
     // The builder: GPU H-PLOC with subgroups, else tinybvh; the chooser says why.
+    const builder = await createMeshLayoutBuilder(device, { prepare: false });
     const prepareStart = performance.now();
-    const builder = await createMeshLayoutBuilder(device); // prepares the GPU builder's pipelines
+    await builder.prepare(); // the GPU builder's pipelines, once, timed apart from the build
     const prepareMs = performance.now() - prepareStart;
     const start = performance.now();
-    const [result] = await builder.buildLayouts([mesh]);
+    let gpuMs: number | null | undefined; // the GPU batch's pass (timestamps); undefined when tinybvh built it
+    const [result] = await builder.buildLayouts([mesh], { onGpuBatch: (batch) => (gpuMs = batch.gpuMs) });
     const cpuMs = performance.now() - start;
-    // createMeshLayoutBuilder takes no timestamp writes: CPU wall time only (from the call to the layout read back).
-    overlay.build({ builtBy: result.builtBy, fallbackReason: builder.fallbackReason ?? result.fallbackReason, cpuMs });
+    // CPU wall time from the call to the layout read back; GPU time from timestamps where the device has them.
+    overlay.build({ builtBy: result.builtBy, fallbackReason: (builder.fallback ? builder.fallbackReason : null) ?? result.fallbackReason, cpuMs, gpuMs });
     overlay.set('builder setup', `${prepareMs.toFixed(0)} ms (pipelines; once per builder)`);
     overlay.tree(layoutInfo(result.layout));
     overlay.set('mesh', `${scene.name}: ${(mesh.indices.length / 3).toLocaleString('en-US')} triangles${scene.instances.length > 1 ? `, ${scene.instances.length} instances merged` : ''}`);
@@ -175,14 +178,14 @@ async function swapScene(scene: VanillaScene): Promise<void> {
     // One instance at the origin: the scene the walk reads, in the formats the tree came in (the builder's defaults).
     const data = assembleLayouts([result.layout], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY_TRANSFORM }], [mesh]);
     const buffers = uploadTraceScene(device, data, 'hello');
-    const source = traceSourceOf(device, buffers);
+    const source = buffers; // an uploaded scene names its formats
     // Everything new is made before anything old goes: the frames go on with the old scene meanwhile.
     const formats = `${source.triangleLeaves}/${source.positionLayout}/${source.nodeFormat}`;
     const kernel =
         batchKernel && formats === kernelFormats
             ? batchKernel
             : await TraceBatchKernel.create(device, { label: 'hello batch', triangleLeaves: source.triangleLeaves, positionLayout: source.positionLayout, nodeFormat: source.nodeFormat });
-    const newPicks = await GpuRays.create(source);
+    const newPicks = await GpuRays.create(device, buffers, { label: 'hello picks' });
 
     const positions = device.createBuffer({ label: 'hello positions', size: mesh.positions.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     const indices = device.createBuffer({ label: 'hello indices', size: mesh.indices.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });

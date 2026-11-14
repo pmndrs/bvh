@@ -88,8 +88,26 @@ export async function preferLbvh(device: GPUDevice): Promise<void> {
     const lbvhFirst = await createMeshLayoutBuilder(device, { prefer: 'gpu-lbvh' });
     const cpuOnly = await createMeshLayoutBuilder(device, { prefer: 'tinybvh' }); // for comparisons
     const capped = await createMeshLayoutBuilder(device, { maxBatchBytes: 256 * 1024 * 1024 }); // lower build peak
+    // cpuOnly.fallbackReason is 'the CPU builder was asked for', but cpuOnly.fallback is false: show only real fallbacks.
+    const shown = cpuOnly.fallback ? cpuOnly.fallbackReason : null;
     // #endregion
+    console.log(shown);
     console.log(lbvhFirst.kind, cpuOnly.kind, capped.kind);
+}
+
+export async function timedBuild(device: GPUDevice, meshes: readonly MeshInput[]): Promise<void> {
+    // #region chooser-timing
+    const builder = await createMeshLayoutBuilder(device, { prepare: false });
+    const setupStart = performance.now();
+    await builder.prepare(); // the pipelines, once: timed apart from any build
+    console.log(`setup ${(performance.now() - setupStart).toFixed(0)} ms`);
+
+    const results = await builder.buildLayouts(meshes, {
+        // Once per GPU batch, when its trees are on the GPU (before the readback): never for tinybvh.
+        onGpuBatch: ({ meshes: inBatch, gpuMs, wallMs }) => console.log(`${inBatch.length} meshes: ${gpuMs ?? 'no timestamp-query'} ms on the GPU, ${wallMs} ms submit to done`),
+    });
+    // #endregion
+    console.log(results.length);
 }
 
 // #region check

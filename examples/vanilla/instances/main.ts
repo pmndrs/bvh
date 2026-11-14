@@ -20,9 +20,8 @@
  * shown by instance by default.
  */
 
-import { createRandom, SceneTrees, type MeshGeometry } from '@pmndrs/bvh';
-import { GpuRays } from '../../shared/gpu-rays.ts';
-import { GpuBracket, gpuMsText } from '../../shared/gpu-timer.ts';
+import { createRandom, GpuRays, SceneTrees, type MeshGeometry } from '@pmndrs/bvh';
+import { gpuMsText, GpuTimer } from '../../shared/gpu-timer.ts';
 import { bytes } from '../../shared/overlay.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
@@ -139,7 +138,7 @@ submitUpdate();
 const view = RayCastView.create(device, app.format);
 // A SceneTrees is a trace source as it is: its buffers and formats are read every frame.
 await view.prepare(trees);
-const rays = await GpuRays.create(trees);
+const rays = await GpuRays.create(device, trees);
 camera.frame([-FIELD - 4, -FIELD - 4, -FIELD - 4, FIELD + 4, FIELD + 4, FIELD + 4]);
 camera.distance *= 0.5;
 
@@ -189,16 +188,16 @@ let highlight: number | null = null;
 const sun = vec3.normalize([0.45, 0.85, 0.3]);
 let frame = 0;
 let updateMs = 0;
-// SceneTrees.update takes no timestamp writes: two tiny timed passes around it give its GPU time (the top-level refit, plus whatever else the update recorded).
-const bracket = GpuBracket.create(device);
+// The update's GPU time: its timestampWrites put a timestamp before and after everything it records (the top-level refit, plus whatever else it recorded).
+const updateTimer = GpuTimer.create(device, 1);
 let updateGpuMs: number | null = null;
 let lastEvents = 0;
 let smoke: Promise<void> | null = null;
 app.loop({
     async update(_now, delta) {
         frame++;
-        const [{ measurement, pick }, gpuMs] = await Promise.all([view.collect(), bracket ? bracket.result() : Promise.resolve(null)]);
-        if (gpuMs !== null) updateGpuMs = gpuMs;
+        const [{ measurement, pick }, gpuMs] = await Promise.all([view.collect(), updateTimer ? updateTimer.result() : Promise.resolve([])]);
+        if (gpuMs.length > 0) updateGpuMs = gpuMs[0];
         if (measurement?.gpuMs) overlay.rays('primary (GPU timestamps)', measurement.primaryRays / (measurement.gpuMs / 1000));
         if (pick !== undefined) {
             const instance = pick ? instances.get(pick.instance) : undefined;
@@ -218,10 +217,9 @@ app.loop({
             }
         }
         // Builds started, finished trees placed, the top level refit: recorded before the trace reads it.
-        const timed = bracket !== null && !bracket.busy && frame % 15 === 0;
-        if (timed) bracket.begin(encoder);
-        trees.update(encoder);
-        if (timed) bracket.end(encoder);
+        const timed = updateTimer !== null && !updateTimer.pending && frame % 15 === 0;
+        trees.update(encoder, { timestampWrites: timed ? updateTimer.pass() : undefined });
+        if (timed) updateTimer.resolveInto(encoder);
         updateMs = updateMs * 0.9 + (performance.now() - start) * 0.1;
         const width = canvas.width;
         const height = canvas.height;
@@ -239,8 +237,8 @@ function showStats(): void {
     overlay.set('top level', trees.topLevelPath === 'gpu' ? 'GPU (refit each frame)' : 'CPU (rebuilt when something moved)');
     overlay.set('setTransform + update (CPU)', `${updateMs.toFixed(2)} ms per frame`);
     // Everything update recorded: the top-level refit (GPU top level), and on load or swap frames builds, copies and quantize jobs too.
-    const holds = trees.topLevelPath === 'gpu' ? `the top-level refit of ${trees.counts.instances.toLocaleString('en-US')} instances, plus any builds or copies` : 'no top-level refit here (the CPU top level), only builds or copies';
-    overlay.set('GPU work recorded by update', updateGpuMs === null ? (bracket ? '…' : 'no timestamp-query') : `${gpuMsText(updateGpuMs)} (${holds})`);
+    const holds = trees.topLevelPath === 'gpu' ? `the top-level refit of ${trees.counts.instances.toLocaleString('en-US')} instances, plus any tree copies` : 'no top-level refit here (the CPU top level), only tree copies';
+    overlay.set('GPU work recorded by update', updateGpuMs === null ? (updateTimer ? '…' : 'no timestamp-query') : `${gpuMsText(updateGpuMs)} (${holds})`);
     overlay.set('swaps (GPU tree → tinybvh)', counts.swaps);
     overlay.set('memory', `${bytes(trees.memory.resident)} resident, ${bytes(trees.memory.peak)} peak`);
     if (log.events.length !== lastEvents) {

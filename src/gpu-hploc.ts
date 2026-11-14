@@ -401,12 +401,15 @@ export class GpuHplocBuilder {
         return this.pipelines !== null;
     }
 
-    /** Builds every mesh's tree in one batch and one submit. A refused mesh has `problem` set; the others are fine. */
-    async buildMany(geometries: readonly GpuMeshGeometry[], options: HplocOptions = {}): Promise<GpuTreeBuffers> {
+    /**
+     * Builds every mesh's tree in one batch and one submit. A refused mesh has `problem` set; the others are fine.
+     * `timestampWrites` (optional) times the batch's one compute pass: resolve its query set after this resolves.
+     */
+    async buildMany(geometries: readonly GpuMeshGeometry[], options: HplocOptions = {}, timestampWrites?: GPUComputePassTimestampWrites): Promise<GpuTreeBuffers> {
         const batch = this.createBatch(geometries, options);
         try {
             const encoder = this.device.createCommandEncoder({ label: this.label });
-            batch.encode(encoder);
+            batch.encode(encoder, timestampWrites);
             this.device.queue.submit([encoder.finish()]);
             return await batch.finish();
         } finally {

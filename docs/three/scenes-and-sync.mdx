@@ -87,6 +87,17 @@ a mesh of one material). To get from a hit to three's `object.material[i]`, eith
 value you map back from it) in the callback, or call `threeMaterialOf(source, meshSource, hit.triangle)`, which works
 without a callback. `threeGroupOf(meshSource, hit.triangle)` gives the group itself.
 
+`sync.meshHandles` lists the `SceneTrees` mesh handles the sync holds (one per mesh it added: a shared geometry range,
+or a posed object's own), for `trees.meshStatus(handle)` and stats. It is a new array each time; `sync()` can add and
+remove handles. Merged static groups are `SceneTrees`' own (`trees.groupStatus`).
+
+{/* snippet: sync-handles */}
+```ts
+// The SceneTrees mesh handles the sync holds now: one per shared geometry (or posed object).
+let nodes = 0;
+for (const handle of sync.meshHandles) nodes += trees.meshStatus(handle).placement?.nodeCount ?? 0;
+```
+
 ## Static objects
 
 `static: true`, or `(object, instanceId) => boolean`, marks instances for `mergeStaticInstances`
