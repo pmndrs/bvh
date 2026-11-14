@@ -9,7 +9,7 @@
  * itself runs on a GPU: tests/gpu/pages/three-shapecast.
  */
 
-import { Fn, If, context, float, instanceIndex, select, storage, uint, vec4, wgslFn } from 'three/tsl';
+import { Fn, If, code, context, float, instanceIndex, select, storage, uint, uvec4, vec4, wgslFn } from 'three/tsl';
 import { StorageBufferAttribute, StructTypeNode, WebGPUBackend } from 'three/webgpu';
 import { describe, expect, it } from 'vitest';
 import { installWebGpuGlobals } from '../../tests/support/fake-gpu.ts';
@@ -40,7 +40,83 @@ function computeShader(renderer: unknown, call: () => BvhTslNode): string {
     return builder.computeShader;
 }
 
+/** The compute shader three generates for a kernel whose body `body` writes into `out` (64 `uvec4`s). */
+function kernelShader(renderer: unknown, body: (out: BvhTslNode) => void): string {
+    const out = storage(new StorageBufferAttribute(new Uint32Array(64 * 4), 4), 'uvec4', 64);
+    const kernel = Fn(() => {
+        If(instanceIndex.lessThan(64), () => body(out));
+    })().compute(64, [64]);
+    const builder = (WebGPUBackend.prototype as unknown as { createNodeBuilder(object: unknown, renderer: unknown): { build(): void; computeShader: string; compute: unknown } }).createNodeBuilder(null, renderer);
+    builder.compute = kernel;
+    builder.build();
+    return builder.computeShader;
+}
+
+/**
+ * Every module-scope name the shader declares more than once: functions,
+ * structs and module variables (`var<private>`, `var<storage, ...>`,
+ * `var<uniform>`, `var<workgroup>`; a function's own `var` has no address
+ * space). WGSL refuses such a shader ("redeclaration of ...").
+ */
+function redeclared(shader: string): string[] {
+    const names = [...shader.matchAll(/^\s*(?:fn|struct|var<[^>]+>)\s+([A-Za-z_][A-Za-z0-9_]*)/gm)].map((match) => match[1]);
+    return [...new Set(names.filter((name, i) => names.indexOf(name) !== i))];
+}
+
 const occurrences = (text: string, pattern: RegExp) => (text.match(new RegExp(pattern.source, 'g')) ?? []).length;
+
+describe('BvhTraceNodes.getShapecastFn: one declaration per name', () => {
+    it('declares every hook, adapter, walk and variable once: two casts sharing a hook, private state, the closest, any and closest-point nodes', () => {
+        const renderer = stubRenderer();
+        const bvh = new BvhTraceNodes(renderer, source, { queries: true });
+        // The three-shapecast page's kernel: a TSL box test shared by two casts, wgslFn triangle tests, a counter in a code node.
+        const sphereBounds = Fn(([shape, boxMin, boxMax]: BvhTslNode[]) => {
+            const outside = boxMin.sub(shape.xyz).max(shape.xyz.sub(boxMax)).max(0);
+            const distanceSq = outside.dot(outside);
+            return select(distanceSq.lessThanEqual(shape.w.mul(shape.w)), distanceSq, float(-1));
+        }).setLayout({ name: 'pageSphereBounds', type: 'float', inputs: [{ name: 'shape', type: 'vec4' }, { name: 'boxMin', type: 'vec3' }, { name: 'boxMax', type: 'vec3' }] });
+        const sphereTriangle = wgslFn(
+            `fn pageSphereTriangle(shape: vec4f, a: vec3f, b: vec3f, c: vec3f) -> bool { let o = bvhClosestPointToTriangle(shape.xyz, a, b, c).point - shape.xyz; return dot(o, o) <= shape.w * shape.w; }`,
+            [bvh.module as never],
+        );
+        const counter = code('var<private> pageCounter: u32;');
+        // Hooks named the way a cast's own adapters were named (`<cast>Triangle`, `<cast>Keep`): the cast must not reuse those names.
+        const countTriangle = wgslFn(`fn pageCountTriangle(shape: vec4f, a: vec3f) -> bool { if (distance(shape.xyz, a) <= shape.w) { pageCounter += 1u; } return false; }`, [counter as never]);
+        const countKeep = wgslFn(`fn pageCountKeep(shape: vec4f, score: f32) -> bool { return score <= shape.w * shape.w; }`);
+        const anyCast = bvh.getShapecastFn({ name: 'pageAny', shape: 'vec4', intersectsBounds: sphereBounds, intersectsTriangle: sphereTriangle });
+        const countCast = bvh.getShapecastFn({ name: 'pageCount', shape: 'vec4', intersectsBounds: sphereBounds, intersectsTriangle: countTriangle, keep: countKeep });
+        const readCount = wgslFn(`fn pageReadCount() -> u32 { return pageCounter; }`, [counter as never]);
+        const shader = kernelShader(renderer, (out) => {
+            const shape = vec4(1, 2, 3, 0.5);
+            const any = select(anyCast(shape), uint(1), uint(0)).toVar();
+            const masked = select(anyCast(shape, uint(0)), uint(1), uint(0)).toVar();
+            const stopped = select(countCast(shape), uint(1), uint(0)).toVar();
+            const counted = (readCount() as unknown as BvhTslNode).toVar();
+            const hit = bvh.traceClosest(shape.xyz, shape.xyz).toVar();
+            const blocked = select(bvh.traceAny(shape.xyz, shape.xyz), uint(1), uint(0)).toVar();
+            const point = bvh.closestPoint(shape.xyz).toVar();
+            out.element(instanceIndex).assign(uvec4(any.add(masked).add(stopped).add(blocked), counted, hit.get('instance'), point.get('triangle')));
+        });
+        expect(redeclared(shader)).toEqual([]);
+        for (const hook of ['pageSphereBounds', 'pageSphereTriangle', 'pageCountTriangle', 'pageCountKeep', 'pageReadCount']) expect(occurrences(shader, new RegExp(`fn ${hook}\\s*\\(`)), hook).toBe(1);
+        expect(occurrences(shader, /var<private> pageCounter\b/)).toBe(1);
+        for (const cast of ['pageAny', 'pageCount']) expect(occurrences(shader, new RegExp(`fn ${cast}\\s*\\(`)), cast).toBe(1);
+        // The module (with its own walks) is in once, though every helper and both casts include it.
+        expect(occurrences(shader, /fn bvhTraceClosest\s*\(/)).toBe(1);
+        expect(occurrences(shader, /fn bvhClosestPointWalk\s*\(/)).toBe(1);
+    });
+
+    it('refuses a hook that has the name of its own cast', () => {
+        const renderer = stubRenderer();
+        const bvh = new BvhTraceNodes(renderer, source, { queries: true });
+        const cast = bvh.getShapecastFn({
+            name: 'sameName',
+            intersectsBounds: wgslFn(`fn otherBounds(boxMin: vec3f, boxMax: vec3f) -> f32 { return 0.0; }`),
+            intersectsTriangle: wgslFn(`fn sameName(a: vec3f) -> bool { return true; }`),
+        });
+        expect(() => kernelShader(renderer, (out) => out.element(instanceIndex).assign(uvec4(select(cast(), uint(1), uint(0)))))).toThrow(/named sameName, as the cast/);
+    });
+});
 
 describe('BvhTraceNodes.getShapecastFn', () => {
     it("compiles a wgslFn and a TSL Fn with a layout into the walk, with the shape first and only the declared triangle arguments", () => {
@@ -61,18 +137,18 @@ describe('BvhTraceNodes.getShapecastFn', () => {
         expect(occurrences(shader, /fn testSphereTriangle\s*\(/)).toBe(1);
         expect(occurrences(shader, /fn testSphereKeep\s*\(/)).toBe(1);
         // The adapters: the shape first, then the walk's own values (only the five triangle arguments declared).
-        expect(shader).toContain('var<private> testSphereCastShape: vec4f;');
-        expect(shader).toMatch(/return f32\(testSphereBounds\(\s*testSphereCastShape, bounds\.min, bounds\.max\s*\)\);/);
-        expect(shader).toMatch(/return testSphereKeep\(\s*testSphereCastShape, score\s*\);/);
-        expect(shader).toMatch(/return testSphereTriangle\(\s*testSphereCastShape, triangle\.a, triangle\.b, triangle\.c, triangle\.instance\s*\);/);
+        expect(shader).toContain('var<private> testSphereCast_bvhShape: vec4f;');
+        expect(shader).toMatch(/return f32\(testSphereBounds\(\s*testSphereCast_bvhShape, bounds\.min, bounds\.max\s*\)\);/);
+        expect(shader).toMatch(/return testSphereKeep\(\s*testSphereCast_bvhShape, score\s*\);/);
+        expect(shader).toMatch(/return testSphereTriangle\(\s*testSphereCast_bvhShape, triangle\.a, triangle\.b, triangle\.c, triangle\.instance\s*\);/);
         expect(shader).not.toMatch(/testSphereTriangle\([^)]*bvhShapecastMaterial/);
         // The walk stamped for the adapters, nestable (it re-reads its instance's frame after a leaf), and the entry with the mask.
-        expect(shader).toContain('fn testSphereCastWalk(mask: u32) -> bool');
-        expect(shader).toContain('let leftScore = testSphereCastBounds(left);');
-        expect(shader).toContain('if (testSphereCastTriangle(candidate)) {');
-        expect(shader).toContain('if (!testSphereCastKeep(scores[stackSize])) {');
+        expect(shader).toContain('fn testSphereCast_bvhWalk(mask: u32) -> bool');
+        expect(shader).toContain('let leftScore = testSphereCast_bvhBounds(left);');
+        expect(shader).toContain('if (testSphereCast_bvhTriangle(candidate)) {');
+        expect(shader).toContain('if (!testSphereCast_bvhKeep(scores[stackSize])) {');
         expect(shader).toMatch(/fn testSphereCast\s*\(\s*shape: vec4f, mask: u32\s*\) -> bool/);
-        expect(shader).toMatch(/testSphereCastShape = shape;\s*return testSphereCastWalk\(mask\);/);
+        expect(shader).toMatch(/testSphereCast_bvhShape = shape;\s*return testSphereCast_bvhWalk\(mask\);/);
         // The walk reads the bound storage nodes, as the module does.
         expect(shader).toMatch(/var<storage, read> bvhTraceTopLevel/);
         // The call: the default mask is every instance.
@@ -90,7 +166,7 @@ describe('BvhTraceNodes.getShapecastFn', () => {
         const shader = computeShader(renderer, () => any());
         expect(shader).toMatch(/fn testEverything\s*\(\s*\) -> bool/);
         expect(shader).toMatch(/testAllTriangle\(\s*triangle\.a, triangle\.b, triangle\.c, triangle\.instance, triangle\.triangle, bvhShapecastMaterial\(triangle\), bvhShapecastNormal\(triangle\)\s*\)/);
-        expect(shader).toContain('fn testEverythingKeep(score: f32) -> bool {\n    return true;');
+        expect(shader).toContain('fn testEverything_bvhKeep(score: f32) -> bool {\n    return true;');
         expect(() => any(vec4(0))).toThrow(/takes nothing/);
 
         const capsule = new StructTypeNode({ start: 'vec3', end: 'vec3', radius: 'float' }, 'TestCapsule');
@@ -102,7 +178,7 @@ describe('BvhTraceNodes.getShapecastFn', () => {
             intersectsTriangle: wgslFn(`fn testCapsuleTriangle(shape: TestCapsule, a: vec3f) -> bool { return distance(a, shape.start) < shape.radius; }`),
         });
         const capsuleShader = computeShader(renderer, () => capsuleCast(wgslFn(`fn testMakeCapsule() -> TestCapsule { return TestCapsule(vec3f(0.0), vec3f(1.0), 0.5); }`, [capsule as never])(), uint(3)));
-        expect(capsuleShader).toContain('var<private> testCapsuleCastShape: TestCapsule;');
+        expect(capsuleShader).toContain('var<private> testCapsuleCast_bvhShape: TestCapsule;');
         expect(capsuleShader).toMatch(/struct TestCapsule\s*\{/);
         expect(capsuleShader).toMatch(/testCapsuleCast\(\s*testMakeCapsule\(\s*\), 3u\s*\)/);
     });
