@@ -191,6 +191,56 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         description: 'A tree baked in Node (pnpm examples:bake: tinybvh, serializeLayout, a file) loaded here with no build at all: builtBy is the baked file, and the walk traces it. Drop another .bvh, or open ?bake=<url>.',
         timeoutMs: 90_000,
     },
+    // three-mesh-bvh example ports (P8): the `@pmndrs/bvh/three` CPU queries on the originals' scenes.
+    {
+        name: 'three-clippedEdges',
+        path: 'three/clippedEdges',
+        title: 'Clipped edges',
+        description: 'A plane sweeps through a model and tree.shapecast turns every triangle it crosses into an outline segment (intersectsBounds keeps the crossed boxes), capped with the stencil trick; three-mesh-bvh\'s clippedEdges. Switch the BVH off to visit every triangle: the same segments, checked in the smoke run.',
+        timeoutMs: 180_000,
+    },
+    {
+        name: 'three-collectTriangles',
+        path: 'three/collectTriangles',
+        title: 'Collect triangles',
+        description: 'A paint brush that is a sphere: tree.shapecast collects every triangle it touches (CONTAINED boxes hand theirs over untested) on hundreds of thousands of triangles; three-mesh-bvh\'s collectTriangles. The smoke run checks the triangles against a pass over every triangle.',
+        timeoutMs: 180_000,
+    },
+    {
+        name: 'three-edgeIntersect',
+        path: 'three/edgeIntersect',
+        title: 'Edge intersect',
+        description: 'tree.bvhcast walks two trees against each other and ExtendedTriangle.intersectsTriangle gives the segment where each pair of triangles crosses: two spinning torus knots and the line where they meet; three-mesh-bvh\'s edgeIntersect. The smoke run checks the crossings against every pair of triangles.',
+        timeoutMs: 180_000,
+    },
+    {
+        name: 'three-lineIntersection',
+        path: 'three/lineIntersection',
+        title: 'Line intersection',
+        description: 'Raycasting a polyline of hundreds of thousands of segments with a pick threshold; three-mesh-bvh\'s lineIntersection, which uses LineBVH. There is no line primitive here, so every segment is a degenerate triangle and tree.shapecast does the ray-segment test. Checked against three\'s Line.raycast in the smoke run.',
+        timeoutMs: 240_000,
+    },
+    {
+        name: 'three-triangleIntersect',
+        path: 'three/triangleIntersect',
+        title: 'Triangle intersect',
+        description: 'ExtendedTriangle.intersectsTriangle on its own: two triangles with six draggable corners and the segment where they cross; three-mesh-bvh\'s triangleIntersect. The smoke run checks thousands of random pairs against a second method.',
+        timeoutMs: 90_000,
+    },
+    {
+        name: 'three-voxelize',
+        path: 'three/voxelize',
+        title: 'Voxelize',
+        description: 'A grid of voxels over a model: tree.intersectsBox(box, boxToMesh) finds the voxels on the surface, tree.raycastFirst with DoubleSide the ones inside it, filled a few ms per frame; three-mesh-bvh\'s voxelize. The smoke run checks every voxel against three\'s Triangle.intersectsBox and Mesh.raycast.',
+        timeoutMs: 240_000,
+    },
+    {
+        name: 'three-batchedMesh',
+        path: 'three/batchedMesh',
+        title: 'BatchedMesh',
+        description: 'computeBatchedBoundsTree and acceleratedRaycast on a BatchedMesh of three geometries, with hundreds of raycasters firing every frame and a switch to three\'s own raycast; three-mesh-bvh\'s batchedMesh. The smoke run checks the nearest hits against three\'s.',
+        timeoutMs: 240_000,
+    },
 ];
 
 /** Where an example's source is browsed. */
