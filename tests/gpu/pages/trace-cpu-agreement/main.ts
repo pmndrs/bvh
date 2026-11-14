@@ -23,7 +23,13 @@
  * divides, so no CPU arithmetic reproduces a GPU's bits (the
  * `wgsl-f32-arithmetic` page measures what a GPU does). The verdict: any hits
  * agree on every ray of every set, closest hits never disagree on hit or miss,
- * and on primary rays every closest hit names the GPU's instance and triangle
+ * and on primary rays every closest hit names the GPU's instance and triangle,
+ * unless the two hits are a near tie: another triangle whose `t` is within
+ * `NEAR_TIE_ULPS` f32 steps of the GPU's, as at overlapping coplanar faces
+ * (Sponza has some; the Intel Gen12 walk and the CPU walk order one such pair
+ * differently, both hits well inside their triangles, `t` 2 ulp apart). No walk
+ * can order surfaces closer than its own rounding, which on one triangle
+ * already differs by tens of ulp; near ties are counted, not failed
  * (`?strict=0` reports without failing). Edge-aimed rays may name the other
  * neighbour at a seam; they are counted, not failed.
  */
@@ -55,6 +61,8 @@ const AIR_RAYS = Number(query.get('airRays')) || 65536;
 const SHARED_RAYS = Number(query.get('sharedRays')) || 200000;
 const STRICT = query.get('strict') !== '0';
 const EXAMPLES = 12;
+/** Another triangle this close in `t` is a near tie (above the same-triangle spread primary rays show: up to 42 ulp). */
+const NEAR_TIE_ULPS = 64;
 
 const bitView = new DataView(new ArrayBuffer(4));
 function bits(value: number): number {
@@ -79,6 +87,8 @@ interface Tally {
     sameTriangleTDiffers: number;
     /** Another triangle at exactly the same t (a tie the walks broke differently). */
     tieOtherTriangle: number;
+    /** Another triangle within NEAR_TIE_ULPS of the same t (overlapping faces, or a seam). */
+    nearTieOtherTriangle: number;
     /** Another triangle at another t. */
     otherTriangle: number;
     /** One hit, the other missed. */
@@ -88,11 +98,14 @@ interface Tally {
     normalDiffers: number;
     anyAgree: number;
     anyDisagree: number;
+    /** The first problem rays of any kind. */
     examples: string[];
+    /** The first rays that name another triangle or disagree on hit, kept apart so bit noise cannot crowd them out. */
+    gateExamples: string[];
 }
 
 function newTally(): Tally {
-    return { rays: 0, misses: 0, exact: 0, sameTriangleTExact: 0, sameTriangleTDiffers: 0, tieOtherTriangle: 0, otherTriangle: 0, hitMiss: 0, maxTUlps: 0, normalDiffers: 0, anyAgree: 0, anyDisagree: 0, examples: [] };
+    return { rays: 0, misses: 0, exact: 0, sameTriangleTExact: 0, sameTriangleTDiffers: 0, tieOtherTriangle: 0, nearTieOtherTriangle: 0, otherTriangle: 0, hitMiss: 0, maxTUlps: 0, normalDiffers: 0, anyAgree: 0, anyDisagree: 0, examples: [], gateExamples: [] };
 }
 
 function describeHit(hit: CpuHit | null): string {
@@ -105,7 +118,7 @@ function compareRay(tally: Tally, index: number, ray: TraceRay, gpu: CpuHit | nu
     if (gpuAny === cpuAny) tally.anyAgree++;
     else {
         tally.anyDisagree++;
-        if (tally.examples.length < EXAMPLES) tally.examples.push(`ray ${index} any: GPU ${gpuAny}, CPU ${cpuAny}`);
+        if (tally.gateExamples.length < EXAMPLES) tally.gateExamples.push(`ray ${index} any: GPU ${gpuAny}, CPU ${cpuAny}`);
     }
     let problem: string | null = null;
     if (!gpu || !cpu) {
@@ -131,15 +144,18 @@ function compareRay(tally: Tally, index: number, ray: TraceRay, gpu: CpuHit | nu
     } else if (bits(gpu.t) === bits(cpu.t)) {
         tally.tieOtherTriangle++;
         problem = 'tie, other triangle';
+    } else if (ulps(gpu.t, cpu.t) <= NEAR_TIE_ULPS) {
+        tally.nearTieOtherTriangle++;
+        problem = `near tie (${ulps(gpu.t, cpu.t)} ulp), other triangle`;
     } else {
         tally.otherTriangle++;
         problem = 'other triangle';
     }
-    if (problem && tally.examples.length < EXAMPLES) {
-        tally.examples.push(
-            `ray ${index} [${problem}] o=(${ray.origin.map(hex).join(',')}) d=(${ray.direction.map(hex).join(',')}) tMin=${ray.tMin} tMax=${ray.tMax}: GPU ${describeHit(gpu)}; CPU ${describeHit(cpu)}`,
-        );
-    }
+    if (!problem) return;
+    const line = `ray ${index} [${problem}] o=(${ray.origin.map(hex).join(',')}) d=(${ray.direction.map(hex).join(',')}) tMin=${ray.tMin} tMax=${ray.tMax}: GPU ${describeHit(gpu)}; CPU ${describeHit(cpu)}`;
+    const gates = problem === 'hit/miss' || problem.endsWith('other triangle');
+    if (gates && tally.gateExamples.length < EXAMPLES) tally.gateExamples.push(line);
+    else if (!gates && tally.examples.length < EXAMPLES) tally.examples.push(line);
 }
 
 interface RaySet {
@@ -267,12 +283,13 @@ await runGpuTest(async ({ device, log }) => {
                 const t = tally;
                 log(
                     `[${key}] ${set.rays.length} rays: exact ${t.exact}, misses ${t.misses}, same triangle ${t.sameTriangleTExact} (t bits equal) + ${t.sameTriangleTDiffers} (t up to ${t.maxTUlps} ulp), ` +
-                        `tie ${t.tieOtherTriangle}, other triangle ${t.otherTriangle}, hit/miss ${t.hitMiss}, normal bits differ ${t.normalDiffers}, any ${t.anyAgree} agree / ${t.anyDisagree} not`,
+                        `tie ${t.tieOtherTriangle}, near tie ${t.nearTieOtherTriangle}, other triangle ${t.otherTriangle}, hit/miss ${t.hitMiss}, normal bits differ ${t.normalDiffers}, any ${t.anyAgree} agree / ${t.anyDisagree} not`,
                 );
+                for (const example of t.gateExamples) log(`    gate: ${example}`);
                 for (const example of t.examples) log(`    ${example}`);
                 if (t.anyDisagree > 0) failures.push(`${key}: any hit disagrees on ${t.anyDisagree} rays`);
                 if (t.hitMiss > 0) failures.push(`${key}: closest hit and miss disagree on ${t.hitMiss} rays`);
-                if (set.identityGate && t.tieOtherTriangle + t.otherTriangle > 0) failures.push(`${key}: ${t.tieOtherTriangle + t.otherTriangle} primary rays name another triangle`);
+                if (set.identityGate && t.otherTriangle > 0) failures.push(`${key}: ${t.otherTriangle} primary rays name another triangle more than ${NEAR_TIE_ULPS} ulp away`);
                 await yieldToBrowser();
             }
             buffers.destroy();
