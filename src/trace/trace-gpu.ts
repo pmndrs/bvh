@@ -11,7 +11,7 @@
  */
 
 import type { TraceSceneData } from './scene-assembly.ts';
-import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl, closestPointKernelWgsl, hitRecordBytes, WALK_COUNTS_BYTES, type AnyHitOrder } from './wgsl.ts';
+import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl, closestPointKernelWgsl, hitRecordBytes, WALK_COUNTS_BYTES, type AnyHitOrder, type QuantizedDecode } from './wgsl.ts';
 import { CLOSEST_POINT_RECORD_BYTES, POINT_QUERY_BYTES } from './query-wgsl.ts';
 import { RAY_MASK_ALL, type NodeFormat, type PositionLayout, type TriangleLeaves } from './layout.ts';
 import { RAY_BYTES } from './rays.ts';
@@ -211,6 +211,8 @@ export interface TraceBatchKernelOptions {
     readonly nodeFormat?: NodeFormat;
     /** The any-hit walk's child order, compiled in (`AnyHitOrder`). Default `'far'` (best for rays from surfaces); `'larger'` for rays from outside the geometry or across open space. */
     readonly anyHitOrder?: AnyHitOrder;
+    /** How the walk decodes quantized nodes, compiled in (`QuantizedDecode`). Default `'exact'`; `'folded'` is the measured lever (quantized nodes only). */
+    readonly quantizedDecode?: QuantizedDecode;
     /**
      * Compile the counted walk (`TraceModuleOptions.counters`): every ray's
      * result is a `BvhWalkCounts` (`WALK_COUNTS_BYTES`, words in
@@ -247,13 +249,13 @@ export class TraceBatchKernel {
     }
 
     static async create(device: GPUDevice, options: TraceBatchKernelOptions = {}): Promise<TraceBatchKernel> {
-        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = DEFAULT_NODE_FORMAT, anyHitOrder, counters = false } = options;
+        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = DEFAULT_NODE_FORMAT, anyHitOrder, quantizedDecode, counters = false } = options;
         const pipelineFor = (mode: 'closest' | 'any') =>
             device.createComputePipelineAsync({
                 label: `${label} batch ${mode}`,
                 layout: 'auto',
                 compute: {
-                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks, hitNormal, triangleLeaves, positionLayout, nodeFormat, anyHitOrder, counters }) }),
+                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks, hitNormal, triangleLeaves, positionLayout, nodeFormat, anyHitOrder, quantizedDecode, counters }) }),
                     entryPoint: 'bvhBatch',
                 },
             });
