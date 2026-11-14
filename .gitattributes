@@ -2,3 +2,5 @@
 native/** text eol=lf
 # The docs checks (docs/snippets/snippets.test.ts) compare page text with the samples and read frontmatter line by line; keep LF on Windows checkouts too.
 docs/** text eol=lf
+# The docs checks also compare README.md's code blocks with docs/snippets.
+README.md text eol=lf
