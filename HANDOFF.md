@@ -28,7 +28,7 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
 
 ## The build-out (2026-11-14, Windows laptop). Read this first.
 
-Dennis asked for full feature coverage as planned before more hand-offs. Everything below is on local `main` (not pushed): lint, typecheck, 842 unit tests, `docs:check`, `build` (licence checks) and `examples:build` pass. Every new GPU page and example passed on **SwiftShader only**: the downsampler had the real GPUs, so nothing of this has run on the RTX 3060 or the Intel UHD. That run is `tools/windows-clean-run.ps1` (below).
+Dennis asked for full feature coverage as planned before more hand-offs. Everything below is on local `main` (not pushed): lint, typecheck, 842 unit tests, `docs:check`, `build` (licence checks) and `examples:build` pass. Every new GPU page and example passed on SwiftShader first, then in the clean run on the RTX 3060 and the Intel UHD (below; results in `docs/internals/WINDOWS-RUNBOOK.md`, section 9).
 
 **Built** (each with tests, docs and a PARITY row; design notes in `docs/internals/design/`):
 - **Babylon (P6):** `@pmndrs/bvh/babylon` (`bvhSceneFromBabylon`, `BabylonBvhPicker` returning `PickingInfo`, `deviceFromEngine`, `createTraceComputeShader`, `wgslForBabylon`); examples `babylon/picking` (WebGL too) and `babylon/gpu-trace`; `docs/engines/babylon.mdx`. `@babylonjs/core` 9.35.0 dev, peer `>=9.35.0 <10`.
@@ -48,6 +48,8 @@ Dennis asked for full feature coverage as planned before more hand-offs. Everyth
 - **Windows:** README and docs kept LF (the docs test passes on CRLF checkouts); SwiftShader flags that work on Windows Chrome 157 in `tests/gpu/README.md`.
 
 **The clean run:** `pwsh tools/windows-clean-run.ps1 -Commit main` pins a worktree (`..\bvh-clean-run`), waits until no downsampler process runs and the RTX is idle for 5 minutes, then runs every correctness page on the RTX and the Intel UHD, `scene-trees-sponza`, the surface-ray benches 3 times each and the examples; results in `bench/runs/<date>-<commit>/summary.md`. Then Dennis decides the defaults (below).
+
+**Clean run done (2026-11-14/15, `6c32897`; runbook section 9):** every correctness page passed on both GPUs after two test fixes (`scene-trees-mid-swap` outgrew its 900 s timeout, 965 s on the RTX; `trace-cpu-agreement` met overlapping coplanar faces in Sponza on the Intel UHD, now counted as near ties). Section 8 answers the `triangleLeaves` question: indexed leaves on quantized nodes cost 5-17% on closest hits (packed 13-23%) and save 29% of the settled Sponza scene (458.6 to 327.1 MB at the default cap, measured on f32 nodes). The folded decode is 3-7% slower on instanced trees and 0-6% faster on merged ones. The default build cap holds Sponza's peak at 711 MB (uncapped 1,483). All 41 examples passed on the RTX and their screenshots draw.
 
 **For Dennis to decide** (from the build-out; each agent's reasoning is in the design notes):
 - Defaults after the clean run: `triangleLeaves` (section 8), the six BX.20 levers, `quantizeOnEmit`, folded decode, `positionsBuffer`.
@@ -137,14 +139,14 @@ Everything below was on `main` and pushed to origin on 2026-11-13. No release, t
 - **three-bvh-csg, homefig, drei, three-gpu-pathtracer:** the CPU features they use exist (shapecast, `bvhcast`, `ExtendedTriangle`, closest point); none has switched.
 
 **Open** (rewritten 2026-11-14 after the build-out; the 2026-11-13 list is in git history)
-- **The clean run on the RTX 3060 and the Intel UHD** (`tools/windows-clean-run.ps1`): every page added on 2026-11-14 has run on SwiftShader only. The run covers the correctness pages, `scene-trees-sponza` (memory, the cap, lever variants), the surface-ray benches (merged, records against indexed, quantized, section 8 combined, section 9 folded, hit record, any-hit order) and the examples. Defaults wait on it (above).
+- **Defaults from the clean run** (Dennis; numbers in runbook section 9). Not measured there: D3D12 compile times, Intel UHD timings, SDF against three-mesh-bvh on the RTX.
+- **Cosmetic, seen in the RTX screenshots:** `three/pathtracer`'s HUD shows depth, nodes and triangles 0 for its GPU tree; `babylon/gpu-trace`'s shadows look blocky.
 - **pmndrs/bvh#1 on the Mac:** `wgsl-f32-arithmetic` and `trace-cpu-agreement` on the M5, and `trace-oracle` once. Webpack and esbuild dev servers are untested with the worker handshake.
 - **CI has never run on GitHub** (nothing pushed since the jobs were written). Its SwiftShader flags work on Linux; on Windows Chrome 157 `--use-angle=swiftshader` gives no adapter (`tests/gpu/README.md`). Consider adding `sdf-oracle`, `trace-clustered` and `three-shapecast` to the CI job.
 - **WASM on Linux/macOS:** the first `pnpm bvh:wasm --check` there with the new prefix-map flags.
 - **Publishing the docs** (Dennis; steps above).
 - **Not built, by decision:** GPU points and lines (design note); `ClusteredBVH` inside `SceneTrees` and the sync; per-node `refit(nodeIndices)` on `BvhBoundsTree` (the `sculpt` port refits the whole tree); a CPU copy of `SceneTrees`' trees (no SAH per tree in overlays); LBVH skipping its parents output (H-PLOC only); `onProgress` from tinybvh (needs a WASM callback).
-- **`scene-trees-mid-swap`:** one unexplained failure on 2026-11-13 under a parallel `pnpm build`; the full page ran past 900 s on SwiftShader under load on 2026-11-14 (variants passed alone). If it fails on a real GPU, keep the full log.
-- **`three-load-gltf` on SwiftShader** fails "no mesh got a GPU first tree" (tinybvh wins the race on a CPU adapter); expected to pass on a real GPU.
+- **`three-load-gltf` on SwiftShader** fails "no mesh got a GPU first tree" (tinybvh wins the race on a CPU adapter); passes on the RTX.
 - **Old worktree** `~/Developer/bvh-worktrees/reflections-integration` on the Mac: Dennis removes it.
 - **Agent worktrees** under `.claude/worktrees/` on this laptop: all merged into `main`; safe to remove with `git worktree remove`.
 - **API tidy:** `export *` in `src/trace/index.ts`, batch helpers in `gpu-lbvh.ts`, merging the two layout files.

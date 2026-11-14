@@ -33,7 +33,7 @@ Then the same with `--gpu intel`. Add `--json out-nvidia.json` to keep a run.
 
 Notes:
 - `bvh-lbvh` also runs `bvh-lbvh-fallback` and `bvh-lbvh-profile` (substring match), and `bvh-hploc` also runs `bvh-hploc-profile`; the profile pages are manual, so they run only when named like this. Drop them with `--timeout` or run exact names from `tests/gpu/pages/` if they are too slow.
-- `scene-trees-mid-swap` takes about 170 s on the M5. If it fails, keep the full log (HANDOFF, Open).
+- `scene-trees-mid-swap` takes about 16 minutes on the RTX 3060 (30 variants; its timeout is 30 minutes). `--verbose` prints each finished variant, also when it times out.
 - Decides: whether any benchmark below is worth running. A failing oracle or inline page on a GPU means stop and report; do not benchmark.
 - Watch `three-skinned` and the first run of each page for D3D12 compile time (HANDOFF: pose pass "not measured on Windows").
 
@@ -140,3 +140,50 @@ Headless Chrome on D3D12; correctness only, no timings. Assets: `BVH_ASSETS_DIR=
 - `wgsl-f32-arithmetic` (reports only): `dot()` is `fma(z, fma(y, x * x))`; `1.0 / x` correctly rounded on 86.9% of inputs, else 1 ulp off; `a / b` about `a * (1 / b)`; `sqrt`, `inverseSqrt` 1 ulp off at times; written products and sums not fused.
 - `scene-trees-runtime` and the 20 example smoke pages passed with the worker handshake (item 2).
 - GPU idle between runs: P8, 255 MHz graphics, 49 °C.
+
+## 9. Clean run: RTX 3060 Laptop and Intel UHD, 2026-11-14 (commit `6c32897`)
+
+`tools/windows-clean-run.ps1 -Commit 6c32897`, headless Chrome 157 on D3D12, after the downsampler finished. Everything in `bench/runs/2026-11-14-6c32897/` (`summary.md`, a log and JSON per step); the bench rows are appended to `bench/results/trace.csv` (`run1`-`run3` and `median/` prefixes, as in section 7).
+
+**Correctness (section 1 plus `query-oracle`, `sdf-oracle`, `trace-clustered`, `trace-cpu-agreement`, `bvh-shared`, `three-shapecast`), both GPUs:** everything passed but two pages, both since fixed in the tests, not the library:
+- `scene-trees-mid-swap` timed out at 900 s on both. Rerun alone with progress logging (`d9f0f8c`): PASS in 965 s on the RTX, every case and variant through. Not a hang; the page grew to 30 variants (indexed, quantized, levers) since the M5's 170 s. Its timeout is now 1,800 s.
+- `trace-cpu-agreement` on the Intel UHD: 1 of 98,304 Sponza primary rays named another triangle, in both scenes. Both hits are well inside their triangles of mesh 25, `t` 2 ulp apart, and the f32 scene orders the pair the other way: two overlapping coplanar faces. The page now counts another triangle within 64 ulp of `t` as a near tie (reported, not failed); passes on both GPUs (`17b0699`). The RTX has no near tie.
+
+**Ratios on the RTX** (each run's median of rounds, range over the 3 runs; above 1 means the option is faster):
+
+| Lever | Sponza | Bistro interior |
+| --- | --- | --- |
+| merged over instanced | closest 1.44-1.72, any 1.23-1.58 | closest 1.19-1.20, any 1.17-1.36 |
+| `quantized` over `f32` | closest 0.99-1.21, any 0.97-1.04 | closest 1.01-1.09, any 0.95-1.02 |
+| indexed `vec4` over records (f32 nodes) | 0.91-1.03 | 0.92-0.97 |
+| indexed packed over records (f32 nodes) | 0.88-0.99 | 0.82-0.88 |
+| **indexed `vec4` on quantized over quantized records** (section 8) | closest 0.83-0.95, any 0.95-1.03 | closest 0.89-0.93, any 0.92-0.94 |
+| **indexed packed on quantized over quantized records** | closest 0.77-0.87, any 0.90-1.03 | closest 0.77-0.81, any 0.83-0.86 |
+| folded decode over exact (section 9) | instanced 0.93-0.97, merged 1.00-1.06 | instanced 0.94-0.97, merged 1.00-1.05 |
+| folded decode, indexed | instanced 0.92-0.99, merged 1.02-1.08 | instanced 0.95-0.99, merged 1.00-1.03 |
+| 40-byte hit record over 24 | 0.88-0.92 | 0.92-0.94 |
+| `anyHitOrder: 'larger'` over `'far'` | instanced 1.11-1.45; merged air 1.06, surface 0.87 | instanced 1.18-1.49; merged air 1.05-1.07, surface 0.80 |
+| `anyHitOrder: 'near'` over `'far'` | 0.58-1.25 | 0.74-1.22 |
+
+Section 8's walks agreed on every ray (`different` 0 in every entry). Indexed leaves on quantized nodes cost 5-17% on closest hits (packed 13-23%), more than on f32 nodes; any hits roughly break even on Sponza surface rays.
+
+**Sponza memory (section 3), RTX:** 132 meshes, 5,744,384 triangles; every variant 0 disagreements.
+
+| Variant | Cap | Batches | Peak MB | Settled MB (nodes / triangles / positions) |
+| --- | --- | --- | --- | --- |
+| copy, uncapped | none | 1 | 1,482.7 | 470.0 (206.9 / 263 / 0) |
+| adopt, uncapped | none | 1 | 1,482.7 | 613.6 (350.6 / 263 / 0) |
+| copy, default cap | 256 | 7 | 711.0 | 458.6 (195.6 / 263 / 0) |
+| copy, cap 512 / 128 | 512 / 128 | 3 / 13 | 963.0 / 581.4 | 460.7 / 453.3 |
+| indexed `vec4`, default cap | 256 | 6 | 580.0 | 327.1 (194.1 / 87.7 / 45.2) |
+| indexed packed, default cap | 256 | 6 | 568.7 | 315.8 (194.1 / 87.7 / 33.9) |
+| quantized, default cap | 256 | 7 | 613.2 | 360.8 (97.8 / 263 / 0) |
+| default cap + `trimWhenRefined` | 256 | 7 | 711.0 | 448.1 (185.1 / 263 / 0) |
+| adopt + trim | none | 1 | 1,482.7 | 448.1 |
+| default cap, `parents: 'refit'` | 256 | 7 | 707.3 | 458.6 |
+
+`quantizeJobs: 'batched'` changed nothing here (613.2 either way).
+
+**Examples:** all 41 smoke pages passed on the RTX, `three-load-gltf` included (it fails only on SwiftShader). Screenshots now show the canvas; the ones looked at draw correctly. Two cosmetic notes: `three/pathtracer`'s HUD shows depth, nodes and triangles 0 for its GPU tree, and `babylon/gpu-trace`'s shadows look blocky.
+
+Not covered by this run: D3D12 compile times (no page records them), the Intel UHD benches (correctness only), SDF against three-mesh-bvh on the RTX beyond `compare/sdf`'s smoke.
