@@ -51,7 +51,8 @@
  * trees), `quantizeJobs: 'batched'` and `parents: 'refit'` (no batch writes
  * parents). After the swap the node buffer must hold its trees and no more.
  *
- * URL option: `?sharedRays=100000` shrinks the seam cases.
+ * URL options: `?sharedRays=100000` shrinks the seam cases; `?variants=a,b` runs only those
+ * variants (`?variants=levers` every `-levers` one).
  */
 
 import { SceneTrees } from '../../../../src/scene/scene-trees.ts';
@@ -124,6 +125,8 @@ await runGpuTest(
     async ({ device, log }) => {
         assert(GpuFirstTrees.isSupported(device), 'GPU first trees need subgroups');
         const sharedRays = Number(new URLSearchParams(location.search).get('sharedRays') ?? 1_000_000);
+        const only = new URLSearchParams(location.search).get('variants')?.split(',') ?? null;
+        const variants = only ? VARIANTS.filter((variant) => only.includes(variant.name) || (only.includes('levers') && variant.levers)) : VARIANTS;
         const cases: OracleCase[] = [...buildOracleCases(FULL_SIZES), sharedEdgeCase(sharedRays, false), sharedEdgeCase(sharedRays, true)];
         const tinyBvh = await createTinyBvhBuilder();
         const kernels = {
@@ -154,7 +157,7 @@ await runGpuTest(
                 {},
                 { nodeFormat: 'f32' },
             );
-            for (const variant of VARIANTS) {
+            for (const variant of variants) {
                 const { meshes, instances } = variant.merged ? forMerge(oracleCase.meshes, oracleCase.instances) : { meshes: oracleCase.meshes, instances: oracleCase.instances };
                 const scene = await SceneTrees.create(device, {
                     label: `${oracleCase.name} ${variant.name}`,
@@ -230,7 +233,7 @@ await runGpuTest(
         }
         pool.dispose();
         for (const kernel of Object.values(kernels)) kernel.destroy();
-        for (const variant of VARIANTS) {
+        for (const variant of variants) {
             if (variant.maxBatchBytes === SMALL_CAP && !cappedCasesWithBatches.has(variant.name)) failures.push(`${variant.name}: no case built in more than one GPU batch`);
         }
         if (failures.length > 0) throw new Error(failures.slice(0, 10).join(' | '));
