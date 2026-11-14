@@ -8,6 +8,12 @@
 
 import type { CpuMeshBvh } from './cpu-mesh-bvh.ts';
 
+/**
+ * What the debug functions read of a tree: a {@link CpuMeshBvh}, or a points
+ * or segments tree (`CpuPointsBvh`, `CpuSegmentsBvh`), which walk the same way.
+ */
+export type BvhDebugTree = Pick<CpuMeshBvh<unknown>, 'traverseNodes' | 'writePrimitiveRangeBounds' | 'estimateMemoryInBytes'>;
+
 /** three-mesh-bvh's cost constants (`core/Constants.js`), as `getBVHExtremes` scores with them. */
 export const BVH_TRAVERSAL_COST = 1;
 export const BVH_PRIMITIVE_INTERSECT_COST = 1.25;
@@ -42,7 +48,7 @@ export interface BvhExtremes {
  * depth and size ranges, the split axes and a surface-area score, one entry
  * per root (our trees have one root).
  */
-export function getBVHExtremes(tree: CpuMeshBvh<unknown>): BvhExtremes[] {
+export function getBVHExtremes(tree: BvhDebugTree): BvhExtremes[] {
     const result: BvhExtremes = {
         nodeCount: 0,
         leafNodeCount: 0,
@@ -86,7 +92,7 @@ function containsBox(outer: ArrayLike<number>, inner: ArrayLike<number>): boolea
  * so positions edited without a {@link CpuMeshBvh.refit} fail, as they do in
  * three-mesh-bvh. (`checkGpuLayout` checks the layout itself, bit for bit.)
  */
-export function validateBounds(tree: CpuMeshBvh<unknown>): boolean {
+export function validateBounds(tree: BvhDebugTree): boolean {
     const boxes: Float32Array[] = [];
     const primitives = new Float64Array(6);
     let passes = true;
@@ -115,7 +121,7 @@ export function validateBounds(tree: CpuMeshBvh<unknown>): boolean {
  * there), and, with `displayParents`, every box above those too. Empty boxes
  * are skipped. The root is at depth 0, so `depth` 1 draws the root's box.
  */
-export function bvhHelperPositions(tree: CpuMeshBvh<unknown>, depth: number, displayParents: boolean): Float32Array {
+export function bvhHelperPositions(tree: BvhDebugTree, depth: number, displayParents: boolean): Float32Array {
     const targetDepth = depth - 1;
     const boxes: Float32Array[] = [];
     tree.traverseNodes((nodeDepth, isLeaf, box) => {
@@ -166,6 +172,6 @@ export function bvhHelperIndices(positions: Float32Array, edges: boolean): Uint1
  * level and lookups made so far; not the source geometry). three-mesh-bvh
  * walks the object graph instead, which counts its geometry's index.
  */
-export function estimateMemoryInBytes(tree: CpuMeshBvh<unknown>): number {
+export function estimateMemoryInBytes(tree: BvhDebugTree): number {
     return tree.estimateMemoryInBytes();
 }
