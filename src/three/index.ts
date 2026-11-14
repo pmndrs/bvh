@@ -71,3 +71,5 @@ export { estimateMemoryInBytes, getBVHExtremes, validateBounds, type BvhExtremes
 
 // The walk in three's node system (three-mesh-bvh's BVHComputeData pattern), for TSL and wgslFn.
 export { BvhTraceNodes, bvhClosestPointHitStruct, bvhTraceHitStruct, type BvhTraceBuffers, type BvhTraceBufferSource, type BvhTraceNodesOptions, type BvhTslNode } from './trace-nodes.ts';
+// Signed distance fields in a three 3D texture, filled by the core's SdfGenerator (docs/tracing/sdf.mdx).
+export { generateSdfTexture, type BvhSdfTexture, type BvhSdfTextureOptions } from './sdf.ts';

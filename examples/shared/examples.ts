@@ -129,6 +129,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         timeoutMs: 120_000,
     },
     {
+        name: 'three-sdf',
+        path: 'three/sdf',
+        title: 'SDF generation',
+        description: 'A signed distance field generated on the GPU from the scene\'s trees (closest point plus a three-ray inside vote per voxel) into a three 3D texture, shown by a TSL raymarch or a slice with contours. Resolution, margin and the inside rule live.',
+        timeoutMs: 120_000,
+    },
+    {
         name: 'compare-raycast',
         path: 'compare/raycast',
         title: 'compare/raycast',
@@ -168,6 +175,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         path: 'compare/gpu',
         title: 'compare/gpu',
         description: 'GPU traversal, ours against three-mesh-bvh/webgpu, closest and any hit, in paired rounds; a GPU-built tree traced by the same kernel.',
+        timeoutMs: 240_000,
+    },
+    {
+        name: 'compare-sdf',
+        path: 'compare/sdf',
+        title: 'compare/sdf',
+        description: 'SDF generation time on the GPU against three-mesh-bvh\'s webgpu_sdfGeneration kernel at several resolutions, in paired rounds, distances and signs checked; the scene\'s GPU-built tree straight into a three texture, shown as a slice.',
         timeoutMs: 240_000,
     },
 ];

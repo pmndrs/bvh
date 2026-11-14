@@ -21,7 +21,8 @@
  *
  * The library's own queries are such hook sets over private state
  * (`bvhClosestPoint`, `bvhIntersectsSphere`, `bvhIntersectsBox`,
- * `bvhIntersectsOrientedBox`), and `shapecast: wgsl` stamps the walk for the
+ * `bvhIntersectsOrientedBox`, and the inside test's `bvhRayCrossings`, which
+ * `bvhInsideVotes` and `bvhIsInside` cast three times), and `shapecast: wgsl` stamps the walk for the
  * caller's `bvhShapecastBounds`, `bvhShapecastKeep` and `bvhShapecastTriangle`.
  *
  * **World space throughout.** Rays can be moved into an instance's space
@@ -65,6 +66,39 @@ export const QUERY_BOX_PADDING = 1e-6;
  * infinity) are clamped to it so its square stays a finite f32.
  */
 export const CLOSEST_POINT_MAX_DISTANCE = 1e18;
+
+/**
+ * The inside test's ray directions (`bvhIsInside`, `CpuMeshBvh.isPointInside`):
+ * three unit vectors, far apart, along no axis or diagonal (an authored
+ * mesh's edges and faces mostly lie along those), into different octants (no
+ * one hemisphere holds all three, so a mesh open on one side still has rays
+ * that reach its walls), each component an exact f32, so the CPU and the GPU
+ * cast the same rays. A point is inside when
+ * at least {@link INSIDE_TEST_MAJORITY} of the rays vote it inside.
+ */
+export const INSIDE_TEST_DIRECTIONS: readonly (readonly [number, number, number])[] = [
+    [Math.fround(0.816543519), Math.fround(0.272114486), Math.fround(0.50912714)],
+    [Math.fround(-0.340902179), Math.fround(0.931205928), Math.fround(-0.129000828)],
+    [Math.fround(-0.464902997), Math.fround(-0.242553741), Math.fround(0.85148865)],
+];
+
+/** Votes of {@link INSIDE_TEST_DIRECTIONS} that make a point inside: a majority of three. */
+export const INSIDE_TEST_MAJORITY = 2;
+
+/**
+ * How the inside test reads one ray's crossings:
+ *
+ * - `'parity'`: an odd number of crossings is inside (even-odd rule). Needs no
+ *   consistent winding; overlapping closed shells cancel where they overlap.
+ * - `'winding'`: a non-zero sum of signed crossings is inside (non-zero rule;
+ *   +1 leaving through a triangle's authored front side, -1 entering through
+ *   it): the generalized winding number along the ray, an integer for closed
+ *   meshes. Overlapping closed shells stay inside; it needs consistently wound
+ *   triangles (either way round).
+ */
+export type InsideRule = 'parity' | 'winding';
+
+const wgslVec3 = (v: readonly number[]) => `vec3f(${v.map((x) => x.toPrecision(9)).join(', ')})`;
 
 /** The hook names a stamped shapecast walk calls. */
 export interface ShapecastHookNames {
@@ -511,6 +545,105 @@ ${entryPoints(rayMasks, 'bvhIntersectsOrientedBox', 'center: vec3f, halfSize: ve
 
 // Whether any triangle touches the solid axis-aligned box [boxMin, boxMax] (world space).
 ${entryPoints(rayMasks, 'bvhIntersectsBox', 'boxMin: vec3f, boxMax: vec3f', 'bvhOrientedBoxStart((boxMin + boxMax) * 0.5, (boxMax - boxMin) * 0.5, mat3x3f(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0)));', 'bvhOrientedBoxWalk', '', 'bool')}
+${insideTestWgsl(rayMasks)}`;
+}
+
+/**
+ * The inside test (PARITY 8.10): every crossing of a ray with the scene's
+ * triangles, counted and signed, through the shapecast walk with a ray-box
+ * score (nearer boxes first, though order does not matter: nothing stops it)
+ * and the walk's own watertight triangle test on the world-space corners. A
+ * corner shared by two triangles of one instance moves to the same world bits
+ * in both, so a ray cannot slip through a shared edge; a ray exactly on an
+ * edge counts both triangles (the walk's rule), which the vote of three rays
+ * outweighs.
+ */
+function insideTestWgsl(rayMasks: boolean): string {
+    const [d0, d1, d2] = INSIDE_TEST_DIRECTIONS.map(wgslVec3);
+    const votes = (masked: boolean) => {
+        const call = (direction: string) => `bvhInsideVote(bvhRayCrossings${masked ? 'Masked' : ''}(point, ${direction}${masked ? ', mask' : ''}))`;
+        return `${call('BVH_INSIDE_DIRECTION_0')}\n        + ${call('BVH_INSIDE_DIRECTION_1')}\n        + ${call('BVH_INSIDE_DIRECTION_2')}`;
+    };
+    const maskedForms = rayMasks
+        ? `
+
+// As bvhInsideVotes, over the instances whose mask shares a bit with 'mask'.
+fn bvhInsideVotesMasked(point: vec3f, mask: u32) -> vec2u {
+    return ${votes(true)};
+}
+
+// As bvhIsInside, over the instances whose mask shares a bit with 'mask'.
+fn bvhIsInsideMasked(point: vec3f, mask: u32) -> bool {
+    return bvhInsideVotesMasked(point, mask).x >= BVH_INSIDE_MAJORITY;
+}`
+        : '';
+    return /* wgsl */ `
+// ---- Spatial queries: inside test (bvhRayCrossings, bvhInsideVotes, bvhIsInside) ----
+
+// A ray's crossings with the scene's triangles, at t >= 0 (world space).
+struct BvhRayCrossings {
+    count: u32,     // every triangle the ray crosses
+    winding: i32,   // +1 per triangle left through its authored front side, -1 per one entered through it
+}
+
+// The inside test's rays (INSIDE_TEST_DIRECTIONS): along no axis or diagonal, the same f32 values as the CPU's.
+const BVH_INSIDE_DIRECTION_0: vec3f = ${d0};
+const BVH_INSIDE_DIRECTION_1: vec3f = ${d1};
+const BVH_INSIDE_DIRECTION_2: vec3f = ${d2};
+// Votes (of three) that make a point inside.
+const BVH_INSIDE_MAJORITY: u32 = ${INSIDE_TEST_MAJORITY}u;
+
+var<private> bvhCrossingSetup: BvhRaySetup;
+var<private> bvhCrossingCount: u32;
+var<private> bvhCrossingWinding: i32;
+
+fn bvhCrossingBounds(bounds: BvhShapecastBounds) -> f32 {
+    let entry = bvhBoxEntry(bounds.min, bounds.max, bvhCrossingSetup, 0.0, BVH_BOX_MISS);
+    return select(-1.0, entry, entry < BVH_BOX_MISS);
+}
+
+fn bvhCrossingKeep(score: f32) -> bool {
+    return true;
+}
+
+fn bvhCrossingTriangle(triangle: BvhShapecastTriangle) -> bool {
+    let hit = bvhIntersectWatertight(BvhTriangle(triangle.a, 0u, triangle.b, 0u, triangle.c, 0u), bvhCrossingSetup, 0.0, BVH_BOX_MISS);
+    if (hit.hit) {
+        bvhCrossingCount += 1u;
+        // frontFacing is against the world winding; a mirrored triangle's authored side is the other one.
+        bvhCrossingWinding += select(1, -1, hit.frontFacing != triangle.mirrored);
+    }
+    return false;
+}
+
+${shapecastWalkWgsl('bvhCrossingWalk', { bounds: 'bvhCrossingBounds', keep: 'bvhCrossingKeep', triangle: 'bvhCrossingTriangle' }, rayMasks)}
+
+fn bvhRayCrossingsStart(origin: vec3f, direction: vec3f) {
+    bvhCrossingSetup = bvhMakeRaySetup(origin, direction);
+    bvhCrossingCount = 0u;
+    bvhCrossingWinding = 0;
+}
+
+// Every triangle the ray from 'origin' along 'direction' crosses at t >= 0 (world space; the
+// triangle filter is not asked): how many, and their signed sum. The walk cannot stop early.
+${entryPoints(rayMasks, 'bvhRayCrossings', 'origin: vec3f, direction: vec3f', 'bvhRayCrossingsStart(origin, direction);', 'bvhCrossingWalk', 'BvhRayCrossings(bvhCrossingCount, bvhCrossingWinding)', 'BvhRayCrossings')}
+
+// One ray's vote: (odd crossings, non-zero winding), each 1 for inside.
+fn bvhInsideVote(crossings: BvhRayCrossings) -> vec2u {
+    return vec2u(crossings.count & 1u, select(0u, 1u, crossings.winding != 0));
+}
+
+// The inside test's votes for 'point' over its three rays: x by parity, y by winding
+// (each 0 to 3; 2 or more is inside). Three full ray walks.
+fn bvhInsideVotes(point: vec3f) -> vec2u {
+    return ${votes(false)};
+}
+
+// Whether 'point' is inside the scene's closed surfaces: odd crossings on at least two of
+// three rays (parity; bvhInsideVotes(point).y >= 2u for the winding rule).
+fn bvhIsInside(point: vec3f) -> bool {
+    return bvhInsideVotes(point).x >= BVH_INSIDE_MAJORITY;
+}${maskedForms}
 `;
 }
 

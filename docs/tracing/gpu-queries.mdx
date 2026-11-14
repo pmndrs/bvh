@@ -198,6 +198,6 @@ agrees. The `three-trace` page checks that `closestPoint` gives exactly the batc
 
 ## Not here
 
-- Signed distance fields: the sign needs an inside test this package doesn't have yet. `bvhClosestPoint` and the normal
-  it returns are the building blocks.
+- Signed distance fields and the inside test (`bvhRayCrossings`, `bvhInsideVotes`, `bvhIsInside`, also in this module):
+  see [Signed distance fields](/tracing/sdf).
 - Closest point between two meshes (`closestPointToGeometry`) and `bvhcast` exist on the CPU only.

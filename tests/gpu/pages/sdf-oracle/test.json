@@ -1,0 +1,4 @@
+{
+    "description": "SDF generation (SdfGenerator: closest point and the inside test's vote per voxel) against generateSdfCpu over CpuMeshBvh trees: welded solids, overlapping and hollow shells (parity and winding), an open box and a triangle soup, in every node and triangle format, merged, masks on and off, a distance band, unsigned, texture and buffer outputs.",
+    "timeoutMs": 600000
+}

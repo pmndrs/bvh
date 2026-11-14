@@ -39,6 +39,7 @@ Raw WebGPU and `@pmndrs/bvh` only: no three, no engine.
 | [`three/instances`](https://github.com/pmndrs/bvh/tree/main/examples/three/instances) | 6,000 `InstancedMesh` and 3,000 `BatchedMesh` instances moving, with a top-level refit every frame and picking. |
 | [`three/load-gltf`](https://github.com/pmndrs/bvh/tree/main/examples/three/load-gltf) | Fast first trees on a real glTF: GPU H-PLOC, then tinybvh from the worker pool, with a per-mesh timeline. |
 | [`three/inspector`](https://github.com/pmndrs/bvh/tree/main/examples/three/inspector) | tinybvh, H-PLOC and LBVH on one mesh: build times, SAH, depth, bytes, `MeshBVHHelper` and a heat map of nodes per ray. |
+| [`three/sdf`](https://github.com/pmndrs/bvh/tree/main/examples/three/sdf) | A [signed distance field](/tracing/sdf) generated on the GPU from the scene's trees into a three 3D texture, shown by a TSL raymarch or a slice with contours; resolution, margin and the inside rule live. [`compare/sdf`](https://github.com/pmndrs/bvh/tree/main/examples/compare/sdf) times the generation against three-mesh-bvh's `webgpu_sdfGeneration`. |
 
 ## Babylon.js
 
@@ -53,4 +54,3 @@ Basic: [`@pmndrs/bvh/babylon`](/engines/babylon) is "it works", not polish.
 
 - **Node:** `bake` (build in Node, load with no build).
 - **Comparisons with three-mesh-bvh** (`compare/`): raycast, async builds, path tracer, skinned, tree quality.
-- **three:** `sdf`, on the GPU closest-point query (`bvhClosestPoint`; the sign needs an inside test, not built yet).
