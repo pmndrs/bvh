@@ -4,8 +4,8 @@ description: The API mapping from three-mesh-bvh 0.9, what is missing here, what
 nav: 86
 ---
 
-This compares `@pmndrs/bvh` with three-mesh-bvh 0.9.18. Of the 52 features audited, 31 have an equivalent here, 7 have
-part of one, 9 are missing and 5 won't be done. The full audit, with the code behind each row, is
+This compares `@pmndrs/bvh` with three-mesh-bvh 0.9.18. Of the 52 features audited, 40 have an equivalent here, 3 have
+part of one, 4 are missing and 5 won't be done. The full audit, with the code behind each row, is
 [`docs/internals/PARITY.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/PARITY.md).
 
 ## CPU: MeshBVH and friends
@@ -22,12 +22,15 @@ Most code switches by changing the import:
 | `refit()` | `refit()`: rereads the position attribute; the index must not have changed |
 | `traverse(callback)` (the node walk) | `traverseNodes(callback)`. Our `traverse` is the shapecast box walk |
 | `resolveTriangleIndex(i)` | The same. The geometry is never reordered, as with `indirect: true` |
-| `MeshBVH.serialize(bvh)`, `MeshBVH.deserialize(data, geometry)` | `boundsTree.serialize()`, `deserializeBoundsTree(bytes, geometry)`: our format |
+| `MeshBVH.serialize(bvh)`, `MeshBVH.deserialize(data, geometry, { setIndex })` | The same, in three-mesh-bvh's format both ways; `deserialize` also reads our bytes (`boundsTree.serialize()`) ([Save and load](/three/bounds-tree#save-and-load)) |
 | `ExtendedTriangle`, `OrientedBox`, `SeparatingAxisBounds`, `CONTAINED`, `INTERSECTED`, `NOT_INTERSECTED` | The same, from `/three`. `OrientedBox` is its own class, not a `Box3` subclass |
-| `getTriangleHitPointInfo`, `estimateMemoryInBytes`, `getBVHExtremes`, `validateBounds` | The same functions |
+| `getTriangleHitPointInfo`, `estimateMemoryInBytes`, `getBVHExtremes`, `validateBounds`, `getJSONStructure` | The same functions |
 | `MeshBVHHelper`, `BVHHelper` | The same classes (no deprecation warning on `MeshBVHHelper`) |
 | `GenerateMeshBVHWorker().generate(geometry, options)` | `new GenerateMeshBvhWorker().generate(geometry, options)`: no cross-origin isolation needed |
 | `ObjectBVH.raycast(raycaster)`, frustum culling | `BvhSceneRaycaster`, `raycastScene(picker, raycaster)`, `picker.intersectsFrustum(frustum, layers)` |
+| `ObjectBVH.shapecast({ intersectsBounds, intersectsObject, ... })` | `picker.shapecast(...)`: the same callbacks over the objects' world boxes ([Shapecast over the objects](/three/cpu-raycast#shapecast-over-the-objects)) |
+| `BatchedMesh.prototype.computeBoundsTree = computeBatchedBoundsTree` | The same: a tree per geometry in `batchedMesh.boundsTrees` ([BatchedMesh](/three/cpu-raycast#batchedmesh)) |
+| `StaticGeometryGenerator` | The same class: skinned and morphed meshes baked on the CPU ([On the CPU](/three/skinned-and-morphed#on-the-cpu-staticgeometrygenerator)) |
 
 Without three, the same queries are on the core's `CpuMeshBvh` with plain points ([CPU queries](/cpu-queries/raycast)).
 
@@ -38,11 +41,12 @@ Without three, the same queries are on the core's `CpuMeshBvh` with plain points
 | `new BVHComputeData(root, { attributes })` | `SceneTrees.create(deviceFromRenderer(renderer))`, `new SceneTreesObject3DSync(trees, root, options)`, `new BvhTraceNodes(renderer, trees)` |
 | `bvh.update()` (repack everything) | `sync.sync()`: only the meshes and instances that changed |
 | `bvh.updateTransforms()` | `sync.update()` each frame, then `trees.update(encoder)`, then `bvh.update()` |
-| `bvh.updateAsync` | `trees.whenBuilt()`, `trees.whenRefined()` |
+| `await bvh.updateAsync()` | `await bvh.updateAsync({ sync })`, or `updateSceneTreesAsync(trees, { sync, nodes })` ([Waiting for every tree](/three/trace-nodes#waiting-for-every-tree)) |
 | `bvh.fns.raycastFirstHit(ray, &hit) -> bool` | WGSL `bvhTraceClosest(ray) -> BvhHit` (`hit.t < 0` on a miss); TSL `bvh.traceClosest(origin, direction, tMin, tMax)` |
 | `bvh.fns.raycastAnyHit(ray) -> bool` | WGSL `bvhTraceAny(ray) -> bool`; TSL `bvh.traceAny(...)` |
 | (none) | Ray masks: `bvhTraceClosestMasked`, `bvhTraceAnyMasked`; `rayMaskFromLayers(camera.layers)` |
 | `wgslTagFn` with `${bvh.fns.raycastFirstHit}` | three's `wgslFn(code, [bvh.module])`, calling the walk by name |
+| `bvh.getShapecastFn({ shapeStruct, intersectsBoundsFn, intersectRangeFn, ... })` | `bvh.getShapecastFn({ shape, intersectsBounds, intersectsTriangle, keep })`, hooks as TSL `Fn`s or `wgslFn`s ([Shapecasts with TSL hooks](/three/trace-nodes#shapecasts-with-tsl-hooks)) |
 | `rayStruct` (`origin, direction, maxDist`; 0 is unbounded) | `BvhRay(origin, tMin, direction, tMax)`, an explicit interval |
 | `hit.dist`, `hit.didHit` | `hit.t`, and `hit.t >= 0.0` |
 | `hit.normal` and `hit.side` | `hit.normal` (world, geometric, authored front side) and `hit.frontFace` |
@@ -54,25 +58,30 @@ Without three, the same queries are on the core's `CpuMeshBvh` with plain points
 
 ## Partly there
 
-- **Skinned meshes:** posed on the GPU for GPU rays ([Skinned and morphed meshes](/three/skinned-and-morphed)); CPU
-  picking on them uses three's own raycast. No `SkinnedMeshBVH` on the CPU.
-- **`StaticGeometryGenerator`:** the GPU pose pass replaces it for GPU rays; there is no CPU static geometry.
-- **`BatchedMesh`:** the scene read and the raycast work; there is no per-geometry `computeBatchedBoundsTree(index)`.
+- **Skinned meshes:** posed on the GPU for GPU rays ([Skinned and morphed meshes](/three/skinned-and-morphed)), and
+  baked on the CPU by `StaticGeometryGenerator` for CPU queries. No `SkinnedMeshBVH` (a tree that refits from the pose
+  itself).
 - **`maxDepth`:** accepted, not honoured.
-- **`setBoundingBox`, `verbose`, `onProgress`:** `onProgress` reports 0 and 1 only; `verbose` is ignored.
-- **`serialize`:** our layout's format, not three-mesh-bvh's, and no `setIndex`.
-- **`updateAsync`:** `whenBuilt()` and `whenRefined()` cover it.
+- **`setBoundingBox`, `verbose`, `onProgress`:** `onProgress` reports 0 and 1 only: tinybvh builds in one WebAssembly
+  call and has no progress callback (its task hooks run only in threaded builds; ours is single-threaded). `verbose` is
+  ignored.
+
+There, with differences:
+
+- **`serialize`:** three-mesh-bvh's format is read and written. Reading keeps the tree's shape and recomputes exact
+  boxes; a tree built over a draw range or groups that leave triangles out can't be read.
+- **`getShapecastFn`:** the triangle test gets one world-space triangle at a time, not a leaf's index range, and there is
+  no result pointer: the shape goes in by value, and results come back through a `wgslFn`'s private state.
+- **`StaticGeometryGenerator`:** it also bakes a mesh again when only a morph weight changed (three-mesh-bvh keeps the
+  old pose then).
 
 ## Missing
 
 - `PointsBVH` and the line BVHs (`LineSegmentsBVH`, `LineLoopBVH`, `LineBVH`): leaves hold triangles only.
-- `ObjectBVH.shapecast`.
-- `getJSONStructure`.
 - On the GPU: `ClusteredBVH`. SDF generation exists ([Signed distance fields](/tracing/sdf), `generateSdfTexture` in
-  `/three`), and so do closest point, sphere and box tests, shapecasts and the WGSL helpers `intersectRayTriangle` and
-  `closestPointToTriangle` ([Spatial queries on the GPU](/tracing/gpu-queries)), with two differences: shapecast hooks
-  are WGSL functions, not TSL callbacks as `getShapecastFn` takes, and queries run over the whole scene in world space
-  rather than over one mesh.
+  `/three`), and so do closest point, sphere and box tests, shapecasts (with WGSL or TSL hooks) and the WGSL helpers
+  `intersectRayTriangle` and `closestPointToTriangle` ([Spatial queries on the GPU](/tracing/gpu-queries)); the queries
+  run over the whole scene in world space rather than over one mesh.
 
 ## Won't be done
 
@@ -94,7 +103,7 @@ Without three, the same queries are on the core's `CpuMeshBvh` with plain points
 ## When to stay with three-mesh-bvh
 
 - You need WebGL2 GPU traversal, or GLSL.
-- You need points or lines as primitives, or GPU shapecasts written as TSL callbacks.
+- You need points or lines as primitives.
 - Memory matters more than ray speed. Our GPU scenes use about 7 times three-mesh-bvh's bytes beyond the geometry on
   Sponza (356 MiB against 51 MiB with defaults on both sides; 6.5 times on Bistro exterior). Indexed leaves, off by
   default, bring Sponza to 226 MiB. Our CPU trees (`computeBoundsTree`) keep 64-byte nodes: 8-9 times. See

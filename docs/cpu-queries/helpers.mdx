@@ -69,3 +69,19 @@ const indices = bvhHelperIndices(positions, true);
 - `bvhHelperPositions(tree, depth, displayParents)` and `bvhHelperIndices(positions, edges)`: the boxes as line
   segments (or faces), for any engine to draw. three's `MeshBVHHelper` uses them.
 - `checkGpuLayout` and `treeSahCost` check and score any tree ([The builder contract](/concepts/builder-contract#the-rule)).
+- `getJSONStructure(tree)`: three-mesh-bvh's plain-object tree, for looking at or logging a tree's shape. Each node has
+  `bounds` and either `offset` and `count` (a leaf; tree positions, as `traverse` reports them) or `left` and `right`.
+  The root's box is the tree's bounds. Boxes are `BvhBox3`s here and three `Box3`s from `@pmndrs/bvh/three`; pass
+  `makeBox` for another type. A tree written in three-mesh-bvh's format gives the same structure from its
+  `getJSONStructure`, node for node.
+
+{/* snippet: json-structure */}
+```ts
+import { getJSONStructure, type CpuMeshBvh } from '@pmndrs/bvh';
+import { getJSONStructure as getJSONStructureThree } from '@pmndrs/bvh/three';
+
+const root = getJSONStructure(tree); // { bounds: BvhBox3, left, right }, or { bounds, offset, count } at a leaf
+console.log(JSON.stringify(root, null, 2));
+// In three, the boxes are Box3s:
+const threeRoot = getJSONStructureThree(geometry.boundsTree!);
+```

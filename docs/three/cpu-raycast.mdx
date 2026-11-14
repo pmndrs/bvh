@@ -35,7 +35,8 @@ The same intersections as three's `Mesh.raycast`:
 - `raycaster.near` and `far`;
 - the same fields: `distance`, `point`, `face` (`a`, `b`, `c`, `normal`, `materialIndex`), `faceIndex`, `barycoord`,
   `uv`, `uv1` and `normal`;
-- `InstancedMesh` and `BatchedMesh` through `Mesh.raycast` (call `batchedMesh.geometry.computeBoundsTree()`).
+- `InstancedMesh` and `BatchedMesh` through `Mesh.raycast` (a tree per batched geometry with
+  `computeBatchedBoundsTree`, below, or one over the whole batch with `batchedMesh.geometry.computeBoundsTree()`).
 
 Without `firstHitOnly` every hit is returned, as three does. Tested against three on 8,000 random rays, and 5,000 more
 through ranges and groups off a multiple of 3. The one difference: three reports a triangle that reads past the end of
@@ -47,6 +48,41 @@ the index at a `NaN` distance; we report nothing there.
 - A `SkinnedMesh`, or a mesh with morph targets (three poses each vertex on the CPU; that is exact).
 - The position attribute's version, or the index, changed since `computeBoundsTree`. It warns once and stays on three's
   raycast until `geometry.boundsTree.refit()` (same index) or `computeBoundsTree` runs again.
+
+## BatchedMesh
+
+A tree per geometry of a `BatchedMesh`, as three-mesh-bvh's `computeBatchedBoundsTree` makes them: each instance's
+raycast walks only its own geometry's tree.
+
+{/* snippet: batched-bounds-tree */}
+```ts
+import { BatchedMesh, Mesh } from 'three';
+import { acceleratedRaycast, computeBatchedBoundsTree, disposeBatchedBoundsTree } from '@pmndrs/bvh/three';
+
+Mesh.prototype.raycast = acceleratedRaycast;
+BatchedMesh.prototype.raycast = acceleratedRaycast; // three-mesh-bvh's setup; three's own BatchedMesh.raycast runs underneath
+BatchedMesh.prototype.computeBoundsTree = computeBatchedBoundsTree;
+BatchedMesh.prototype.disposeBoundsTree = disposeBatchedBoundsTree;
+
+batched.computeBoundsTree(); // a tree per geometry, in batched.boundsTrees
+// After batched.setGeometryAt(changedGeometry, geometry): that geometry's tree again, the others refitted.
+batched.computeBoundsTree(changedGeometry);
+for (const tree of batched.boundsTrees ?? []) tree?.refit();
+```
+
+- `computeBoundsTree(index = -1, options)` builds every geometry's tree into `batchedMesh.boundsTrees` (by geometry id)
+  and returns the array, or builds one geometry's tree and returns it (null past the geometries, or for a deleted one).
+  The options are `computeBoundsTree`'s. `disposeBoundsTree(index = -1)` drops one tree or all of them.
+- Each tree is a `BvhBoundsTree` over that geometry's range of the batched geometry. The hits are three's: `faceIndex`,
+  `face` and the interpolated attributes over the whole batched geometry, and `batchId`. three-mesh-bvh reorders the
+  batch's index in place, so its `faceIndex` numbers differ from three's; ours don't.
+- `acceleratedRaycast` on a `BatchedMesh` runs three's own `BatchedMesh.raycast`, whose stand-in mesh comes back to
+  `Mesh.raycast`: set both prototypes, as with three-mesh-bvh.
+- After `setGeometryAt`, or another edit of the batch's positions or index, the trees are stale: raycasts fall back to
+  three's, with one warning, until the changed geometry's tree is built again and the others are refitted or rebuilt.
+- A geometry whose index count isn't a multiple of 3 loses the one triangle three would read past its range.
+
+Tested against three's raycast and three-mesh-bvh's accelerated `BatchedMesh` raycast, indexed and not.
 
 ## A whole scene
 
@@ -86,6 +122,51 @@ const seen = picker.intersectsFrustum(frustum, camera.layers); // [{ object, ins
 
 Tested against three's `intersectObject` on 10,000 rays before and after moves, and 300 camera frustums against brute
 force.
+
+### Shapecast over the objects
+
+`picker.shapecast(callbacks)` is three-mesh-bvh's `ObjectBVH.shapecast`: the walk over the objects' world boxes that the
+raycast uses, with your own tests. Use it to find what a shape (a sphere, a box, a capsule) might touch, then test those
+objects' triangles.
+
+{/* snippet: scene-shapecast */}
+```ts
+import { BvhSceneRaycaster, CONTAINED, INTERSECTED, NOT_INTERSECTED } from '@pmndrs/bvh/three';
+import type { Object3D, Sphere } from 'three';
+
+const picker = new BvhSceneRaycaster(scene); // after `await prepareBoundsTrees()`
+const near: Object3D[] = [];
+picker.shapecast({
+    // World boxes of the objects (and instances); CONTAINED takes a subtree whole.
+    intersectsBounds: (box) => {
+        if (!sphere.intersectsBox(box)) return NOT_INTERSECTED;
+        return sphere.containsPoint(box.min) && sphere.containsPoint(box.max) ? CONTAINED : INTERSECTED;
+    },
+    // Each object in an entered box: instanceId is the InstancedMesh or BatchedMesh instance, else 0.
+    intersectsObject: (object, instanceId) => {
+        console.log(object.name, instanceId);
+        near.push(object);
+        return false; // true stops the cast
+    },
+});
+```
+
+- `intersectsBounds(box, isLeaf, score, depth, nodeIndex)`: a world `Box3` (scratch, valid during the call). Return
+  `NOT_INTERSECTED` (or anything falsy) to skip it, `INTERSECTED` to enter it, `CONTAINED` to hand over every object
+  under it without asking about the boxes below.
+- `intersectsObject(object, instanceId, contained, depth, source)`: each object in an entered box. `instanceId` is the
+  `InstancedMesh` or `BatchedMesh` instance, else 0, as in three-mesh-bvh; `source` is ours (`{ object, instanceId,
+  group, ... }`; a multi-material mesh with `multiMaterial: 'groups'` comes once per group). True stops the cast.
+- `intersectsRange(offset, count, contained, depth, nodeIndex, box)` and `boundsTraverseOrder(box)` work as in
+  three-mesh-bvh. Ranges are positions in the top level (`picker.cpuScene.instanceAt(position)`).
+- The boxes are the padded world boxes of each object's mesh tree, not three-mesh-bvh's (the geometry's box shrunk to
+  its sphere); both hold the object. Hidden objects are in unless `includeHidden: false`; a `BatchedMesh`'s hidden
+  instances are not.
+- Without three: `CpuSceneBvh.shapecast({ intersectsBounds, intersectsInstance, intersectsRange, boundsTraverseOrder })`,
+  with instances by `instanceIndex`, and `CpuSceneBvh.traverse`.
+
+Tested call for call against three-mesh-bvh's `shapecastTraverse` run over the same top level, and against
+`ObjectBVH.shapecast` on sphere casts before and after objects move.
 
 ## Off the main thread
 

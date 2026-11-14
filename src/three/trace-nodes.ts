@@ -59,9 +59,11 @@
  */
 
 import { CodeNode, REVISION, StorageBufferAttribute, StructTypeNode, type Node, type NodeBuilder } from 'three/webgpu';
-import { float, storage, wgslFn } from 'three/tsl';
+import { expression, float, storage, uint, wgslFn } from 'three/tsl';
 import { traceModuleWgsl, type AnyHitOrder } from '../trace/wgsl.ts';
+import { shapecastWalkWgsl } from '../trace/query-wgsl.ts';
 import { traceSourceFormats, type TraceSceneBuffers } from '../trace/trace-gpu.ts';
+import { updateSceneTreesAsync, type SceneTreesAsyncTarget, type UpdateSceneTreesAsyncOptions } from './update-async.ts';
 
 /** The buffers a source binds. `positions`: an indexed scene's fourth buffer (docs/internals/design/indexed-leaves.md); null or absent for records. */
 export interface BvhTraceBuffers {
@@ -316,7 +318,7 @@ class BvhTraceModuleNode extends CodeNode {
     bvhTracePositions: StorageNode | null;
 
     constructor(
-        private readonly text: string,
+        protected readonly text: string,
         storages: Readonly<Partial<Record<BufferName, StorageNode>>>,
     ) {
         super('', [], 'wgsl');
@@ -326,6 +328,11 @@ class BvhTraceModuleNode extends CodeNode {
         this.bvhTracePositions = storages.bvhTracePositions ?? null;
     }
 
+    /** The text to emit, before the buffer names are replaced (a subclass fills in more). */
+    protected textFor(_builder: NodeBuilder): string {
+        return this.text;
+    }
+
     generate(builder: NodeBuilder): string {
         const names: Record<string, string> = {
             bvhTraceNodes: this.bvhTraceNodes.build(builder, 'property') as string,
@@ -333,10 +340,121 @@ class BvhTraceModuleNode extends CodeNode {
             bvhTraceTopLevel: this.bvhTraceTopLevel.build(builder, 'property') as string,
             ...(this.bvhTracePositions ? { bvhTracePositions: this.bvhTracePositions.build(builder, 'property') as string } : {}),
         };
-        const code = this.text.replace(/\bbvhTrace(?:Nodes|Triangles|TopLevel|Positions)\b/g, (name) => names[name]);
+        const code = this.textFor(builder).replace(/\bbvhTrace(?:Nodes|Triangles|TopLevel|Positions)\b/g, (name) => names[name]);
         const nodeCode = (builder as unknown as { getCodeFromNode(node: Node, type: string): { code: string } }).getCodeFromNode(this, this.getNodeType(builder));
         nodeCode.code = code;
         return code;
+    }
+}
+
+/** A shapecast hook: a three `wgslFn`, or a TSL `Fn` with `setLayout` (so it is a function of its own in the shader). */
+export type BvhShapecastHook = BvhTslNode;
+
+/**
+ * Options of {@link BvhTraceNodes.getShapecastFn}: three-mesh-bvh's
+ * `getShapecastFn` hooks as three function nodes, compiled into one
+ * shapecast walk (`shapecastWalkWgsl`, the walk `traceModuleWgsl({ shapecast })`
+ * stamps for WGSL hooks). Each hook takes `shape` first when a `shape`
+ * type is given, then its own arguments.
+ */
+export interface BvhShapecastFnOptions {
+    /** The WGSL name of the function (and the prefix of its walk, private state and adapters). Default `bvhThreeShapecast<n>`, numbered in creation order. */
+    readonly name?: string;
+    /**
+     * The TSL type of the value the cast is called with and every hook gets
+     * first (`'vec4'`, `'mat4'`, a `StructTypeNode`, ...): the query's shape.
+     * Default none: the hooks get no shape and the call takes none.
+     */
+    readonly shape?: string | StructTypeNode;
+    /** `(shape?, boxMin: vec3, boxMax: vec3) -> float`: a world box's score; negative skips it, the lower of two siblings is entered first. */
+    readonly intersectsBounds: BvhShapecastHook;
+    /**
+     * `(shape?, a: vec3, b: vec3, c: vec3, instance: uint, triangle: uint,
+     * material: uint, normal: vec3) -> bool`, or any leading part of those
+     * arguments (only what it declares is computed): a triangle in world space,
+     * its instance (`BvhHit.instance`), original triangle, material and the
+     * world normal of its authored front side. True stops the cast.
+     */
+    readonly intersectsTriangle: BvhShapecastHook;
+    /** `(shape?, score: float) -> bool`: asked when a pushed box comes off the stack with the score it was pushed with; false skips it. Default: keep every box. */
+    readonly keep?: BvhShapecastHook;
+}
+
+/** WGSL names of the TSL types a shape may have. */
+const WGSL_TYPES: Record<string, string> = {
+    float: 'f32',
+    int: 'i32',
+    uint: 'u32',
+    bool: 'bool',
+    vec2: 'vec2f',
+    vec3: 'vec3f',
+    vec4: 'vec4f',
+    ivec2: 'vec2i',
+    ivec3: 'vec3i',
+    ivec4: 'vec4i',
+    uvec2: 'vec2u',
+    uvec3: 'vec3u',
+    uvec4: 'vec4u',
+    mat2: 'mat2x2f',
+    mat3: 'mat3x3f',
+    mat4: 'mat4x4f',
+};
+
+/** The arguments the triangle hook may take, in order: WGSL snippet over the walk's `triangle` and TSL type. */
+const TRIANGLE_ARGUMENTS: readonly (readonly [string, string])[] = [
+    ['triangle.a', 'vec3'],
+    ['triangle.b', 'vec3'],
+    ['triangle.c', 'vec3'],
+    ['triangle.instance', 'uint'],
+    ['triangle.triangle', 'uint'],
+    ['bvhShapecastMaterial(triangle)', 'uint'],
+    ['bvhShapecastNormal(triangle)', 'vec3'],
+];
+
+let shapecastFnCount = 0;
+
+/** A hook's parameter count: a TSL `Fn`'s layout, or a `wgslFn`'s code as three parses it. */
+function hookInputCount(hook: BvhShapecastHook, builder: NodeBuilder, what: string): number {
+    const layout = hook?.shaderNode?.layout as { inputs: unknown[] } | null | undefined;
+    if (layout) return layout.inputs.length;
+    if (hook?.shaderNode) throw new Error(`@pmndrs/bvh/three: the shapecast's ${what} is a TSL Fn without setLayout; give it a layout so it is a function of its own`);
+    if (typeof hook?.code === 'string') return (builder as unknown as { parser: { parseFunction(code: string): { inputs: unknown[] } } }).parser.parseFunction(hook.code).inputs.length;
+    throw new Error(`@pmndrs/bvh/three: the shapecast's ${what} must be a wgslFn or a TSL Fn with setLayout`);
+}
+
+/**
+ * One caller's shapecast walk in three's node system: the trace module's
+ * shapecast walk stamped for this cast's adapters, which call the caller's
+ * hooks. The hooks are built when this node generates, so three emits them
+ * as functions of their own (renamed if a name is taken) and the adapters
+ * call them by the name three gave them.
+ */
+class BvhShapecastWalkNode extends BvhTraceModuleNode {
+    constructor(
+        text: string,
+        storages: Readonly<Partial<Record<BufferName, StorageNode>>>,
+        private readonly castName: string,
+        private readonly shapeType: string | null,
+        private readonly hooks: { readonly bounds: BvhShapecastHook; readonly keep: BvhShapecastHook | null; readonly triangle: BvhShapecastHook },
+    ) {
+        super(text, storages);
+    }
+
+    protected override textFor(builder: NodeBuilder): string {
+        const { castName: name, shapeType, hooks } = this;
+        const shape: [string, string][] = shapeType ? [[`${name}Shape`, shapeType]] : [];
+        const call = (hook: BvhShapecastHook, what: string, args: readonly (readonly [string, string])[], type: string, leading = false): string => {
+            const declared = hookInputCount(hook, builder, what) - shape.length;
+            if (declared < 0 || (leading ? declared > args.length : declared !== args.length)) {
+                throw new RangeError(`@pmndrs/bvh/three: the shapecast's ${what} takes ${declared + shape.length} arguments; expected ${shape.length ? 'the shape, then ' : ''}${leading ? `up to ${args.length}` : args.length}`);
+            }
+            const nodes = [...shape, ...args.slice(0, declared)].map(([snippet, nodeType]) => expression(snippet, nodeType));
+            return (hook(...nodes) as Node).build(builder, type) as string;
+        };
+        return this.text
+            .replace('__BVH_SHAPECAST_BOUNDS__', () => call(hooks.bounds, 'intersectsBounds', [['bounds.min', 'vec3'], ['bounds.max', 'vec3']], 'float'))
+            .replace('__BVH_SHAPECAST_KEEP__', () => (hooks.keep ? call(hooks.keep, 'keep', [['score', 'float']], 'bool') : 'true'))
+            .replace('__BVH_SHAPECAST_TRIANGLE__', () => call(hooks.triangle, 'intersectsTriangle', TRIANGLE_ARGUMENTS, 'bool', true));
     }
 }
 
@@ -408,6 +526,7 @@ export class BvhTraceNodes {
     readonly closestPointMasked: (point: BvhTslNode, maxDistance: NodeInput, mask: BvhTslNode) => BvhTslNode;
 
     private readonly renderer: RendererLike;
+    private readonly storageNodes: Readonly<Partial<Record<BufferName, StorageNode>>>;
     private boundVersion: number | undefined;
     private bound: BvhTraceBufferSource['buffers'];
     private disposed = false;
@@ -438,6 +557,7 @@ export class BvhTraceNodes {
             storages[name] = node;
         }
         this.storage = { nodes: storages.bvhTraceNodes!, triangles: storages.bvhTraceTriangles!, topLevel: storages.bvhTraceTopLevel!, positions: storages.bvhTracePositions ?? null };
+        this.storageNodes = storages;
         this.module = new BvhTraceModuleNode(moduleWithoutBindings(options, this.triangleLeaves, this.positionLayout, this.nodeFormat), storages);
         const includes = [bvhTraceHitStruct, this.module];
         this.traceClosest = helper(closestWgsl('bvhThreeTraceClosest', false), includes);
@@ -487,6 +607,82 @@ export class BvhTraceNodes {
         this.bound = buffers;
         this.boundVersion = this.source.version;
         return true;
+    }
+
+    /**
+     * three-mesh-bvh's `getShapecastFn` (PARITY 8.6): a scene shapecast whose
+     * box and triangle tests are three function nodes ({@link BvhShapecastFnOptions}:
+     * `wgslFn`s, or TSL `Fn`s with `setLayout`), compiled into the trace
+     * module's shapecast walk (the one `traceModuleWgsl({ shapecast })` stamps
+     * for WGSL hooks: world space, every instance, node and triangle format).
+     * Returns a TSL function `(shape?, mask?) => bool`, true when the triangle
+     * hook stopped the cast; `mask` (a `u32`, default every instance) only
+     * with `rayMasks`. Needs `queries: true` (the walk's types and helpers).
+     *
+     * The hooks are functions of their own in the shader. A TSL `Fn` with a
+     * layout is cached across shaders by three, so its body must depend only
+     * on its arguments: pass per-call data as the `shape`. State a hook keeps
+     * between calls (a best distance, a count) needs a `wgslFn` writing its own
+     * `var<private>` or a storage buffer. The triangle hook may call the
+     * module's other walks (`bvhTraceAny`, `bvhClosestPoint`, ...); the bounds
+     * and keep hooks must not.
+     */
+    getShapecastFn(options: BvhShapecastFnOptions): (...args: BvhTslNode[]) => BvhTslNode {
+        if (!this.queries) throw new Error('@pmndrs/bvh/three: getShapecastFn needs a BvhTraceNodes made with queries: true');
+        const name = options.name ?? `bvhThreeShapecast${shapecastFnCount++}`;
+        if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name)) throw new RangeError(`@pmndrs/bvh/three: shapecast name "${name}" is not a WGSL identifier`);
+        const shape = options.shape ?? null;
+        const shapeType = shape === null ? null : typeof shape === 'string' ? shape : shape.name;
+        const shapeWgsl = shape === null ? null : typeof shape === 'string' ? WGSL_TYPES[shape] : shape.name;
+        if (shape !== null && !shapeWgsl) throw new RangeError(`@pmndrs/bvh/three: shapecast shape type "${String(shape)}" is not one of ${Object.keys(WGSL_TYPES).join(', ')} or a StructTypeNode`);
+        const masks = this.rayMasks;
+        const walkText = /* wgsl */ `
+// ---- The caller's shapecast ${name} (BvhTraceNodes.getShapecastFn) ----
+${shapeWgsl ? `var<private> ${name}Shape: ${shapeWgsl};` : ''}
+fn ${name}Bounds(bounds: BvhShapecastBounds) -> f32 {
+    return f32(__BVH_SHAPECAST_BOUNDS__);
+}
+fn ${name}Keep(score: f32) -> bool {
+    return __BVH_SHAPECAST_KEEP__;
+}
+fn ${name}Triangle(triangle: BvhShapecastTriangle) -> bool {
+    return __BVH_SHAPECAST_TRIANGLE__;
+}
+${shapecastWalkWgsl(`${name}Walk`, { bounds: `${name}Bounds`, keep: `${name}Keep`, triangle: `${name}Triangle` }, masks, true)}`;
+        const walk = new BvhShapecastWalkNode(walkText, this.storageNodes, name, shapeType, { bounds: options.intersectsBounds, keep: options.keep ?? null, triangle: options.intersectsTriangle });
+        const parameters = [shapeWgsl ? `shape: ${shapeWgsl}` : '', masks ? 'mask: u32' : ''].filter(Boolean).join(', ');
+        const entry = wgslFn(
+            /* wgsl */ `
+fn ${name}(${parameters}) -> bool {
+    ${shapeWgsl ? `${name}Shape = shape;` : ''}
+    return ${name}Walk(${masks ? 'mask' : ''});
+}`,
+            [...(shape !== null && typeof shape !== 'string' ? [shape] : []), walk, this.module] as never,
+        ) as unknown as (...args: unknown[]) => BvhTslNode;
+        return (...args: BvhTslNode[]): BvhTslNode => {
+            const call = [...args];
+            if (shapeWgsl && call.length < 1) throw new Error(`@pmndrs/bvh/three: shapecast ${name} takes its shape first`);
+            const expected = (shapeWgsl ? 1 : 0) + (masks ? 1 : 0);
+            if (masks && call.length === expected - 1) call.push(uint(0xffffffff));
+            if (call.length !== expected) throw new RangeError(`@pmndrs/bvh/three: shapecast ${name} takes ${shapeWgsl ? 'its shape' : 'nothing'}${masks ? ' and an optional u32 mask' : ''}; got ${args.length} arguments`);
+            return entry(...call);
+        };
+    }
+
+    /**
+     * three-mesh-bvh's `await bvh.updateAsync()` (PARITY 8.4): with a
+     * `SceneTrees` source, {@link updateSceneTreesAsync} (the sync walked,
+     * every build started and waited for, the trees placed) and then
+     * {@link update}; with fixed buffers (an upload), just {@link update}.
+     */
+    async updateAsync(options: Omit<UpdateSceneTreesAsyncOptions, 'nodes'> = {}): Promise<void> {
+        const trees = this.source as Partial<SceneTreesAsyncTarget>;
+        if (typeof trees.whenBuilt === 'function' && typeof trees.whenRefined === 'function' && typeof trees.update === 'function' && trees.device) {
+            await updateSceneTreesAsync(trees as SceneTreesAsyncTarget, { ...options, nodes: this });
+            return;
+        }
+        if (options.sync) throw new Error('@pmndrs/bvh/three: BvhTraceNodes.updateAsync with a sync needs a SceneTrees source');
+        this.update();
     }
 
     /** Each stand-in three used still has our buffer, and three made none of its own. */

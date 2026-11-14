@@ -28,6 +28,8 @@ export {
 export { SceneTreesObject3DSync, type Object3DPoseCounts, type Object3DSyncCounts, type SceneTreesObject3DSyncOptions, type SceneTreesTarget } from './scene-trees-sync.ts';
 // Skinned and morphed meshes on the GPU: three's skinning and morph math in a TSL compute pass, feeding SceneTrees.setPose.
 export { BvhPosePass, poseVertices, threeDeforms, type BvhPosePassLike, type BvhPosePassOptions } from './deform.ts';
+// Skinned and morphed meshes baked to a static geometry on the CPU (three-mesh-bvh's StaticGeometryGenerator), for CPU queries on the live pose.
+export { StaticGeometryGenerator } from './static-geometry.ts';
 
 // CPU raycasts (Q1) and the CPU tree: three-mesh-bvh-style drop-ins over the core's CpuMeshBvh.
 export {
@@ -38,8 +40,10 @@ export {
     BvhBoundsTree as MeshBVH,
     buildOptionsFromThreeMeshBvh,
     CENTER,
+    computeBatchedBoundsTree,
     computeBoundsTree,
     deserializeBoundsTree,
+    disposeBatchedBoundsTree,
     disposeBoundsTree,
     getTriangleHitPointInfo,
     meshInputFromGeometry,
@@ -58,7 +62,7 @@ export {
     type BvhSplitStrategy,
 } from './raycast.ts';
 // A ray against the whole scene on the CPU (three-mesh-bvh's ObjectBVH.raycast), and frustum culling over the top level.
-export { BvhSceneRaycaster, raycastScene, type BvhSceneRaycasterOptions } from './scene-raycast.ts';
+export { BvhSceneRaycaster, raycastScene, type BvhSceneRaycasterOptions, type BvhSceneShapecastCallbacks } from './scene-raycast.ts';
 // Shapecast and bvhcast (Q2): three-mesh-bvh's shape classes with three's types, over the core's math.
 export { ExtendedTriangle, OrientedBox, SeparatingAxisBounds } from './shapes.ts';
 // three-mesh-bvh's names for what intersectsBounds returns.
@@ -68,8 +72,13 @@ export { GenerateMeshBvhWorker, type GenerateMeshBvhWorkerOptions } from './gene
 export { BVHHelper, MeshBVHHelper } from './helper.ts';
 // three-mesh-bvh's debug functions (the core's, which take any CpuMeshBvh, so a BvhBoundsTree too).
 export { estimateMemoryInBytes, getBVHExtremes, validateBounds, type BvhExtremes, type BvhExtremes as ExtremeInfo } from '../query/debug.ts';
+export { getJSONStructure } from './debug.ts';
+// three-mesh-bvh's serialized format (MeshBVH.serialize / deserialize take it too), next to ours.
+export { meshBvhFromThreeMeshBvh, serializeThreeMeshBvh, type BvhJsonNode, type ThreeMeshBvhSerialized, type ThreeMeshBvhSerialized as SerializedBVH } from '../query/three-mesh-bvh-format.ts';
 
 // The walk in three's node system (three-mesh-bvh's BVHComputeData pattern), for TSL and wgslFn.
-export { BvhTraceNodes, bvhClosestPointHitStruct, bvhTraceHitStruct, type BvhTraceBuffers, type BvhTraceBufferSource, type BvhTraceNodesOptions, type BvhTslNode } from './trace-nodes.ts';
+// three-mesh-bvh's BVHComputeData.updateAsync: every build waited for and placed before the first traced frame.
+export { updateSceneTreesAsync, type SceneTreesAsyncTarget, type UpdateSceneTreesAsyncOptions } from './update-async.ts';
+export { BvhTraceNodes, bvhClosestPointHitStruct, bvhTraceHitStruct, type BvhShapecastFnOptions, type BvhShapecastHook, type BvhTraceBuffers, type BvhTraceBufferSource, type BvhTraceNodesOptions, type BvhTslNode } from './trace-nodes.ts';
 // Signed distance fields in a three 3D texture, filled by the core's SdfGenerator (docs/tracing/sdf.mdx).
 export { generateSdfTexture, type BvhSdfTexture, type BvhSdfTextureOptions } from './sdf.ts';

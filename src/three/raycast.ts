@@ -61,15 +61,16 @@
 
 import {
     BackSide,
+    BatchedMesh,
     Box3,
+    BufferAttribute,
+    BufferGeometry,
     DoubleSide,
     FrontSide,
     Mesh,
     Triangle,
     Vector2,
     Vector3,
-    type BufferAttribute,
-    type BufferGeometry,
     type Face,
     type Intersection,
     type InterleavedBufferAttribute,
@@ -97,8 +98,10 @@ import {
     type BvhTriangleAccept,
     type BvhVec3Like,
     type CpuMeshBvhBuildOptions,
+    type CpuMeshBvhOptions,
 } from '../query/cpu-mesh-bvh.ts';
 import type { BvhMatrix4Like } from '../query/shapes.ts';
+import { meshBvhFromThreeMeshBvh, serializeThreeMeshBvh, type ThreeMeshBvhSerialized } from '../query/three-mesh-bvh-format.ts';
 import { ExtendedTriangle } from './shapes.ts';
 import { deserializeLayout } from '../serialize.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
@@ -526,6 +529,52 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
         } finally {
             threeTrianglePool.push(triangle);
         }
+    }
+
+    /**
+     * three-mesh-bvh's `MeshBVH.serialize(bvh, { cloneBuffers })`: the tree
+     * in three-mesh-bvh's serialized format (indirect mode, `index` a copy of
+     * the geometry's), which its `MeshBVH.deserialize` reads
+     * (`serializeThreeMeshBvh`). `bvh.serialize()` gives our own format.
+     */
+    static serialize(bvh: CpuMeshBvh<unknown> & { readonly geometry?: BufferGeometry }, options: { readonly cloneBuffers?: boolean } = {}): ThreeMeshBvhSerialized {
+        const index = bvh.geometry?.index?.array as Uint16Array | Uint32Array | Int32Array | undefined;
+        return serializeThreeMeshBvh(bvh, { index: index ?? null, cloneBuffers: options.cloneBuffers });
+    }
+
+    /**
+     * three-mesh-bvh's `MeshBVH.deserialize(data, geometry, { setIndex })`:
+     * a tree for `geometry` from three-mesh-bvh's serialized format (its
+     * `MeshBVH.serialize`, or {@link BvhBoundsTree.serialize}), or from our
+     * bytes (`bvh.serialize()`). For three-mesh-bvh's format, `setIndex`
+     * (default true) sets the geometry's index from `data.index` as
+     * three-mesh-bvh does (makes one when the geometry has none, else copies
+     * into it); the tree's shape is kept and its boxes made exact
+     * (`meshBvhFromThreeMeshBvh`). The other options are `computeBoundsTree`'s.
+     * Doesn't set `geometry.boundsTree`; `setBoundsTree` does.
+     */
+    static override deserialize(data: ThreeMeshBvhSerialized | ArrayBuffer | ArrayBufferView, geometry: BufferGeometry, options?: BvhBoundsTreeOptions & { readonly setIndex?: boolean }): BvhBoundsTree;
+    /** The core's form (`CpuMeshBvh.deserialize(bytes, options)`), for subclasses whose constructor takes a layout. */
+    static override deserialize<T>(this: new (layout: GpuLayoutMeshBvh, options?: CpuMeshBvhOptions) => T, bytes: ArrayBuffer | ArrayBufferView, options?: CpuMeshBvhOptions): T;
+    static override deserialize(data: ThreeMeshBvhSerialized | ArrayBuffer | ArrayBufferView, geometry?: BufferGeometry | CpuMeshBvhOptions, options: BvhBoundsTreeOptions & { readonly setIndex?: boolean } = {}): unknown {
+        if (!geometry || !(geometry as BufferGeometry).isBufferGeometry) return CpuMeshBvh.deserialize.call(this as never, data as ArrayBuffer, geometry as CpuMeshBvhOptions);
+        return BvhBoundsTree.deserializeFor(data, geometry as BufferGeometry, options);
+    }
+
+    private static deserializeFor(data: ThreeMeshBvhSerialized | ArrayBuffer | ArrayBufferView, geometry: BufferGeometry, options: BvhBoundsTreeOptions & { readonly setIndex?: boolean }): BvhBoundsTree {
+        if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) return deserializeBoundsTree(data, geometry, options);
+        const { setIndex = true, ...rest } = options;
+        if (setIndex && data.index) {
+            const current = geometry.getIndex();
+            if (current === null) geometry.setIndex(new BufferAttribute(data.index, 1, false));
+            else if (current.array !== data.index) {
+                (current.array as Uint32Array).set(data.index);
+                current.needsUpdate = true;
+            }
+        }
+        const snapshot = snapshotGeometry(geometry);
+        const layout = meshBvhFromThreeMeshBvh(data, snapshot.input);
+        return new BvhBoundsTree(geometry, { ...rest, layout, snapshot });
     }
 
     /**
@@ -973,6 +1022,112 @@ export function computeBoundsTree(this: BufferGeometry, options: BvhBoundsTreeOp
     return tree;
 }
 
+/** A BatchedMesh geometry's own tree ({@link computeBatchedBoundsTree}), over the batched geometry's index range `[start, start + count)`. */
+interface BatchedRangeTree {
+    readonly tree: BvhBoundsTree;
+    readonly start: number;
+    /** The batched geometry's index (or null) and its version when the tree was built: a changed index makes the tree stale. */
+    readonly batchIndex: BufferAttribute | null;
+    readonly batchIndexVersion: number;
+}
+
+/** Per-geometry trees of BatchedMeshes: by the batched position attribute, then by `start:count` (the stand-in's draw range). */
+const batchedTrees = new WeakMap<object, Map<string, BatchedRangeTree>>();
+
+/** What {@link computeBatchedBoundsTree} reads of a `BatchedMesh` (three r187). */
+type BatchedMeshLike = BatchedMesh & { readonly _geometryCount?: number; readonly _geometryInfo?: readonly unknown[] };
+/** `batchedMesh.boundsTrees` (three-mesh-bvh's field; typed apart from its augmentation of BatchedMesh). */
+type BoundsTreesHolder = { boundsTrees?: (BvhBoundsTree | null)[] | null };
+
+/**
+ * A geometry over one range of a batched geometry: the batched attributes
+ * (shared objects, so their versions are seen) and an index over the range's
+ * whole triangles (a view of the batched index, or `start, start + 1, ...`
+ * without one). Its triangle `k` is the batched triangle at index `start + 3k`.
+ */
+function batchedRangeGeometry(batch: BufferGeometry, start: number, count: number): BufferGeometry {
+    const view = new BufferGeometry();
+    for (const [name, attribute] of Object.entries(batch.attributes)) view.setAttribute(name, attribute);
+    const index = batch.index;
+    const whole = Math.max(0, Math.floor(Math.min(count, (index ? index.count : batch.attributes.position.count) - start) / 3) * 3);
+    if (index) {
+        const array = index.array;
+        view.setIndex(new BufferAttribute(array instanceof Uint16Array || array instanceof Uint32Array ? array.subarray(start, start + whole) : Uint32Array.from({ length: whole }, (_, i) => index.getX(start + i)), 1));
+    } else {
+        view.setIndex(new BufferAttribute(Uint32Array.from({ length: whole }, (_, i) => start + i), 1));
+    }
+    return view;
+}
+
+/**
+ * three-mesh-bvh's `computeBatchedBoundsTree(index = -1, options)`, for
+ * `BatchedMesh.prototype.computeBoundsTree` (PARITY 5.5): a tree per
+ * geometry of the batch, in `batchedMesh.boundsTrees` (made with a slot per
+ * geometry when missing). `index` -1 builds every geometry's and returns the
+ * array; a geometry id builds that one and returns it (null past the
+ * geometries, or for a deleted geometry). Each tree is a {@link BvhBoundsTree}
+ * over the geometry's range of the batched geometry (its triangle `k` is the
+ * batch's triangle at index `start + 3k`); {@link acceleratedRaycast} walks
+ * it for each instance of that geometry, and the intersections are three's
+ * (`faceIndex`, `face` and the attributes over the whole batched geometry,
+ * `batchId`). Options are `computeBoundsTree`'s. After `setGeometryAt` (or any
+ * edit of the batched positions), rebuild that geometry's tree with this, and
+ * `refit()` the others or rebuild them: until then raycasts fall back to three's.
+ */
+export function computeBatchedBoundsTree(this: BatchedMesh, index = -1, options: BvhBoundsTreeOptions = {}): BvhBoundsTree | (BvhBoundsTree | null)[] | null {
+    const batched = this as BatchedMeshLike;
+    const geometryCount = batched._geometryCount ?? batched._geometryInfo?.length ?? 0;
+    const holder = this as unknown as BoundsTreesHolder;
+    const trees = (holder.boundsTrees ??= new Array<BvhBoundsTree | null>(geometryCount).fill(null));
+    while (trees.length < geometryCount) trees.push(null);
+    const build = (geometryId: number): void => {
+        let range: { start: number; count: number };
+        try {
+            range = batched.getGeometryRangeAt(geometryId);
+        } catch {
+            trees[geometryId] = null; // a deleted geometry
+            return;
+        }
+        const batch = batched.geometry;
+        const tree = new BvhBoundsTree(batchedRangeGeometry(batch, range.start, range.count), options);
+        const position = batch.attributes.position;
+        let ranges = batchedTrees.get(position);
+        if (!ranges) batchedTrees.set(position, (ranges = new Map()));
+        const old = trees[geometryId];
+        if (old) for (const [key, entry] of ranges) if (entry.tree === old) ranges.delete(key);
+        ranges.set(`${range.start}:${range.count}`, { tree, start: range.start, batchIndex: batch.index, batchIndexVersion: batch.index ? batch.index.version : 0 });
+        trees[geometryId] = tree;
+    };
+    if (index < 0) {
+        for (let geometryId = 0; geometryId < geometryCount; geometryId++) build(geometryId);
+        return trees;
+    }
+    if (index < geometryCount) build(index);
+    return trees[index] ?? null;
+}
+
+/** three-mesh-bvh's `disposeBatchedBoundsTree(index = -1)`, for `BatchedMesh.prototype.disposeBoundsTree`: drops one geometry's tree, or every one. */
+export function disposeBatchedBoundsTree(this: BatchedMesh, index = -1): void {
+    const batched = this as BatchedMeshLike;
+    const trees = (this as unknown as BoundsTreesHolder).boundsTrees;
+    if (!trees) return;
+    const ranges = batchedTrees.get(batched.geometry.attributes.position);
+    const drop = (geometryId: number) => {
+        const tree = trees[geometryId];
+        if (tree && ranges) for (const [key, entry] of ranges) if (entry.tree === tree) ranges.delete(key);
+        trees[geometryId] = null;
+    };
+    if (index < 0) for (let geometryId = 0; geometryId < trees.length; geometryId++) drop(geometryId);
+    else if (index < trees.length) drop(index);
+}
+
+/** The per-geometry tree a BatchedMesh stand-in's draw range names, if {@link computeBatchedBoundsTree} made one for it. */
+function batchedTreeOf(geometry: BufferGeometry): BatchedRangeTree | null {
+    const position = geometry.attributes.position;
+    const entry = position ? batchedTrees.get(position)?.get(`${geometry.drawRange.start}:${geometry.drawRange.count}`) : undefined;
+    return entry && entry.batchIndex === geometry.index ? entry : null;
+}
+
 /** `BufferGeometry.prototype.disposeBoundsTree`: drops `this.boundsTree`. */
 export function disposeBoundsTree(this: BufferGeometry): void {
     const tree = (this as unknown as WithBoundsTree).boundsTree;
@@ -995,8 +1150,8 @@ function treeOf(geometry: BufferGeometry, material: Material | Material[]): BvhB
 }
 
 /** A tree whose geometry changed since its build: three's raycast is used until `refit` or `computeBoundsTree` runs again. */
-function stale(tree: BvhBoundsTree): boolean {
-    if (tree.current()) return false;
+function stale(tree: BvhBoundsTree, changed = false): boolean {
+    if (!changed && tree.current()) return false;
     if (!tree.staleWarned) {
         tree.staleWarned = true;
         console.warn(
@@ -1006,8 +1161,11 @@ function stale(tree: BvhBoundsTree): boolean {
     return true;
 }
 
-// three's own raycast, captured before anyone replaces it, for the fallback.
+// three's own raycasts, captured before anyone replaces them, for the fallback.
 const threeRaycast = Mesh.prototype.raycast;
+const threeBatchedRaycast = BatchedMesh.prototype.raycast;
+/** A range tree holds just its range: walk all of it. */
+const WHOLE_RANGE = { start: 0, count: Infinity } as const;
 /** World-to-object rows (3 x 4, row-major), as the top level stores them. */
 const rows = new Float64Array(12);
 const worldPoint = new Vector3();
@@ -1015,9 +1173,18 @@ const localPoint = new Vector3();
 
 /** `Mesh.prototype.raycast` over the geometry's {@link BvhBoundsTree}, or three's own without one. */
 export function acceleratedRaycast(this: Mesh, raycaster: Raycaster, intersects: Intersection[]): void {
-    const tree = this.material === undefined ? null : treeOf(this.geometry, this.material);
+    // A BatchedMesh (three-mesh-bvh sets BatchedMesh.prototype.raycast too): three's own, whose stand-in mesh comes back here.
+    if ((this as unknown as BatchedMesh).isBatchedMesh) {
+        threeBatchedRaycast.call(this as unknown as BatchedMesh, raycaster, intersects);
+        return;
+    }
+    // A BatchedMesh stand-in whose geometry has its own tree (computeBatchedBoundsTree), else the geometry's.
+    const ranged = this.material === undefined || Array.isArray(this.material) ? null : batchedTreeOf(this.geometry);
+    const tree = ranged ? ranged.tree : this.material === undefined ? null : treeOf(this.geometry, this.material);
     const morphs = this.morphTargetInfluences !== undefined && Object.keys(this.geometry.morphAttributes).length > 0;
-    if (!tree || (this as unknown as { isSkinnedMesh?: boolean }).isSkinnedMesh || morphs || stale(tree)) {
+    // A range tree reads the batch's index through a view: the batch's index version says when it changed.
+    const indexChanged = ranged !== null && ranged.batchIndex !== null && ranged.batchIndex.version !== ranged.batchIndexVersion;
+    if (!tree || (this as unknown as { isSkinnedMesh?: boolean }).isSkinnedMesh || morphs || stale(tree, indexChanged)) {
         threeRaycast.call(this, raycaster, intersects);
         return;
     }
@@ -1040,7 +1207,7 @@ export function acceleratedRaycast(this: Mesh, raycaster: Raycaster, intersects:
     // world distance over |d| (1 for three's normalized rays).
     const toT = 1 / direction.length();
     const firstHitOnly = raycaster.firstHitOnly === true;
-    const hits = tree.raycastLocal(localOrigin, localDirection, raycaster.near * toT, raycaster.far * toT, material, this.geometry.drawRange, firstHitOnly);
+    const hits = tree.raycastLocal(localOrigin, localDirection, raycaster.near * toT, raycaster.far * toT, material, ranged ? WHOLE_RANGE : this.geometry.drawRange, firstHitOnly);
     if (!hits) {
         threeRaycast.call(this, raycaster, intersects); // a range off a multiple of 3, and tinybvh isn't loaded for its tree
         return;
@@ -1052,7 +1219,10 @@ export function acceleratedRaycast(this: Mesh, raycaster: Raycaster, intersects:
         worldPoint.copy(localPoint).applyMatrix4(this.matrixWorld);
         const distance = raycaster.ray.origin.distanceTo(worldPoint);
         if (distance < raycaster.near || distance > raycaster.far) continue;
-        intersects.push({ distance, point: worldPoint.clone(), object: this, ...intersectionFields(this.geometry, hit.triangle, hit.firstIndex, hit.u, hit.v, localDir, hit.materialIndex) });
+        // A range tree's triangle k is the batch's at index start + 3k; three's faceIndex is that index over 3.
+        const firstIndex = ranged ? ranged.start + hit.firstIndex : hit.firstIndex;
+        const triangle = ranged ? Math.floor(firstIndex / 3) : hit.triangle;
+        intersects.push({ distance, point: worldPoint.clone(), object: this, ...intersectionFields(this.geometry, triangle, firstIndex, hit.u, hit.v, localDir, hit.materialIndex) });
     }
 }
 
@@ -1081,6 +1251,18 @@ declare module 'three' {
         /** Set it to {@link disposeBoundsTree}. */
         // @ts-ignore TS2717 next to three-mesh-bvh's augmentation
         disposeBoundsTree: typeof disposeBoundsTree;
+    }
+
+    interface BatchedMesh {
+        /** Per-geometry trees {@link computeBatchedBoundsTree} made, by geometry id. */
+        // @ts-ignore TS2717 next to three-mesh-bvh's augmentation
+        boundsTrees?: (BvhBoundsTree | null)[] | null;
+        /** Set it to {@link computeBatchedBoundsTree}: `BatchedMesh.prototype.computeBoundsTree = computeBatchedBoundsTree`. */
+        // @ts-ignore TS2717 next to three-mesh-bvh's augmentation
+        computeBoundsTree: typeof computeBatchedBoundsTree;
+        /** Set it to {@link disposeBatchedBoundsTree}. */
+        // @ts-ignore TS2717 next to three-mesh-bvh's augmentation
+        disposeBoundsTree: typeof disposeBatchedBoundsTree;
     }
 
     interface Raycaster {

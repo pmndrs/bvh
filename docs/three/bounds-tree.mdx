@@ -98,8 +98,46 @@ options:
 
 ## Save and load
 
-`boundsTree.serialize()` and `deserializeBoundsTree(bytes, geometry)` use our layout's bytes (`serializeLayout`), not
-three-mesh-bvh's format. See [Serialization and baking](/serialization/serialization-and-baking).
+Two formats, one call to read either:
+
+- **Ours:** `boundsTree.serialize()` gives our layout's bytes (`serializeLayout`), and
+  `deserializeBoundsTree(bytes, geometry)` or `MeshBVH.deserialize(bytes, geometry)` reads them. These are what the GPU
+  uploads, so a baked tree loads with no build. See [Serialization and baking](/serialization/serialization-and-baking).
+- **three-mesh-bvh's:** `MeshBVH.serialize(tree)` gives its `SerializedBVH` (`{ version, roots, index, indirectBuffer }`),
+  which three-mesh-bvh's `MeshBVH.deserialize` reads, and `MeshBVH.deserialize(data, geometry)` reads one written by
+  three-mesh-bvh. Use it to swap a library in or out without rebuilding stored trees.
+
+{/* snippet: three-mesh-bvh-format */}
+```ts
+import { MeshBVH } from '@pmndrs/bvh/three';
+import type { BufferGeometry } from 'three';
+
+// Ours to three-mesh-bvh: its MeshBVH.deserialize(data, geometry) reads this.
+const data = MeshBVH.serialize(new MeshBVH(geometry)); // { version: 1, roots, index, indirectBuffer }
+
+// three-mesh-bvh's to ours: its MeshBVH.serialize(bvh) output, structured-cloned from a worker or stored.
+const tree = MeshBVH.deserialize(theirs, geometry); // setIndex: true sets the index three-mesh-bvh wrote
+geometry.boundsTree = tree;
+
+// Our own bytes still go through the same call.
+const again = MeshBVH.deserialize(tree.serialize(), geometry);
+```
+
+- **Writing** always gives indirect mode (our trees never reorder the geometry): one root, `indirectBuffer` mapping tree
+  positions to triangles, `index` a copy of the geometry's (`cloneBuffers: false` hands over the same array). A
+  geometry without an index gives `index: null`; pass `setIndex: false` to three-mesh-bvh's `deserialize` then.
+- **Reading** keeps the tree's shape (which triangles share a leaf, which nodes are whose children) and recomputes every
+  box from the triangles, so the boxes are exact. Leaves of more than 8 triangles (three-mesh-bvh's default is 10) are
+  cut in half. A tree that reordered the index (not `indirect`) needs that index: `setIndex: true` (the default) copies
+  `data.index` into the geometry as three-mesh-bvh does. Several roots (one per group) are joined; version 0 files are
+  read as three-mesh-bvh reads them.
+- **Limit:** the tree must hold every triangle of the geometry. One built over a draw range or groups that leave
+  triangles out is refused, since our trees hold every triangle.
+- The core has the same without three: `serializeThreeMeshBvh(tree, { index })` and
+  `meshBvhFromThreeMeshBvh(data, { positions, indices })` from `@pmndrs/bvh`.
+
+Tested against three-mesh-bvh 0.9.18: its `deserialize` reads our trees and its raycasts, box casts, `validateBounds` and
+`getJSONStructure` agree with ours; its trees (indirect or not, with groups, version 0) read into ours give its hits.
 
 ## The helper
 

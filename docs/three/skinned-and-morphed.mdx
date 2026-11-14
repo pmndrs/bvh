@@ -59,6 +59,54 @@ A walking character's root motion is followed.
 
 GPU picking (`TraceBatchKernel` or `BvhTraceNodes`) hits the posed surface. CPU picking on a posed mesh stays on three's
 own raycast (`acceleratedRaycast` falls back for a `SkinnedMesh` or morph targets), which poses each vertex on the CPU.
+For CPU queries on the live pose with a tree, bake it (below).
 
 Tested on the `three-skinned` GPU page (Apple M5): 0 disagreements over 16,384 rays at 4 frames, against three's CPU
 pose. The [skinned example](/examples/examples) shows nine characters.
+
+## On the CPU: StaticGeometryGenerator
+
+`StaticGeometryGenerator` is three-mesh-bvh's class: it bakes skinned and morph-target meshes (and plain ones) into one
+static `BufferGeometry`, on the CPU, so a tree over it answers CPU raycasts, shapecasts and closest-point queries for the
+live pose. Use it for a character's collider or for picking on an animated mesh without a GPU readback.
+
+{/* snippet: static-geometry */}
+```ts
+import { StaticGeometryGenerator, computeBoundsTree } from '@pmndrs/bvh/three';
+import { Mesh, type Raycaster, type SkinnedMesh } from 'three';
+
+const generator = new StaticGeometryGenerator(character); // every visible mesh under it
+const geometry = generator.generate(); // the current pose, in world space, a group per mesh
+computeBoundsTree.call(geometry);
+const collider = new Mesh(geometry, generator.getMaterials()); // identity transform: the pose is in world space
+
+// Each frame, after the animation mixer and updateMatrixWorld():
+const frame = () => {
+    generator.generate(geometry); // the same arrays; the index is left alone
+    geometry.boundsTree!.refit();
+    raycaster.firstHitOnly = true;
+    const [hit] = raycaster.intersectObject(collider); // the live pose
+    console.log(hit?.point);
+};
+```
+
+- **What it bakes:** every visible `Mesh` under the objects you pass (`traverseVisible`), in that order. `meshes` lists
+  them, and `getMaterials()` gives their materials in the order of the geometry's groups (one group per mesh with
+  `useGroups`, the default).
+- **three's math:** each vertex is morphed as three's `Mesh.getVertexPosition` morphs it, then skinned with
+  `SkinnedMesh.applyBoneTransform`, so the baked positions are what three's own CPU raycast tests. Normals and tangents
+  go through the blended bone matrix. With `applyWorldTransforms` (default true) everything is in world space; a
+  mirrored mesh's triangles are flipped to keep their winding.
+- **Updating:** pass the same geometry to `generate` again. Its arrays are written in place and its index is left alone,
+  so `geometry.boundsTree.refit()` is enough, as with three-mesh-bvh. Meshes that didn't change (matrix, positions
+  version, bone matrices, morph weights) are skipped.
+- **`attributes`** (default `position`, `normal`, `color`, `tangent`, `uv`, `uv2`) says what to copy. Every mesh must
+  have the same attributes, and all must be indexed or none; `generate` throws otherwise, or when a mesh's attribute
+  sizes changed since the last call.
+- **Cost:** every vertex of every changed mesh, every call, on the main thread. For many or large characters, pose on
+  the GPU (above) instead.
+
+It is a port of three-mesh-bvh 0.9.18's class (MIT). One difference: three-mesh-bvh doesn't notice a change of morph
+weights alone and keeps the old pose; this one bakes again. Tested bit for bit against three-mesh-bvh's output and
+three's `getVertexPosition`, and a tree over the baked geometry hits what three's raycast of the posed meshes hits,
+before and after the pose moves.
