@@ -73,6 +73,11 @@ way into storage, so the batches are the same size either way.
   none of it.
 - **Merged static instances** (on by default, for instances added with `static: true`): the same resident bytes as
   instanced, plus a CPU plan of 161.6 MiB on Sponza while the merged mesh builds.
+- **CPU trees (`CpuMeshBvh`):** 64-byte nodes and 48-byte triangle records by default, each record a copy of its
+  corners. `corners: 'positions'` keeps 16-byte indexed triangles and reads corners from the source's own positions,
+  with no copy: 32 bytes less per triangle (175.3 MiB less for all of Sponza's 5.74M triangles; the furnished room's
+  tree 21.0 to 12.4 MB). Same answers bit for bit; query times level with records within a loaded CPU's noise, refits
+  0.76-0.95x the time (`bench/cpu-corners.ts`, indicative). The source must stay alive and unchanged between refits.
 - **`gpuTreeOutputs: 'adopt'`:** no copy at load, but the node buffer keeps one node per triangle: 613.6 MiB settled on
   Sponza against 470.0 (both `f32`), unless `trimWhenRefined` packs it afterwards (448.1). It needs `nodeFormat: 'f32'`.
 

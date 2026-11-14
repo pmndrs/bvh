@@ -23,8 +23,13 @@ Other ways to get one:
 - `generateCpuMeshBvh(pool, input)` from `@pmndrs/bvh/worker`, off the main thread;
 - `CpuMeshBvh.deserialize(bytes)` ([Serialization](/serialization/serialization-and-baking)).
 
-Quantized and indexed trees are decoded to 64-byte `f32` nodes and 48-byte records when the tree is made: CPU trees
-stay in that layout.
+Quantized trees are decoded to 64-byte `f32` nodes when the tree is made. Triangles are 48-byte records by default
+(indexed trees are expanded to them), each a copy of its corners. To keep 16 bytes per triangle instead, pass
+`corners: 'positions'` (to the constructor, `build` or `create`; it needs `source`): the tree keeps indexed triangles
+(tinybvh writes them, a records tree is converted) and reads every corner from `source.positions` by reference. Every
+query and refit gives the same answer bit for bit. The corners are then the source's live values, so after editing the
+positions call `refit()` before the next query; `serialize()` writes an indexed file, which loads with the same
+geometry as `source`.
 
 ## Raycast
 
