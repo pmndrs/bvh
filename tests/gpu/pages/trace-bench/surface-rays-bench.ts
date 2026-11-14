@@ -248,7 +248,23 @@ export interface SurfaceRaysData {
     hitRecord?: HitRecordResult;
     triangleLeaves?: LeafLayoutResult;
     nodeFormat?: NodeFormatResult;
+    combinedLeaves?: CombinedLeavesResult;
     anyHitOrder?: AnyHitOrderResult;
+}
+
+/**
+ * Section 8: indexed leaves on quantized nodes against quantized records, the pairing the
+ * `triangleLeaves` default waits on; ratios `quantized_indexed_over_quantized_records/<tree>/<set>/<mode>`
+ * and `quantized_indexed_packed_over_quantized_records/...` (above 1: indexed is faster).
+ * `?skip=combined` leaves it out.
+ */
+export interface CombinedLeavesResult {
+    rounds: number;
+    entries: LeafLayoutEntry[];
+    ratios: PairedRatio[];
+    /** Per case and format: identical answers, ties (same t, another triangle) and different ones (must be 0). */
+    agreement: { tree: Tree; set: SetName; mode: 'closest' | 'any'; layout: LeafLayout; rays: number; same: number; ties: number; different: number }[];
+    bytes: LeafLayoutResult['bytes'];
 }
 
 function summarizeTree(data: TraceSceneData, buildMs: number): TreeSummary {
@@ -371,7 +387,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
     try {
         const profileName = (new URLSearchParams(location.search).get('profile') ?? 'full') as SurfaceProfileName;
         const profile = SURFACE_PROFILES[profileName];
-        // `?skip=hit-record,leaves,any-order`: leave out sections 4, 5 and 7 (for a run that only wants the others).
+        // `?skip=hit-record,leaves,combined,any-order`: leave out sections 4, 5, 8 and 7 (for a run that only wants the others).
         const skip = new Set((new URLSearchParams(location.search).get('skip') ?? '').split(',').filter((name) => name.length > 0));
         if (!profile) throw new Error(`unknown profile "${profileName}" (known: ${Object.keys(SURFACE_PROFILES).join(', ')})`);
         const { device } = await requestBenchDevice();
@@ -815,6 +831,86 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             }
             const nodeFormat: NodeFormatResult = { rounds: profile.rounds, entries: nodeEntries, ratios: nodeRatios, agreement: nodeAgreement, counts: nodeCounts, bytes: nodeBytes };
 
+            // 8: indexed leaves on quantized nodes against quantized records, the pairing the `triangleLeaves` default waits on
+            // (HANDOFF, Open): sections 5 and 6 time each lever alone against f32 records.
+            const runCombined = !skip.has('combined');
+            const combinedScenes: Record<LeafLayout, Record<Tree, TraceSceneBuffers>> = { records: nodeScenes.quantized, indexed: {} as Record<Tree, TraceSceneBuffers>, 'indexed-packed': {} as Record<Tree, TraceSceneBuffers> };
+            const combinedBytes: LeafLayoutResult['bytes'] = {};
+            const combinedKernels: Record<LeafLayout, TraceBatchKernel> = { records: nodeKernels.quantized, indexed: nodeKernels.quantized, 'indexed-packed': nodeKernels.quantized };
+            if (runCombined) {
+                for (const tree of ['instanced', 'merged'] as const) {
+                    for (const [layout, positionLayout] of [['indexed', 'vec4'], ['indexed-packed', 'packed']] as const) {
+                        const combined = await buildTraceScene(geometries, instances, { build, mergeStaticInstances: tree === 'merged', triangleLeaves: 'indexed', positionLayout, nodeFormat: 'quantized' });
+                        combinedBytes[`quantized-${layout}/${tree}`] = { nodes: combined.nodes.byteLength, triangles: combined.triangles.byteLength, positions: combined.positions.byteLength, topLevel: combined.topLevel.buffer.byteLength };
+                        const buffers = uploadTraceScene(device, combined, `surface quantized ${layout} ${tree}`);
+                        sceneBuffers.push(buffers);
+                        combinedScenes[layout][tree] = buffers;
+                        await yieldToBrowser();
+                    }
+                }
+                combinedKernels.indexed = await TraceBatchKernel.create(device, { label: 'surface quantized indexed', triangleLeaves: 'indexed', nodeFormat: 'quantized' });
+                combinedKernels['indexed-packed'] = await TraceBatchKernel.create(device, { label: 'surface quantized indexed packed', triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'quantized' });
+                extraKernels.push(combinedKernels.indexed, combinedKernels['indexed-packed']);
+            }
+            const combinedEntries: LeafLayoutEntry[] = leafCases.flatMap((entry) =>
+                leafLayouts.map((layout): LeafLayoutEntry => ({ tree: entry.tree, set: entry.set as SetName, mode: entry.mode, layout, mraysPerRound: [], singleMraysPerRound: [] })),
+            );
+            const combinedEntryOf = (entry: LeafLayoutCase, layout: LeafLayout): LeafLayoutEntry => {
+                const found = combinedEntries.find((candidate) => candidate.tree === entry.tree && candidate.set === entry.set && candidate.mode === entry.mode && candidate.layout === layout);
+                if (!found) throw new Error(`no combined entry ${entry.tree} ${entry.set} ${entry.mode} ${layout}`);
+                return found;
+            };
+            // The same quantized trees in each triangle format: answers should be identical; a tie (same t, another triangle) is reported apart.
+            const combinedAgreement: CombinedLeavesResult['agreement'] = [];
+            for (const entry of runCombined ? leafCases : []) {
+                const set = sets.find((candidate) => candidate.name === entry.set) as RaySet;
+                const expected = new Uint32Array(await traceOnce(device, combinedKernels.records, combinedScenes.records[entry.tree], entry.mode, set.buffer, set.count));
+                for (const layout of ['indexed', 'indexed-packed'] as const) {
+                    const actual = new Uint32Array(await traceOnce(device, combinedKernels[layout], combinedScenes[layout][entry.tree], entry.mode, set.buffer, set.count));
+                    const words = expected.length / set.count;
+                    let same = 0;
+                    let ties = 0;
+                    for (let ray = 0; ray < set.count; ray++) {
+                        let equal = true;
+                        for (let word = 0; word < words && equal; word++) equal = expected[ray * words + word] === actual[ray * words + word];
+                        if (equal) same++;
+                        else if (entry.mode === 'closest' && expected[ray * words + HIT_RECORD_WORD.t] === actual[ray * words + HIT_RECORD_WORD.t]) ties++;
+                    }
+                    combinedAgreement.push({ tree: entry.tree, set: entry.set as SetName, mode: entry.mode, layout, rays: set.count, same, ties, different: set.count - same - ties });
+                }
+            }
+            const timeCombined = async (entry: LeafLayoutCase, layout: LeafLayout): Promise<{ loaded: number; single: number }> => {
+                const set = sets.find((candidate) => candidate.name === entry.set) as RaySet;
+                const results = leafResults.get(`${set.name}/${entry.mode}`) as GPUBuffer;
+                const encode = (encoder: GPUCommandEncoder, timestampWrites?: GPUComputePassTimestampWrites): void =>
+                    combinedKernels[layout].encode(encoder, combinedScenes[layout][entry.tree], { mode: entry.mode, rays: set.buffer, results, count: set.count, timestampWrites });
+                const single = await measureDispatches(() => timer.time((encoder, timestampWrites) => encode(encoder, timestampWrites)), profile.warmups, profile.timed);
+                const loaded = await timeLoaded(device, encode, set.count, single.medianMs, profile.loadedMs);
+                await yieldToBrowser();
+                return { loaded: loaded.mraysPerSecond, single: set.count / (single.medianMs * 1e3) };
+            };
+            if (runCombined) progress(`${sceneId}: indexed leaves on quantized nodes against quantized records, ${profile.rounds} rounds of ${leafCases.length} cases in ${leafLayouts.length} formats, the order reversed every other round`);
+            for (let round = 0; round < (runCombined ? profile.rounds : 0); round++) {
+                for (const step of leafLayoutRoundOrder(leafCases, leafLayouts, round)) {
+                    const entry = combinedEntryOf(step.case, step.layout);
+                    const timed = await timeCombined(step.case, step.layout);
+                    entry.mraysPerRound.push(timed.loaded);
+                    entry.singleMraysPerRound.push(timed.single);
+                }
+                progress(
+                    `${sceneId}: combined round ${round + 1} of ${profile.rounds}: ` +
+                        leafCases.map((entry) => `${entry.tree} ${entry.set} ${entry.mode} q-indexed/q-records ${(combinedEntryOf(entry, 'indexed').mraysPerRound[round] / combinedEntryOf(entry, 'records').mraysPerRound[round]).toFixed(3)}`).join(', '),
+                );
+            }
+            const combinedRatios: PairedRatio[] = (runCombined ? leafCases : []).flatMap((entry) => [
+                ratioOfRounds(`quantized_indexed_over_quantized_records/${entry.tree}/${entry.set}/${entry.mode}`, combinedEntryOf(entry, 'indexed').mraysPerRound, combinedEntryOf(entry, 'records').mraysPerRound),
+                ratioOfRounds(`quantized_indexed_packed_over_quantized_records/${entry.tree}/${entry.set}/${entry.mode}`, combinedEntryOf(entry, 'indexed-packed').mraysPerRound, combinedEntryOf(entry, 'records').mraysPerRound),
+            ]);
+            for (const ratio of combinedRatios) {
+                progress(`${sceneId}: ${ratio.name}: median ${ratio.median.toFixed(3)} (${ratio.min.toFixed(3)}-${ratio.max.toFixed(3)} over ${profile.rounds} rounds)`);
+            }
+            const combinedLeaves: CombinedLeavesResult = { rounds: profile.rounds, entries: combinedEntries, ratios: combinedRatios, agreement: combinedAgreement, bytes: combinedBytes };
+
             // 7: any-hit child order (TraceModuleOptions.anyHitOrder): 'larger' and 'near' against the default 'far', any-hit, records.
             const runOrders = !skip.has('any-order');
             const orders: AnyHitOrderName[] = ['far', 'larger', 'near'];
@@ -895,6 +991,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                 ...(runRecords ? { hitRecord } : {}),
                 ...(runLeaves ? { triangleLeaves } : {}),
                 nodeFormat,
+                ...(runCombined ? { combinedLeaves } : {}),
                 ...(runOrders ? { anyHitOrder } : {}),
             };
 
@@ -917,6 +1014,9 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             }
             for (const entry of nodeAgreement) {
                 if (entry.different > 0) failures.push(`quantized nodes change ${entry.different} of ${entry.rays} answers (not ties) on ${entry.tree} ${entry.set} ${entry.mode}`);
+            }
+            for (const entry of combinedAgreement) {
+                if (entry.different > 0) failures.push(`quantized ${entry.layout} changes ${entry.different} of ${entry.rays} answers (not ties) against quantized records on ${entry.tree} ${entry.set} ${entry.mode}`);
             }
             for (const entry of nodeCounts) {
                 if (entry.countedAgreement < MIN_COUNTED_AGREEMENT) failures.push(`the quantized counted walk disagrees with its production kernel on ${entry.tree} ${entry.set} ${entry.mode}: ${percent(entry.countedAgreement)}`);

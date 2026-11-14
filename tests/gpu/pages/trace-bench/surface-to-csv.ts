@@ -36,6 +36,12 @@
  *   the rates; `surface-rays/node_format/<tree>/<set>/<mode>/{same,ties,different}` the answers
  *   against f32 (different must be 0), `.../<format>/{steps,mesh_nodes,triangle_tests}` the counted
  *   walk per ray, and `surface-rays/node_format/<format>/<tree>/bytes_nodes`;
+ * - `surface-rays/paired/quantized_indexed_over_quantized_records/<tree>/<set>/<mode>/{median,min,max}_of_rounds`
+ *   and `quantized_indexed_packed_over_quantized_records/...` (and `.../round<k>`): indexed leaves on
+ *   quantized nodes over quantized records (section 8, above 1: indexed is faster);
+ *   `surface-rays/paired/combined_leaves/<tree>/<set>/<mode>/quantized-<layout>_mrays_per_s_*` the rates,
+ *   `surface-rays/combined_leaves/<tree>/<set>/<mode>/quantized-<layout>/{same,ties,different}` the answers
+ *   against quantized records (different must be 0), and `surface-rays/combined_leaves/quantized-<layout>/<tree>/bytes_*`;
  * - `surface-rays/paired/any_{larger,near}_over_far/<tree>/<set>/any/{median,min,max}_of_rounds`
  *   (and `.../round<k>`): any-hit with `anyHitOrder: 'larger'` or `'near'` over the default `'far'`,
  *   within a round (above 1: that order is faster); `surface-rays/paired/any_hit_order/<tree>/<set>/any/<order>_mrays_per_s_*`
@@ -214,6 +220,34 @@ export function surfaceRaysRows(data: SurfaceRaysData): { timed: MetricRow[]; co
         for (const [name, value] of Object.entries(nodes.bytes)) {
             const [format, tree] = name.split('/');
             counted.push({ scene, metric: `surface-rays/node_format/${format}/${tree}/bytes_nodes`, value });
+        }
+    }
+    const combined = data.combinedLeaves;
+    if (combined) {
+        for (const entry of combined.entries) {
+            const prefix = `surface-rays/paired/combined_leaves/${entry.tree}/${entry.set}/${entry.mode}/quantized-${entry.layout}`;
+            const loaded = [...entry.mraysPerRound].sort((a, b) => a - b);
+            timed.push(
+                { scene, metric: `${prefix}_mrays_per_s_median_of_rounds`, value: middle(loaded) },
+                { scene, metric: `${prefix}_mrays_per_s_min_of_rounds`, value: loaded[0] },
+                { scene, metric: `${prefix}_mrays_per_s_max_of_rounds`, value: loaded[loaded.length - 1] },
+            );
+        }
+        for (const ratio of combined.ratios) {
+            const prefix = `surface-rays/paired/${ratio.name}`;
+            timed.push(
+                { scene, metric: `${prefix}/median_of_rounds`, value: ratio.median },
+                { scene, metric: `${prefix}/min_of_rounds`, value: ratio.min },
+                { scene, metric: `${prefix}/max_of_rounds`, value: ratio.max },
+            );
+            ratio.perRound.forEach((value, round) => timed.push({ scene, metric: `${prefix}/round${round + 1}`, value }));
+        }
+        for (const entry of combined.agreement) {
+            const prefix = `surface-rays/combined_leaves/${entry.tree}/${entry.set}/${entry.mode}/quantized-${entry.layout}`;
+            counted.push({ scene, metric: `${prefix}/same`, value: entry.same }, { scene, metric: `${prefix}/ties`, value: entry.ties }, { scene, metric: `${prefix}/different`, value: entry.different });
+        }
+        for (const [name, bytes] of Object.entries(combined.bytes)) {
+            for (const [part, value] of Object.entries(bytes)) counted.push({ scene, metric: `surface-rays/combined_leaves/${name}/bytes_${part}`, value });
         }
     }
     const orders = data.anyHitOrder;
