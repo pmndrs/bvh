@@ -45,7 +45,14 @@
  * workers, merged groups one frame each, capped batches stored between
  * updates; one also with indexed leaves (packed positions).
  *
- * URL option: `?sharedRays=100000` shrinks the seam cases.
+ * The `-levers` variants turn on the P9 memory levers of BX.20 that change
+ * how trees are placed, not the trees (docs/internals/design/memory.md):
+ * `trimWhenRefined` (the node buffer packed once every swap is in, which moves
+ * trees), `quantizeJobs: 'batched'` and `parents: 'refit'` (no batch writes
+ * parents). After the swap the node buffer must hold its trees and no more.
+ *
+ * URL options: `?sharedRays=100000` shrinks the seam cases; `?variants=a,b` runs only those
+ * variants (`?variants=levers` every `-levers` one).
  */
 
 import { SceneTrees } from '../../../../src/scene/scene-trees.ts';
@@ -71,6 +78,8 @@ interface Variant {
     readonly indexed?: 'vec4' | 'packed';
     /** Quantized nodes (docs/internals/design/compressed-nodes.md); absent: f32. */
     readonly quantized?: boolean;
+    /** The BX.20 placement levers: trimWhenRefined, quantizeJobs 'batched', parents 'refit'. */
+    readonly levers?: boolean;
 }
 
 /** Smaller than any one-mesh batch (its uniforms alone are 2.8 kB), so every mesh is a batch of its own. */
@@ -98,6 +107,10 @@ const VARIANTS: readonly Variant[] = [
     { name: 'quantized-copy-merged', gpuTreeOutputs: 'copy', merged: true, quantized: true },
     { name: 'quantized-copy-capped', gpuTreeOutputs: 'copy', merged: false, maxBatchBytes: SMALL_CAP, quantized: true },
     { name: 'quantized-indexed-copy-merged-capped', gpuTreeOutputs: 'copy', merged: true, maxBatchBytes: SMALL_CAP, indexed: 'packed', quantized: true },
+    // The BX.20 levers (memory.md): the node buffer trimmed after the swap, batched quantize passes, no parents output.
+    { name: 'adopt-merged-levers', gpuTreeOutputs: 'adopt', merged: true, levers: true },
+    { name: 'quantized-copy-merged-levers', gpuTreeOutputs: 'copy', merged: true, quantized: true, levers: true },
+    { name: 'quantized-copy-capped-levers', gpuTreeOutputs: 'copy', merged: false, maxBatchBytes: SMALL_CAP, quantized: true, levers: true },
 ];
 
 /** Each instance its own mesh copy, two of every three static (the trace-oracle's merged variants). */
@@ -112,6 +125,8 @@ await runGpuTest(
     async ({ device, log }) => {
         assert(GpuFirstTrees.isSupported(device), 'GPU first trees need subgroups');
         const sharedRays = Number(new URLSearchParams(location.search).get('sharedRays') ?? 1_000_000);
+        const only = new URLSearchParams(location.search).get('variants')?.split(',') ?? null;
+        const variants = only ? VARIANTS.filter((variant) => only.includes(variant.name) || (only.includes('levers') && variant.levers)) : VARIANTS;
         const cases: OracleCase[] = [...buildOracleCases(FULL_SIZES), sharedEdgeCase(sharedRays, false), sharedEdgeCase(sharedRays, true)];
         const tinyBvh = await createTinyBvhBuilder();
         const kernels = {
@@ -142,7 +157,7 @@ await runGpuTest(
                 {},
                 { nodeFormat: 'f32' },
             );
-            for (const variant of VARIANTS) {
+            for (const variant of variants) {
                 const { meshes, instances } = variant.merged ? forMerge(oracleCase.meshes, oracleCase.instances) : { meshes: oracleCase.meshes, instances: oracleCase.instances };
                 const scene = await SceneTrees.create(device, {
                     label: `${oracleCase.name} ${variant.name}`,
@@ -154,6 +169,7 @@ await runGpuTest(
                     firstTreeBuilder: variant.indexed ? indexedFirstTrees : firstTrees,
                     ...(variant.indexed ? { triangleLeaves: 'indexed' as const, positionLayout: variant.indexed } : {}),
                     nodeFormat: variant.quantized ? 'quantized' : 'f32',
+                    ...(variant.levers ? { trimWhenRefined: true, quantizeJobs: 'batched' as const, parents: 'refit' as const } : {}),
                 });
                 const kernel = kernels[`${variant.quantized ? 'quantized-' : ''}${variant.indexed ?? 'records'}` as keyof typeof kernels];
                 const handles = meshes.map((mesh) => scene.addMesh(mesh));
@@ -205,13 +221,19 @@ await runGpuTest(
                 frame();
                 const last = await check('tinybvh');
                 if (last.onGpuTrees > 0) failures.push(`${oracleCase.name} ${variant.name}: ${last.onGpuTrees} GPU trees left after the swap`);
+                if (variant.levers) {
+                    // The swap's update trimmed the node buffer (every tree placed, nothing building): trees moved, hits checked above.
+                    const memory = scene.memory;
+                    if (memory.nodes !== memory.nodesInUse) failures.push(`${oracleCase.name} ${variant.name}: ${memory.nodes} node bytes for ${memory.nodesInUse} in use after the trim`);
+                    results[`${oracleCase.name} ${variant.name} trims`] = scene.trimCount;
+                }
                 log(`${oracleCase.name} ${variant.name}: gpu ${first.onGpuTrees}, mid ${mid.onGpuTrees}/${mid.onTinybvhTrees}, swaps ${last.swaps}, groups ${last.mergedGroups}`);
                 scene.dispose();
             }
         }
         pool.dispose();
         for (const kernel of Object.values(kernels)) kernel.destroy();
-        for (const variant of VARIANTS) {
+        for (const variant of variants) {
             if (variant.maxBatchBytes === SMALL_CAP && !cappedCasesWithBatches.has(variant.name)) failures.push(`${variant.name}: no case built in more than one GPU batch`);
         }
         if (failures.length > 0) throw new Error(failures.slice(0, 10).join(' | '));

@@ -155,8 +155,11 @@ function hplocParamRecords(mortonCodes: HplocMortonCodes) {
     return { sortRecords, rankScanRecord, leafRunScanRecord, hplocParamsRecord };
 }
 
-/** The H-PLOC batch's buffers, as {@link GpuHplocBatch} asks for them (before rounding up to 4 bytes, at least 16). */
-export function hplocBatchBuffers(totals: BatchTotals, mortonCodes: HplocMortonCodes = 'cubic-30', triangleLeaves: GpuLayoutTriangleLeaves = 'records') {
+/**
+ * The H-PLOC batch's buffers, as {@link GpuHplocBatch} asks for them (before rounding up to 4 bytes, at least 16).
+ * `parents: false` (a batch built without its parents output, {@link GpuHplocBatchOptions.parents}) leaves a 4-byte placeholder.
+ */
+export function hplocBatchBuffers(totals: BatchTotals, mortonCodes: HplocMortonCodes = 'cubic-30', triangleLeaves: GpuLayoutTriangleLeaves = 'records', parents = true) {
     const { meshes, triangles, inner } = totals;
     const layout = hplocLayout(totals);
     const sortOffsetWords = totals.sortTiles * RADIX_BINS;
@@ -168,7 +171,7 @@ export function hplocBatchBuffers(totals: BatchTotals, mortonCodes: HplocMortonC
         stats: meshes * LBVH_STATS_BYTES + 16,
         outNodes: inner * GPU_LAYOUT_NODE_BYTES,
         outTriangles: triangles * gpuLayoutTriangleBytes(triangleLeaves),
-        outParents: inner * 4,
+        outParents: parents ? inner * 4 : 4,
         tables: tableWords(totals) * 4,
         primitiveBoxes: triangles * 32,
         keysA: triangles * 4,
@@ -190,8 +193,21 @@ export type HplocBatchBuffer = keyof ReturnType<typeof hplocBatchBuffers>;
 export type HplocPoolBuffer = Exclude<HplocBatchBuffer, 'outNodes' | 'outTriangles' | 'outParents'>;
 
 /** GPU bytes an H-PLOC batch of these totals holds while it builds, by buffer: its inputs, scratch and uniforms (`scratch`) and its trees (`outputs`). */
-export function hplocBatchBytes(totals: BatchTotals, mortonCodes: HplocMortonCodes = 'cubic-30', triangleLeaves: GpuLayoutTriangleLeaves = 'records'): BatchBytes<HplocBatchBuffer> {
-    return summarizeBatchBuffers(hplocBatchBuffers(totals, mortonCodes, triangleLeaves));
+export function hplocBatchBytes(totals: BatchTotals, mortonCodes: HplocMortonCodes = 'cubic-30', triangleLeaves: GpuLayoutTriangleLeaves = 'records', parents = true): BatchBytes<HplocBatchBuffer> {
+    return summarizeBatchBuffers(hplocBatchBuffers(totals, mortonCodes, triangleLeaves, parents));
+}
+
+/** Options of one H-PLOC batch ({@link GpuHplocBuilder.createBatch}): the build's, and whether it writes parents. */
+export interface GpuHplocBatchOptions extends HplocOptions {
+    /**
+     * Write each node's parent into the trees' `parents` buffer (4 bytes per
+     * node). Default true. False (P9 lever 7, "parents only when needed")
+     * leaves out that output: `parents` is then a 16-byte placeholder, the
+     * trees say so (`GpuTreeBuffers.withoutParents`), and `readLayouts` finds
+     * each read-back tree's parents from its nodes on the CPU. The nodes and
+     * triangles are the same either way.
+     */
+    readonly parents?: boolean;
 }
 
 const POOL_USAGE: Record<HplocPoolBuffer, number> = {
@@ -405,7 +421,7 @@ export class GpuHplocBuilder {
      * Builds every mesh's tree in one batch and one submit. A refused mesh has `problem` set; the others are fine.
      * `timestampWrites` (optional) times the batch's one compute pass: resolve its query set after this resolves.
      */
-    async buildMany(geometries: readonly GpuMeshGeometry[], options: HplocOptions = {}, timestampWrites?: GPUComputePassTimestampWrites): Promise<GpuTreeBuffers> {
+    async buildMany(geometries: readonly GpuMeshGeometry[], options: GpuHplocBatchOptions = {}, timestampWrites?: GPUComputePassTimestampWrites): Promise<GpuTreeBuffers> {
         const batch = this.createBatch(geometries, options);
         try {
             const encoder = this.device.createCommandEncoder({ label: this.label });
@@ -434,7 +450,7 @@ export class GpuHplocBuilder {
      * rebuilds the same trees) and read with `finish`. Throws if the batch is
      * too big for the device (see {@link planGpuHplocBatches}).
      */
-    createBatch(geometries: readonly GpuMeshGeometry[], options: HplocOptions = {}, pool?: GpuHplocScratchPool): GpuHplocBatch {
+    createBatch(geometries: readonly GpuMeshGeometry[], options: GpuHplocBatchOptions = {}, pool?: GpuHplocScratchPool): GpuHplocBatch {
         if (!this.pipelines || !this.sortPipelines) throw new Error('@pmndrs/bvh: call prepare() before building');
         if (geometries.length === 0) throw new RangeError('a batch needs at least one mesh');
         const settings = checkHplocOptions(options);
@@ -447,7 +463,7 @@ export class GpuHplocBuilder {
             );
         }
         if (pool && pool.mortonCodes !== settings.mortonCodes) throw new RangeError(`the scratch pool was made for '${pool.mortonCodes}' codes, not '${settings.mortonCodes}'`);
-        return new GpuHplocBatch(this.device, this.label, this.pipelines, this.sortPipelines, geometries, settings, pool ?? null);
+        return new GpuHplocBatch(this.device, this.label, this.pipelines, this.sortPipelines, geometries, settings, pool ?? null, options.parents ?? true);
     }
 
     /**
@@ -478,6 +494,8 @@ export class GpuHplocBatch {
     readonly triangleLeaves: GpuLayoutTriangleLeaves;
     /** The node format `finish` hands out (the batch builds `f32` nodes either way). */
     readonly nodeFormat: GpuLayoutNodeFormat;
+    /** The batch writes each node's parent ({@link GpuHplocBatchOptions.parents}). */
+    readonly parents: boolean;
     private readonly device: GPUDevice;
     private readonly label: string;
     private readonly mortonCodes: HplocMortonCodes;
@@ -506,8 +524,10 @@ export class GpuHplocBatch {
         geometries: readonly GpuMeshGeometry[],
         options: Required<HplocOptions>,
         pool: GpuHplocScratchPool | null = null,
+        parents = true,
     ) {
         this.device = device;
+        this.parents = parents;
         this.label = label;
         this.mortonCodes = options.mortonCodes;
         this.pipelines = pipelines;
@@ -523,7 +543,7 @@ export class GpuHplocBatch {
 
         // Sizes from hplocBatchBuffers, which the planner's byte cap and the scratch pool also use.
         const totals = batchTotals(this.meshes);
-        const sizes = hplocBatchBuffers(totals, options.mortonCodes, options.triangleLeaves);
+        const sizes = hplocBatchBuffers(totals, options.mortonCodes, options.triangleLeaves, parents);
         this.triangleLeaves = options.triangleLeaves;
         this.nodeFormat = options.nodeFormat;
         if (tables.byteLength !== sizes.tables || sortTable.offsetWords * 4 !== sizes.sortOffsets) throw new Error('hplocBatchBuffers is out of step with buildTables');
@@ -593,7 +613,7 @@ export class GpuHplocBatch {
             HPLOC_TIE_BREAK[options.tieBreak], // tieBreak
             leafRunsOffset, // leafRunsOffset
             scratchQuads, // scratchQuads
-            0, // unused
+            parents ? 1 : 0, // writeParents
         ]);
         if (hplocParams.byteLength !== HPLOC_PARAMS_BYTES) throw new Error('HplocParams changed size');
 
@@ -774,6 +794,7 @@ export class GpuHplocBatch {
                 triangles: outTriangles,
                 triangleLeaves: this.triangleLeaves,
                 parents: outParents,
+                ...(this.parents ? {} : { withoutParents: true as const }),
                 meshes: this.meshes.map((mesh, index) => {
                     const stats = words.subarray(index * LBVH_STATS_WORDS, (index + 1) * LBVH_STATS_WORDS);
                     return meshResult(mesh, index, stats, hplocProblems(stats));

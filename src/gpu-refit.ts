@@ -688,6 +688,11 @@ export class GpuBvhRefit {
         this.shape = { nodeCount, leafCount };
     }
 
+    /** Moves the tree the shape refits to another place in the node buffer (`nodeWordOffset`), keeping the shape. */
+    setNodeWordOffset(nodeWordOffset: number): void {
+        this.device.queue.writeBuffer(this.params, 0, Uint32Array.of(nodeWordOffset));
+    }
+
     /**
      * Records the refit into `pass`: the clear, the climb and the repair
      * (which returns at once unless the climb gave up). `tree` holds

@@ -66,6 +66,24 @@ export function leafSlotsOf(words: Uint32Array, nodeWordOffset: number, nodeCoun
 }
 
 /**
+ * Each node's parent (its root's is `0xffffffff`), as builders write it, found
+ * from the `f32` nodes' child links: for a tree whose parents were not kept
+ * (P9 lever 7). The same array a builder writes for a tree in the GPU layout.
+ */
+export function parentsOfNodes(words: Uint32Array, nodeWordOffset: number, nodeCount: number): Uint32Array {
+    const parents = new Uint32Array(nodeCount).fill(GPU_LAYOUT_NO_PARENT);
+    for (let node = 0; node < nodeCount; node++) {
+        const base = nodeWordOffset + node * GPU_LAYOUT_NODE_WORDS;
+        for (let side = 0; side < 2; side++) {
+            const index = words[base + indexWord(side)];
+            if (index === GPU_LAYOUT_EMPTY_CHILD || words[base + countWord(side)] > 0) continue;
+            if (index < nodeCount) parents[index] = node;
+        }
+    }
+    return parents;
+}
+
+/**
  * Converts a parent array (parent node per node, as builders write it) into
  * parent slots, which say which side of the parent each node hangs on.
  */
@@ -389,6 +407,49 @@ export function refitOrderOf(parents: Uint32Array, nodeCount: number): Uint32Arr
     return order;
 }
 
+/**
+ * What a CPU pose ({@link refitLayoutToPose}) needs of a mesh tree, without
+ * its triangles: the nodes and parents, and per triangle slot the original
+ * triangle and (records) the flags and padding words, where any is non-zero.
+ * The corners a pose rewrites anyway, so the 48-byte records go: 4 bytes per
+ * triangle stay in place of 48 (16 for indexed trees). The P9 lever "freeing
+ * CPU copies" for deforming meshes (`SceneTrees`' `deformingLayouts:
+ * 'compact'`). Made by {@link compactPoseLayout}.
+ */
+export interface PoseLayout extends Omit<GpuLayoutMeshBvh, 'triangles'> {
+    /** Each triangle slot's original triangle (records' word 3; an indexed record's id bits). */
+    readonly slotTriangles: Uint32Array;
+    /** Records: each slot's flags word (7), or null when every one is 0. Null for indexed trees. */
+    readonly slotFlags: Uint32Array | null;
+    /** Records: each slot's padding word (11), or null when every one is 0. Null for indexed trees. */
+    readonly slotPadding: Uint32Array | null;
+}
+
+/** A tree's {@link PoseLayout}: the same nodes and parents (not copied), and the slot words a CPU pose keeps. */
+export function compactPoseLayout(layout: GpuLayoutMeshBvh): PoseLayout {
+    const { triangleCount } = layout;
+    const indexed = layout.triangleLeaves === 'indexed';
+    const recordWords = indexed ? GPU_LAYOUT_INDEXED_TRIANGLE_BYTES / 4 : GPU_LAYOUT_TRIANGLE_BYTES / 4;
+    const words = new Uint32Array(layout.triangles, 0, triangleCount * recordWords);
+    const slotTriangles = new Uint32Array(triangleCount);
+    let slotFlags: Uint32Array | null = null;
+    let slotPadding: Uint32Array | null = null;
+    for (let slot = 0; slot < triangleCount; slot++) {
+        const base = slot * recordWords;
+        if (indexed) {
+            slotTriangles[slot] = words[base + GPU_LAYOUT_INDEXED_TRIANGLE_WORD.idFlags] & GPU_LAYOUT_INDEXED_ID_MASK;
+            continue;
+        }
+        slotTriangles[slot] = words[base + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
+        const flags = words[base + GPU_LAYOUT_TRIANGLE_WORD.flags];
+        if (flags !== 0) (slotFlags ??= new Uint32Array(triangleCount))[slot] = flags;
+        const padding = words[base + GPU_LAYOUT_TRIANGLE_WORD.padding];
+        if (padding !== 0) (slotPadding ??= new Uint32Array(triangleCount))[slot] = padding;
+    }
+    const { triangles: _triangles, ...rest } = layout;
+    return { ...rest, slotTriangles, slotFlags, slotPadding };
+}
+
 /** A mesh tree refit to a new pose on the CPU ({@link refitLayoutToPose}). */
 export interface PosedLayout {
     /** `f32` nodes (64 bytes each), refit: their boxes are exact for the pose. */
@@ -405,23 +466,47 @@ export interface PosedLayout {
  * the mesh's own vertex numbering) on the CPU, keeping its shape: the CPU
  * path of a deforming mesh's pose (`SceneTrees.setPoseCpu`). Each slot's
  * corners come from `indices` (the mesh's, or none for a triangle list) by
- * the slot's original index. The layout itself is not changed.
+ * the slot's original index. The layout itself is not changed. A
+ * {@link PoseLayout} (no triangles) gives the same result, bit for bit.
  */
-export function refitLayoutToPose(layout: GpuLayoutMeshBvh, positions: Float32Array, indices: Uint16Array | Uint32Array | null | undefined): PosedLayout {
+export function refitLayoutToPose(layout: GpuLayoutMeshBvh | PoseLayout, positions: Float32Array, indices: Uint16Array | Uint32Array | null | undefined): PosedLayout {
     const { nodeCount, triangleCount } = layout;
     const nodes = dequantizeNodes(layout).nodes.slice(0, nodeCount * GPU_LAYOUT_NODE_BYTES);
     const indexed = layout.triangleLeaves === 'indexed';
     const recordWords = GPU_LAYOUT_TRIANGLE_BYTES / 4;
-    const source = new Uint32Array(layout.triangles, 0, (triangleCount * (indexed ? GPU_LAYOUT_INDEXED_TRIANGLE_BYTES : GPU_LAYOUT_TRIANGLE_BYTES)) / 4);
-    const triangles = indexed ? null : layout.triangles.slice(0, triangleCount * GPU_LAYOUT_TRIANGLE_BYTES);
+    // Each slot's original triangle: word `originalAt` of every `originalStride` words of `originals`, masked.
+    let originals: Uint32Array;
+    let originalStride: number;
+    let originalAt: number;
+    let originalMask = 0xffffffff;
+    let triangles: ArrayBuffer | null;
+    if ('slotTriangles' in layout) {
+        originals = layout.slotTriangles;
+        originalStride = 1;
+        originalAt = 0;
+        // The records rebuilt from the slot words: the corners are written below, as for a whole layout.
+        triangles = indexed ? null : new ArrayBuffer(triangleCount * GPU_LAYOUT_TRIANGLE_BYTES);
+        if (triangles) {
+            const words = new Uint32Array(triangles);
+            for (let slot = 0; slot < triangleCount; slot++) {
+                words[slot * recordWords + GPU_LAYOUT_TRIANGLE_WORD.originalIndex] = layout.slotTriangles[slot];
+                if (layout.slotFlags) words[slot * recordWords + GPU_LAYOUT_TRIANGLE_WORD.flags] = layout.slotFlags[slot];
+                if (layout.slotPadding) words[slot * recordWords + GPU_LAYOUT_TRIANGLE_WORD.padding] = layout.slotPadding[slot];
+            }
+        }
+    } else {
+        originals = new Uint32Array(layout.triangles, 0, (triangleCount * (indexed ? GPU_LAYOUT_INDEXED_TRIANGLE_BYTES : GPU_LAYOUT_TRIANGLE_BYTES)) / 4);
+        originalStride = indexed ? 4 : recordWords;
+        originalAt = indexed ? GPU_LAYOUT_INDEXED_TRIANGLE_WORD.idFlags : GPU_LAYOUT_TRIANGLE_WORD.originalIndex;
+        if (indexed) originalMask = GPU_LAYOUT_INDEXED_ID_MASK;
+        triangles = indexed ? null : layout.triangles.slice(0, triangleCount * GPU_LAYOUT_TRIANGLE_BYTES);
+    }
     const recordFloats = triangles ? new Float32Array(triangles) : null;
     const vertexCount = positions.length / 3;
     const boxes = new Float32Array(triangleCount * PRIMITIVE_BOX_FLOATS);
     const corners = [GPU_LAYOUT_TRIANGLE_WORD.vertex0, GPU_LAYOUT_TRIANGLE_WORD.vertex1, GPU_LAYOUT_TRIANGLE_WORD.vertex2];
     for (let slot = 0; slot < triangleCount; slot++) {
-        const original = indexed
-            ? source[slot * 4 + GPU_LAYOUT_INDEXED_TRIANGLE_WORD.idFlags] & GPU_LAYOUT_INDEXED_ID_MASK
-            : source[slot * recordWords + GPU_LAYOUT_TRIANGLE_WORD.originalIndex];
+        const original = (originals[slot * originalStride + originalAt] & originalMask) >>> 0;
         const box = slot * PRIMITIVE_BOX_FLOATS;
         boxes.fill(Infinity, box, box + 3);
         boxes.fill(-Infinity, box + 4, box + 7);

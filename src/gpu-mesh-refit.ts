@@ -305,10 +305,71 @@ export class GpuMeshRefitKernels {
     }
 }
 
+/**
+ * One primitive-box buffer for several mesh refits (P9, "refit buffer
+ * pooling", docs/internals/design/memory.md): the boxes (32 bytes per
+ * triangle) are written and read only inside each refit's own dispatches, so
+ * refits recorded one after another in a pass can take turns with one buffer
+ * sized for the largest mesh instead of one buffer each. The dispatches of a
+ * pass run in order, each seeing the writes of the ones before.
+ *
+ * The rule for sharing: the refits' {@link GpuMeshRefit.encode} calls must not
+ * overlap (one at a time into a pass, or into passes submitted in order), and
+ * {@link GpuMeshRefit.setTree} may grow the buffer, which retires the old one
+ * until {@link releaseRetired}: call it once the frames that used the old
+ * buffer were submitted (`DeformingTrees` does at each update).
+ */
+export class GpuRefitBoxPool {
+    private readonly device: GPUDevice;
+    private readonly label: string;
+    private current: GPUBuffer;
+    private retired: GPUBuffer[] = [];
+
+    constructor(device: GPUDevice, label = 'refit boxes') {
+        this.device = device;
+        this.label = label;
+        this.current = device.createBuffer({ label, size: 64, usage: USAGE.STORAGE });
+    }
+
+    /** The shared buffer: replaced when a refit needs more than it holds. */
+    get buffer(): GPUBuffer {
+        return this.current;
+    }
+
+    /** GPU bytes of the buffer in use and of the ones retired, not yet released. */
+    get memoryBytes(): number {
+        return this.current.size + this.retired.reduce((total, buffer) => total + buffer.size, 0);
+    }
+
+    /** Makes the buffer hold at least `bytes` (a refit's boxes): a bigger one replaces it, the old one is retired. */
+    reserve(bytes: number): void {
+        if (this.current.size >= bytes) return;
+        this.retired.push(this.current);
+        this.current = this.device.createBuffer({ label: this.label, size: bytes, usage: USAGE.STORAGE });
+    }
+
+    /** Destroys the buffers replaced since the last call (the frames that used them were submitted). */
+    releaseRetired(): void {
+        for (const buffer of this.retired) buffer.destroy();
+        this.retired = [];
+    }
+
+    dispose(): void {
+        this.releaseRetired();
+        this.current.destroy();
+    }
+}
+
 /** Options of one mesh refit: {@link GpuBvhRefitOptions}, with the shared kernels of the mesh refit. */
 export interface GpuMeshRefitOptions extends Omit<GpuBvhRefitOptions, 'kernels'> {
     /** Kernels shared with other mesh refits; without them this refit compiles its own in `prepare`. */
     readonly kernels?: GpuMeshRefitKernels;
+    /**
+     * A box buffer shared with other refits ({@link GpuRefitBoxPool}: their
+     * `encode` calls must not overlap); without it this refit has its own,
+     * sized for its mesh.
+     */
+    readonly boxes?: GpuRefitBoxPool;
 }
 
 /** Refits one mesh's tree from moved vertices, every frame if need be. Needs `subgroups` (for the refit). */
@@ -322,7 +383,9 @@ export class GpuMeshRefit {
     private readonly refit: GpuBvhRefit;
     private readonly kernels: GpuMeshRefitKernels;
     private readonly params: GPUBuffer;
-    private boxes: GPUBuffer;
+    /** Its own box buffer, or null with a shared one ({@link boxPool}). */
+    private ownBoxes: GPUBuffer | null;
+    private readonly boxPool: GpuRefitBoxPool | null;
     private triangleCount = 0;
     private triangleWordOffset = 0;
     private group: { group: GPUBindGroup; key: readonly unknown[] } | null = null;
@@ -339,13 +402,19 @@ export class GpuMeshRefit {
         this.kernels = options.kernels ?? new GpuMeshRefitKernels(device, this.label);
         this.refit = new GpuBvhRefit(device, { label: this.label, diagnostics: options.diagnostics, kernels: this.kernels.refit });
         this.params = device.createBuffer({ label: `${this.label} params`, size: PARAM_WORDS * 4, usage: USAGE.UNIFORM | USAGE.COPY_DST });
-        this.boxes = device.createBuffer({ label: `${this.label} boxes`, size: 64, usage: USAGE.STORAGE });
+        this.boxPool = options.boxes ?? null;
+        this.ownBoxes = this.boxPool ? null : device.createBuffer({ label: `${this.label} boxes`, size: 64, usage: USAGE.STORAGE });
         this.indexedParams = device.createBuffer({ label: `${this.label} indexed params`, size: 16, usage: USAGE.UNIFORM | USAGE.COPY_DST });
     }
 
     /** Compiles the kernels, or waits for the shared ones. */
     prepare(): Promise<void> {
         return this.kernels.prepare();
+    }
+
+    /** The primitive boxes' buffer: its own, or the shared pool's current one. */
+    private get boxes(): GPUBuffer {
+        return this.boxPool ? this.boxPool.buffer : this.ownBoxes!;
     }
 
     get ready(): boolean {
@@ -410,11 +479,31 @@ export class GpuMeshRefit {
         });
         this.triangleCount = layout.triangleCount;
         const boxBytes = Math.max(64, layout.triangleCount * PRIMITIVE_BOX_FLOATS * 4);
-        if (this.boxes.size < boxBytes) {
-            this.boxes.destroy();
-            this.boxes = this.device.createBuffer({ label: `${this.label} boxes`, size: boxBytes, usage: USAGE.STORAGE });
+        if (this.boxPool) {
+            this.boxPool.reserve(boxBytes);
+        } else if (this.ownBoxes!.size < boxBytes) {
+            this.ownBoxes!.destroy();
+            this.ownBoxes = this.device.createBuffer({ label: `${this.label} boxes`, size: boxBytes, usage: USAGE.STORAGE });
         }
         this.triangleWordOffset = placement.triangleWordOffset ?? 0;
+    }
+
+    /**
+     * The tree moved to another place in the target's node buffer (a scene
+     * that compacted its nodes, `SceneTrees.trim`): its root is now at
+     * `nodeWordOffset`, as {@link setTree}'s placement names it. The shape,
+     * the triangles' place and the stats stay.
+     */
+    moveTree(nodeWordOffset: number): void {
+        if (this.quantized) {
+            if (nodeWordOffset < 8 || nodeWordOffset % 8 !== 0) throw new RangeError(`GpuMeshRefit.moveTree: a quantized target's nodeWordOffset (${nodeWordOffset}) must be a 32-byte slot after the frame slot`);
+            this.quantized.rootSlot = nodeWordOffset / 8;
+            this.quantized.job?.destroy();
+            this.quantized.job = null;
+            this.quantized.jobTarget = null;
+        } else {
+            this.refit.setNodeWordOffset(nodeWordOffset);
+        }
     }
 
     /** Records the triangle step and the refit into `pass`. The vertices must be written by an earlier command. */
@@ -477,9 +566,9 @@ export class GpuMeshRefit {
         return quantized.job;
     }
 
-    /** GPU bytes of this refit's own buffers (the tree belongs to the caller). */
+    /** GPU bytes of this refit's own buffers (the tree belongs to the caller, a shared box buffer to its pool). */
     get memoryBytes(): number {
-        return this.refit.memoryBytes + this.params.size + this.boxes.size + (this.quantized?.shadow.size ?? 0);
+        return this.refit.memoryBytes + this.params.size + (this.ownBoxes?.size ?? 0) + (this.quantized?.shadow.size ?? 0);
     }
 
     /** Stats readback (diagnostics only), as for the top-level refit: poll at a frame's start, copy after the submit's encode. */
@@ -495,7 +584,7 @@ export class GpuMeshRefit {
         this.refit.dispose();
         this.params.destroy();
         this.indexedParams.destroy();
-        this.boxes.destroy();
+        this.ownBoxes?.destroy();
         this.quantized?.job?.destroy();
         this.quantized?.shadow.destroy();
         this.quantized = null;

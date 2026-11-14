@@ -21,6 +21,10 @@
  * to its fallback (mesh-builder.ts). (A NaN corner is not refused: WGSL's
  * `min` and `max` may drop the NaN, so the boxes stay finite and the tree is built.)
  *
+ * Built without the parents output (`parents: false`, P9 lever 7), every tree
+ * must be the same, bit for bit, and its read-back parents (found from the
+ * nodes on the CPU) the ones the GPU writes.
+ *
  * The ray oracle for H-PLOC trees is the trace-oracle page (variant `watertight-hploc`).
  */
 
@@ -122,6 +126,34 @@ async function checkVariant(
     return { failures, trees };
 }
 
+/** `parents: false`: the same nodes and triangles, no parents output, and the parents read back from the nodes equal the GPU's. */
+async function checkWithoutParents(builder: GpuHplocBuilder, cases: readonly TreeCase[], log: (message: string) => void): Promise<string[]> {
+    const failures: string[] = [];
+    const inputs = cases.map((entry) => entry.input ?? entry.geometry);
+    const withParents = await builder.buildMany(inputs);
+    const without = await builder.buildMany(inputs, { parents: false });
+    if (!without.withoutParents || without.parents.size > 16) failures.push(`parents: false still has a ${without.parents.size}-byte parents output`);
+    const [expected, actual] = await Promise.all([builder.readLayouts(withParents), builder.readLayouts(without)]);
+    const same = (a: ArrayBufferLike, b: ArrayBufferLike) => a.byteLength === b.byteLength && new Uint8Array(a).every((byte, index) => byte === new Uint8Array(b)[index]);
+    let checked = 0;
+    expected.forEach((layout, index) => {
+        const other = actual[index];
+        const where = `parents: false, ${cases[index].name}`;
+        if (!layout || !other) {
+            if (Boolean(layout) !== Boolean(other)) failures.push(`${where}: built in one batch only`);
+            return;
+        }
+        checked++;
+        if (!same(layout.nodes, other.nodes)) failures.push(`${where}: the nodes differ`);
+        if (!same(layout.triangles, other.triangles)) failures.push(`${where}: the triangles differ`);
+        if (!same(layout.parents.buffer, other.parents.buffer)) failures.push(`${where}: the parents found from the nodes are not the GPU's`);
+    });
+    log(`parents: false: ${checked} trees the same as with parents, outputs ${withParents.parents.size} bytes of parents against ${without.parents.size}`);
+    withParents.destroy();
+    without.destroy();
+    return failures;
+}
+
 /** An index past the last vertex must get the mesh refused, and only that mesh. */
 async function checkRefusal(builder: GpuHplocBuilder, log: (message: string) => void): Promise<string[]> {
     const positions = randomSoup(200, 11);
@@ -153,6 +185,7 @@ await runGpuTest(
             data[variant.name] = result.trees;
         }
         failures.push(...(await checkRefusal(builder, log)));
+        failures.push(...(await checkWithoutParents(builder, cases, log)));
         for (const buffer of owned) buffer.destroy();
         assert(failures.length === 0, failures.slice(0, 15).join('\n'));
         return data;

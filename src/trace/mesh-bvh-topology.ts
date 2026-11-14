@@ -34,6 +34,8 @@ export interface MeshTreeTopologyOptions {
     readonly triangleLeaves?: 'records' | 'indexed';
     /** The node format: `'f32'` (64 bytes, the default) or `'quantized'` (32 bytes; docs/internals/design/compressed-nodes.md). */
     readonly nodeFormat?: 'f32' | 'quantized';
+    /** tinybvh's trees only: false leaves the parents out (an empty array; P9 lever 7). Default true. */
+    readonly parents?: boolean;
 }
 
 /**

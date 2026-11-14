@@ -34,7 +34,7 @@
  * until the garbage collector frees the builder's dropped instance.
  */
 
-import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
+import { buildMeshBvhAsync, releaseInlineTinyBvh } from '../trace/mesh-bvh-build.ts';
 import { countTriangles } from '../trace/triangle-packing.ts';
 import type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from '../trace/mesh-bvh.ts';
 import type { BuildRequest, BuildResponse, WorkerReady } from '../trace/mesh-bvh-worker.ts';
@@ -72,6 +72,17 @@ export interface BvhWorkerPoolOptions {
      */
     readonly recycleAboveBytes?: number;
     /**
+     * A worker left with nothing to build for this many milliseconds is
+     * ended, and its tinybvh WASM memory (64 MiB at least, more after a big
+     * build) goes back to the system; the next build starts a fresh worker
+     * (a module load and a WASM start, a few milliseconds). Inline, the
+     * calling thread's tinybvh instance is dropped the same way. Default
+     * `Infinity` ({@link WORKER_IDLE_TIMEOUT_MS}): idle workers live as long
+     * as the pool. The P9 lever "freeing CPU copies"
+     * (docs/internals/design/memory.md): a pool of 4 holds 256 MiB while idle.
+     */
+    readonly idleTimeoutMs?: number;
+    /**
      * Called for every build as it is queued, started on a worker (or
      * inline) and finished: built, failed or cancelled (see
      * {@link BvhPoolBuildEvent}). For tools that time builds per mesh. A
@@ -103,6 +114,9 @@ export interface BvhPoolBuildEvent {
 /** {@link BvhWorkerPoolOptions.recycleAboveBytes}'s default: 256 MiB. */
 export const WORKER_RECYCLE_ABOVE_BYTES = 256 * 2 ** 20;
 
+/** {@link BvhWorkerPoolOptions.idleTimeoutMs}'s default: `Infinity`, idle workers are kept. */
+export const WORKER_IDLE_TIMEOUT_MS = Infinity;
+
 /** Per-build options of {@link BvhWorkerPool.build}, besides the tree's own. */
 export interface BvhBuildRequest {
     /**
@@ -130,6 +144,8 @@ export interface BvhWorkerPoolStats {
     readonly finished: number;
     /** Workers ended because a build left their WASM memory past `recycleAboveBytes`. */
     readonly recycled: number;
+    /** Workers ended (or, inline, tinybvh instances dropped) because they sat idle for `idleTimeoutMs`. */
+    readonly idleEnded: number;
 }
 
 export interface BvhWorkerPool {
@@ -181,6 +197,8 @@ interface PoolWorker {
     nextId: number;
     /** The worker said it loaded ({@link WorkerReady}); until then it gets no build. */
     ready: boolean;
+    /** The timer that ends it after `idleTimeoutMs` with nothing to build, or null. */
+    idleTimer: ReturnType<typeof setTimeout> | null;
 }
 
 function abortError(): Error {
@@ -202,6 +220,13 @@ export function workerLoadFailure(what: string, detail?: string): string {
         'A bundler may not have shipped the worker file, or a dev server refused it. Under Vite: keep @pmndrs/bvh out of ' +
         'optimizeDeps (optimizeDeps.exclude), and for a linked checkout outside the project add its folder to server.fs.allow'
     );
+}
+
+/** A timer for `idleTimeoutMs` that doesn't keep Node's process alive on its own (browsers have no `unref`). */
+function idleTimer(callback: () => void, ms: number): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(callback, ms);
+    (timer as { unref?: () => void }).unref?.();
+    return timer;
 }
 
 /** The worker entry's URL. It stays inline in `new Worker(new URL(...))` so bundlers find the file. */
@@ -252,7 +277,12 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
     if (!Number.isInteger(size) || size < 1) throw new RangeError(`a worker pool needs a size of at least 1, got ${size}`);
     const recycleAboveBytes = options.recycleAboveBytes ?? WORKER_RECYCLE_ABOVE_BYTES;
     if (!(recycleAboveBytes >= 0)) throw new RangeError(`a worker pool's recycleAboveBytes must be a number of bytes (or Infinity), got ${recycleAboveBytes}`);
+    const idleTimeoutMs = options.idleTimeoutMs ?? WORKER_IDLE_TIMEOUT_MS;
+    if (!(idleTimeoutMs >= 0)) throw new RangeError(`a worker pool's idleTimeoutMs must be a number of milliseconds (or Infinity), got ${idleTimeoutMs}`);
     let recycled = 0;
+    let idleEnded = 0;
+    /** Inline: the timer that drops the calling thread's tinybvh instance once nothing was built for `idleTimeoutMs`. */
+    let inlineIdleTimer: ReturnType<typeof setTimeout> | null = null;
     let inline = mode === 'never' || typeof Worker === 'undefined';
     if (inline && mode === 'always') throw new Error('@pmndrs/bvh/worker: a worker was required, but this environment has no Worker');
     let inlineReason: string | null = mode === 'never' ? "worker: 'never'" : inline ? 'this environment has no Worker' : null;
@@ -260,6 +290,8 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
     const queue: Job[] = [];
     const workers: PoolWorker[] = [];
     let inlineRunning = 0;
+    /** Inline: a build ran since the calling thread's tinybvh instance was last dropped (`idleTimeoutMs`). */
+    let inlineBuilt = false;
     /** Builds running inline now (a tinybvh build can't be stopped, so dispose settles them and drops their result). */
     const inlineJobs = new Set<Job>();
     let finished = 0;
@@ -320,6 +352,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
                 return;
             }
             markStarted(job, false);
+            inlineBuilt = true;
             buildMeshBvhAsync(job.geometry, job.options).then(
                 (bvh) => settle(job, { bvh }),
                 (error: unknown) => settle(job, { error: toError(error) }),
@@ -335,7 +368,44 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
     const removeWorker = (entry: PoolWorker): void => {
         const index = workers.indexOf(entry);
         if (index >= 0) workers.splice(index, 1);
+        if (entry.idleTimer !== null) clearTimeout(entry.idleTimer);
+        entry.idleTimer = null;
         entry.worker.terminate();
+    };
+
+    /**
+     * `idleTimeoutMs`: ends idle loaded workers after the timeout, and (inline) drops the calling thread's
+     * tinybvh instance once no build ran or waited for that long. Called after every change of who is busy.
+     */
+    const watchIdle = (): void => {
+        if (idleTimeoutMs === Infinity || disposed) return;
+        for (const entry of workers) {
+            const idle = entry.ready && entry.job === null;
+            if (!idle && entry.idleTimer !== null) {
+                clearTimeout(entry.idleTimer);
+                entry.idleTimer = null;
+            } else if (idle && entry.idleTimer === null) {
+                entry.idleTimer = idleTimer(() => {
+                    entry.idleTimer = null;
+                    if (disposed || entry.job !== null || !workers.includes(entry)) return;
+                    removeWorker(entry);
+                    idleEnded++;
+                }, idleTimeoutMs);
+            }
+        }
+        const inlineIdle = inline && inlineRunning === 0 && !queue.some((job) => !job.settled);
+        if (!inlineIdle && inlineIdleTimer !== null) {
+            clearTimeout(inlineIdleTimer);
+            inlineIdleTimer = null;
+        } else if (inlineIdle && inlineIdleTimer === null && inlineBuilt) {
+            inlineIdleTimer = idleTimer(() => {
+                inlineIdleTimer = null;
+                if (disposed || inlineRunning > 0 || queue.some((job) => !job.settled)) return;
+                // Only when this pool built something inline since the last drop: another pool's instance is the same one.
+                if (releaseInlineTinyBvh()) idleEnded++;
+                inlineBuilt = false;
+            }, idleTimeoutMs);
+        }
     };
 
     /** A worker couldn't start or load. No build was sent to it (builds wait for {@link WorkerReady}), so none is lost. */
@@ -419,9 +489,14 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
         }
     };
 
-    /** Starts queued builds on free, loaded workers (starting workers up to the pool's size). */
+    /** Starts queued builds on free, loaded workers (starting workers up to the pool's size), then watches the idle ones. */
     function pump(): void {
         if (disposed) return;
+        startQueued();
+        watchIdle();
+    }
+
+    function startQueued(): void {
         while (queue.length > 0) {
             if (queue[0].settled) {
                 queue.shift();
@@ -444,7 +519,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
             if (loading >= waiting || workers.length >= size) return;
             let started: PoolWorker;
             try {
-                started = { worker: startWorker(), job: null, nextId: 1, ready: false };
+                started = { worker: startWorker(), job: null, nextId: 1, ready: false, idleTimer: null };
             } catch (error) {
                 workerUnavailable(`@pmndrs/bvh/worker: a worker could not be started: ${toError(error).message}`);
                 continue;
@@ -471,6 +546,7 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
                 workers: workers.length,
                 finished,
                 recycled,
+                idleEnded,
             };
         },
         build(geometry, buildOptions = {}, request = {}) {
@@ -511,8 +587,10 @@ export function createBvhWorkerPool(options: BvhWorkerPoolOptions = {}): BvhWork
         dispose() {
             if (disposed) return;
             disposed = true;
+            if (inlineIdleTimer !== null) clearTimeout(inlineIdleTimer);
             const error = new Error('@pmndrs/bvh/worker: the pool was disposed');
             for (const entry of workers.splice(0)) {
+                if (entry.idleTimer !== null) clearTimeout(entry.idleTimer);
                 entry.worker.terminate();
                 if (entry.job) settle(entry.job, { error });
             }

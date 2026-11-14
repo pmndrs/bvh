@@ -62,6 +62,11 @@ export interface GpuTreeBuildOptions {
     /** Read every usable tree's layout back too (deforming meshes' refit needs it), once, after the stats. Default false. */
     readonly readLayouts?: boolean;
     /**
+     * The batches write each node's parent (`GpuHplocBatchOptions.parents`). Default true. False leaves that
+     * output out (P9 lever 7); read-back layouts then get their parents from their nodes, on the CPU.
+     */
+    readonly parents?: boolean;
+    /**
      * Cap each batch's GPU bytes (inputs, scratch and outputs) and build the
      * batches one after another, each once the previous one's outputs are let
      * go, in the builder's one queue with every other capped build (see the
@@ -308,7 +313,7 @@ export class GpuFirstTrees implements FirstTreeBuilder {
         for (const indices of plan.batches) {
             const members = indices.map((index) => requests[index]);
             try {
-                const batch = this.hploc.createBatch(members.map((member) => member.geometry), this.buildOptions);
+                const batch = this.hploc.createBatch(members.map((member) => member.geometry), options.parents === false ? { ...this.buildOptions, parents: false } : this.buildOptions);
                 const writes = timer?.writes();
                 batch.encode(encoder, writes);
                 buildingBytes += batch.scratchBytes + batch.outputBytes;
@@ -417,7 +422,7 @@ export class GpuFirstTrees implements FirstTreeBuilder {
             const geometries = members.map((member) => member.geometry);
             const pool = this.poolFor(geometries);
             this.poolOwner = owner;
-            batch = this.hploc.createBatch(geometries, this.buildOptions, pool);
+            batch = this.hploc.createBatch(geometries, options.parents === false ? { ...this.buildOptions, parents: false } : this.buildOptions, pool);
             const building = batch;
             this.current = { owner, bytes: () => building.outputBytes };
             options.onMemoryChange?.();

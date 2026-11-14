@@ -262,7 +262,7 @@ export function decodeQuantizedNode(words: Uint32Array, nodeWord: number, frame:
  * (`nodes` is a new buffer; the rest is shared). A quantized tree comes back
  * as it is.
  */
-export function quantizeNodes<T extends GpuLayoutMeshBvh>(layout: T): T {
+export function quantizeNodes<T extends Pick<GpuLayoutMeshBvh, 'nodes' | 'nodeFormat' | 'nodeCount'>>(layout: T): T {
     if (layout.nodeFormat === 'quantized') return layout;
     const nodes = new ArrayBuffer((layout.nodeCount + 1) * GPU_LAYOUT_QUANTIZED_NODE_BYTES);
     const source = layout.nodes;
@@ -276,7 +276,7 @@ export function quantizeNodes<T extends GpuLayoutMeshBvh>(layout: T): T {
  * (they contain the exact boxes; a refit makes them exact again). An `f32`
  * tree comes back as it is. CPU trees (`CpuMeshBvh`) use this.
  */
-export function dequantizeNodes<T extends GpuLayoutMeshBvh>(layout: T): T {
+export function dequantizeNodes<T extends Pick<GpuLayoutMeshBvh, 'nodes' | 'nodeFormat' | 'nodeCount'>>(layout: T): T {
     if (layout.nodeFormat !== 'quantized') return layout;
     const nodes = new ArrayBuffer(layout.nodeCount * GPU_LAYOUT_NODE_BYTES);
     dequantizeNodeWords(new Uint32Array(layout.nodes), 0, layout.nodeCount, new Float32Array(nodes), new Uint32Array(nodes), 0);

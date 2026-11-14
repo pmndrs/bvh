@@ -158,6 +158,47 @@ export class GrowableStorage {
         this.version++;
     }
 
+    /**
+     * Packs `ranges` (every range in use, nothing else) to the front of a new
+     * buffer of exactly their units plus `extraUnits`, recording their copies
+     * into `encoder`: the growth room and the holes between ranges go. The old
+     * buffer is retired as a growth retires it (this frame's commands still
+     * copy out of it). Returns each range's new offset, by its old offset.
+     * Unlike a growth, ranges move: the caller rewrites whatever points at them.
+     */
+    compact(encoder: GPUCommandEncoder, ranges: readonly ResidentRange[], extraUnits = 0): Map<number, number> {
+        const used = ranges.reduce((total, range) => total + range.count, 0);
+        if (used !== this.allocator.used) throw new Error(`@pmndrs/bvh: compacting the ${this.label} storage needs every range in use (${this.allocator.used} units), got ${used}`);
+        const units = used + Math.max(0, extraUnits);
+        const buffer = this.createBuffer(units);
+        const allocator = new RangeAllocator(units);
+        const moved = new Map<number, number>();
+        const sorted = [...ranges].filter((range) => range.count > 0).sort((a, b) => a.offset - b.offset);
+        let at = 0;
+        // Neighbouring ranges stay neighbours, so they are copied as one.
+        let run: { from: number; to: number; count: number } | null = null;
+        const flush = (): void => {
+            if (run) encoder.copyBufferToBuffer(this.current, run.from * this.unitBytes, buffer, run.to * this.unitBytes, run.count * this.unitBytes);
+        };
+        for (const range of sorted) {
+            moved.set(range.offset, at);
+            allocator.reserve(at, range.count);
+            if (run && run.from + run.count === range.offset) {
+                run.count += range.count;
+            } else {
+                flush();
+                run = { from: range.offset, to: at, count: range.count };
+            }
+            at += range.count;
+        }
+        flush();
+        this.retire(this.current);
+        this.current = buffer;
+        this.allocator = allocator;
+        this.version++;
+        return moved;
+    }
+
     /** Writes `data` at a range this storage handed out. */
     write(offset: number, data: ArrayBuffer | ArrayBufferView<ArrayBuffer>, byteLength?: number): void {
         if (ArrayBuffer.isView(data)) this.device.queue.writeBuffer(this.current, offset * this.unitBytes, data.buffer, data.byteOffset, byteLength ?? data.byteLength);

@@ -117,7 +117,7 @@ describe('createBvhWorkerPool', () => {
         expect(trees.map((tree) => tree.triangleCount)).toEqual(Array.from({ length: 7 }, (_, index) => 2 * (2 + index) ** 2));
         expect(FakeWorker.started).toHaveLength(3);
         expect(FakeWorker.started.every((worker) => worker.maxBusy === 1 && worker.sentBeforeReady === 0)).toBe(true);
-        expect(pool.stats).toEqual({ queued: 0, running: 0, workers: 3, finished: 7, recycled: 0 });
+        expect(pool.stats).toEqual({ queued: 0, running: 0, workers: 3, finished: 7, recycled: 0, idleEnded: 0 });
         pool.dispose();
         expect(FakeWorker.started.every((worker) => worker.terminated)).toBe(true);
     });
@@ -145,6 +145,43 @@ describe('createBvhWorkerPool', () => {
         expect(() => createBvhWorkerPool({ recycleAboveBytes: -1 })).toThrow(RangeError);
         pool.dispose();
         keeping.dispose();
+    });
+
+    it('ends workers left idle for idleTimeoutMs (P9 lever 4), and builds the same trees on fresh ones', async () => {
+        vi.stubGlobal('Worker', FakeWorker);
+        const pool = createBvhWorkerPool({ size: 2, idleTimeoutMs: 30 });
+        const before = await Promise.all([pool.build(quad(3)), pool.build(quad(5), { maxLeafPrimitives: 2 })]);
+        expect(pool.stats).toMatchObject({ workers: 2, idleEnded: 0 });
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        expect(pool.stats).toMatchObject({ workers: 0, idleEnded: 2 });
+        expect(FakeWorker.started.every((worker) => worker.terminated)).toBe(true);
+        const after = await Promise.all([pool.build(quad(3)), pool.build(quad(5), { maxLeafPrimitives: 2 })]);
+        expect(FakeWorker.started).toHaveLength(4);
+        after.forEach((tree, index) => {
+            expect(new Uint8Array(tree.nodes)).toEqual(new Uint8Array(before[index].nodes));
+            expect(new Uint8Array(tree.triangles)).toEqual(new Uint8Array(before[index].triangles));
+            expect(tree.parents).toEqual(before[index].parents);
+        });
+        pool.dispose();
+        expect(() => createBvhWorkerPool({ idleTimeoutMs: -1 })).toThrow(RangeError);
+        // The default keeps idle workers.
+        const keeping = createBvhWorkerPool({ size: 1 });
+        await keeping.build(quad(3));
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        expect(keeping.stats).toMatchObject({ workers: 1, idleEnded: 0 });
+        keeping.dispose();
+    });
+
+    it('inline, drops the calling thread\'s tinybvh instance after idleTimeoutMs, and builds the same trees after', async () => {
+        const pool = createBvhWorkerPool({ idleTimeoutMs: 20 });
+        expect(pool.usesWorkers).toBe(false);
+        const before = await pool.build(quad(6), { maxLeafPrimitives: 2 });
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        expect(pool.stats.idleEnded).toBe(1);
+        const after = await pool.build(quad(6), { maxLeafPrimitives: 2 });
+        expect(new Uint8Array(after.nodes)).toEqual(new Uint8Array(before.nodes));
+        expect(new Uint8Array(after.triangles)).toEqual(new Uint8Array(before.triangles));
+        pool.dispose();
     });
 
     it('builds inline, losing nothing, when a fresh worker fails to load after a recycled one answered', async () => {
