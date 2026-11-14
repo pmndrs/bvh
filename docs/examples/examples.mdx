@@ -55,6 +55,22 @@ Each of these is one of three-mesh-bvh's examples (MIT) running on `@pmndrs/bvh/
 | [`three/voxelize`](https://github.com/pmndrs/bvh/tree/main/examples/three/voxelize) | `tree.intersectsBox(box, boxToMesh)` for the voxels on a surface and `tree.raycastFirst(ray, DoubleSide)` for the ones inside, filled a few milliseconds per frame; a dropped glTF builds its tree in `GenerateMeshBvhWorker`. From `voxelize`. |
 | [`three/batchedMesh`](https://github.com/pmndrs/bvh/tree/main/examples/three/batchedMesh) | `computeBatchedBoundsTree` and `acceleratedRaycast` on a `BatchedMesh` of three geometries with hundreds of raycasters firing every frame, against three's own `BatchedMesh.raycast`. From `batchedMesh`. |
 | [`three/point-cloud`](https://github.com/pmndrs/bvh/tree/main/examples/three/point-cloud) | three-mesh-bvh's `pointCloudIntersection`, ported: a [`PointsBVH`](/three/points-and-lines) over a scanned point cloud, the pointer picked through `acceleratedRaycast` with `Raycaster.params.Points.threshold`, and `BVHHelper` boxes. |
+| [`three/shapecast`](https://github.com/pmndrs/bvh/tree/main/examples/three/shapecast) | A sphere, a box or another mesh moved over a spinning knot: `intersectsSphere`, `intersectsBox`, `intersectsGeometry` (tree against tree), red where they touch. |
+| [`three/distancecast`](https://github.com/pmndrs/bvh/tree/main/examples/three/distancecast) | `closestPointToGeometry` joins a cylinder you move to a noise terrain; a marching-cubes volume of `closestPointToPoint` shows where either is within a distance. |
+| [`three/characterMovement`](https://github.com/pmndrs/bvh/tree/main/examples/three/characterMovement) | A capsule walked through a level baked into one collider by `StaticGeometryGenerator`, pushed out of the triangles `shapecast` hands back. WASD and space; the level is three's primitives, not the original's downloaded dungeon. |
+| [`three/physics`](https://github.com/pmndrs/bvh/tree/main/examples/three/physics) | Spheres thrown into a baked environment, pushed out of its triangles (`shapecast`, nearest boxes first) and off each other. |
+| [`three/sculpt`](https://github.com/pmndrs/bvh/tree/main/examples/three/sculpt) | Clay, normal and flatten brushes on a welded icosphere: `shapecast` finds the vertices, the tree is refit after each stroke (whole-tree: three-mesh-bvh refits only the visited nodes). |
+| [`three/selection`](https://github.com/pmndrs/bvh/tree/main/examples/three/selection) | Lasso and box selection of a 60k-triangle knot, narrowed by each tree box's screen hull, with or without the tree. |
+
+## Comparisons with three-mesh-bvh
+
+The [comparison](/performance/comparison) pages in `examples/compare/` (raycast, build, tree quality, queries, scene, GPU,
+SDF) put the same geometry through both libraries; the method is on that page. Two more:
+
+| Page | Compares |
+| --- | --- |
+| [`compare/skinned`](https://github.com/pmndrs/bvh/tree/main/examples/compare/skinned) | Skinned characters kept on their pose every frame: three-mesh-bvh's `SkinnedMeshBVH.refit()` on the CPU against our GPU pose pass and refit (`SceneTrees.setPose`), CPU and GPU ms per frame. What else: a plain WebGPU pass three never sees traces the refit trees. |
+| [`compare/pathtracer`](https://github.com/pmndrs/bvh/tree/main/examples/compare/pathtracer) | The same small path tracer on three-mesh-bvh/webgpu's WGSL functions and on our walk (`BvhTraceNodes`): Mrays/s of the whole tracer, its closest-hit rays and its any-hit rays. What else: the scene's GPU-built trees traced by the same kernel. |
 
 ## Babylon.js
 
@@ -75,4 +91,4 @@ A Node CLI plus the page that loads what it wrote. [Serialization and baking](/s
 
 ## Planned
 
-- **Comparisons with three-mesh-bvh** (`compare/`): raycast, async builds, path tracer, skinned, tree quality.
+- **Comparisons with three-mesh-bvh** (`compare/`): async builds (`compare/async-build`).

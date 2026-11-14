@@ -2,7 +2,8 @@
  * three/pathtracer: a small TSL compute path tracer over `SceneTrees`,
  * through `BvhTraceNodes` (the WGSL walk in three's node system).
  *
- * One compute node, one invocation per pixel, one sample per frame:
+ * One compute node (kernel.ts, which compare/pathtracer runs over three-mesh-bvh's
+ * walk too), one invocation per pixel, one sample per frame:
  * - a camera ray, then up to `bounces` diffuse bounces (a `Loop` with a
  *   uniform bound, so the walk is in the shader once);
  * - at each hit, `bvh.traceAny` toward the sun for a hard shadow;
@@ -18,8 +19,8 @@
  * after (an upper bound on its GPU time).
  */
 
-import { Color, Group, Matrix4, Mesh, MeshStandardMaterial, PlaneGeometry, BoxGeometry, SphereGeometry, TorusKnotGeometry, Vector3, type Material, type Object3D } from 'three';
-import { Break, Fn, If, Loop, atomicAdd, cos, float, instanceIndex, max, normalize, sin, sqrt, storage, texture, textureStore, uint, uniform, uv, uvec2, vec3, vec4, cross, abs, select, dot, mix, pow, exp } from 'three/tsl';
+import { Color, Group, Mesh, MeshStandardMaterial, PlaneGeometry, BoxGeometry, SphereGeometry, TorusKnotGeometry, type Material, type Object3D } from 'three';
+import { storage, texture, uv } from 'three/tsl';
 import { MeshBasicNodeMaterial, QuadMesh, StorageBufferAttribute, StorageTexture, type ComputeNode } from 'three/webgpu';
 import { SceneTrees } from '@pmndrs/bvh';
 import { BvhTraceNodes, SceneTreesObject3DSync, type BvhTslNode } from '@pmndrs/bvh/three';
@@ -27,6 +28,7 @@ import { createApp } from '../../shared/app.ts';
 import { enableDrop, frameObject, loadGltf, requestedModel } from '../../shared/loader.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
 import { isSmoke, ready } from '../../shared/smoke.ts';
+import { pathTracerKernel, pathTracerTargets, pathTracerUniforms, type PathTracerTargets, type PathTracerWalk } from './kernel.ts';
 
 const app = await createApp('Path tracer', 'three/pathtracer');
 const { device, renderer, camera, controls, overlay } = app;
@@ -92,22 +94,20 @@ updateTrees();
 await trees.whenBuilt();
 updateTrees();
 
-// Uniforms.
-const cameraWorld = uniform(new Matrix4());
-const projectionInverse = uniform(new Matrix4());
-const cameraPosition = uniform(new Vector3());
-const frameIndex = uniform(0, 'uint');
-const bounces = uniform(2, 'uint');
-const sunDirection = uniform(new Vector3(0.45, 0.8, 0.35).normalize());
-const width = uniform(1, 'uint');
-const height = uniform(1, 'uint');
+// The kernel (kernel.ts, shared with compare/pathtracer): the sampling over our walk.
+const u = pathTracerUniforms();
+const { cameraWorld, projectionInverse, cameraPosition, frameIndex, bounces, width, height } = u;
 const paletteNode = storage(new StorageBufferAttribute(palette, 4), 'vec4', PALETTE_CAPACITY).toReadOnly();
-const rayCounter = new StorageBufferAttribute(new Uint32Array(4), 1);
-const rayCounterNode = storage(rayCounter, 'uint', 4).toAtomic();
+const walk: PathTracerWalk = {
+    closest(origin, direction, tMin, tMax) {
+        const hit = bvh.traceClosest(origin, direction, tMin, tMax).toVar() as BvhTslNode;
+        return { t: hit.get('t'), normal: hit.get('normal'), albedo: paletteNode.element(hit.get('material')).xyz };
+    },
+    any: (origin, direction, tMin, tMax) => bvh.traceAny(origin, direction, tMin, tMax) as BvhTslNode,
+};
 
 // Size-dependent resources, made again on resize.
-let accum: StorageBufferAttribute;
-let target: StorageTexture;
+let targets: PathTracerTargets;
 let kernel: ComputeNode;
 const quad = new QuadMesh(new MeshBasicNodeMaterial());
 
@@ -117,75 +117,13 @@ function build(): void {
     const h = Math.max(16, Math.floor(innerHeight * scale));
     width.value = w;
     height.value = h;
-    accum = new StorageBufferAttribute(new Float32Array(w * h * 4), 4);
-    const accumNode = storage(accum, 'vec4', w * h);
-    target = new StorageTexture(w, h);
-    // The node graph is the same for any size: sizes are uniforms.
-    kernel = Fn(() => {
-        const pixel = instanceIndex;
-        const x = pixel.mod(width);
-        const y = pixel.div(width);
-        // PCG random numbers (the state is one u32 per invocation).
-        const state = pixel.mul(uint(9781)).add(frameIndex.mul(uint(6271))).add(uint(1)).toVar();
-        const random = () => {
-            state.assign(state.mul(uint(747796405)).add(uint(2891336453)));
-            const word = state.shiftRight(state.shiftRight(uint(28)).add(uint(4))).bitXor(state).mul(uint(277803737)).toVar();
-            return float(word.shiftRight(uint(22)).bitXor(word)).div(4294967295.0);
-        };
-        // The camera ray, jittered within the pixel.
-        const ndcX = float(x).add(random()).div(float(width)).mul(2).sub(1);
-        const ndcY = float(1).sub(float(y).add(random()).div(float(height)).mul(2));
-        const view = projectionInverse.mul(vec4(ndcX, ndcY, 1, 1));
-        const far = cameraWorld.mul(vec4(view.xyz.div(view.w), 1)).xyz;
-        const origin = vec3(cameraPosition).toVar();
-        const direction = normalize(far.sub(cameraPosition)).toVar();
-        const throughput = vec3(1).toVar();
-        const radiance = vec3(0).toVar();
-        const traced = uint(0).toVar();
-
-        Loop(bounces.add(uint(1)), () => {
-            const hit = bvh.traceClosest(origin, direction, 1e-4, 1e30).toVar() as BvhTslNode;
-            traced.addAssign(uint(1));
-            const t = hit.get('t');
-            If(t.lessThan(0), () => {
-                // Sky.
-                const up = max(direction.y, 0);
-                radiance.addAssign(throughput.mul(mix(vec3(0.75, 0.8, 0.9), vec3(0.35, 0.5, 0.85), pow(up, 0.6))));
-                Break();
-            });
-            const geometric = vec3(hit.get('normal'));
-            const normal = select(dot(geometric, direction).greaterThan(0), geometric.negate(), geometric).toVar();
-            const albedo = paletteNode.element(hit.get('material')).xyz.toVar();
-            const point = origin.add(direction.mul(t)).add(normal.mul(1e-3)).toVar();
-            // Sun: one shadow ray.
-            const facing = max(dot(normal, sunDirection), 0);
-            If(facing.greaterThan(0), () => {
-                const blocked = bvh.traceAny(point, sunDirection, 1e-4, 1e30) as BvhTslNode;
-                traced.addAssign(uint(1));
-                radiance.addAssign(select(blocked, vec3(0), throughput.mul(albedo).mul(facing).mul(vec3(2.6, 2.4, 2.1))));
-            });
-            // A cosine-weighted diffuse bounce.
-            const u1 = random();
-            const u2 = random().mul(6.2831853);
-            const r = sqrt(u1);
-            const helper = select(abs(normal.x).greaterThan(0.9), vec3(0, 1, 0), vec3(1, 0, 0));
-            const tangent = normalize(cross(helper, normal));
-            const bitangent = cross(normal, tangent);
-            direction.assign(normalize(tangent.mul(r.mul(cos(u2))).add(bitangent.mul(r.mul(sin(u2)))).add(normal.mul(sqrt(float(1).sub(u1))))));
-            origin.assign(point);
-            throughput.mulAssign(albedo);
-        });
-
-        const sum = accumNode.element(pixel);
-        sum.addAssign(vec4(radiance, 1));
-        const mean = sum.xyz.div(sum.w);
-        // Exposure and gamma.
-        const mapped = pow(vec3(1).sub(exp(mean.negate().mul(0.9))), vec3(1 / 2.2));
-        textureStore(target, uvec2(x, y), vec4(mapped, 1));
-        atomicAdd(rayCounterNode.element(0), traced);
-    })().compute(w * h, [64]);
+    // The ray counter carries over a resize (the Mrays/s readout takes differences).
+    const counter = targets?.rayCounter;
+    targets = pathTracerTargets(w, h, new StorageTexture(w, h));
+    if (counter) targets = { ...targets, rayCounter: counter };
+    kernel = pathTracerKernel(walk, u, targets, w, h);
     const material = quad.material as MeshBasicNodeMaterial;
-    material.colorNode = texture(target, uv());
+    material.colorNode = texture(targets.target, uv());
     material.needsUpdate = true;
 }
 
@@ -218,8 +156,8 @@ let computeMs = 0;
 app.loop(async () => {
     frame++;
     if (resetNeeded) {
-        (accum.array as Float32Array).fill(0);
-        accum.needsUpdate = true;
+        (targets.accum.array as Float32Array).fill(0);
+        targets.accum.needsUpdate = true;
         samples = 0;
         resetNeeded = false;
     }
@@ -243,7 +181,7 @@ app.loop(async () => {
     if (timed) {
         gpuMs += computeMs;
         measuredFrames++;
-        const count = new Uint32Array(await renderer.getArrayBufferAsync(rayCounter))[0];
+        const count = new Uint32Array(await renderer.getArrayBufferAsync(targets.rayCounter))[0];
         const rays = (count - lastRays) >>> 0;
         lastRays = count;
         raysPerSecond = (rays / 20 / computeMs) * 1000;
