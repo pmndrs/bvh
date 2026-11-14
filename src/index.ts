@@ -68,7 +68,22 @@ export {
     type WeldOptions,
     type WeldResult,
 } from './indexed-leaves.ts';
-export { deserializeLayout, SERIALIZED_FORMAT_VERSION, serializedLayoutBytes, serializeLayout } from './serialize.ts';
+export {
+    deserializeLayout,
+    isSerializedCurrent,
+    meshGeometryHash,
+    readSerializedHeader,
+    SERIALIZED_FORMAT_VERSION,
+    SERIALIZED_SCENE_FORMAT_VERSION,
+    serializedLayoutBytes,
+    serializeLayout,
+    type DeserializeLayoutOptions,
+    type SerializedHeader,
+    type SerializedSceneHeader,
+    type SerializedTreeHeader,
+    type SerializeLayoutOptions,
+} from './serialize.ts';
+export { deserializeTraceScene, serializeTraceScene } from './serialize-scene.ts';
 
 // A tree's shape alone, before it is written in the GPU layout.
 export { singleLeafTopology, TOPOLOGY_EMPTY_CHILD, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from './topology.ts';
