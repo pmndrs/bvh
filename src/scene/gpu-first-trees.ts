@@ -48,6 +48,7 @@
 import { GpuHplocBuilder, hplocScratchPoolBytes, planGpuHplocBatches, type GpuHplocBatch, type GpuHplocScratchPool } from '../gpu-hploc.ts';
 import type { GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import type { GpuMeshGeometry, GpuMeshTreeRange, GpuTreeBuffers } from '../mesh-input.ts';
+import { PassTimestamps } from '../gpu-timestamps.ts';
 
 /** A mesh to build: its slot and version, and its geometry, read once when the build starts. */
 export interface GpuTreeRequest {
@@ -72,6 +73,10 @@ export interface GpuTreeBuildOptions {
     readonly cancelled?: () => boolean;
     /** Called when the builds' GPU bytes change (a capped batch allocated, the pool made or freed), so the caller can sample its peak. */
     readonly onMemoryChange?: () => void;
+    /** Time each batch's compute pass with timestamp queries, where the device has `timestamp-query` (the result's `gpuMs`). Default false. */
+    readonly timestamps?: boolean;
+    /** Called when a batch is submitted (a capped batch can wait in the queue first), with its meshes. */
+    readonly onBatchStart?: (members: readonly GpuTreeRequest[]) => void;
 }
 
 /**
@@ -196,6 +201,8 @@ export interface GpuTreeBatchResult {
     readonly refused: readonly GpuRefusedTree[];
     /** Milliseconds from the submit to the stats on the CPU (the build plus the readback's latency). */
     readonly buildMs: number;
+    /** GPU milliseconds of the batch's compute pass, from timestamps (`timestamps: true` on a device with `timestamp-query`), else null or absent. */
+    readonly gpuMs?: number | null;
     /** Why the whole batch failed (it couldn't start, or its readback failed), or null. Its meshes are then all in `refused`. */
     readonly failure: string | null;
 }
@@ -294,24 +301,32 @@ export class GpuFirstTrees implements FirstTreeBuilder {
 
         // Every batch goes into one encoder and one submit; each then reads its own stats back.
         const encoder = this.device.createCommandEncoder({ label: this.label });
-        const recorded: { members: GpuTreeRequest[]; finish: () => Promise<GpuTreeBuffers> }[] = [];
+        const recorded: { members: GpuTreeRequest[]; finish: () => Promise<GpuTreeBuffers>; pass: number | null }[] = [];
         const failed: { members: GpuTreeRequest[]; reason: string }[] = [];
+        const timer = options.timestamps ? PassTimestamps.create(this.device, plan.batches.length, this.label) : null;
         let buildingBytes = 0;
         for (const indices of plan.batches) {
             const members = indices.map((index) => requests[index]);
             try {
                 const batch = this.hploc.createBatch(members.map((member) => member.geometry), this.buildOptions);
-                batch.encode(encoder);
+                const writes = timer?.writes();
+                batch.encode(encoder, writes);
                 buildingBytes += batch.scratchBytes + batch.outputBytes;
-                recorded.push({ members, finish: () => batch.finish() });
+                recorded.push({ members, finish: () => batch.finish(), pass: writes ? writes.beginningOfPassWriteIndex! / 2 : null });
             } catch (error) {
                 failed.push({ members, reason: `the GPU mesh tree build could not start: ${describe(error)}` });
             }
         }
+        timer?.resolveInto(encoder);
         const submittedAt = performance.now();
         this.device.queue.submit([encoder.finish()]);
+        for (const { members } of recorded) options.onBatchStart?.(members);
+        const times = readTimes(timer);
 
-        const batches = recorded.map(async ({ members, finish }) => (await this.collect(members, finish, submittedAt, options)).result);
+        const batches = recorded.map(async ({ members, finish, pass }) => {
+            const gpuMs = times.then((ms) => (pass === null ? null : (ms[pass] ?? null)));
+            return (await this.collect(members, finish, submittedAt, options, gpuMs)).result;
+        });
         for (const { members, reason } of failed) batches.push(Promise.resolve({ built: [], refused: refuseAll(members, reason), buildMs: 0, failure: reason }));
         return { notBuilt, batches, buildingBytes };
     }
@@ -407,11 +422,15 @@ export class GpuFirstTrees implements FirstTreeBuilder {
             this.current = { owner, bytes: () => building.outputBytes };
             options.onMemoryChange?.();
             const encoder = this.device.createCommandEncoder({ label: this.label });
-            batch.encode(encoder);
+            const timer = options.timestamps ? PassTimestamps.create(this.device, 1, this.label) : null;
+            batch.encode(encoder, timer?.writes());
+            timer?.resolveInto(encoder);
             const submittedAt = performance.now();
             this.device.queue.submit([encoder.finish()]);
+            options.onBatchStart?.(members);
+            const gpuMs = readTimes(timer).then((ms) => ms[0] ?? null);
             // From finish on, the outputs are counted until the caller claims them.
-            return this.collect(members, () => building.finish(), submittedAt, options, (outputs) => (this.current = { owner, bytes: () => outputs.unclaimedBytes }));
+            return this.collect(members, () => building.finish(), submittedAt, options, gpuMs, (outputs) => (this.current = { owner, bytes: () => outputs.unclaimedBytes }));
         } catch (error) {
             batch?.destroy();
             this.current = null;
@@ -442,6 +461,7 @@ export class GpuFirstTrees implements FirstTreeBuilder {
         finish: () => Promise<GpuTreeBuffers>,
         submittedAt: number,
         options: GpuTreeBuildOptions,
+        gpuTime: Promise<number | null>,
         onOutputs?: (outputs: GpuTreeOutputs) => void,
     ): Promise<{ result: GpuTreeBatchResult; outputs: GpuTreeOutputs | null }> {
         let trees: GpuTreeBuffers;
@@ -449,9 +469,10 @@ export class GpuFirstTrees implements FirstTreeBuilder {
             trees = await finish();
         } catch (error) {
             const failure = `the GPU mesh tree build failed: ${describe(error)}`;
-            return { result: { built: [], refused: refuseAll(members, failure), buildMs: performance.now() - submittedAt, failure }, outputs: null };
+            return { result: { built: [], refused: refuseAll(members, failure), buildMs: performance.now() - submittedAt, gpuMs: await gpuTime, failure }, outputs: null };
         }
         const buildMs = performance.now() - submittedAt;
+        const gpuMs = await gpuTime;
         const usable = trees.meshes.filter((tree) => tree.problem === null).length;
         const outputs = new GpuTreeOutputs(trees, usable);
         onOutputs?.(outputs);
@@ -465,8 +486,17 @@ export class GpuFirstTrees implements FirstTreeBuilder {
             if (tree.problem === null) built.push({ slot, generation, outputs, tree, layout: layouts[index] ?? null });
             else refused.push({ slot, generation, reason: tree.problem });
         });
-        return { result: { built, refused, buildMs, failure: null }, outputs };
+        return { result: { built, refused, buildMs, gpuMs, failure: null }, outputs };
     }
+}
+
+/** A measurement's milliseconds per pass, once read (none without a timer, or if the read fails); the timer is freed after. */
+function readTimes(timer: PassTimestamps | null): Promise<number[]> {
+    if (!timer) return Promise.resolve([]);
+    return timer
+        .read()
+        .catch((): number[] => [])
+        .finally(() => timer.destroy());
 }
 
 function refuseAll(members: readonly GpuTreeRequest[], reason: string): GpuRefusedTree[] {

@@ -219,6 +219,13 @@ export interface SceneTreesOptions {
     readonly topLevel?: 'auto' | 'cpu';
     /** Read the GPU top level's refit stats back (counters, warnings). Default false: no readbacks frame after frame. */
     readonly diagnostics?: boolean;
+    /**
+     * Time each GPU build batch's compute pass with timestamp queries, where
+     * the device has `timestamp-query`: `counts.gpuBuildTimestampMs` sums them
+     * (`counts.gpuBuildMs` is submit-to-stats wall time either way). Default
+     * false: one small query set and readback per batch when on.
+     */
+    readonly timestamps?: boolean;
     /** Where problems are reported once (a GPU build that failed, a refit repaired). Default `console.warn`. */
     readonly warn?: (message: string) => void;
     /** Called when a tree is placed (a mesh's first, or a swap). */
@@ -310,6 +317,22 @@ export interface SceneTreeCounts {
     readonly gpuBatches: number;
     /** The sum of every GPU batch's time from its submit to its stats on the CPU. */
     readonly gpuBuildMs: number;
+    /** The sum of every GPU batch's compute pass from timestamp queries (`timestamps: true` on a device with `timestamp-query`), or null when none was timed. */
+    readonly gpuBuildTimestampMs: number | null;
+}
+
+/** Options of one {@link SceneTrees.update}. */
+export interface SceneTreesUpdateOptions {
+    /**
+     * Timestamps around everything the update records into the encoder (tree
+     * copies, quantize and identity passes, refits, growth copies, the top
+     * level): `beginningOfPassWriteIndex` is written by a tiny compute pass
+     * before the update's first command, `endOfPassWriteIndex` by one after
+     * its last (each only when given). The caller resolves the query set. Not
+     * in the bracket: GPU builds and capped batches' copies, which go in
+     * submits of their own (`timestamps` times the builds).
+     */
+    readonly timestampWrites?: GPUComputePassTimestampWrites;
 }
 
 /** GPU bytes the scene's trees hold. */
@@ -661,6 +684,10 @@ export class SceneTrees {
     private readonly outputsWaitingForUpdate = new Set<GpuTreeOutputs>();
     private gpuBatches = 0;
     private gpuBuildMs = 0;
+    private gpuBuildTimestampMs: number | null = null;
+    private readonly timestamps: boolean;
+    /** A one-thread pipeline for the timestamp passes around an update (`SceneTreesUpdateOptions.timestampWrites`), made at its first use. */
+    private bracketPipeline: GPUComputePipeline | null = null;
     private buildFailure: Error | null = null;
     private builtWaiters: (() => void)[] = [];
     private refinedWaiters: (() => void)[] = [];
@@ -690,6 +717,7 @@ export class SceneTrees {
         this.transferGeometry = options.transferGeometry ?? false;
         this.mergeStatic = options.mergeStaticInstances ?? true;
         this.gpuMaxDepth = options.gpuMaxDepth ?? GPU_TREE_MAX_DEPTH;
+        this.timestamps = options.timestamps ?? false;
         this.refinementHold = options.holdRefinements ? () => true : null;
         const workers = options.workers;
         if (workers && 'build' in workers) {
@@ -1134,6 +1162,7 @@ export class SceneTrees {
             lastGpuBuildMs: this.lastGpuBuildMs,
             gpuBatches: this.gpuBatches,
             gpuBuildMs: this.gpuBuildMs,
+            gpuBuildTimestampMs: this.gpuBuildTimestampMs,
         };
     }
 
@@ -1298,10 +1327,39 @@ export class SceneTrees {
      *   copies, refits and growth copies are in `encoder`, and the buffers they
      *   replace are destroyed at the next update: **submit the encoder anyway**,
      *   or the scene's buffers hold empty trees.
+     *
+     * `options.timestampWrites` times what the update records (see
+     * {@link SceneTreesUpdateOptions}). Its two passes are recorded however
+     * the update ends, a throw included, so the pair is always complete; an
+     * update that throws before recording anything else leaves only them in
+     * the encoder.
      */
-    update(encoder: GPUCommandEncoder): void {
+    update(encoder: GPUCommandEncoder, options: SceneTreesUpdateOptions = {}): void {
         this.checkLive();
         if (!this.prepared) throw new Error('@pmndrs/bvh: SceneTrees is not prepared; make it with SceneTrees.create');
+        const bracket = options.timestampWrites;
+        if (bracket?.beginningOfPassWriteIndex !== undefined) this.timestampPass(encoder, { querySet: bracket.querySet, beginningOfPassWriteIndex: bracket.beginningOfPassWriteIndex });
+        try {
+            this.updateNow(encoder);
+        } finally {
+            if (bracket?.endOfPassWriteIndex !== undefined) this.timestampPass(encoder, { querySet: bracket.querySet, endOfPassWriteIndex: bracket.endOfPassWriteIndex });
+        }
+    }
+
+    /** A one-thread pass that only writes a timestamp (an empty pass may not be recorded on every backend). */
+    private timestampPass(encoder: GPUCommandEncoder, timestampWrites: GPUComputePassTimestampWrites): void {
+        this.bracketPipeline ??= this.device.createComputePipeline({
+            label: `${this.label} update timestamp`,
+            layout: 'auto',
+            compute: { module: this.device.createShaderModule({ label: `${this.label} update timestamp`, code: '@compute @workgroup_size(1) fn bvhUpdateTimestamp() {}' }), entryPoint: 'bvhUpdateTimestamp' },
+        });
+        const pass = encoder.beginComputePass({ label: `${this.label} update timestamp`, timestampWrites });
+        pass.setPipeline(this.bracketPipeline);
+        pass.dispatchWorkgroups(1);
+        pass.end();
+    }
+
+    private updateNow(encoder: GPUCommandEncoder): void {
         this.updates++;
         // The frame the last update recorded into was submitted: its writes into the storages are on the queue.
         this.encoderWritesStorage = false;
@@ -1475,6 +1533,7 @@ export class SceneTrees {
                 maxBatchBytes: this.maxBatchBytes,
                 cancelled: () => this.disposed,
                 onMemoryChange: () => this.samplePeak(),
+                timestamps: this.timestamps,
             });
         } catch (error) {
             this.warn(`@pmndrs/bvh: the GPU mesh tree build failed, so ${kind.rebuild ? 'the mesh keeps its refit tree' : 'the meshes wait for tinybvh'}: ${describe(error)}`);
@@ -1518,6 +1577,7 @@ export class SceneTrees {
         if (result.failure === null) {
             this.gpuBatches++;
             this.gpuBuildMs += result.buildMs;
+            if (typeof result.gpuMs === 'number') this.gpuBuildTimestampMs = (this.gpuBuildTimestampMs ?? 0) + result.gpuMs;
         }
         const batchOutputs = new Set(result.built.map((built) => built.outputs));
         for (const outputs of batchOutputs) {

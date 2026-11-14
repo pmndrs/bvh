@@ -33,4 +33,14 @@ describe('createMeshLayoutBuilder', () => {
         const withoutSubgroups = { features: new Set<string>() } as unknown as GPUDevice;
         for (const prefer of ['gpu-hploc', 'gpu-lbvh'] as const) expect((await createMeshLayoutBuilder(withoutSubgroups, { prefer })).kind).toBe('tinybvh');
     });
+
+    it('has a separate prepare step, and never reports GPU batches for tinybvh', async () => {
+        const builder = await createMeshLayoutBuilder(null, { prepare: false });
+        expect(builder.ready).toBe(true);
+        await builder.prepare();
+        const batches: unknown[] = [];
+        const [result] = await builder.buildLayouts([{ positions: randomSoup(50, 3) }], { onGpuBatch: (batch) => batches.push(batch), maxLeafPrimitives: 2 });
+        expect(result.builtBy).toBe('tinybvh');
+        expect(batches).toEqual([]);
+    });
 });

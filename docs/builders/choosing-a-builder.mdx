@@ -49,6 +49,31 @@ const cpuOnly = await createMeshLayoutBuilder(device, { prefer: 'tinybvh' }); //
 const capped = await createMeshLayoutBuilder(device, { maxBatchBytes: 256 * 1024 * 1024 }); // lower build peak
 ```
 
+### Setup and GPU time
+
+The factory compiles the GPU builder's pipelines before it resolves. With `prepare: false` it doesn't, and
+`builder.prepare()` (or the first build) does, so a page can time or schedule the setup apart from the builds.
+`onGpuBatch` reports each GPU batch once its trees are on the GPU: its meshes, its compute pass in milliseconds from
+timestamp queries (null without `timestamp-query`; Chrome rounds them to 0.1 ms unless WebGPU's developer features are
+on), and the wall time from its submit. It is never called for tinybvh.
+
+{/* snippet: chooser-timing */}
+```ts
+const builder = await createMeshLayoutBuilder(device, { prepare: false });
+const setupStart = performance.now();
+await builder.prepare(); // the pipelines, once: timed apart from any build
+console.log(`setup ${(performance.now() - setupStart).toFixed(0)} ms`);
+
+const results = await builder.buildLayouts(meshes, {
+    // Once per GPU batch, when its trees are on the GPU (before the readback): never for tinybvh.
+    onGpuBatch: ({ meshes: inBatch, gpuMs, wallMs }) => console.log(`${inBatch.length} meshes: ${gpuMs ?? 'no timestamp-query'} ms on the GPU, ${wallMs} ms submit to done`),
+});
+```
+
+To time the builders yourself, each GPU builder's `createBatch(...).encode(encoder, timestampWrites)` records a batch's
+one compute pass with your timestamp writes, and `buildMany(meshes, options, timestampWrites)` does the same in its own
+submit (resolve the query set after it resolves).
+
 ## tinybvh
 
 {/* snippet: tinybvh */}

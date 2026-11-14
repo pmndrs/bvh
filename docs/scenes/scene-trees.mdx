@@ -65,6 +65,37 @@ then await. A frame loop that already runs needs nothing extra; a page that awai
 `onTree` reports every placement: the mesh, `builtBy` (`'gpu'` or `'tinybvh'`), `replaced` (`'gpu'` for a swap),
 `fallbackReason` and the milliseconds since the update that started it.
 
+## GPU time
+
+Two numbers, both from timestamp queries (the device needs `timestamp-query`):
+
+- **An update's GPU time.** `update(encoder, { timestampWrites })` writes `beginningOfPassWriteIndex` in a tiny compute
+  pass before the first command it records and `endOfPassWriteIndex` in one after the last: tree copies, quantize and
+  identity passes, refits, growth copies and the top-level refit. You resolve the query set. Both passes are recorded
+  however the update ends, so the pair is never half written. GPU builds are not in it: they go in submits of their
+  own.
+- **The GPU builds.** With `timestamps: true`, each H-PLOC batch's pass is timed, and `counts.gpuBuildTimestampMs`
+  sums them (null until one is timed). `counts.gpuBuildMs` stays the wall time from each batch's submit to its stats.
+
+{/* snippet: timing */}
+```ts
+// timestamps: each GPU build batch's pass, summed in counts.gpuBuildTimestampMs (needs timestamp-query).
+const trees = await SceneTrees.create(device, { timestamps: true });
+const querySet = device.createQuerySet({ type: 'timestamp', count: 2 });
+const resolved = device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+const read = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+
+const encoder = device.createCommandEncoder();
+// A timestamp before and after everything the update records (copies, refits, the top level).
+trees.update(encoder, { timestampWrites: { querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } });
+encoder.resolveQuerySet(querySet, 0, 2, resolved, 0);
+encoder.copyBufferToBuffer(resolved, 0, read, 0, 16);
+device.queue.submit([encoder.finish()]);
+await read.mapAsync(GPUMapMode.READ);
+const [start, end] = new BigInt64Array(read.getMappedRange());
+console.log(`update: ${Number(end - start) / 1e6} ms on the GPU; builds so far: ${trees.counts.gpuBuildTimestampMs ?? '-'} ms`);
+```
+
 ## Rebinding when a buffer grows
 
 The node and triangle buffers grow by doubling. A growth replaces the `GPUBuffer` and bumps `trees.version`. Make your
@@ -112,6 +143,7 @@ const trees = await SceneTrees.create(device, {
 | `topLevel` | `'auto'` | The GPU top level with subgroups, the CPU one without. `'cpu'`: always the CPU one. |
 | `triangleLeaves`, `positionLayout`, `nodeFormat`, `weld` | records, `vec4`, `'quantized'`, `true` | [Layout variants](/concepts/gpu-layout#variants). Indexed and quantized need `gpuTreeOutputs: 'copy'`. Compile your walk from `trees.nodeFormat` (or leave the walk's default, also quantized). |
 | `diagnostics` | `false` | Read the top level's refit stats back. |
+| `timestamps` | `false` | Time each GPU build batch with timestamp queries (`counts.gpuBuildTimestampMs`; see [GPU time](#gpu-time)). |
 | `onTree`, `warn`, `label` | | Events, where problems are reported, GPU object labels. |
 
 ## What it holds

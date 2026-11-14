@@ -174,10 +174,10 @@ export class FakeEncoder {
                 groups.set(index, value as unknown as FakeBindGroup);
             },
             dispatchWorkgroups: (workgroupsX: number, workgroupsY = 1) => {
-                const group = groups.get(0);
-                if (!pipeline || !group) throw new Error('dispatch without a pipeline and bind group 0');
+                // A pipeline with no bindings (a pass that only writes timestamps) needs no bind group.
+                if (!pipeline) throw new Error('dispatch without a pipeline');
                 const all = new Map([...groups].map(([index, bound]) => [index, buffersOf(bound)] as const));
-                this.commands.push({ dispatch: { entryPoint: pipeline.entryPoint, bindings: all.get(0)!, groups: all, workgroupsX, workgroupsY } });
+                this.commands.push({ dispatch: { entryPoint: pipeline.entryPoint, bindings: all.get(0) ?? new Map(), groups: all, workgroupsX, workgroupsY } });
             },
             end: () => {},
         };

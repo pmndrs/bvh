@@ -40,6 +40,27 @@ export async function waitForTrees(trees: SceneTrees, frame: () => void): Promis
     // #endregion
 }
 
+export async function timing(device: GPUDevice): Promise<void> {
+    // #region timing
+    // timestamps: each GPU build batch's pass, summed in counts.gpuBuildTimestampMs (needs timestamp-query).
+    const trees = await SceneTrees.create(device, { timestamps: true });
+    const querySet = device.createQuerySet({ type: 'timestamp', count: 2 });
+    const resolved = device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+    const read = device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+
+    const encoder = device.createCommandEncoder();
+    // A timestamp before and after everything the update records (copies, refits, the top level).
+    trees.update(encoder, { timestampWrites: { querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } });
+    encoder.resolveQuerySet(querySet, 0, 2, resolved, 0);
+    encoder.copyBufferToBuffer(resolved, 0, read, 0, 16);
+    device.queue.submit([encoder.finish()]);
+    await read.mapAsync(GPUMapMode.READ);
+    const [start, end] = new BigInt64Array(read.getMappedRange());
+    console.log(`update: ${Number(end - start) / 1e6} ms on the GPU; builds so far: ${trees.counts.gpuBuildTimestampMs ?? '-'} ms`);
+    // #endregion
+    read.unmap();
+}
+
 export function bindings(trees: SceneTrees, rebind: (buffers: SceneTrees['buffers']) => void): void {
     // #region version
     let boundVersion = -1;

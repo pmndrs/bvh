@@ -160,14 +160,16 @@ function useScene(scene: VanillaScene): Promise<void> {
 async function swapScene(scene: VanillaScene): Promise<void> {
     const mesh = mergeToWorld(scene);
     // The builder: GPU H-PLOC with subgroups, else tinybvh; the chooser says why.
+    const builder = await createMeshLayoutBuilder(device, { prepare: false });
     const prepareStart = performance.now();
-    const builder = await createMeshLayoutBuilder(device); // prepares the GPU builder's pipelines
+    await builder.prepare(); // the GPU builder's pipelines, once, timed apart from the build
     const prepareMs = performance.now() - prepareStart;
     const start = performance.now();
-    const [result] = await builder.buildLayouts([mesh]);
+    let gpuMs: number | null | undefined; // the GPU batch's pass (timestamps); undefined when tinybvh built it
+    const [result] = await builder.buildLayouts([mesh], { onGpuBatch: (batch) => (gpuMs = batch.gpuMs) });
     const cpuMs = performance.now() - start;
-    // createMeshLayoutBuilder takes no timestamp writes: CPU wall time only (from the call to the layout read back).
-    overlay.build({ builtBy: result.builtBy, fallbackReason: builder.fallbackReason ?? result.fallbackReason, cpuMs });
+    // CPU wall time from the call to the layout read back; GPU time from timestamps where the device has them.
+    overlay.build({ builtBy: result.builtBy, fallbackReason: builder.fallbackReason ?? result.fallbackReason, cpuMs, gpuMs });
     overlay.set('builder setup', `${prepareMs.toFixed(0)} ms (pipelines; once per builder)`);
     overlay.tree(layoutInfo(result.layout));
     overlay.set('mesh', `${scene.name}: ${(mesh.indices.length / 3).toLocaleString('en-US')} triangles${scene.instances.length > 1 ? `, ${scene.instances.length} instances merged` : ''}`);

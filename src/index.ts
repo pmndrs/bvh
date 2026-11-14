@@ -74,7 +74,15 @@ export { deserializeLayout, SERIALIZED_FORMAT_VERSION, serializedLayoutBytes, se
 export { singleLeafTopology, TOPOLOGY_EMPTY_CHILD, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from './topology.ts';
 
 // Builders. createMeshLayoutBuilder picks one for you.
-export { createMeshLayoutBuilder, type MeshLayoutBuilder, type MeshLayoutBuilderKind, type MeshLayoutResult } from './mesh-builder.ts';
+export {
+    createMeshLayoutBuilder,
+    type MeshLayoutBuilder,
+    type MeshLayoutBuilderKind,
+    type MeshLayoutBuilderOptions,
+    type MeshLayoutBuildOptions,
+    type MeshLayoutGpuBatch,
+    type MeshLayoutResult,
+} from './mesh-builder.ts';
 export {
     createTinyBvhBuilder,
     TINYBVH_RELEASE_ABOVE_BYTES,
@@ -244,6 +252,7 @@ export {
     type SceneTreesMemory,
     type SceneTreesOptions,
     type SceneTreesTimeline,
+    type SceneTreesUpdateOptions,
     type TreeBuilder,
 } from './scene/scene-trees.ts';
 export { DRIFT_HOLD_FRAMES, DRIFT_THRESHOLD, STATS_EVERY_FRAMES, type DeformingTreeCounts } from './scene/deforming-trees.ts';
