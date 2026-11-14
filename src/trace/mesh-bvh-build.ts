@@ -21,6 +21,19 @@ export function tinyBvhHeapBytes(): number {
     return started?.lastBuildHeapBytes ?? 0;
 }
 
+/**
+ * Drops this thread's tinybvh instance (its WASM memory goes with it, at the
+ * garbage collector's next pass); the next build starts a fresh one. A build
+ * already waiting for the instance keeps it. Returns whether there was one to
+ * drop. For a worker pool's `idleTimeoutMs` on the calling thread.
+ */
+export function releaseInlineTinyBvh(): boolean {
+    const had = tinyBvh !== null;
+    tinyBvh = null;
+    started = null;
+    return had;
+}
+
 export async function buildMeshBvhAsync(geometry: MeshGeometry, options: MeshBvhBuildOptions = {}): Promise<MeshBvh> {
     tinyBvh ??= createTinyBvhBuilder().then((builder) => (started = builder));
     return buildMeshBvhWithTinyBvh(geometry, await tinyBvh, { maxLeafPrimitives: options.maxLeafPrimitives, triangleLeaves: options.triangleLeaves, nodeFormat: options.nodeFormat });

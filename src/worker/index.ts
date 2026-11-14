@@ -17,6 +17,7 @@ export {
     type BvhWorkerPool,
     type BvhWorkerPoolOptions,
     type BvhWorkerPoolStats,
+    WORKER_IDLE_TIMEOUT_MS,
     WORKER_RECYCLE_ABOVE_BYTES,
 } from './pool.ts';
 export { generateCpuMeshBvh } from './generate.ts';
