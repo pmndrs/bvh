@@ -44,6 +44,7 @@ scene.background = null;
 
 // three-mesh-bvh's setup for a BatchedMesh; three's own raycast is kept for the comparison.
 const threeBatchedRaycast = BatchedMesh.prototype.raycast;
+Mesh.prototype.raycast = acceleratedRaycast; // the stand-in mesh three's BatchedMesh.raycast casts against
 BatchedMesh.prototype.raycast = acceleratedRaycast;
 // three-mesh-bvh's types are in the project too, with their own signatures for these two.
 (BatchedMesh.prototype as unknown as { computeBoundsTree: typeof computeBatchedBoundsTree }).computeBoundsTree = computeBatchedBoundsTree;

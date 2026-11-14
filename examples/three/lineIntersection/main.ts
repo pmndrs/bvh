@@ -126,6 +126,8 @@ interface LineHit {
     readonly index: number;
     readonly distance: number;
     readonly point: Vector3;
+    /** The ray's own nearest point (local), which three measures the distance to. */
+    readonly onRay?: Vector3;
 }
 
 /** The nearest segment within the threshold of the ray, found through the tree: LineBVH's raycastFirst, made of a shapecast. */
@@ -152,7 +154,7 @@ function raycastFirstBvh(ray: Ray, threshold: number): LineHit | null {
             const distance = localRay.origin.distanceTo(interRay);
             if (distance < bestDistance) {
                 bestDistance = distance;
-                best = { index, distance, point: interSegment.clone() };
+                best = { index, distance, point: interSegment.clone(), onRay: interRay.clone() };
             }
             return false;
         },
@@ -161,7 +163,7 @@ function raycastFirstBvh(ray: Ray, threshold: number): LineHit | null {
     const found = best as LineHit;
     // Back to world space; the distance in world units like three's.
     hitPoint.copy(found.point).applyMatrix4(line.matrixWorld);
-    return { index: found.index, distance: ray.origin.distanceTo(interRay.applyMatrix4(line.matrixWorld)), point: hitPoint.clone() };
+    return { index: found.index, distance: ray.origin.distanceTo(found.onRay!.applyMatrix4(line.matrixWorld)), point: hitPoint.clone() };
 }
 
 /** three's own Line.raycast over every segment, the nearest hit. */
