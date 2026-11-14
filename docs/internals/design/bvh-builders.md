@@ -131,6 +131,7 @@ The smallest subgroup size comes from `device.adapterInfo.subgroupMinSize`. If t
 
 - `mortonCodes`: `'cubic-30'` (B1's codes, the default) or `'tinybvh-63'` (tinybvh's 63-bit codes, two sort words).
 - `tieBreak`: `'pairs'` (the default) or `'tinybvh'`. On exactly equal merged areas tinybvh's rule chains the tree: 3000 identical triangles give depth 128, twice the tracer's stack. `'pairs'` pairs ties up and keeps the tree balanced.
+- `quantizeOnEmit` (default false; needs `nodeFormat: 'quantized'`): the emit pass writes the quantized nodes itself instead of `f32` nodes that `finish` then packs with the quantize pass ([compressed-nodes.md](compressed-nodes.md)). Each thread of `hplocEmit` derives its mesh's frame from the root's two children (the climb is done, so their boxes are known) by the quantize pass's rule (`QUANTIZE_WGSL`: the union of the non-empty children's non-empty axes, `bvhqAxisFrame`, then `bvhqAxisWord` with the margin per child), so every frame and node is the pass's word for word (the `bvh-hploc` page compares them, records and indexed, with a refused mesh in the batch). The output node buffer has a 32-byte slot per radix-tree node and per mesh: mesh `m`'s frame is at its `f32` node offset plus `m`, its root the slot after (`nodeOffset`), its parents where the `f32` build puts them (`parentOffset`); a refused mesh gets `nodeOffset: 0, nodeCount: 0`. The batch never holds 64-byte nodes and runs no quantize pass: on one Sponza batch the output nodes go from 350.6 to 175.3 MiB (the batch from 1,482.4 to 1,307.1 MiB). The buffer is not compacted (one slot per radix-tree node, where the pass packs only the kept nodes), which matters only to a caller that keeps the batch's buffers. The climbs still hand `f32` boxes over, as they must. `bvh-hploc-profile` times both ways on a real GPU (not run yet).
 
 **The oracle.** `src/hploc-cpu.ts` is H-PLOC on the CPU, step for step, with the same options.
 
@@ -165,11 +166,13 @@ T is triangles and I is radix-tree inner nodes, `max(1, T - 1)` per mesh (so I i
 | climb scratch | 52 (3 words per I, a 9-word record and a cluster per T) | 76 (19 words per I) | scratch: handed-over words, records, clusters |
 | links (H-PLOC) / node info + rank (LBVH) | 28 (two scans, 2 children, 2 parents, tree order) | 16 | scratch |
 | **scratch** | **136** | **140** | |
-| output nodes | 64 per I | 64 | output |
+| output nodes | 64 per I (32 per I and per mesh with `quantizeOnEmit`) | 64 | output |
 | output triangle records | 48 | 48 | output |
 | output parents | 4 per I | 4 | output |
-| **outputs** | **116** | **116** | |
-| **total** | **252 + inputs** | **256 + inputs** | Sponza: 270.6 and 274.6 B/tri with its 18.5 of inputs |
+| **outputs** | **116** (84 with `quantizeOnEmit`) | **116** | |
+| **total** | **252 + inputs** (220 with `quantizeOnEmit`) | **256 + inputs** | Sponza: 270.6 and 274.6 B/tri with its 18.5 of inputs |
+
+With indexed triangles (16 bytes, not 48) every H-PLOC output and total above is 32 lower: outputs 84, or 52 with `quantizeOnEmit` too.
 
 **Predicted against measured.** One H-PLOC batch of all of Sponza: inputs 101.3 + scratch 745.6 + outputs 635.5 = **1,482.4 MiB** predicted (`hplocBatchBytes`, printed by the `scene-trees-sponza` page). `SceneTrees.memory.peak` measured **1,482.7 MiB** in every mode (`copy`, `adopt`, `copy-merged`). The 0.3 MiB difference is the scene's empty buffers and top level. The peak comes while the batch builds, before the scene's own buffers hold anything.
 
