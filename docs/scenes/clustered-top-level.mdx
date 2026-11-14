@@ -1,0 +1,105 @@
+---
+title: Clustered top level
+description: Cut big meshes into clusters, each its own top-level leaf, so the top level can separate meshes whose boxes overlap. three-mesh-bvh's ClusteredBVH.
+nav: 35
+sourcecode: src/trace/clustered-scene.ts
+---
+
+The top level normally has one leaf per instance, holding the instance's whole mesh box. When big meshes overlap
+(architecture, Sponza, Bistro: one instance per wall, floor and column), a ray enters many instances it never hits, and
+pays a transform and a descent into each. `clusterTraceScene` cuts each mesh's tree into subtrees ("clusters") of
+fewer than `primitiveLimit` triangles and gives each cluster its own top-level leaf, with the cluster's box moved to
+world space. The top level can then tell the parts of overlapping meshes apart.
+
+This is three-mesh-bvh's `ClusteredBVH`, the top level its `BVHComputeData` always builds. The cut is the same: walk
+down the mesh's tree and stop at the first node with fewer triangles than the limit, or at a leaf.
+
+{/* snippet: clustered-scene */}
+```ts
+import { buildMeshBvhWithTinyBvh, buildTraceScene, clusterTraceScene, createTinyBvhBuilder, uploadTraceScene, type MeshGeometry, type TraceSceneInstance } from '@pmndrs/bvh';
+
+const tiny = await createTinyBvhBuilder();
+const scene = await buildTraceScene(meshes, instances, { build: (geometry) => buildMeshBvhWithTinyBvh(geometry, tiny) });
+
+// Cut every unshared mesh's tree into subtrees of fewer than 64 triangles, each its own top-level leaf.
+const clustered = clusterTraceScene(scene, { primitiveLimit: 64 });
+console.log(clustered.clusters.records, '->', clustered.clusters.clusterRecords, 'top-level records');
+
+// The same walk, kernels and queries trace it.
+const buffers = uploadTraceScene(device, clustered);
+```
+
+The result is an ordinary scene. Nothing in the walk changes, so `traceModuleWgsl`, the batch kernels, the CPU walk,
+the GPU queries and `SdfGenerator` trace it as they are, in every node and triangle format, merged groups included.
+
+## Options
+
+- **`primitiveLimit`** (default 64, as in three-mesh-bvh): the walk down a tree stops at a subtree with fewer
+  triangles than this. Lower gives more, smaller clusters: a deeper top level over shallower trees. `Infinity` splits
+  nothing, and the scene comes back as it was.
+- **`split(record)`**: which instance records to cut. The default cuts a record whose mesh no other record uses, as
+  three-mesh-bvh references instanced meshes whole. The callback gets the record's `instanceIndex`, `meshIndex` (or
+  `mergedGroup`), `merged` and `sharedBy` (how many records use its mesh). Instanced meshes can be cut too; their
+  cluster copies are shared by every instance.
+- **`topLevel`**: the top level's SAH options.
+
+{/* snippet: clustered-split */}
+```ts
+const clustered = clusterTraceScene(scene, {
+    // Instanced meshes too, but not the mesh you refit (its cluster copies would not follow).
+    split: (record) => record.meshIndex !== characterMesh,
+});
+```
+
+`meshClusters(scene, nodeOffset, primitiveLimit)` returns one mesh's cut without building anything: each cluster's
+root, triangle count and object-space box.
+
+## Hits stay exact
+
+Each cluster's record is the instance's own record (transform, instance index, mask, material, flags) pointing at the
+cluster's subtree, so a hit names the same instance and triangle, with the same side, material and normal, and `t` is
+the same to the bit. The one difference is which of two triangles at the same distance (or a few ulps apart, where
+faces meet) is reported, because the walk meets them in another order.
+
+## What it costs
+
+- **Memory:** a 64-byte record and about two top-level nodes per cluster, and a 32-byte frame slot per cluster in a
+  quantized scene. A subtree is copied once, so that the walk can enter it at its root. A mesh tree that only split
+  records use is left out, as three-mesh-bvh uploads only the subtrees its leaves enter, so the mesh's nodes move into
+  the copies rather than being held twice. `clustered.clusters` reports the counts and `addedBytes`.
+- **Stack:** a deeper top level over shallower trees. `clusterTraceScene` throws if the trace stack (64 entries) can't
+  hold the result; raise `primitiveLimit` then.
+- **Build time:** a CPU pass over the nodes and a CPU top-level build over every cluster.
+
+## Measured
+
+CPU walk, nodes visited per ray (both levels), not time. Sixteen meshes of 4,000 triangles whose boxes overlap, one
+instance each, quantized nodes, 20,000 random rays:
+
+| Scene | Top-level records | Bytes | Closest hit | Any hit |
+| --- | ---: | ---: | ---: | ---: |
+| Instanced (one leaf per mesh) | 16 | 5.07 MB | 271.9 | 139.6 |
+| Clustered, `primitiveLimit` 256 | 384 | 5.12 MB | 214.4 | 130.5 |
+| Clustered, 64 (default) | 1,515 | 5.27 MB | 185.8 | 120.1 |
+| Clustered, 16 | 6,263 | 5.87 MB | 135.4 | 97.7 |
+| [Merged static](/scenes/merged-static) | 1 | 4.84 MB | 53.2 | 48.6 |
+
+GPU timings are not measured yet.
+
+## Clustered or merged?
+
+For instances that never move, [merging](/scenes/merged-static) does more: one world-space tree over all of them, no
+top level to walk. Clustering keeps each mesh in its own space, so it also works where merging doesn't: instanced
+meshes (merging never copies a mesh used twice), instances you will move (cluster again after moving them), and a
+scene that mixes merged groups with other instances (a merged group is cut like any mesh). It costs no triangle
+copies.
+
+## Limits
+
+- **Assembled scenes only.** It works on a `TraceSceneData` (`buildTraceScene`, `assembleTraceScene`). `SceneTrees`
+  and its GPU top level have no clustered mode, and neither does the `/three` sync.
+- **Static meshes.** A refit does not reach a mesh's cluster copies. A mesh whose own tree was left out has
+  `clustered: true` in `scene.meshes` (its triangles are where they were, so filter flags are written there as
+  before), and `meshRefitPlacement` refuses it. Leave meshes you refit out with `split`.
+- **Moving instances:** a clustered scene is a CPU build of the whole top level. After a move, assemble and cluster
+  again.

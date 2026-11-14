@@ -4,8 +4,8 @@ description: The API mapping from three-mesh-bvh 0.9, what is missing here, what
 nav: 86
 ---
 
-This compares `@pmndrs/bvh` with three-mesh-bvh 0.9.18. Of the 52 features audited, 31 have an equivalent here, 7 have
-part of one, 9 are missing and 5 won't be done. The full audit, with the code behind each row, is
+This compares `@pmndrs/bvh` with three-mesh-bvh 0.9.18. Of the 52 features audited, 35 have an equivalent here, 8 have
+part of one, 4 are missing and 5 won't be done. The full audit, with the code behind each row, is
 [`docs/internals/PARITY.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/PARITY.md).
 
 ## CPU: MeshBVH and friends
@@ -39,6 +39,7 @@ Without three, the same queries are on the core's `CpuMeshBvh` with plain points
 | `bvh.update()` (repack everything) | `sync.sync()`: only the meshes and instances that changed |
 | `bvh.updateTransforms()` | `sync.update()` each frame, then `trees.update(encoder)`, then `bvh.update()` |
 | `bvh.updateAsync` | `trees.whenBuilt()`, `trees.whenRefined()` |
+| The clustered top level (`ClusteredBVH`, `primitiveLimit` 64; always on) | `clusterTraceScene(scene, { primitiveLimit })` on an assembled scene, opt-in; not in `SceneTrees` or the sync ([Clustered top level](/scenes/clustered-top-level)) |
 | `bvh.fns.raycastFirstHit(ray, &hit) -> bool` | WGSL `bvhTraceClosest(ray) -> BvhHit` (`hit.t < 0` on a miss); TSL `bvh.traceClosest(origin, direction, tMin, tMax)` |
 | `bvh.fns.raycastAnyHit(ray) -> bool` | WGSL `bvhTraceAny(ray) -> bool`; TSL `bvh.traceAny(...)` |
 | (none) | Ray masks: `bvhTraceClosestMasked`, `bvhTraceAnyMasked`; `rayMaskFromLayers(camera.layers)` |
@@ -68,11 +69,13 @@ Without three, the same queries are on the core's `CpuMeshBvh` with plain points
 - `PointsBVH` and the line BVHs (`LineSegmentsBVH`, `LineLoopBVH`, `LineBVH`): leaves hold triangles only.
 - `ObjectBVH.shapecast`.
 - `getJSONStructure`.
-- On the GPU: `ClusteredBVH`. SDF generation exists ([Signed distance fields](/tracing/sdf), `generateSdfTexture` in
-  `/three`), and so do closest point, sphere and box tests, shapecasts and the WGSL helpers `intersectRayTriangle` and
-  `closestPointToTriangle` ([Spatial queries on the GPU](/tracing/gpu-queries)), with two differences: shapecast hooks
-  are WGSL functions, not TSL callbacks as `getShapecastFn` takes, and queries run over the whole scene in world space
-  rather than over one mesh.
+
+On the GPU nothing is missing. SDF generation exists ([Signed distance fields](/tracing/sdf), `generateSdfTexture` in
+`/three`), and so do closest point, sphere and box tests, shapecasts and the WGSL helpers `intersectRayTriangle` and
+`closestPointToTriangle` ([Spatial queries on the GPU](/tracing/gpu-queries)), with two differences: shapecast hooks
+are WGSL functions, not TSL callbacks as `getShapecastFn` takes, and queries run over the whole scene in world space
+rather than over one mesh. `ClusteredBVH`'s cut is `clusterTraceScene` ([Clustered top level](/scenes/clustered-top-level)),
+for scenes assembled without `SceneTrees`.
 
 ## Won't be done
 
