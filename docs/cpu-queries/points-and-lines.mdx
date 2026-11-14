@@ -1,0 +1,81 @@
+---
+title: Points and lines
+description: Trees over points and line segments, with three's raycast thresholds, shapecasts and closest point, engine-free.
+nav: 74
+sourcecode: src/query/primitive-bvh.ts
+---
+
+`CpuPointsBvh` and `CpuSegmentsBvh` put points and line segments in a tree, as three-mesh-bvh's `PointsBVH` and line
+BVHs do. Use them to pick points in a scan, to snap a cursor to the nearest wire of a drawing, or to find the segments
+near a shape. They need no GPU and no engine. In three, [`PointsBVH` and the line trees](/three/points-and-lines) wrap
+them.
+
+{/* snippet: points */}
+```ts
+import { CpuPointsBvh, CpuSegmentsBvh } from '@pmndrs/bvh';
+
+const cloud = CpuPointsBvh.build({ positions, indices }, { maxLeafPrimitives: 8 }); // synchronous, no WebAssembly
+const ray = { origin: [0, 0, 5], direction: [0, 0, -1] }; // a unit direction, as three's rays are
+const hits = cloud.raycast(ray, { threshold: 0.01, near: 0, far: 100 }); // three's Points.raycast test
+const first = cloud.raycastFirst(ray, { threshold: 0.01 }); // or null
+if (first) console.log(first.index, first.distance, first.distanceToRay, first.pointOnRay, first.pointOnPrimitive);
+const nearest = cloud.closestPointToPoint([0, 1, 0]); // { point, distance, index } or null
+
+// Lines: 'segments' pairs entries (LineSegments), 'strip' joins each to the next (Line), 'loop' closes it (LineLoop).
+const lines = CpuSegmentsBvh.build({ positions, indices, mode: 'strip', start: 0, count: 1000 });
+const below: number[] = [];
+lines.shapecast({
+    intersectsBounds: (box) => box.min.y < 0.5, // false skips the box
+    intersectsLine: (line, index) => {
+        if (line.start.y < 0.5 && line.end.y < 0.5) below.push(index); // the segment's first entry
+        return false; // true stops the cast
+    },
+});
+```
+
+## The input
+
+Points and lines come as three draws them: `positions` (`x, y, z` per vertex, `Float32Array`), an optional `indices`,
+and a range of entries (`start`, `count`, like a draw range; default all). An **entry** is a position in `indices`, or
+a vertex without them. A point is one entry. A segment starts at an entry and ends at the next:
+
+| `mode` | three object | Segments |
+| --- | --- | --- |
+| `'segments'` (default) | `LineSegments` | entries 0-1, 2-3, ... |
+| `'strip'` | `Line` | 0-1, 1-2, ..., to the last entry |
+| `'loop'` | `LineLoop` | the strip, then the last entry back to the first |
+
+A hit's `index` is the point's entry, or the segment's first entry (three's `index` for lines; for points three
+reports the entry's vertex, `indices[index]`). The positions are copied into the tree as `f32`, so moving them later
+needs `refit()`.
+
+## Queries
+
+- `raycast(ray, { threshold, near, far, accept })` returns every primitive within `threshold` of the ray, nearest first
+  (then by entry). It is three's test, computed with three's `Ray` operations in three's order: a point counts when
+  strictly closer than `threshold`, a segment when no farther. `distance` runs from the ray's origin to `pointOnRay`;
+  `distanceToRay` is the gap between the ray and the primitive. The default threshold is 1, three's. A direction that
+  isn't unit length is normalized first. `accept(hit)` can drop hits (a draw range, a distance in another space).
+- `raycastFirst(ray, options)` returns the closest hit (the lower entry on a tie), or null. Boxes beyond the closest hit
+  so far are skipped, as in three-mesh-bvh's `firstHitOnly`.
+- `closestPointToPoint(point, target, minThreshold, maxThreshold)` returns `{ point, distance, index }` (a point on a
+  segment, clamped to its ends), or null when nothing is within `maxThreshold`. It stops at the first one within
+  `minThreshold`.
+- `shapecast({ intersectsBounds, intersectsPoint | intersectsLine, intersectsRange, boundsTraverseOrder })` has
+  [`CpuMeshBvh.shapecast`'s](/cpu-queries/shapecast) contract, with each point or segment handed over as a scratch
+  object, with its entry.
+- `traverse`, `traverseNodes`, `getBoundingBox`, `resolvePrimitiveIndex`, `getPoint` / `getSegment`, `refit(input)`,
+  `serialize()` and `CpuPointsBvh.deserialize(bytes)` / `CpuSegmentsBvh.deserialize(bytes)` (checked: a corrupt file
+  throws). `getBVHExtremes`, `validateBounds` and `bvhHelperPositions` take these trees too.
+
+## The tree and its limits
+
+- **The builder is a centre split** (three-mesh-bvh's default `CENTER`), in TypeScript: the longest axis of the
+  primitives' centres is cut at its middle, with a median cut when that leaves a side empty or past depth 40. It runs
+  on the calling thread; a million points take about a second, as long as three-mesh-bvh's `PointsBVH`. tinybvh isn't used: it builds over triangles, and points
+  given to it as flat triangles come out with one node per point.
+- **Nodes are the GPU layout's** 64-byte two-child nodes, leaves of up to 8 primitives. A point record is 16 bytes, a
+  segment 32: about 27 bytes per point and 43 per segment with the nodes.
+- **CPU only.** The GPU walk has no point or segment leaves yet; the plan is in
+  [`docs/internals/design/points-and-lines.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/points-and-lines.md).
+- An empty input builds an empty tree, which every query answers with nothing.

@@ -231,6 +231,16 @@ Raycasts per second, Node 22 on the Apple M5 while other jobs were running (`nod
 
 At 10k triangles: three 3,390; three-mesh-bvh 607k (CENTER) and 656k (SAH); ours 629k (`firstHitOnly`). All hits: 285k, 281k and 363k.
 
+## Points and lines (`PointsBVH`, `LineSegmentsBVH`, `LineLoopBVH`, `LineBVH`)
+
+`src/three/points-lines.ts` (PARITY 3.2, 3.3; user page `docs/three/points-and-lines.mdx`; design and the GPU decision in `docs/internals/design/points-and-lines.md`). The classes extend the core's `CpuPointsBvh` / `CpuSegmentsBvh` (`src/query/primitive-bvh.ts`), built by `computeBoundsTree({ type })` (an overload returns the class built; `geometry.boundsTree` stays typed as `BvhBoundsTree`). `acceleratedRaycast` sends `Points` and anything with `isLine` to `raycastPointsOrLines`, which calls the tree's `raycastObject3D` (three-mesh-bvh's method name) or three's own raycast (captured at module load) when there is no tree of ours.
+
+- **Three's raycast, step for step:** the bounding-sphere test (three-mesh-bvh skips it), three's `Ray.applyMatrix4` for the local ray, the threshold over the mean of `object.scale`, the draw range read at each raycast, `near`/`far` on the world distance through three's own `Vector3` calls, pushes in entry order so `Raycaster`'s stable sort gives three's list. Tested field for field (`src/three/points-lines.test.ts`) on random clouds and lines, indexed or not, rotated, scaled, mirrored and stretched objects, draw ranges from odd and even entries, thresholds down to 0, `near`/`far`, `firstHitOnly`.
+- **Draw ranges without rebuilds:** the tree covers every entry and the raycast filters by the range. A `LineSegments` range from an odd entry walks a second tree over odd-aligned pairs (made on first use, dropped on refit); a `LineLoop` range's closing segment is tested alone (`raySegmentHit`).
+- **`firstHitOnly`:** the core ranks by local distance; a second walk over hits within 1e-9 of the closest ranks them by world distance, so the pick is three's sorted first (an exact tie goes to the lower entry; three-mesh-bvh keeps the one its tree reaches first).
+- **Staleness and kind:** position version or index changed, or a tree of another kind than the object: three's raycast, one warning per tree. `refit()` rereads the attribute.
+- **Departures from three:** an empty `LineLoop` range reports nothing (three reads entry -1 and reports a `NaN` distance); positions that aren't plain `f32` are rounded to `f32` in the tree.
+
 ## Switching the known consumers
 
 - **reflections:** use `bvhSceneFromObject3D` in place of `bvhTraceSceneFromObjects`. It also covers BatchedMesh, groups and draw ranges. `SceneTreesObject3DSync.update()` replaces `refit()`, which rebuilt the CPU top level each time.

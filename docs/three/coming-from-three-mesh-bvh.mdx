@@ -1,11 +1,11 @@
 ---
 title: Coming from three-mesh-bvh
 description: The API mapping from three-mesh-bvh 0.9, what is missing here, what won't be, and when to stay with three-mesh-bvh.
-nav: 86
+nav: 87
 ---
 
-This compares `@pmndrs/bvh` with three-mesh-bvh 0.9.18. Of the 52 features audited, 42 have an equivalent here, 3 have
-part of one, 2 are missing and 5 won't be done. The full audit, with the code behind each row, is
+This compares `@pmndrs/bvh` with three-mesh-bvh 0.9.18. Of the 52 features audited, 44 have an equivalent here, 3 have
+part of one and 5 won't be done. The full audit, with the code behind each row, is
 [`docs/internals/PARITY.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/PARITY.md).
 
 ## CPU: MeshBVH and friends
@@ -31,6 +31,7 @@ Most code switches by changing the import:
 | `ObjectBVH.shapecast({ intersectsBounds, intersectsObject, ... })` | `picker.shapecast(...)`: the same callbacks over the objects' world boxes ([Shapecast over the objects](/three/cpu-raycast#shapecast-over-the-objects)) |
 | `BatchedMesh.prototype.computeBoundsTree = computeBatchedBoundsTree` | The same: a tree per geometry in `batchedMesh.boundsTrees` ([BatchedMesh](/three/cpu-raycast#batchedmesh)) |
 | `StaticGeometryGenerator` | The same class: skinned and morphed meshes baked on the CPU ([On the CPU](/three/skinned-and-morphed#on-the-cpu-staticgeometrygenerator)) |
+| `PointsBVH`, `LineSegmentsBVH`, `LineLoopBVH`, `LineBVH`, `computeBoundsTree({ type })` | The same classes and option; `acceleratedRaycast` on `Points` and the line objects answers as three's raycast, draw range read at each raycast ([Points and lines](/three/points-and-lines)) |
 
 Without three, the same queries are on the core's `CpuMeshBvh` with plain points ([CPU queries](/cpu-queries/raycast)).
 
@@ -76,11 +77,13 @@ There, with differences:
 - **`StaticGeometryGenerator`:** it also bakes a mesh again when only a morph weight changed (three-mesh-bvh keeps the
   old pose then).
 
+- **Points and lines:** CPU only (`SceneTrees` and the GPU walk take triangles), as three-mesh-bvh's are. Where
+  three-mesh-bvh departs from three's raycast (no bounding-sphere test, the draw range and groups fixed at build time,
+  the index reordered outside `indirect` mode), we follow three ([Points and lines](/three/points-and-lines#where-three-mesh-bvh-differs)).
+
 ## Missing
 
-- `PointsBVH` and the line BVHs (`LineSegmentsBVH`, `LineLoopBVH`, `LineBVH`): leaves hold triangles only.
-
-On the GPU nothing is missing. SDF generation exists ([Signed distance fields](/tracing/sdf), `generateSdfTexture` in
+Nothing on the CPU. On the GPU nothing is missing either. SDF generation exists ([Signed distance fields](/tracing/sdf), `generateSdfTexture` in
 `/three`), and so do closest point, sphere and box tests, shapecasts (with WGSL or TSL hooks) and the WGSL helpers
 `intersectRayTriangle` and `closestPointToTriangle` ([Spatial queries on the GPU](/tracing/gpu-queries)); the queries
 run over the whole scene in world space rather than over one mesh. `ClusteredBVH`'s cut is `clusterTraceScene`
@@ -106,7 +109,6 @@ run over the whole scene in world space rather than over one mesh. `ClusteredBVH
 ## When to stay with three-mesh-bvh
 
 - You need WebGL2 GPU traversal, or GLSL.
-- You need points or lines as primitives.
 - Memory matters more than ray speed. Our GPU scenes use about 7 times three-mesh-bvh's bytes beyond the geometry on
   Sponza (356 MiB against 51 MiB with defaults on both sides; 6.5 times on Bistro exterior). Indexed leaves, off by
   default, bring Sponza to 226 MiB. Our CPU trees (`computeBoundsTree`) keep 64-byte nodes: 8-9 times. See

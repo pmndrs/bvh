@@ -1,0 +1,106 @@
+---
+title: Points and lines in three
+description: PointsBVH, LineSegmentsBVH, LineLoopBVH and LineBVH as drop-ins, with acceleratedRaycast on Points and line objects.
+nav: 86
+sourcecode: src/three/points-lines.ts
+---
+
+`Points`, `LineSegments`, `LineLoop` and `Line` get trees as meshes do: `computeBoundsTree({ type })` with
+three-mesh-bvh's class names, and `acceleratedRaycast` as their `raycast`. Picking a point in a large scan or a wire
+in a drawing then visits a few boxes instead of every vertex. [Example: three/point-cloud](/examples/examples).
+
+{/* snippet: three-points */}
+```ts
+import { BufferGeometry, Line, Points, Raycaster } from 'three';
+import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree, LineBVH, PointsBVH } from '@pmndrs/bvh/three';
+
+BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+Points.prototype.raycast = acceleratedRaycast;
+Line.prototype.raycast = acceleratedRaycast; // LineSegments and LineLoop inherit it
+
+const tree = cloud.geometry.computeBoundsTree({ type: PointsBVH }); // no prepareBoundsTrees() needed
+line.geometry.computeBoundsTree({ type: LineBVH }); // LineSegmentsBVH, LineLoopBVH for the others
+
+const raycaster = new Raycaster();
+raycaster.params.Points.threshold = 0.01;
+raycaster.params.Line.threshold = 0.02;
+raycaster.firstHitOnly = true; // optional: only the closest
+const [hit] = raycaster.intersectObjects([cloud, line]); // distance, distanceToRay, point, index, object
+```
+
+| Object | `type` | Segments |
+| --- | --- | --- |
+| `Points` | `PointsBVH` | (points) |
+| `LineSegments` | `LineSegmentsBVH` | pairs of entries |
+| `LineLoop` | `LineLoopBVH` | each entry to the next, the last back to the first |
+| `Line` | `LineBVH` | each entry to the next |
+
+## What it returns
+
+The same intersections as three's `Points.raycast` and `Line.raycast`, in the same order, field for field (tested on
+random clouds and lines, indexed or not, under rotated, scaled, mirrored and stretched objects, with draw ranges from
+odd and even entries and thresholds down to 0):
+
+- three's bounding-sphere test first, then the ray in the object's space and the threshold divided by the object's mean
+  `scale`, as three does;
+- the draw range, read at each raycast; `raycaster.near` and `far` on the world distance;
+- `distance`, `point` (on the ray for points, on the segment for lines), `distanceToRay` (points), `index` (the point's
+  vertex; the segment's first entry in the index), and `face`, `faceIndex` and `barycoord` null.
+
+With `raycaster.firstHitOnly` only the closest comes back, as in three-mesh-bvh. A tree has no build options of its
+own: `strategy` is accepted (every value builds the same centre-split tree), `maxLeafSize` and `targetLeafSize` set the
+leaf size (1 to 8), `setBoundingBox` and `onProgress` work as for meshes, and `range` throws. Building needs no
+WebAssembly.
+
+## Queries
+
+{/* snippet: three-points-queries */}
+```ts
+import { Box3, Vector3 } from 'three';
+
+const tree = cloud.geometry.computeBoundsTree({ type: PointsBVH });
+const box = new Box3(new Vector3(-1, 0, -1), new Vector3(1, 1, 1));
+const inside: number[] = [];
+tree.shapecast({
+    intersectsBounds: (bounds) => box.intersectsBox(bounds),
+    intersectsPoint: (point, index) => {
+        if (box.containsPoint(point)) inside.push(index); // the entry; its vertex is geometry.index?.getX(index) ?? index
+        return false;
+    },
+});
+const nearest = tree.closestPointToPoint(new Vector3(0, 2, 0)); // { point: Vector3, distance, index } or null
+tree.refit(); // after editing the positions in place (bump the attribute's version)
+const bytes = tree.serialize(); // new PointsBVH(geometry, { layout: PointsBVH.deserialize(bytes).layout })
+```
+
+The line trees' `shapecast` takes `intersectsLine(line, index, contained, depth)` with a `Line3`. `BVHHelper` draws
+these trees, and `getBVHExtremes`, `validateBounds` and `estimateMemoryInBytes` read them. Without three, the same trees
+are the core's [`CpuPointsBvh` and `CpuSegmentsBvh`](/cpu-queries/points-and-lines).
+
+## Where three-mesh-bvh differs
+
+We follow three where three-mesh-bvh 0.9.18 doesn't:
+
+- it skips three's bounding-sphere test;
+- it builds over the draw range and groups at build time, where three's raycast ignores groups and reads the draw range
+  when it runs (for a range from an odd entry its `LineSegmentsBVH` still pairs entries from an even one, and its
+  `LineLoopBVH` closes a range back to entry 0);
+- outside `indirect: true` it reorders the geometry's index (and adds one to a geometry without), so a line hit's
+  `index` changes meaning. Our trees never touch the geometry; `indirect` is ignored;
+- `intersectsPoint` and `intersectsLine` get its buffer position; ours get the entry.
+
+On an exact tie (two segments meeting at a vertex) our `firstHitOnly` keeps the lower entry, three's sorted order;
+three-mesh-bvh keeps the one its tree reaches first.
+
+## Limits and fallbacks
+
+- When the position attribute's version or the index changed since the build, raycasts use three's own (with a warning)
+  until `tree.refit()` or `computeBoundsTree` runs again. A tree of the wrong kind (a `PointsBVH` on a `Line`) does
+  too.
+- Positions that aren't plain `f32` (normalized or interleaved attributes) are copied as `f32`, which may round them
+  where three reads the exact value.
+- An empty draw range on a `LineLoop` returns nothing; three reads entry -1 there and reports a `NaN` distance.
+- `geometry.boundsTree` is typed as the mesh tree (`BvhBoundsTree`); for these objects it holds the class built, which
+  `computeBoundsTree({ type })` returns typed.
+- CPU only: `SceneTrees` and the GPU walk take triangles.
