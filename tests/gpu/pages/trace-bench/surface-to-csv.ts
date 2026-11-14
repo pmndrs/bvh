@@ -250,6 +250,31 @@ export function surfaceRaysRows(data: SurfaceRaysData): { timed: MetricRow[]; co
             for (const [part, value] of Object.entries(bytes)) counted.push({ scene, metric: `surface-rays/combined_leaves/${name}/bytes_${part}`, value });
         }
     }
+    const folded = data.foldedDecode;
+    if (folded) {
+        for (const entry of folded.entries) {
+            const prefix = `surface-rays/paired/folded_decode/${entry.tree}/${entry.set}/${entry.mode}/quantized-${entry.layout}-${entry.decode}`;
+            const loaded = [...entry.mraysPerRound].sort((a, b) => a - b);
+            timed.push(
+                { scene, metric: `${prefix}_mrays_per_s_median_of_rounds`, value: middle(loaded) },
+                { scene, metric: `${prefix}_mrays_per_s_min_of_rounds`, value: loaded[0] },
+                { scene, metric: `${prefix}_mrays_per_s_max_of_rounds`, value: loaded[loaded.length - 1] },
+            );
+        }
+        for (const ratio of folded.ratios) {
+            const prefix = `surface-rays/paired/${ratio.name}`;
+            timed.push(
+                { scene, metric: `${prefix}/median_of_rounds`, value: ratio.median },
+                { scene, metric: `${prefix}/min_of_rounds`, value: ratio.min },
+                { scene, metric: `${prefix}/max_of_rounds`, value: ratio.max },
+            );
+            ratio.perRound.forEach((value, round) => timed.push({ scene, metric: `${prefix}/round${round + 1}`, value }));
+        }
+        for (const entry of folded.agreement) {
+            const prefix = `surface-rays/folded_decode/${entry.tree}/${entry.set}/${entry.mode}/quantized-${entry.layout}`;
+            counted.push({ scene, metric: `${prefix}/same`, value: entry.same }, { scene, metric: `${prefix}/ties`, value: entry.ties }, { scene, metric: `${prefix}/different`, value: entry.different });
+        }
+    }
     const orders = data.anyHitOrder;
     if (orders) {
         for (const entry of orders.entries) {

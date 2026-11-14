@@ -249,7 +249,23 @@ export interface SurfaceRaysData {
     triangleLeaves?: LeafLayoutResult;
     nodeFormat?: NodeFormatResult;
     combinedLeaves?: CombinedLeavesResult;
+    foldedDecode?: FoldedDecodeResult;
     anyHitOrder?: AnyHitOrderResult;
+}
+
+/**
+ * Section 9: the folded decode of quantized nodes (`quantizedDecode: 'folded'`,
+ * docs/internals/design/compressed-nodes.md, question 6) against the exact decode, on the
+ * quantized records scenes of section 6 (and section 8's quantized indexed ones when it ran);
+ * ratios `folded_over_exact/<tree>/<set>/<mode>` and `folded_indexed_over_exact_indexed/...`
+ * (above 1: folded is faster). Answers: the exact walk's, but for ties (same t, another
+ * triangle; folded boxes are a few ulps wider). `?skip=folded` leaves it out.
+ */
+export interface FoldedDecodeResult {
+    rounds: number;
+    entries: { tree: Tree; set: SetName; mode: 'closest' | 'any'; layout: LeafLayout; decode: 'exact' | 'folded'; mraysPerRound: number[]; singleMraysPerRound: number[] }[];
+    ratios: PairedRatio[];
+    agreement: { tree: Tree; set: SetName; mode: 'closest' | 'any'; layout: LeafLayout; rays: number; same: number; ties: number; different: number }[];
 }
 
 /**
@@ -387,7 +403,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
     try {
         const profileName = (new URLSearchParams(location.search).get('profile') ?? 'full') as SurfaceProfileName;
         const profile = SURFACE_PROFILES[profileName];
-        // `?skip=hit-record,leaves,combined,any-order`: leave out sections 4, 5, 8 and 7 (for a run that only wants the others).
+        // `?skip=hit-record,leaves,combined,folded,any-order`: leave out sections 4, 5, 8, 9 and 7 (for a run that only wants the others).
         const skip = new Set((new URLSearchParams(location.search).get('skip') ?? '').split(',').filter((name) => name.length > 0));
         if (!profile) throw new Error(`unknown profile "${profileName}" (known: ${Object.keys(SURFACE_PROFILES).join(', ')})`);
         const { device } = await requestBenchDevice();
@@ -911,6 +927,77 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             }
             const combinedLeaves: CombinedLeavesResult = { rounds: profile.rounds, entries: combinedEntries, ratios: combinedRatios, agreement: combinedAgreement, bytes: combinedBytes };
 
+            // 9: the folded decode (quantizedDecode: 'folded') against the exact one, on section 6's quantized records scenes
+            // (and section 8's quantized indexed ones when it ran): the same scenes and trees, only the kernel differs.
+            const runFolded = !skip.has('folded');
+            const foldedLayouts: LeafLayout[] = runCombined ? ['records', 'indexed'] : ['records'];
+            const foldedKernels: Partial<Record<LeafLayout, TraceBatchKernel>> = {};
+            if (runFolded) {
+                for (const layout of foldedLayouts) {
+                    const kernel = await TraceBatchKernel.create(device, { label: `surface folded ${layout}`, nodeFormat: 'quantized', quantizedDecode: 'folded', ...(layout === 'indexed' ? { triangleLeaves: 'indexed' as const } : {}) });
+                    foldedKernels[layout] = kernel;
+                    extraKernels.push(kernel);
+                }
+            }
+            const foldedCases = runFolded ? foldedLayouts.flatMap((layout) => leafCases.map((entry) => ({ ...entry, layout }))) : [];
+            const foldedEntries: FoldedDecodeResult['entries'] = foldedCases.flatMap((entry) =>
+                (['exact', 'folded'] as const).map((decode) => ({ tree: entry.tree, set: entry.set as SetName, mode: entry.mode, layout: entry.layout, decode, mraysPerRound: [] as number[], singleMraysPerRound: [] as number[] })),
+            );
+            const foldedEntryOf = (entry: (typeof foldedCases)[number], decode: 'exact' | 'folded') => {
+                const found = foldedEntries.find((candidate) => candidate.tree === entry.tree && candidate.set === entry.set && candidate.mode === entry.mode && candidate.layout === entry.layout && candidate.decode === decode);
+                if (!found) throw new Error(`no folded entry ${entry.tree} ${entry.set} ${entry.mode} ${entry.layout} ${decode}`);
+                return found;
+            };
+            const foldedKernelOf = (layout: LeafLayout, decode: 'exact' | 'folded'): TraceBatchKernel => (decode === 'folded' ? (foldedKernels[layout] as TraceBatchKernel) : combinedKernels[layout]);
+            // Folded boxes are a few ulps wider, so answers must be the exact walk's, but for ties (same t, another triangle).
+            const foldedAgreement: FoldedDecodeResult['agreement'] = [];
+            for (const entry of foldedCases) {
+                const set = sets.find((candidate) => candidate.name === entry.set) as RaySet;
+                const expected = new Uint32Array(await traceOnce(device, foldedKernelOf(entry.layout, 'exact'), combinedScenes[entry.layout][entry.tree], entry.mode, set.buffer, set.count));
+                const actual = new Uint32Array(await traceOnce(device, foldedKernelOf(entry.layout, 'folded'), combinedScenes[entry.layout][entry.tree], entry.mode, set.buffer, set.count));
+                const words = expected.length / set.count;
+                let same = 0;
+                let ties = 0;
+                for (let ray = 0; ray < set.count; ray++) {
+                    let equal = true;
+                    for (let word = 0; word < words && equal; word++) equal = expected[ray * words + word] === actual[ray * words + word];
+                    if (equal) same++;
+                    else if (entry.mode === 'closest' && expected[ray * words + HIT_RECORD_WORD.t] === actual[ray * words + HIT_RECORD_WORD.t]) ties++;
+                }
+                foldedAgreement.push({ tree: entry.tree, set: entry.set as SetName, mode: entry.mode, layout: entry.layout, rays: set.count, same, ties, different: set.count - same - ties });
+                await yieldToBrowser();
+            }
+            const timeFolded = async (entry: (typeof foldedCases)[number], decode: 'exact' | 'folded'): Promise<{ loaded: number; single: number }> => {
+                const set = sets.find((candidate) => candidate.name === entry.set) as RaySet;
+                const results = leafResults.get(`${set.name}/${entry.mode}`) as GPUBuffer;
+                const encode = (encoder: GPUCommandEncoder, timestampWrites?: GPUComputePassTimestampWrites): void =>
+                    foldedKernelOf(entry.layout, decode).encode(encoder, combinedScenes[entry.layout][entry.tree], { mode: entry.mode, rays: set.buffer, results, count: set.count, timestampWrites });
+                const single = await measureDispatches(() => timer.time((encoder, timestampWrites) => encode(encoder, timestampWrites)), profile.warmups, profile.timed);
+                const loaded = await timeLoaded(device, encode, set.count, single.medianMs, profile.loadedMs);
+                await yieldToBrowser();
+                return { loaded: loaded.mraysPerSecond, single: set.count / (single.medianMs * 1e3) };
+            };
+            if (runFolded) progress(`${sceneId}: folded decode against exact on quantized nodes (${foldedLayouts.join(', ')}), ${profile.rounds} rounds of ${foldedCases.length} cases, the order reversed every other round`);
+            for (let round = 0; round < (runFolded ? profile.rounds : 0); round++) {
+                for (const step of leafLayoutRoundOrder(foldedCases, ['exact', 'folded'] as const, round)) {
+                    const entry = foldedEntryOf(step.case as (typeof foldedCases)[number], step.layout);
+                    const timed = await timeFolded(step.case as (typeof foldedCases)[number], step.layout);
+                    entry.mraysPerRound.push(timed.loaded);
+                    entry.singleMraysPerRound.push(timed.single);
+                }
+                progress(
+                    `${sceneId}: folded round ${round + 1} of ${profile.rounds}: ` +
+                        foldedCases.map((entry) => `${entry.layout} ${entry.tree} ${entry.set} ${entry.mode} folded/exact ${(foldedEntryOf(entry, 'folded').mraysPerRound[round] / foldedEntryOf(entry, 'exact').mraysPerRound[round]).toFixed(3)}`).join(', '),
+                );
+            }
+            const foldedRatios: PairedRatio[] = foldedCases.map((entry) =>
+                ratioOfRounds(`${entry.layout === 'records' ? 'folded_over_exact' : 'folded_indexed_over_exact_indexed'}/${entry.tree}/${entry.set}/${entry.mode}`, foldedEntryOf(entry, 'folded').mraysPerRound, foldedEntryOf(entry, 'exact').mraysPerRound),
+            );
+            for (const ratio of foldedRatios) {
+                progress(`${sceneId}: ${ratio.name}: median ${ratio.median.toFixed(3)} (${ratio.min.toFixed(3)}-${ratio.max.toFixed(3)} over ${profile.rounds} rounds)`);
+            }
+            const foldedDecode: FoldedDecodeResult = { rounds: profile.rounds, entries: foldedEntries, ratios: foldedRatios, agreement: foldedAgreement };
+
             // 7: any-hit child order (TraceModuleOptions.anyHitOrder): 'larger' and 'near' against the default 'far', any-hit, records.
             const runOrders = !skip.has('any-order');
             const orders: AnyHitOrderName[] = ['far', 'larger', 'near'];
@@ -992,6 +1079,7 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
                 ...(runLeaves ? { triangleLeaves } : {}),
                 nodeFormat,
                 ...(runCombined ? { combinedLeaves } : {}),
+                ...(runFolded ? { foldedDecode } : {}),
                 ...(runOrders ? { anyHitOrder } : {}),
             };
 
@@ -1017,6 +1105,9 @@ export async function runSurfaceRaysPage(sceneId: string): Promise<void> {
             }
             for (const entry of combinedAgreement) {
                 if (entry.different > 0) failures.push(`quantized ${entry.layout} changes ${entry.different} of ${entry.rays} answers (not ties) against quantized records on ${entry.tree} ${entry.set} ${entry.mode}`);
+            }
+            for (const entry of foldedAgreement) {
+                if (entry.different > 0) failures.push(`the folded decode changes ${entry.different} of ${entry.rays} answers (not ties) against the exact one on ${entry.layout} ${entry.tree} ${entry.set} ${entry.mode}`);
             }
             for (const entry of nodeCounts) {
                 if (entry.countedAgreement < MIN_COUNTED_AGREEMENT) failures.push(`the quantized counted walk disagrees with its production kernel on ${entry.tree} ${entry.set} ${entry.mode}: ${percent(entry.countedAgreement)}`);
