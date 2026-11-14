@@ -1019,8 +1019,8 @@ export function setBoundsTree(geometry: BufferGeometry, tree: BvhBoundsTree): vo
     treesByPosition.set(tree.position, tree);
 }
 
-/** A tree class {@link computeBoundsTree} can build (three-mesh-bvh's `type` option). */
-export type BvhBoundsTreeType<T> = new (geometry: BufferGeometry, options: BvhBoundsTreeOptions) => T;
+/** A tree class {@link computeBoundsTree} can build (three-mesh-bvh's `type` option): constructed as `new type(geometry, options)` with the options given. */
+export type BvhBoundsTreeType<T> = new (geometry: BufferGeometry, options?: never) => T;
 
 /**
  * `BufferGeometry.prototype.computeBoundsTree`: builds `this.boundsTree`, a
@@ -1034,7 +1034,7 @@ export function computeBoundsTree<T>(this: BufferGeometry, options: BvhBoundsTre
 export function computeBoundsTree(this: BufferGeometry, options?: BvhBoundsTreeOptions): BvhBoundsTree;
 export function computeBoundsTree(this: BufferGeometry, options: BvhBoundsTreeOptions = {}): unknown {
     if (options.type && options.type !== BvhBoundsTree) {
-        const other = new options.type(this, options);
+        const other = new (options.type as unknown as new (geometry: BufferGeometry, options: BvhBoundsTreeOptions) => unknown)(this, options);
         (this as unknown as WithBoundsTree).boundsTree = other;
         return other;
     }
