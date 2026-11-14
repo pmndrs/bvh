@@ -10,9 +10,12 @@ nav: 0
   things move, and read by a WGSL ray walk that you put in your own shaders.
 </Intro>
 
-The core imports no engine. three.js support lives behind `@pmndrs/bvh/three`, and worker builds behind
-`@pmndrs/bvh/worker`. The same trees serve a raw compute pass, three's node system, a worker, or another library on the
-same `GPUDevice`.
+A BVH is a tree of boxes over a scene's triangles. It lets a ray, or a point, skip almost every triangle on the way to
+the one that matters. Ray tracing, picking, shadows, collision and distance fields all start from one.
+
+The core imports no engine. three.js support lives behind `@pmndrs/bvh/three`, Babylon.js support behind
+`@pmndrs/bvh/babylon`, and worker builds behind `@pmndrs/bvh/worker`. The same trees serve a raw compute pass, three's
+node system, a worker, or another library on the same `GPUDevice`.
 
 > [!IMPORTANT]
 > The package is at version 0.0.0 and not on npm yet. The API can still change before 0.1.
@@ -21,12 +24,17 @@ same `GPUDevice`.
 
 | Part | What it does | Page |
 | --- | --- | --- |
-| Builders | tinybvh (CPU, WebAssembly), H-PLOC and LBVH (GPU, WGSL), and a chooser that picks one | [Choosing a builder](/builders/choosing-a-builder) |
+| Builders | tinybvh (CPU, WebAssembly), H-PLOC and LBVH (GPU, WGSL), and a chooser that picks one. A new method from a paper is one more builder | [Choosing a builder](/builders/choosing-a-builder) |
 | One GPU layout | 64-byte two-child nodes (32-byte quantized ones in scenes, by default), 48-byte triangles, a parent per node, `GPU_LAYOUT_VERSION` | [The GPU layout](/concepts/gpu-layout) |
 | `SceneTrees` | A scene's trees on one device: GPU trees first, tinybvh's swapped in, the GPU top level, runtime changes | [SceneTrees](/scenes/scene-trees) |
 | Refits | Top-level refit over moving instances, per-mesh refit for deforming meshes, both on the GPU | [Refits](/scenes/refits) |
-| The WGSL walk | `bvhTraceClosest` and `bvhTraceAny`, masks, a triangle filter, a watertight triangle test | [Tracing in WGSL](/tracing/wgsl-walk) |
-| CPU queries | Raycast, shapecast, bvhcast and closest point over the same layout; points and lines with three's thresholds | [Raycast](/cpu-queries/raycast) |
+| Clustering | Big meshes cut into clusters, each its own top-level leaf (three-mesh-bvh's `ClusteredBVH`) | [Clustered top level](/scenes/clustered-top-level) |
+| The WGSL walk | `bvhTraceClosest` and `bvhTraceAny`, masks, a triangle filter, a watertight triangle test, ray batches | [Tracing in WGSL](/tracing/wgsl-walk) |
+| GPU spatial queries | Closest point, sphere and box tests and your own shapecast in WGSL | [Spatial queries](/tracing/gpu-queries) |
+| Signed distance fields | A 3D texture or buffer of distances to a scene's triangles, filled on the GPU | [SDF](/tracing/sdf) |
+| CPU queries | Raycast, shapecast, bvhcast and closest point over the same layout | [Raycast](/cpu-queries/raycast) |
+| Points and lines | Trees over points and line segments, on the CPU, with three's raycast thresholds | [Points and lines](/cpu-queries/points-and-lines) |
+| Serialization and baking | Build once (in Node, at build time), save the bytes, load them with no build | [Serialization and baking](/serialization/serialization-and-baking) |
 | three.js | Scenes from `Object3D`, GPU skinning, TSL nodes, and three-mesh-bvh's CPU API | [three.js](/three/overview) |
 | Babylon.js | Picking with `scene.pick`'s result, scenes from meshes, the walk in a `ComputeShader` (basic) | [Babylon.js](/engines/babylon) |
 | Workers | A pool of tinybvh workers that needs no cross-origin isolation | [Workers](/workers/workers) |
@@ -34,11 +42,15 @@ same `GPUDevice`.
 ## What it is not
 
 - It has no WebGL2 path. The CPU queries work anywhere JavaScript runs, but no GPU work targets WebGL2.
+- It is not a renderer. The package ends at the hit: the triangle, instance, barycentrics, face normal and a material
+  number it carries but never reads. What a hit looks like (lights, sampling, textures) is yours.
 - Babylon.js support is "it works", not polish: `/babylon` has picking that returns `scene.pick`'s `PickingInfo`, a
   mesh conversion, and the walk in a `ComputeShader` on the `WebGPUEngine`'s device, reached through the engine's
   internals ([Babylon.js](/engines/babylon)). It has no scene sync or skinning.
 - Points and lines are primitives on the CPU only ([Points and lines](/cpu-queries/points-and-lines)): the GPU walk and
   `SceneTrees` take triangles.
+- It is not a drop-in for all of three-mesh-bvh. Nearly all of its CPU API is here, and a few things are left out on
+  purpose ([Coming from three-mesh-bvh](/three/coming-from-three-mesh-bvh)).
 
 ## Where to start
 
@@ -47,3 +59,18 @@ same `GPUDevice`.
 3. [The GPU layout](/concepts/gpu-layout), if you will write your own walk or read the trees yourself.
 
 Users of three-mesh-bvh can start at [Coming from three-mesh-bvh](/three/coming-from-three-mesh-bvh).
+
+## How the docs are organised
+
+The sections run from first steps to depth, top to bottom in the sidebar:
+
+- **Getting started** and **Concepts** teach the layout and the rules every builder follows.
+- **Builders**, **Scenes**, **Workers** and **Engines** cover building trees and keeping them current, then sharing a
+  device with three or Babylon.
+- **Tracing** is the GPU side: the walk, queries and distance fields. **CPU queries** is the same on the CPU.
+- **three.js** has the engine pages, including the drop-ins for three-mesh-bvh.
+- **Serialization**, **Performance** (how every number was measured), **Examples** and the **API reference** close the
+  site.
+
+The repository front page, [the README](https://github.com/pmndrs/bvh#readme), has the three quick starts side by side,
+and [HISTORY.md](https://github.com/pmndrs/bvh/blob/main/HISTORY.md) tells how the package got here.

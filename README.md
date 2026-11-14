@@ -98,6 +98,37 @@ Basic, "it works": picking is the same on the WebGL engine, and the GPU half rea
 `_device`. What it reads, what differs from `scene.pick`, and what to watch for:
 [Babylon.js](https://bvh.docs.pmnd.rs/engines/babylon).
 
+## What is in the box
+
+Each line links to its page on the docs site.
+
+- **Builders:** tinybvh in WebAssembly, GPU H-PLOC and GPU LBVH, and a chooser that picks one and says why
+  ([Choosing a builder](https://bvh.docs.pmnd.rs/builders/choosing-a-builder)). A new method from a paper is one more
+  builder behind the same contract ([Adding a builder](https://bvh.docs.pmnd.rs/builders/adding-a-builder)).
+- **`SceneTrees`:** a whole scene on one device, with GPU trees first, tinybvh's swapped in, a GPU top level, and meshes
+  and instances that come and go ([SceneTrees](https://bvh.docs.pmnd.rs/scenes/scene-trees)); moving and deforming
+  meshes refit on the GPU ([Refits](https://bvh.docs.pmnd.rs/scenes/refits)).
+- **Clustering:** big meshes cut into clusters, each its own top-level leaf, as three-mesh-bvh's `ClusteredBVH` does
+  ([Clustered top level](https://bvh.docs.pmnd.rs/scenes/clustered-top-level)).
+- **GPU queries:** the WGSL walk for closest and any hit, with masks and a triangle filter; ray batches; closest point,
+  sphere and box tests and your own shapecast
+  ([Tracing in WGSL](https://bvh.docs.pmnd.rs/tracing/wgsl-walk),
+  [Spatial queries](https://bvh.docs.pmnd.rs/tracing/gpu-queries)).
+- **Signed distance fields:** a 3D texture or buffer of distances to a scene's triangles, filled on the GPU
+  ([SDF](https://bvh.docs.pmnd.rs/tracing/sdf)).
+- **CPU queries:** raycast, shapecast, `bvhcast`, closest point and frustum culling on the same layout, with
+  three-mesh-bvh's contracts ([Raycast](https://bvh.docs.pmnd.rs/cpu-queries/raycast)).
+- **Points and lines:** trees over points and line segments on the CPU, with three's raycast thresholds
+  ([Points and lines](https://bvh.docs.pmnd.rs/cpu-queries/points-and-lines)). The GPU walk takes triangles only.
+- **Serialization and baking:** build trees or whole scenes once, in Node or at build time, and load them later with no
+  build ([Serialization and baking](https://bvh.docs.pmnd.rs/serialization/serialization-and-baking)).
+- **Workers:** a tinybvh worker pool that needs no cross-origin isolation
+  ([Workers](https://bvh.docs.pmnd.rs/workers/workers)).
+- **three.js:** scenes from `Object3D`, GPU skinning, `BvhTraceNodes` for TSL, and three-mesh-bvh's CPU API as
+  drop-ins ([three.js](https://bvh.docs.pmnd.rs/three/overview)).
+- **Babylon.js:** picking with `scene.pick`'s result, scenes from meshes, and the walk in a `ComputeShader`
+  ([Babylon.js](https://bvh.docs.pmnd.rs/engines/babylon)).
+
 ## Which builder
 
 | Builder | What it is | Use it when | Needs |
@@ -164,5 +195,7 @@ loses them. Sources and commits are in [THIRD_PARTY.md](THIRD_PARTY.md). Only MI
 - Docs: `pnpm docs:snippets` copies the code samples (`docs/snippets/*.ts`, type-checked and tested) into the pages,
   `pnpm docs:api` builds the TypeDoc reference, `pnpm docs:site` builds the website with pmndrs/docs.
 - Rebuild the `.wasm` with `pnpm bvh:wasm`, or check it with `pnpm bvh:wasm --check`.
+- [HISTORY.md](HISTORY.md): how the package got here, by date. Adding a build method from a paper:
+  [the steps](https://bvh.docs.pmnd.rs/builders/adding-a-builder).
 - Contributor notes (design, divergences from the sources, the three-mesh-bvh audit, runbooks):
   [docs/internals/](docs/internals/README.md).
