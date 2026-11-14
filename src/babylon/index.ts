@@ -27,4 +27,4 @@ export {
 export { BabylonBvhPicker, type BabylonBvhPickerOptions, type BvhPickOptions } from './picking.ts';
 
 // Our buffers in a ComputeShader, with no copy.
-export { bindTraceBuffers, createTraceComputeShader, gpuBufferToDataBuffer, TRACE_BINDING_NAMES, traceBindingsMapping, type BabylonTraceBuffers, type TraceComputeShaderOptions } from './compute.ts';
+export { bindTraceBuffers, createTraceComputeShader, gpuBufferToDataBuffer, TRACE_BINDING_NAMES, traceBindingsMapping, wgslForBabylon, type BabylonTraceBuffers, type TraceComputeShaderOptions } from './compute.ts';

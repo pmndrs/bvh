@@ -115,6 +115,20 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         timeoutMs: 90_000,
     },
     {
+        name: 'babylon-picking',
+        path: 'babylon/picking',
+        title: 'Babylon picking',
+        description: 'scene.pick over a big mesh against the CPU raycast of @pmndrs/bvh/babylon, with picks per second for each. CPU picking needs no WebGPU: it runs on Babylon\'s WebGL engine too (?engine=webgl).',
+        timeoutMs: 120_000,
+    },
+    {
+        name: 'babylon-gpu-trace',
+        path: 'babylon/gpu-trace',
+        title: 'Babylon GPU trace',
+        description: 'Hard shadows from the WGSL walk in a Babylon ComputeShader on the WebGPUEngine\'s own device, bound to SceneTrees\' buffers with no copy and blended over Babylon\'s render. Babylon is "it works" only: it reaches into engine._device.',
+        timeoutMs: 120_000,
+    },
+    {
         name: 'compare-raycast',
         path: 'compare/raycast',
         title: 'compare/raycast',

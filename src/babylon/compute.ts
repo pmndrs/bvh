@@ -14,6 +14,8 @@
  * grows a buffer (`version` changes), call {@link bindTraceBuffers} again.
  */
 
+// WebGPUEngine's compute entry points (createComputeContext, computeDispatch) are an extension a bundle only has if something imports it.
+import '@babylonjs/core/Engines/WebGPU/Extensions/engine.computeShader.js';
 import { ComputeShader, type IComputeShaderOptions } from '@babylonjs/core/Compute/computeShader.js';
 import type { ComputeBindingMapping } from '@babylonjs/core/Engines/Extensions/engine.computeShader.js';
 import type { AbstractEngine } from '@babylonjs/core/Engines/abstractEngine.js';
@@ -85,6 +87,19 @@ export interface TraceComputeShaderOptions {
 }
 
 /**
+ * `code` with its comments removed. Babylon's WGSL preprocessor splits the
+ * source at every `;`, comments included, so a `//` comment holding a
+ * semicolon becomes a line of nonsense and the shader fails to compile
+ * ("expected ':' for struct member"). The walk's comments have semicolons,
+ * so anything given to `ComputeShader` as `traceModuleWgsl()` plus a kernel
+ * goes through this ({@link createTraceComputeShader} does it). WGSL has no
+ * strings, so removing `//` and block comments is safe.
+ */
+export function wgslForBabylon(code: string): string {
+    return code.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '');
+}
+
+/**
  * A `ComputeShader` whose WGSL is `traceModuleWgsl(options.trace)` followed by
  * `kernel` (your declarations and an `@compute` entry point that calls
  * `bvhTraceClosest` and friends), with the walk's names mapped to
@@ -97,7 +112,7 @@ export function createTraceComputeShader(name: string, engine: AbstractEngine, k
     return new ComputeShader(
         name,
         engine,
-        { computeSource: `${traceModuleWgsl(trace)}\n${kernel}` },
+        { computeSource: wgslForBabylon(`${traceModuleWgsl(trace)}\n${kernel}`) },
         { ...options.shader, bindingsMapping: { ...traceBindingsMapping(trace), ...options.bindings } },
     );
 }
