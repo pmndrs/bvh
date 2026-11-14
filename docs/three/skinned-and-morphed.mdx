@@ -59,10 +59,56 @@ A walking character's root motion is followed.
 
 GPU picking (`TraceBatchKernel` or `BvhTraceNodes`) hits the posed surface. CPU picking on a posed mesh stays on three's
 own raycast (`acceleratedRaycast` falls back for a `SkinnedMesh` or morph targets), which poses each vertex on the CPU.
-For CPU queries on the live pose with a tree, bake it (below).
+For CPU queries on the live pose with a tree, use `SkinnedMeshBVH` (one mesh, in its own space) or bake the meshes with
+`StaticGeometryGenerator` (below).
 
 Tested on the `three-skinned` GPU page (Apple M5): 0 disagreements over 16,384 rays at 4 frames, against three's CPU
 pose. The [skinned example](/examples/examples) shows nine characters.
+
+## A tree that follows the pose
+
+`SkinnedMeshBVH` is three-mesh-bvh's class: a CPU tree over one `SkinnedMesh`'s (or morph-target mesh's) posed
+triangles, in the mesh's own space. Set it as the geometry's tree and `acceleratedRaycast` hits the pose; refit it after
+the pose moves.
+
+{/* snippet: skinned-mesh-bvh */}
+```ts
+import { SkinnedMeshBVH, acceleratedRaycast, prepareBoundsTrees, setBoundsTree } from '@pmndrs/bvh/three';
+import { Mesh, SkinnedMesh, type Raycaster } from 'three';
+
+await prepareBoundsTrees();
+Mesh.prototype.raycast = acceleratedRaycast;
+SkinnedMesh.prototype.raycast = acceleratedRaycast; // three's SkinnedMesh has a raycast of its own
+
+const bvh = new SkinnedMeshBVH(character); // the current pose, in the mesh's own space
+setBoundsTree(character.geometry, bvh); // geometry.boundsTree = bvh
+
+// Each frame, after the animation mixer and updateMatrixWorld():
+const frame = () => {
+    bvh.refit(); // poses every vertex again (three's getVertexPosition) and refits the boxes
+    raycaster.firstHitOnly = true;
+    const [hit] = raycaster.intersectObject(character); // the live pose
+    console.log(hit?.point, hit?.face?.normal);
+};
+```
+
+- **The pose** is three's own CPU pose: each vertex through `mesh.getVertexPosition` (morph targets, then skinning), the
+  one three's raycast tests. `matrixWorld` places the tree as it places the mesh, so the object can move freely.
+- **`refit()`** poses every vertex again and refits the boxes, keeping the tree's shape (`CpuMeshBvh.refit`). A tree
+  refitted many times over very different poses gets slower boxes; build a new one now and then if that matters.
+- **Queries** (`raycast`, `raycastFirst`, `shapecast`, `closestPointToPoint`, ...) read the posed corners. A raycast
+  hit's `face.normal` comes from the pose; its `uv` and interpolated `normal` from the geometry's attributes, as three's
+  raycast of a `SkinnedMesh` gives them.
+- **`SkinnedMesh.prototype.raycast`** must be set too: three's `SkinnedMesh` has a raycast of its own, so setting
+  `Mesh.prototype.raycast` alone never reaches it (as with three-mesh-bvh).
+- The options are `computeBoundsTree`'s. The tree belongs to one mesh: two meshes sharing a geometry need a tree each,
+  and only one can be `geometry.boundsTree`.
+- **Cost:** `refit()` poses every vertex on the main thread. For many characters, pose on the GPU (above).
+
+It isn't built on `StaticGeometryGenerator`, which bakes every visible mesh under an object into world space and flips
+a mirrored mesh's winding; this tree is one mesh in its own space, with the geometry's triangle numbering. Tested
+against three-mesh-bvh's `SkinnedMeshBVH` and three's raycast of the posed mesh (skinned, mirrored and morphed, indexed
+and not, over three poses), and its shapecast against three-mesh-bvh's.
 
 ## On the CPU: StaticGeometryGenerator
 

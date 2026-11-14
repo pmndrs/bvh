@@ -38,8 +38,8 @@ import { acceleratedRaycast, computeBatchedBoundsTree, disposeBatchedBoundsTree 
 
 export function batchedBoundsTree(batched: BatchedMesh, changedGeometry: number): void {
     // #region batched-bounds-tree
-    Mesh.prototype.raycast = acceleratedRaycast;
-    BatchedMesh.prototype.raycast = acceleratedRaycast; // three-mesh-bvh's setup; three's own BatchedMesh.raycast runs underneath
+    Mesh.prototype.raycast = acceleratedRaycast; // other meshes; the BatchedMesh needs only its own line below
+    BatchedMesh.prototype.raycast = acceleratedRaycast; // each instance walks its geometry's tree
     BatchedMesh.prototype.computeBoundsTree = computeBatchedBoundsTree;
     BatchedMesh.prototype.disposeBoundsTree = disposeBatchedBoundsTree;
 

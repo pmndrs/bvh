@@ -68,6 +68,7 @@ import {
     DoubleSide,
     FrontSide,
     Mesh,
+    Sphere,
     Triangle,
     Vector2,
     Vector3,
@@ -439,6 +440,17 @@ export type BvhBoundsTreeHit = Omit<Intersection, 'object'>;
  */
 export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
     readonly geometry: BufferGeometry;
+    /**
+     * Whether the tree holds a posed mesh's triangles (`SkinnedMeshBVH`): then `acceleratedRaycast`
+     * walks it for a `SkinnedMesh` or a morphed mesh instead of falling back to three's raycast.
+     */
+    get followsPose(): boolean {
+        return false;
+    }
+    /** The geometry a hit's fields are read from (`face` corners and normal, `uv`, `normal`): the tree's own, or a posed view of it. */
+    get hitGeometry(): BufferGeometry {
+        return this.geometry;
+    }
     /** The position attribute and index the tree was built from (or last refitted to), and their versions then. */
     readonly position: BufferAttribute | InterleavedBufferAttribute;
     positionVersion: number;
@@ -685,14 +697,14 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
         return hits.map((hit) => ({
             distance: hit.t * length,
             point: origin.clone().addScaledVector(direction, hit.t),
-            ...intersectionFields(this.geometry, hit.triangle, hit.firstIndex, hit.u, hit.v, direction, hit.materialIndex),
+            ...intersectionFields(this.hitGeometry, hit.triangle, hit.firstIndex, hit.u, hit.v, direction, hit.materialIndex),
         }));
     }
 
     protected override createHit(hit: BvhRayIntersection, ray: { readonly origin: readonly number[]; readonly direction: readonly number[] }): BvhBoundsTreeHit {
         const direction = new Vector3(ray.direction[0], ray.direction[1], ray.direction[2]);
         const point = new Vector3(ray.origin[0], ray.origin[1], ray.origin[2]).addScaledVector(direction, hit.t);
-        return { distance: hit.t * direction.length(), point, ...intersectionFields(this.geometry, hit.triangle, hit.triangle * 3, hit.u, hit.v, direction, 0) };
+        return { distance: hit.t * direction.length(), point, ...intersectionFields(this.hitGeometry, hit.triangle, hit.triangle * 3, hit.u, hit.v, direction, 0) };
     }
 
     /**
@@ -1185,6 +1197,63 @@ function stale(tree: BvhBoundsTree, changed = false): boolean {
 // three's own raycasts, captured before anyone replaces them, for the fallback.
 const threeRaycast = Mesh.prototype.raycast;
 const threeBatchedRaycast = BatchedMesh.prototype.raycast;
+/** The stand-in mesh {@link raycastBatchedMesh} raycasts each instance through, as three's `BatchedMesh.raycast` does with its own. */
+const batchStandIn = new Mesh(new BufferGeometry());
+const batchHits: Intersection[] = [];
+
+/** What {@link raycastBatchedMesh} reads of a `BatchedMesh` (three r187's own fields, as its `raycast` reads them). */
+interface BatchedMeshInternals {
+    readonly _instanceInfo: readonly { readonly visible: boolean; readonly active: boolean; readonly geometryIndex: number }[];
+    readonly _geometryInfo: readonly { readonly start: number; readonly count: number }[];
+}
+
+/**
+ * three r187's `BatchedMesh.raycast`, step for step, but through a stand-in of
+ * our own whose raycast is {@link acceleratedRaycast}: so a `BatchedMesh`
+ * raycast uses the trees (`computeBatchedBoundsTree`'s per geometry, or the
+ * batched geometry's) with only `BatchedMesh.prototype.raycast` set, and
+ * `Mesh.prototype.raycast` may stay three's. Without a tree each instance gets
+ * three's own `Mesh.raycast`, as in three's `BatchedMesh.raycast`.
+ */
+function raycastBatchedMesh(batched: BatchedMesh, raycaster: Raycaster, intersects: Intersection[]): void {
+    const { _instanceInfo: instanceInfo, _geometryInfo: geometryInfoList } = batched as unknown as BatchedMeshInternals;
+    if (!Array.isArray(instanceInfo) || !Array.isArray(geometryInfoList)) {
+        // A three whose BatchedMesh keeps them elsewhere: its own raycast (accelerated only with Mesh.prototype.raycast set).
+        threeBatchedRaycast.call(batched, raycaster, intersects);
+        return;
+    }
+    const geometry = batchStandIn.geometry;
+    const batchGeometry = batched.geometry;
+    batchStandIn.material = batched.material;
+    geometry.index = batchGeometry.index;
+    geometry.attributes = batchGeometry.attributes;
+    geometry.boundingBox ??= new Box3();
+    geometry.boundingSphere ??= new Sphere();
+    try {
+        for (let i = 0, l = instanceInfo.length; i < l; i++) {
+            if (!instanceInfo[i].visible || !instanceInfo[i].active) continue;
+            const geometryId = instanceInfo[i].geometryIndex;
+            const geometryInfo = geometryInfoList[geometryId];
+            geometry.setDrawRange(geometryInfo.start, geometryInfo.count);
+            batched.getMatrixAt(i, batchStandIn.matrixWorld).premultiply(batched.matrixWorld);
+            batched.getBoundingBoxAt(geometryId, geometry.boundingBox);
+            batched.getBoundingSphereAt(geometryId, geometry.boundingSphere);
+            acceleratedRaycast.call(batchStandIn, raycaster, batchHits);
+            for (const hit of batchHits) {
+                hit.object = batched;
+                (hit as Intersection & { batchId?: number }).batchId = i;
+                intersects.push(hit);
+            }
+            batchHits.length = 0;
+        }
+    } finally {
+        batchStandIn.material = [];
+        geometry.index = null;
+        geometry.attributes = {};
+        geometry.setDrawRange(0, Infinity);
+    }
+}
+
 /** A range tree holds just its range: walk all of it. */
 const WHOLE_RANGE = { start: 0, count: Infinity } as const;
 /** World-to-object rows (3 x 4, row-major), as the top level stores them. */
@@ -1206,7 +1275,7 @@ export function acceleratedRaycast(this: Mesh, raycaster: Raycaster, intersects:
     }
     // A BatchedMesh (three-mesh-bvh sets BatchedMesh.prototype.raycast too): three's own, whose stand-in mesh comes back here.
     if ((this as unknown as BatchedMesh).isBatchedMesh) {
-        threeBatchedRaycast.call(this as unknown as BatchedMesh, raycaster, intersects);
+        raycastBatchedMesh(this as unknown as BatchedMesh, raycaster, intersects);
         return;
     }
     // A BatchedMesh stand-in whose geometry has its own tree (computeBatchedBoundsTree), else the geometry's.
@@ -1215,7 +1284,8 @@ export function acceleratedRaycast(this: Mesh, raycaster: Raycaster, intersects:
     const morphs = this.morphTargetInfluences !== undefined && Object.keys(this.geometry.morphAttributes).length > 0;
     // A range tree reads the batch's index through a view: the batch's index version says when it changed.
     const indexChanged = ranged !== null && ranged.batchIndex !== null && ranged.batchIndex.version !== ranged.batchIndexVersion;
-    if (!tree || (this as unknown as { isSkinnedMesh?: boolean }).isSkinnedMesh || morphs || stale(tree, indexChanged)) {
+    const posed = (this as unknown as { isSkinnedMesh?: boolean }).isSkinnedMesh === true || morphs;
+    if (!tree || (posed && !tree.followsPose) || stale(tree, indexChanged)) {
         threeRaycast.call(this, raycaster, intersects);
         return;
     }
@@ -1253,7 +1323,7 @@ export function acceleratedRaycast(this: Mesh, raycaster: Raycaster, intersects:
         // A range tree's triangle k is the batch's at index start + 3k; three's faceIndex is that index over 3.
         const firstIndex = ranged ? ranged.start + hit.firstIndex : hit.firstIndex;
         const triangle = ranged ? Math.floor(firstIndex / 3) : hit.triangle;
-        intersects.push({ distance, point: worldPoint.clone(), object: this, ...intersectionFields(this.geometry, triangle, firstIndex, hit.u, hit.v, localDir, hit.materialIndex) });
+        intersects.push({ distance, point: worldPoint.clone(), object: this, ...intersectionFields(ranged ? this.geometry : tree.hitGeometry, triangle, firstIndex, hit.u, hit.v, localDir, hit.materialIndex) });
     }
 }
 
