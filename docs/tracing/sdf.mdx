@@ -1,0 +1,204 @@
+---
+title: Signed distance fields
+description: Fill a 3D texture or a buffer with the signed distance to a scene's triangles on the GPU, with an inside test you can call in your own WGSL.
+nav: 63
+sourcecode: src/trace/sdf.ts
+---
+
+A signed distance field (SDF) stores, at every voxel of a box, the distance to the nearest surface: positive outside,
+negative inside. Raymarching, soft collisions, particles that slide along walls, ambient occlusion and mesh-to-volume
+effects all read one. `SdfGenerator` fills one on the GPU from the same scene buffers the walk traces
+(`SceneTrees.traceBuffers` or `uploadTraceScene`), in every node and triangle format, instanced or merged, with no copy
+of the scene.
+
+Per voxel it takes two answers from the [spatial queries](/tracing/gpu-queries): the distance to the nearest triangle
+(`bvhClosestPoint`) and whether the voxel's centre is inside (`bvhInsideVotes`, below).
+
+## Fill a texture
+
+{/* snippet: sdf-generate */}
+```ts
+import { createSdfTexture, SdfGenerator } from '@pmndrs/bvh';
+
+// One generator per scene format (it compiles the walk with the queries); it serves any scene of that format.
+const generator = await SdfGenerator.create(device, {
+    triangleLeaves: trees.triangleLeaves,
+    positionLayout: trees.positionLayout,
+    nodeFormat: trees.nodeFormat,
+});
+// 96 x 96 x 96 voxel centres over a world-space box.
+const grid = { min: [-2, -2, -2], max: [2, 2, 2], resolution: 96 } as const;
+const texture = createSdfTexture(device, grid); // r32float, 3d: storage, sampling and copies
+const { ms } = await generator.generate(trees.traceBuffers, { texture }, grid);
+// The texture holds the distance to the nearest triangle at each voxel centre, negative inside.
+```
+
+Voxel `(x, y, z)` holds the field at its centre, `min + (i + 0.5) * (max - min) / resolution` on each axis. So a shader
+that samples the texture at `uvw = (p - min) / (max - min)` with linear filtering reads the field at `p` (sampling an
+`r32float` texture with filtering needs the device's `float32-filterable` feature; without it, use nearest or
+`textureLoad`).
+
+`generate` cuts the grid into slabs of whole z slices, one submit each (`voxelsPerSubmit`, 2,097,152 by default, a 128³
+grid in one), so no single submit runs long enough for the OS to reset the GPU (about 2 s on Windows), and resolves when
+the GPU is done. `readSdf(device, { texture }, grid)` reads a field back to the CPU.
+
+## Options
+
+`SdfGenerator.create(device, options)` compiles in:
+
+- **`output`**: `'texture'` (the default; an `r32float` 3D texture with `STORAGE_BINDING`, as `createSdfTexture` makes) or
+  `'buffer'` (`f32` in a storage buffer, x fastest, then y, then z).
+- **`triangleLeaves`, `positionLayout`, `nodeFormat`**: the scene's formats, as for `TraceBatchKernel`. A generator
+  refuses a scene of another format.
+- **`rayMasks`**: default true, so each call may pass a `mask`; false compiles masks out.
+
+Each `encode` or `generate` takes:
+
+- **`sign`**: `'parity'` (the default), `'winding'` or `'unsigned'` (the closest point alone, about a quarter of the work).
+- **`maxDistance`**: values are clamped to it, and to minus it inside. The closest-point walk skips boxes farther away,
+  so a narrow band is cheaper. Default: none.
+- **`mask`**: only instances whose mask shares a bit with it count.
+- **`slices`** (`encode` only): `{ start, count }`, the z slices of this dispatch; `timestampWrites` for GPU timing.
+
+{/* snippet: sdf-encode */}
+```ts
+// Into a buffer (x fastest, then y, then z) in your own encoder, from a generator made with output: 'buffer':
+// a narrow band, the winding rule, the instances with mask bit 0, and z slices 0-15 only.
+const grid = { min: [-2, -2, -2], max: [2, 2, 2], resolution: [64, 64, 32] } as const;
+const buffer = device.createBuffer({ size: 64 * 64 * 32 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+generator.encode(encoder, trees.traceBuffers, { buffer }, grid, { maxDistance: 0.25, sign: 'winding', mask: 0x1, slices: { start: 0, count: 16 } });
+```
+
+## The inside test
+
+A distance alone has no sign. The sign comes from an inside test, which the queries module has for your own kernels too:
+
+```wgsl
+struct BvhRayCrossings { count: u32, winding: i32 }
+fn bvhRayCrossings(origin: vec3f, direction: vec3f) -> BvhRayCrossings
+fn bvhInsideVotes(point: vec3f) -> vec2u
+fn bvhIsInside(point: vec3f) -> bool
+```
+
+with `*Masked` forms (a last `mask: u32`) unless `rayMasks: false`.
+
+- `bvhRayCrossings` walks every triangle a ray crosses (`t >= 0`), with the walk's own watertight triangle test, and
+  returns how many there were and their signed sum: +1 for a triangle the ray leaves through its front side, -1 for one
+  it enters through it.
+- `bvhInsideVotes` casts three fixed rays (`INSIDE_TEST_DIRECTIONS`: along no axis or diagonal, into three different
+  octants) and counts how many vote inside: `.x` by **parity** (an odd number of crossings), `.y` by **winding** (a
+  signed sum other than 0). Two or three votes is inside.
+- `bvhIsInside` is the parity vote.
+
+{/* snippet: sdf-inside-wgsl */}
+```ts
+    // A signed distance in your own kernel: the closest point, negated where the inside test says inside.
+    const code = /* wgsl */ `
+${traceModuleWgsl({ queries: true })}
+fn signedDistance(p: vec3f) -> f32 {
+    let hit = bvhClosestPoint(p, 1e30);
+    return select(hit.distance, -hit.distance, bvhIsInside(p));
+}
+fn insideByWinding(p: vec3f) -> bool {
+    return bvhInsideVotes(p).y >= 2u;   // .x: rays voting inside by parity, .y: by winding (of 3)
+}`;
+```
+
+### Why ray parity with a vote
+
+The other common choice is the generalized winding number (Jacobson et al. 2013): the sum of the solid angles every
+triangle subtends at the point. It degrades gracefully on open meshes, but exactly it costs one term per triangle per
+voxel; the fast form needs a tree of dipole moments per node (Barill et al. 2018), which our nodes don't store. A ray
+cast walks the tree we already have, with the walk's watertight test, so on a closed mesh a ray can't slip between two
+triangles that share an edge, and the answer is exact away from the surface. A ray exactly through an edge counts both
+triangles (the walk's rule); casting three rays in different directions and taking the majority outvotes that ray.
+
+Parity and winding differ where shells overlap or nest:
+
+| Geometry | `'parity'` | `'winding'` |
+| --- | --- | --- |
+| One closed mesh, either winding | right | right |
+| Two closed meshes that overlap | the overlap is outside (two crossings) | right (winding 2) |
+| A hollow: an outer shell and an inner one wound inward | right | right |
+| Triangles wound inconsistently | right | wrong where the signs cancel |
+| A mesh with a hole or a missing face | each ray that leaves through the hole votes outside; the vote decides | the same |
+
+### Meshes that aren't watertight
+
+A gap, a missing face or a crack between two vertices that should be one makes some rays pass through, and each such ray
+votes "outside". With three rays in different octants, a point is still found inside unless two of the three leave
+through openings: a box without its top keeps its middle inside. A mesh open on a large part of its surface (a terrain
+patch, a plane, a cloth) has no inside; use `sign: 'unsigned'`. Seams are the common trap: three's built-in geometries
+repeat their vertices along UV seams, and two copies that round apart leave a crack. Weld positions first
+(`mergeVertices` from three's `BufferGeometryUtils`, after deleting the other attributes), as the `three/sdf` example
+does.
+
+### Cost
+
+A signed voxel walks the tree four times: once for the closest point, which prunes by distance, and three times along
+rays that can't stop early (every crossing counts). An unsigned voxel walks it once. Points far from everything are
+cheap with `maxDistance`; the rays are not limited by it.
+
+## On the CPU
+
+`CpuMeshBvh` has the same test (`rayCrossings`, `insideVotes`, `isPointInside`), the same rays and the same watertight
+walk in doubles, and `generateSdfCpu` fills a grid voxel for voxel at the GPU's points: the reference the GPU is checked
+against, and a field where there is no GPU. Several trees count as one scene (`insideVotesOf` adds their crossings up).
+
+{/* snippet: sdf-cpu */}
+```ts
+import { CpuMeshBvh, generateSdfCpu } from '@pmndrs/bvh';
+
+const tree = await CpuMeshBvh.create(geometry); // world-space positions
+const inside = tree.isPointInside([0, 0, 0]); // or isPointInside(point, 'winding'), or insideVotes(point)
+// The same field on the CPU, voxel for voxel the GPU's points: a reference, or a field with no GPU.
+const field = generateSdfCpu(tree, { min: [-2, -2, -2], max: [2, 2, 2], resolution: 9 });
+const center = field[(4 * 9 + 4) * 9 + 4]; // voxel (4, 4, 4) is the box's centre
+```
+
+## In three
+
+`generateSdfTexture` from `@pmndrs/bvh/three` fills a three `Storage3DTexture` on the renderer's device from a
+`SceneTrees` (or `{ buffers: uploadTraceScene(...) }`), and gives TSL helpers to read it:
+
+{/* snippet: sdf-three */}
+```ts
+import { generateSdfTexture } from '@pmndrs/bvh/three';
+import { positionWorld, vec3 } from 'three/tsl';
+import type { MeshBasicNodeMaterial, WebGPURenderer as Renderer } from 'three/webgpu';
+
+const box = new Box3().setFromObject(object).expandByScalar(0.1);
+const sdf = await generateSdfTexture(renderer, trees, { box, resolution: 64 }); // the trees after their update
+// sdf.texture is a three Storage3DTexture (r32float); sdf.sample(p) reads it at a world position in TSL.
+material.colorNode = sdf.sample(positionWorld).lessThan(0).select(vec3(0.3, 0.5, 1), vec3(1, 0.6, 0.3));
+// After the scene moved, fill the same texture again: generateSdfTexture(renderer, trees, { box, resolution: 64, texture: sdf.texture }).
+```
+
+The result also has `uvw(p)` (the texture coordinate of a world position, for `texture3D`), `gpuTexture` and `grid` (for
+`readSdf` or your own WebGPU passes), `box`, `resolution` and `ms`. three makes and owns the texture; the generator only
+writes into it. Don't set its `needsUpdate` afterwards: three would make a new, empty one. The texture filters linearly
+where the device has `float32-filterable`, else nearest.
+
+The [`three/sdf`](https://github.com/pmndrs/bvh/tree/main/examples/three/sdf) example raymarches the field and shows a
+slice with contours; [`compare/sdf`](https://github.com/pmndrs/bvh/tree/main/examples/compare/sdf) times it against
+three-mesh-bvh's `webgpu_sdfGeneration` kernel.
+
+## Limits
+
+- **Formats:** `r32float` textures and `f32` buffers. `r16float` isn't a storage format in core WebGPU; write a buffer and
+  convert it in a pass of your own if you need half floats.
+- **Memory:** a 128³ field is 8 MiB, 256³ is 64 MiB; a 3D texture's side is limited by `maxTextureDimension3D` (2048 by
+  default).
+- **The sign near the surface:** within rounding of a triangle, the closest point is still right but the sign may go either
+  way; a voxel that small a distance from the surface reads as about zero anyway.
+- **Static:** a field is a snapshot. After the scene moves, generate it again (into the same texture or buffer).
+- **The box:** voxels outside the scene's reach still get a value (the distance to the nearest triangle, however far, up to
+  `maxDistance`); a clamp-to-edge sampler (the three helper's) repeats the edge outside the box.
+
+## Correctness
+
+`tests/gpu/pages/sdf-oracle` compares the GPU field with `generateSdfCpu` voxel for voxel: welded solids, overlapping and
+hollow shells under rotations, non-uniform scales and a mirror, a box without its top and a triangle soup; every node and
+triangle format, merged trees, masks on and off, a distance band and unsigned fields. Distances must agree to 4e-6 of the
+scene's size (plus the point's distance from the origin), and signs everywhere farther than 1e-5 of the size from the
+surface (on the open scene, at most 0.2% of voxels may differ). The texture and buffer outputs must match bit for bit.

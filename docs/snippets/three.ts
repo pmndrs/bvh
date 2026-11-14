@@ -236,3 +236,20 @@ export function meshBvh(geometry: BufferGeometry): MeshBVH {
     // #endregion
     return bvh;
 }
+
+// #region sdf-three
+import { generateSdfTexture } from '@pmndrs/bvh/three';
+import { positionWorld, vec3 } from 'three/tsl';
+import type { MeshBasicNodeMaterial, WebGPURenderer as Renderer } from 'three/webgpu';
+
+// #endregion
+
+export async function sdfThree(renderer: Renderer, trees: SceneTrees, object: Object3D, material: MeshBasicNodeMaterial): Promise<void> {
+    // #region sdf-three
+    const box = new Box3().setFromObject(object).expandByScalar(0.1);
+    const sdf = await generateSdfTexture(renderer, trees, { box, resolution: 64 }); // the trees after their update
+    // sdf.texture is a three Storage3DTexture (r32float); sdf.sample(p) reads it at a world position in TSL.
+    material.colorNode = sdf.sample(positionWorld).lessThan(0).select(vec3(0.3, 0.5, 1), vec3(1, 0.6, 0.3));
+    // After the scene moved, fill the same texture again: generateSdfTexture(renderer, trees, { box, resolution: 64, texture: sdf.texture }).
+    // #endregion
+}

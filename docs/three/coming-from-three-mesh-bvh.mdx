@@ -68,10 +68,11 @@ Without three, the same queries are on the core's `CpuMeshBvh` with plain points
 - `PointsBVH` and the line BVHs (`LineSegmentsBVH`, `LineLoopBVH`, `LineBVH`): leaves hold triangles only.
 - `ObjectBVH.shapecast`.
 - `getJSONStructure`.
-- On the GPU: `ClusteredBVH` and SDF generation. Closest point, sphere and box tests, shapecasts and the WGSL helpers
-  `intersectRayTriangle` and `closestPointToTriangle` exist ([Spatial queries on the GPU](/tracing/gpu-queries)), with
-  two differences: shapecast hooks are WGSL functions, not TSL callbacks as `getShapecastFn` takes, and queries run over
-  the whole scene in world space rather than over one mesh.
+- On the GPU: `ClusteredBVH`. SDF generation exists ([Signed distance fields](/tracing/sdf), `generateSdfTexture` in
+  `/three`), and so do closest point, sphere and box tests, shapecasts and the WGSL helpers `intersectRayTriangle` and
+  `closestPointToTriangle` ([Spatial queries on the GPU](/tracing/gpu-queries)), with two differences: shapecast hooks
+  are WGSL functions, not TSL callbacks as `getShapecastFn` takes, and queries run over the whole scene in world space
+  rather than over one mesh.
 
 ## Won't be done
 
@@ -93,7 +94,7 @@ Without three, the same queries are on the core's `CpuMeshBvh` with plain points
 ## When to stay with three-mesh-bvh
 
 - You need WebGL2 GPU traversal, or GLSL.
-- You need points or lines as primitives, GPU shapecasts written as TSL callbacks, or SDF generation.
+- You need points or lines as primitives, or GPU shapecasts written as TSL callbacks.
 - Memory matters more than ray speed. Our GPU scenes use about 7 times three-mesh-bvh's bytes beyond the geometry on
   Sponza (356 MiB against 51 MiB with defaults on both sides; 6.5 times on Bistro exterior). Indexed leaves, off by
   default, bring Sponza to 226 MiB. Our CPU trees (`computeBoundsTree`) keep 64-byte nodes: 8-9 times. See

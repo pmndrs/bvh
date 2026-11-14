@@ -110,6 +110,11 @@ describe('docs samples that need no GPU', () => {
         expect(tracing.gpuQueriesWgsl()).toContain('fn bvhClosestPoint(point: vec3f, maxDistance: f32) -> BvhClosestHit');
         expect(tracing.gpuShapecastWgsl()).toContain('fn bvhShapecast() -> bool');
         expect(tracing.triangleHelpers()).not.toContain('@binding');
+        expect(tracing.sdfInsideWgsl()).toContain('fn bvhIsInside(point: vec3f) -> bool');
+        // The unit sphere: the origin is inside, about one unit from the surface.
+        const { inside, center } = await tracing.sdfCpu(sphere());
+        expect(inside).toBe(true);
+        expect(center).toBeCloseTo(-1, 1);
     });
 
     it('raycast, shapecast, bvhcast and closest point on a CpuMeshBvh', async () => {

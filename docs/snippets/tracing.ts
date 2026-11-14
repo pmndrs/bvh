@@ -291,3 +291,71 @@ fn snap(p: vec3f, a: vec3f, b: vec3f, c: vec3f) -> vec3f {
     // #endregion
     return code;
 }
+
+// #region sdf-generate
+import { createSdfTexture, SdfGenerator } from '@pmndrs/bvh';
+
+// #endregion
+
+export async function sdfGenerate(trees: SceneTrees): Promise<GPUTexture> {
+    const device = trees.device;
+    // #region sdf-generate
+    // One generator per scene format (it compiles the walk with the queries); it serves any scene of that format.
+    const generator = await SdfGenerator.create(device, {
+        triangleLeaves: trees.triangleLeaves,
+        positionLayout: trees.positionLayout,
+        nodeFormat: trees.nodeFormat,
+    });
+    // 96 x 96 x 96 voxel centres over a world-space box.
+    const grid = { min: [-2, -2, -2], max: [2, 2, 2], resolution: 96 } as const;
+    const texture = createSdfTexture(device, grid); // r32float, 3d: storage, sampling and copies
+    const { ms } = await generator.generate(trees.traceBuffers, { texture }, grid);
+    // The texture holds the distance to the nearest triangle at each voxel centre, negative inside.
+    // #endregion
+    console.log(`SDF in ${ms.toFixed(1)} ms`);
+    return texture;
+}
+
+export function sdfEncode(trees: SceneTrees, generator: SdfGenerator, encoder: GPUCommandEncoder): GPUBuffer {
+    const device = trees.device;
+    // #region sdf-encode
+    // Into a buffer (x fastest, then y, then z) in your own encoder, from a generator made with output: 'buffer':
+    // a narrow band, the winding rule, the instances with mask bit 0, and z slices 0-15 only.
+    const grid = { min: [-2, -2, -2], max: [2, 2, 2], resolution: [64, 64, 32] } as const;
+    const buffer = device.createBuffer({ size: 64 * 64 * 32 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    generator.encode(encoder, trees.traceBuffers, { buffer }, grid, { maxDistance: 0.25, sign: 'winding', mask: 0x1, slices: { start: 0, count: 16 } });
+    // #endregion
+    return buffer;
+}
+
+export function sdfInsideWgsl(): string {
+    // #region sdf-inside-wgsl
+    // A signed distance in your own kernel: the closest point, negated where the inside test says inside.
+    const code = /* wgsl */ `
+${traceModuleWgsl({ queries: true })}
+fn signedDistance(p: vec3f) -> f32 {
+    let hit = bvhClosestPoint(p, 1e30);
+    return select(hit.distance, -hit.distance, bvhIsInside(p));
+}
+fn insideByWinding(p: vec3f) -> bool {
+    return bvhInsideVotes(p).y >= 2u;   // .x: rays voting inside by parity, .y: by winding (of 3)
+}`;
+    // #endregion
+    return code;
+}
+
+// #region sdf-cpu
+import { CpuMeshBvh, generateSdfCpu } from '@pmndrs/bvh';
+
+// #endregion
+
+export async function sdfCpu(geometry: MeshGeometry): Promise<{ inside: boolean; center: number }> {
+    // #region sdf-cpu
+    const tree = await CpuMeshBvh.create(geometry); // world-space positions
+    const inside = tree.isPointInside([0, 0, 0]); // or isPointInside(point, 'winding'), or insideVotes(point)
+    // The same field on the CPU, voxel for voxel the GPU's points: a reference, or a field with no GPU.
+    const field = generateSdfCpu(tree, { min: [-2, -2, -2], max: [2, 2, 2], resolution: 9 });
+    const center = field[(4 * 9 + 4) * 9 + 4]; // voxel (4, 4, 4) is the box's centre
+    // #endregion
+    return { inside, center };
+}
