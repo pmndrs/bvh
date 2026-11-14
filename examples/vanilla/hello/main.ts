@@ -169,7 +169,7 @@ async function swapScene(scene: VanillaScene): Promise<void> {
     const [result] = await builder.buildLayouts([mesh], { onGpuBatch: (batch) => (gpuMs = batch.gpuMs) });
     const cpuMs = performance.now() - start;
     // CPU wall time from the call to the layout read back; GPU time from timestamps where the device has them.
-    overlay.build({ builtBy: result.builtBy, fallbackReason: builder.fallbackReason ?? result.fallbackReason, cpuMs, gpuMs });
+    overlay.build({ builtBy: result.builtBy, fallbackReason: (builder.fallback ? builder.fallbackReason : null) ?? result.fallbackReason, cpuMs, gpuMs });
     overlay.set('builder setup', `${prepareMs.toFixed(0)} ms (pipelines; once per builder)`);
     overlay.tree(layoutInfo(result.layout));
     overlay.set('mesh', `${scene.name}: ${(mesh.indices.length / 3).toLocaleString('en-US')} triangles${scene.instances.length > 1 ? `, ${scene.instances.length} instances merged` : ''}`);

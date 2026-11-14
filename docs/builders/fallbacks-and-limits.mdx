@@ -20,6 +20,11 @@ paths.
 
 The `bvh-lbvh-fallback` GPU page covers the no-subgroups path.
 
+`createMeshLayoutBuilder`'s `fallbackReason` is set whenever its `kind` is `'tinybvh'`, including when you asked for
+tinybvh (`prefer: 'tinybvh'`: "the CPU builder was asked for"). `builder.fallback` is true only for a real fallback (a
+GPU builder was wanted and the device can't run it), so an overlay shows `fallback ? fallbackReason : null`. With
+`SceneTrees`, `gpuFirstTrees: false` is a choice too: `gpuFirstTrees.reason` says so.
+
 ## The walk's stack
 
 The walk keeps one 64-entry stack per thread for both levels (`TRACE_STACK_SIZE`). A mesh tree under a top level gets

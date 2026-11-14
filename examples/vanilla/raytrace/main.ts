@@ -70,7 +70,7 @@ async function rebuildNow(): Promise<void> {
     const by = new Map<string, number>();
     for (const result of results) by.set(result.builtBy, (by.get(result.builtBy) ?? 0) + 1);
     // tinybvh asked for by name is no fallback; a GPU builder the device can't run is.
-    const reasons = new Set([settings.builder === 'tinybvh' ? null : builder.fallbackReason, ...results.map((result) => result.fallbackReason)].filter((reason): reason is string => !!reason));
+    const reasons = new Set([builder.fallback ? builder.fallbackReason : null, ...results.map((result) => result.fallbackReason)].filter((reason): reason is string => !!reason));
     overlay.build({ builtBy: [...by].map(([kind, count]) => `${kind} ×${count}`).join(', '), fallbackReason: reasons.size ? [...reasons].join('; ') : null, cpuMs });
     overlay.tree(sumInfo(results.map((result) => layoutInfo(result.layout))));
 

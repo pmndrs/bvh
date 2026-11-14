@@ -68,11 +68,20 @@ export interface MeshLayoutBuilder {
     /** The builder meshes go to first. */
     readonly kind: MeshLayoutBuilderKind;
     /**
-     * Why the GPU builder is not in use, or null when it is: a real fallback
-     * (`'no GPU device'`, `'the device has no "subgroups" feature'`) or
-     * `'the CPU builder was asked for'` (`prefer: 'tinybvh'`).
+     * Why the GPU builder is not in use, or null when it is. Its meaning is
+     * unchanged: it is set whenever `kind` is `'tinybvh'`, a real fallback
+     * (`'no GPU device'`, `'the device has no "subgroups" feature'`) and a
+     * choice alike (`'the CPU builder was asked for'`, with
+     * `prefer: 'tinybvh'`). {@link fallback} tells the two apart.
      */
     readonly fallbackReason: string | null;
+    /**
+     * True only for a real fallback: a GPU builder was wanted (no `prefer`, or
+     * a GPU one) and the device can't run it, so tinybvh builds. False when a
+     * GPU builder is in use, and when tinybvh was asked for
+     * (`prefer: 'tinybvh'`), which an overlay should not show as a fallback.
+     */
+    readonly fallback: boolean;
     /** True once the builder's pipelines are compiled (always for tinybvh). */
     readonly ready: boolean;
     /** Compiles the GPU builder's pipelines, once (the factory does unless `prepare: false`; a build does if nothing did). */
@@ -116,6 +125,7 @@ export async function createMeshLayoutBuilder(device: GPUDevice | null, options:
         return {
             kind: 'tinybvh',
             fallbackReason,
+            fallback: options.prefer !== 'tinybvh',
             ready: true,
             async prepare() {},
             async buildLayouts(geometries, buildOptions = {}) {
@@ -141,6 +151,7 @@ export async function createMeshLayoutBuilder(device: GPUDevice | null, options:
     return {
         kind,
         fallbackReason: null,
+        fallback: false,
         get ready() {
             return gpu.ready;
         },
