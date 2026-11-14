@@ -16,7 +16,7 @@ for (const [subpath, conditions] of Object.entries(manifest.exports)) {
         if (!existsSync(resolve(root, target))) problems.push(`exports["${subpath}"] points at missing ${target}`);
     }
 }
-for (const file of ['README.md', 'THIRD_PARTY.md', 'licenses/tinybvh.txt', 'licenses/emscripten-runtime.txt', 'licenses/hiprt.txt']) {
+for (const file of ['README.md', 'THIRD_PARTY.md', 'licenses/tinybvh.txt', 'licenses/emscripten-runtime.txt', 'licenses/hiprt.txt', 'licenses/three-mesh-bvh.txt']) {
     if (!existsSync(resolve(root, file))) problems.push(`missing ${file}`);
 }
 
@@ -25,6 +25,7 @@ const requiredLicenseText = {
     'tinybvh-wasm.js': ['Copyright (c) 2024 Jacco Bikker', 'Copyright (c) 2010-2014 Emscripten authors', 'Rich Felker'],
     'gpu-lbvh-wgsl.js': ['hiprt', 'Permission is hereby granted, free of charge'],
     'gpu-hploc-wgsl.js': ['tinybvh', 'Permission is hereby granted, free of charge'],
+    'trace/clustered-scene.js': ['Copyright (c) 2018 Garrett Johnson', 'Permission is hereby granted, free of charge'],
 };
 for (const [name, lines] of Object.entries(requiredLicenseText)) {
     const file = resolve(dist, name);
@@ -106,4 +107,4 @@ if (problems.length) {
     console.error(problems.join('\n'));
     process.exit(1);
 }
-console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl and gpu-hploc-wgsl, no .ts imports, no tests, worker entries built (' + workerEntries.size + '), /three and /babylon import in Node, engines only in their own folders.');
+console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl, gpu-hploc-wgsl and trace/clustered-scene, no .ts imports, no tests, worker entries built (' + workerEntries.size + '), /three and /babylon import in Node, engines only in their own folders.');
