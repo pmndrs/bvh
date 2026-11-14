@@ -200,6 +200,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         description: "The same small path tracer on three-mesh-bvh/webgpu's WGSL BVH functions and on our walk (BvhTraceNodes): Mrays/s for the whole tracer, its closest-hit rays and its any-hit shadow rays, in paired rounds, first hits checked; the scene's GPU-built trees traced too.",
         timeoutMs: 300_000,
     },
+    {
+        name: 'three-shapecast',
+        path: 'three/shapecast',
+        title: 'Shapecast',
+        description: "three-mesh-bvh's shapecast example on our tree: a sphere, a box or another mesh moved over a spinning 80k-triangle knot with intersectsSphere, intersectsBox and intersectsGeometry (tree against tree), red where they touch; the query ms live.",
+        timeoutMs: 120_000,
+    },
     // ---- end of set 1.
     {
         name: 'node-bake',
