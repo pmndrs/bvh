@@ -204,3 +204,9 @@ agrees. The `three-trace` page checks that `closestPoint` gives exactly the batc
 - Signed distance fields and the inside test (`bvhRayCrossings`, `bvhInsideVotes`, `bvhIsInside`, also in this module):
   see [Signed distance fields](/tracing/sdf).
 - Closest point between two meshes (`closestPointToGeometry`) and `bvhcast` exist on the CPU only.
+
+## See also
+
+- [Closest point](/cpu-queries/closest-point) and [Shapecast and bvhcast](/cpu-queries/shapecast): the same queries on the CPU.
+- [Signed distance fields](/tracing/sdf): built on the closest-point query and an inside test.
+- [Masks, the triangle filter and materials](/concepts/masks-filter-materials): which instances and triangles a query sees.

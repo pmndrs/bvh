@@ -56,3 +56,9 @@ at its shared edges and vertices, with a category per ray (`SHARED_EDGE_RAY_CATE
 `randomTriangleSoup`, `randomAffine` and `createRandom` (seeded) cover the random cases. The contributor notes are in
 [`docs/internals/design/trace.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/trace.md), "The
 oracle and the CPU walk".
+
+## See also
+
+- [Adding a builder from a paper](/builders/adding-a-builder): running a new builder through the layout check and this oracle.
+- [Tracing in WGSL](/tracing/wgsl-walk): the walk the oracle checks, and its watertight test.
+- [Builds and tracing](/performance/builds-and-tracing): how speed is measured once correctness is settled.

@@ -76,6 +76,7 @@ needs `refit()`.
   given to it as flat triangles come out with one node per point.
 - **Nodes are the GPU layout's** 64-byte two-child nodes, leaves of up to 8 primitives. A point record is 16 bytes, a
   segment 32: about 27 bytes per point and 43 per segment with the nodes.
-- **CPU only.** The GPU walk has no point or segment leaves yet; the plan is in
+- **CPU only.** The GPU walk and `SceneTrees` take triangles; there are no point or segment leaves on the GPU. They
+  are not built because no consumer has asked, and the reasons and a design are in
   [`docs/internals/design/points-and-lines.md`](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/points-and-lines.md).
 - An empty input builds an empty tree, which every query answers with nothing.

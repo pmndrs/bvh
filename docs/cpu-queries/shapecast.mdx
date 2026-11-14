@@ -99,3 +99,9 @@ of 269,764 triangles, 2,000 capsules and 100 brush placements, means of 3 rounds
 | --- | --- | ---: | ---: |
 | A character controller (two capsule shapecasts per step) | 2,000 of 2,000 capsules: the same 4.9 million contact triangles | 1.71 ms per capsule | 1.84 ms |
 | three-bvh-csg's `collectIntersectingTriangles` (bvhcast, room against a 3,380-triangle sphere brush) | 100 of 100 placements: the same 21,160 pairs | 1.51 ms per placement | 1.61 ms |
+
+## See also
+
+- [Closest point](/cpu-queries/closest-point): the nearest point on a mesh, which a shapecast can also find.
+- [Spatial queries on the GPU](/tracing/gpu-queries): your own shapecast in WGSL.
+- [Coming from three-mesh-bvh](/three/coming-from-three-mesh-bvh): what matches three-mesh-bvh's shapecast and what differs.

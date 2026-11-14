@@ -42,5 +42,6 @@ on in most templates, hides it.
 ## Not supported
 
 - WebGL2: `BvhTraceNodes` needs the WebGPU backend. The CPU raycast works with either backend.
-- Points, lines and sprites are not read.
+- Points, lines and sprites are not read by the scene sync, the GPU walk or the scene raycast, which take triangles.
+  Points and lines have their own CPU trees ([Points and lines](/three/points-and-lines)); sprites have none.
 - Layers 8-31 are not seen: the instance mask holds layers 0-7.
