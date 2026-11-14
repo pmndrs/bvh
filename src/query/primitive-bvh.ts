@@ -1008,7 +1008,9 @@ export abstract class CpuPrimitiveBvh {
         // rounding in the box test never drops a primitive three's test keeps.
         const bounds = this.layout.bounds;
         const scale = Math.max(Math.abs(bounds[0]), Math.abs(bounds[1]), Math.abs(bounds[2]), Math.abs(bounds[3]), Math.abs(bounds[4]), Math.abs(bounds[5]), Math.abs(o[0]), Math.abs(o[1]), Math.abs(o[2]));
-        const grow = Math.max(threshold, 0) + (Math.max(threshold, 0) + scale) * 1e-10;
+        // The threshold counts squared (three's), so a negative one (a mirrored object's mean scale) reaches as far as its size.
+        const reach = Math.abs(threshold);
+        const grow = reach + (reach + scale) * 1e-10;
         let best = null as BvhPrimitiveRaycastHit | null;
         const box = new Float32Array(6);
         const words = this.nodeWords;

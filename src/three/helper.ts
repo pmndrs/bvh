@@ -8,6 +8,10 @@
 
 import { BufferAttribute, BufferGeometry, Group, LineBasicMaterial, Matrix4, Mesh, MeshBasicMaterial, Object3D, type Color, type Frustum, type Material, type Vector3 } from 'three';
 import { CpuMeshBvh } from '../query/cpu-mesh-bvh.ts';
+import { CpuPrimitiveBvh } from '../query/primitive-bvh.ts';
+
+/** A tree the helper draws: a mesh's, or a points or lines tree (`PointsBVH`, `LineSegmentsBVH`, ...). */
+export type BvhHelperTree = CpuMeshBvh<unknown> | CpuPrimitiveBvh;
 import { bvhHelperIndices, bvhHelperPositions } from '../query/debug.ts';
 
 const instanceMatrix = new Matrix4();
@@ -19,7 +23,7 @@ class BvhRootHelper extends Object3D {
     depth: number;
     displayParents = false;
     displayEdges = true;
-    bvh: CpuMeshBvh<unknown> | null;
+    bvh: BvhHelperTree | null;
 
     get isMesh(): boolean {
         return !this.displayEdges;
@@ -33,7 +37,7 @@ class BvhRootHelper extends Object3D {
         return this.displayEdges;
     }
 
-    constructor(bvh: CpuMeshBvh<unknown> | null, material: Material, depth = 10) {
+    constructor(bvh: BvhHelperTree | null, material: Material, depth = 10) {
         super();
         this.name = 'BVHRootHelper';
         this.material = material;
@@ -83,7 +87,7 @@ type WithTrees = Object3D & { boundsTree?: unknown; geometry?: { boundsTree?: un
 export class BVHHelper extends Group {
     depth: number;
     mesh: Object3D | null;
-    bvh: CpuMeshBvh<unknown> | null;
+    bvh: BvhHelperTree | null;
     displayParents = false;
     displayEdges = true;
     instanceId = 0;
@@ -106,10 +110,10 @@ export class BVHHelper extends Group {
         this.meshMaterial.opacity = value;
     }
 
-    constructor(meshOrBvh?: Object3D | CpuMeshBvh<unknown> | null, bvhOrDepth?: CpuMeshBvh<unknown> | number | null, depth = 10) {
+    constructor(meshOrBvh?: Object3D | BvhHelperTree | null, bvhOrDepth?: BvhHelperTree | number | null, depth = 10) {
         let mesh: Object3D | null = null;
-        let bvh: CpuMeshBvh<unknown> | null = null;
-        if (meshOrBvh instanceof CpuMeshBvh) {
+        let bvh: BvhHelperTree | null = null;
+        if (meshOrBvh instanceof CpuMeshBvh || meshOrBvh instanceof CpuPrimitiveBvh) {
             bvh = meshOrBvh;
             depth = typeof bvhOrDepth === 'number' && bvhOrDepth ? bvhOrDepth : 10;
         } else {
@@ -129,11 +133,11 @@ export class BVHHelper extends Group {
     }
 
     /** The tree drawn: `bvh`, else the mesh's `boundsTree` or `geometry.boundsTree` when it is one of ours. */
-    private findTree(): CpuMeshBvh<unknown> | null {
+    private findTree(): BvhHelperTree | null {
         if (this.bvh) return this.bvh;
         const mesh = this.mesh as WithTrees | null;
         const tree = mesh ? (mesh.boundsTree ?? mesh.geometry?.boundsTree) : null;
-        return tree instanceof CpuMeshBvh ? tree : null;
+        return tree instanceof CpuMeshBvh || tree instanceof CpuPrimitiveBvh ? tree : null;
     }
 
     /** Rebuilds the boxes from the tree as it is now, with the current `depth`, `displayParents` and `displayEdges`. */
