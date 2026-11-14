@@ -102,7 +102,7 @@ $correctness = @(
     'trace-oracle', 'trace-inline', 'query-oracle', 'sdf-oracle', 'trace-cpu-agreement',
     'bvh-lbvh,bvh-hploc,bvh-blas-refit,bvh-top-level-gpu,bvh-shared',
     'scene-trees-runtime,scene-trees-deforming,scene-trees-mid-swap',
-    'three-trace,three-skinned'
+    'three-trace,three-skinned,three-shapecast'
 ) + $ExtraPages
 
 $gpus = @('nvidia') + $(if ($SkipIntel) { @() } else { @('intel') })
