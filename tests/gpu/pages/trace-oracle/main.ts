@@ -41,6 +41,10 @@
  *   checked by `checkGpuLayout`), masks compiled out, combined with indexed leaves,
  *   and merged groups (one frame per group). The shared-edge rays are B3's leak
  *   class; looser boxes must not lose a hit. The hook cases also run quantized.
+ * - `folded-*`, `merged-folded-*`: quantized nodes through kernels built with
+ *   `quantizedDecode: 'folded'` (the frame folded into the ray per instance entry, the
+ *   pad covering the fold's rounding): tinybvh and H-PLOC trees, masks compiled out with
+ *   `anyHitOrder: 'near'`, indexed leaves and merged groups. Same rules as quantized.
  * Every variant also runs the seam fixtures (`seamQuad` in cases.ts): split
  * seams, every corner its own vertex with the same bits, must let nothing
  * through; one-ulp seams leak in every format (the double-precision reference
@@ -143,6 +147,8 @@ interface OracleVariant {
     nodeFormat?: 'f32' | 'quantized';
     /** The kernel's any-hit child order (`anyHitOrder`); default `'far'`. */
     anyHitOrder?: 'far' | 'near' | 'larger';
+    /** The kernel's quantized decode (`quantizedDecode`); default `'exact'`. */
+    quantizedDecode?: 'exact' | 'folded';
     /**
      * Per-triangle materials on every other mesh (materials.ts): each hit's material is its
      * triangle's, else its instance's. Its trees and walk are another variant's, so the shared
@@ -181,6 +187,12 @@ const VARIANTS: OracleVariant[] = [
     { name: 'merged-quantized-tinybvh', treeSource: 'tinybvh', merged: true, nodeFormat: 'quantized' },
     { name: 'merged-quantized-hploc', treeSource: 'gpu-hploc', merged: true, nodeFormat: 'quantized' },
     { name: 'merged-quantized-indexed-hploc', treeSource: 'gpu-hploc', merged: true, nodeFormat: 'quantized', triangleLeaves: 'indexed', positionLayout: 'packed' },
+    { name: 'folded-tinybvh', treeSource: 'tinybvh', nodeFormat: 'quantized', quantizedDecode: 'folded' },
+    { name: 'folded-tinybvh-nomasks-near', treeSource: 'tinybvh', nodeFormat: 'quantized', quantizedDecode: 'folded', rayMasks: false, anyHitOrder: 'near' },
+    { name: 'folded-hploc', treeSource: 'gpu-hploc', nodeFormat: 'quantized', quantizedDecode: 'folded' },
+    { name: 'folded-indexed-tinybvh', treeSource: 'tinybvh', nodeFormat: 'quantized', triangleLeaves: 'indexed', quantizedDecode: 'folded' },
+    { name: 'merged-folded-tinybvh', treeSource: 'tinybvh', merged: true, nodeFormat: 'quantized', quantizedDecode: 'folded' },
+    { name: 'merged-folded-indexed-hploc', treeSource: 'gpu-hploc', merged: true, nodeFormat: 'quantized', triangleLeaves: 'indexed', positionLayout: 'packed', quantizedDecode: 'folded' },
     { name: 'materials-tinybvh', treeSource: 'tinybvh', triangleMaterials: true },
     { name: 'materials-quantized-lbvh', treeSource: 'gpu-lbvh', nodeFormat: 'quantized', triangleMaterials: true },
     { name: 'materials-indexed-hploc', treeSource: 'gpu-hploc', triangleLeaves: 'indexed', triangleMaterials: true },
@@ -199,7 +211,7 @@ const ULP_SAME_AS_RECORDS = ['indexed-tinybvh', 'indexed-tinybvh-packed'];
  * one-ulp seam may let fewer rays through (a looser box takes rays an exact box's slab test
  * rounds away), never more.
  */
-const ULP_AT_MOST_RECORDS = ['quantized-tinybvh', 'quantized-indexed-tinybvh'];
+const ULP_AT_MOST_RECORDS = ['quantized-tinybvh', 'quantized-indexed-tinybvh', 'folded-tinybvh', 'folded-indexed-tinybvh'];
 
 /** The hooks' quantized passes build their trees and scene as this variant does. */
 const QUANTIZED_HOOK_VARIANT: OracleVariant = { name: 'quantized-hooks', treeSource: 'tinybvh', nodeFormat: 'quantized' };
@@ -545,6 +557,7 @@ await runGpuTest(async ({ device, log }) => {
             positionLayout: variant.positionLayout,
             nodeFormat: variant.nodeFormat ?? 'f32',
             anyHitOrder: variant.anyHitOrder,
+            quantizedDecode: variant.quantizedDecode,
         });
         const results = { cases: {} as Record<string, unknown>, sharedEdges: [] as SharedEdgeReport[] };
         byTest[variant.name] = results;
