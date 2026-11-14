@@ -32,3 +32,31 @@ A hit is the triangle, instance, barycentrics, face normal and a material number
 What a hit *looks like* belongs to renderers built on top: Dennis's path tracer, and a shared tracing layer for it, reflections, shadows and ddgi's GI. That covers sampling, random numbers, BSDFs, lights, accumulation, texture lookups, and interpolating shading normals and UVs.
 
 Physics uses shapecast, closest point and box queries, which stay here. When a consumer asks for something, check it against this line first. `examples/three/pathtracer` is a demo of the walk, not a feature.
+
+## Publishing the docs
+
+The site is the `.mdx` pages in `docs/` built by pmndrs/docs, with the TypeDoc reference at `/api`. It has never been
+published. The workflow is `.github/workflows/docs.yml` ("Build documentation and deploy to GitHub Pages"):
+
+- On every push to `main` and every pull request that touches `docs/`, `src/`, `typedoc.json`, `tools/docs-site.ts` or
+  the workflow, it checks the code samples (`pnpm docs:check`), builds the API reference (`pnpm docs:api`) and the site
+  (`pnpm docs:site _site`). It only builds, to catch MDX and link errors; nothing is deployed.
+- It **deploys only when someone runs it by hand**: Actions, "Build documentation and deploy to GitHub Pages", Run
+  workflow, on `main`. The deploy job uses the `github-pages` environment.
+
+What the owner has to do once:
+
+1. **Pages settings** (repository Settings, Pages): set the source to **GitHub Actions**. Without this the deploy job
+   fails at `actions/deploy-pages`.
+2. **Custom domain** (the same page): enter `bvh.docs.pmnd.rs`, and turn on "Enforce HTTPS" once the certificate is
+   issued. The workflow builds the site for that address (`NEXT_PUBLIC_URL`), and the README and the docs link to it.
+3. **DNS** (the `pmnd.rs` zone, which the pmndrs organisation controls): a `CNAME` record for `bvh.docs` pointing at
+   `pmndrs.github.io`. GitHub checks it before it serves the domain.
+4. **Run the workflow** on `main` (above). To deploy on every push to `main` instead, change the `if:` of the upload
+   step and the deploy job from `github.event_name == 'workflow_dispatch'` to also allow `push`.
+
+Until the domain works, the links in the README and the pages go nowhere. A preview on `pmndrs.github.io/bvh` would need
+`BASE_PATH` set for the build (`npx @pmndrs/docs build --help` lists the settings); that has not been tried.
+
+To look at the site locally: `pnpm docs:api`, `pnpm docs:site`, then `npx -y serve docs-site`. `docs:site` needs network
+access the first time (it runs `npx @pmndrs/docs@4`).
