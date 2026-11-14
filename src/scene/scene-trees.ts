@@ -164,8 +164,8 @@ const INITIAL_NODES = 1024;
 const INITIAL_TRIANGLES = 2048;
 const USAGE = { COPY_SRC: 0x4, COPY_DST: 0x8, STORAGE: 0x80 } as const;
 
-/** Which builder made a tree. */
-export type TreeBuilder = 'gpu' | 'tinybvh';
+/** Which builder made a tree: the GPU's H-PLOC, tinybvh, or the app ({@link SceneTrees.placeTree}). */
+export type TreeBuilder = 'gpu' | 'tinybvh' | 'app';
 
 /** How GPU build outputs reach the scene's buffers; see the file comment. */
 export type GpuTreeOutputsMode = 'copy' | 'adopt';
@@ -203,6 +203,16 @@ export interface SceneTreesOptions {
      * static instances as ordinary ones.
      */
     readonly mergeStaticInstances?: boolean;
+    /**
+     * Default true: every mesh is also built by tinybvh, and its tree replaces
+     * the GPU's (the swap). False is the GPU-only mode: with a GPU builder,
+     * tinybvh builds only the meshes the GPU can't give a usable tree (too
+     * big, too deep, a batch that failed), and the GPU trees stay. Each mesh's
+     * geometry is kept until its GPU tree is placed (for that fallback). Without
+     * a GPU builder (no subgroups, `gpuFirstTrees: false`) tinybvh builds
+     * every mesh either way: the declared fallback.
+     */
+    readonly refine?: boolean;
     /**
      * tinybvh's trees wait instead of replacing a mesh's GPU tree, until
      * {@link SceneTrees.releaseRefinements}. A mesh with no tree yet still takes
@@ -337,6 +347,8 @@ export interface SceneMeshStatus {
     /** Where the tree sits in {@link SceneTrees.buffers}, when placed. */
     readonly placement: TraceSceneMeshPlacement | null;
     readonly maxDepth: number;
+    /** Added as deforming ({@link SceneTrees.setPose}, {@link SceneTrees.rebuild}). */
+    readonly deforming: boolean;
 }
 
 /** One instance's merge state ({@link SceneTrees.instanceStatus}). */
@@ -352,6 +364,8 @@ export interface SceneTreeCounts {
     readonly mergedGroups: number;
     readonly onGpuTrees: number;
     readonly onTinybvhTrees: number;
+    /** Meshes on a tree the app placed ({@link SceneTrees.placeTree}). */
+    readonly onAppTrees: number;
     readonly waitingForFirstTree: number;
     readonly tinybvhBuilding: number;
     readonly gpuTreesBuilt: number;
@@ -460,7 +474,10 @@ interface PlacedTree {
     readonly triangleLeading: number;
     readonly maxDepth: number;
     readonly bounds: readonly number[];
-    readonly source: TreeBuilder;
+    /** `'gpu'` or `'tinybvh'` (an app's tree is written as tinybvh's is, and is as final: see `app`). */
+    readonly source: 'gpu' | 'tinybvh';
+    /** The app placed it ({@link SceneTrees.placeTree}). */
+    readonly app: boolean;
     readonly generation: number;
 }
 
@@ -483,6 +500,8 @@ interface MeshSlot {
     readonly cpuPose: CpuPose | null;
     gpu: 'none' | 'building' | 'built' | 'refused';
     tinybvh: 'none' | 'building' | 'built' | 'failed';
+    /** The app gave the mesh's tree before its builds started ({@link SceneTrees.placeTree}): none start. */
+    ownTree: boolean;
     fallbackReason: string | null;
     /** Only merged instances use it: it has no tree of its own. */
     mergedInto: number | null;
@@ -527,7 +546,8 @@ interface MergedGroup {
 }
 
 type ArrivedTree =
-    | { readonly source: 'tinybvh'; readonly slot: number; readonly generation: number; readonly bvh: MeshBvh }
+    /** tinybvh's tree, or (`app`) one the app placed: written from the CPU, final. */
+    | { readonly source: 'tinybvh'; readonly slot: number; readonly generation: number; readonly bvh: MeshBvh; readonly app?: boolean }
     | {
           readonly source: 'gpu';
           readonly slot: number;
@@ -657,6 +677,8 @@ export class SceneTrees {
     private readonly transferGeometry: boolean;
     private readonly mergeStatic: boolean;
     private readonly gpuMaxDepth: number;
+    /** Every mesh is also built by tinybvh (`refine`, default true). */
+    private readonly refine: boolean;
     private refinementHold: ((meshSlot: number) => boolean) | null;
     private firstTrees: FirstTreeBuilder | null;
     private firstTreesReady = false;
@@ -765,6 +787,7 @@ export class SceneTrees {
         this.mergeStatic = options.mergeStaticInstances ?? true;
         this.gpuMaxDepth = options.gpuMaxDepth ?? GPU_TREE_MAX_DEPTH;
         this.timestamps = options.timestamps ?? false;
+        this.refine = options.refine ?? true;
         this.refinementHold = options.holdRefinements ? () => true : null;
         const workers = options.workers;
         if (workers && 'build' in workers) {
@@ -1046,6 +1069,7 @@ export class SceneTrees {
             users: 0,
             startedAt: 0,
             abort: null,
+            ownTree: false,
         };
     }
 
@@ -1189,8 +1213,10 @@ export class SceneTrees {
     get counts(): SceneTreeCounts {
         let onGpuTrees = 0;
         let onTinybvhTrees = 0;
+        let onAppTrees = 0;
         for (const tree of this.placed.values()) {
-            if (tree.source === 'gpu') onGpuTrees++;
+            if (tree.app) onAppTrees++;
+            else if (tree.source === 'gpu') onGpuTrees++;
             else onTinybvhTrees++;
         }
         let meshes = 0;
@@ -1201,6 +1227,7 @@ export class SceneTrees {
             mergedGroups: this.groups.length,
             onGpuTrees,
             onTinybvhTrees,
+            onAppTrees,
             waitingForFirstTree: this.meshesWaitingForFirstTree(),
             tinybvhBuilding: this.pendingTinybvh,
             gpuTreesBuilt: this.gpuTreesBuilt,
@@ -1246,11 +1273,12 @@ export class SceneTrees {
     private statusOf(state: MeshSlot): SceneMeshStatus {
         const tree = this.placed.get(state.slot);
         return {
-            builtBy: tree?.source ?? null,
+            builtBy: tree ? builtBy(tree) : null,
             fallbackReason: state.fallbackReason,
             mergedInto: state.mergedInto,
             placement: tree ? { nodeOffset: tree.nodeOffset, nodeCount: tree.nodeCount, triangleOffset: tree.triangleOffset, triangleCount: tree.triangleCount } : null,
             maxDepth: tree?.maxDepth ?? 0,
+            deforming: state.deforming,
         };
     }
 
@@ -1347,6 +1375,72 @@ export class SceneTrees {
             return group >= 0 ? -1 - group : slot;
         };
         this.refinementHold = (slot) => held(slot) && !which(key(slot));
+    }
+
+    /**
+     * Rebuilds a deforming mesh's tree now, with the GPU builder (H-PLOC),
+     * from its latest GPU pose ({@link setPose}), rather than waiting for the
+     * drift rule: the next update starts it (one rebuild per update, so
+     * several asked at once go one after another), and the update after its
+     * batch comes back places it (as a drift rebuild is: `onBuild` events with
+     * `rebuild: true`, `deformingCounts.driftRebuilds` counts it). Returns
+     * false, and does nothing, when there is nothing to rebuild from: no GPU
+     * builder (no subgroups), no GPU pose yet, or no tree placed yet; true
+     * when it is asked (again, while it is asked or building, too).
+     */
+    rebuild(mesh: number): boolean {
+        this.checkLive();
+        const state = this.meshes.get(mesh);
+        if (!state || state.group >= 0) throw new RangeError(`SceneTrees.rebuild: no mesh ${mesh}`);
+        if (!state.deforming) throw new RangeError(`SceneTrees.rebuild: mesh ${mesh} was not added as deforming (only a deforming mesh's tree changes with its pose)`);
+        if (!this.deforming || !this.firstTreesReady || !this.firstTrees) return false;
+        return this.deforming.requestRebuild(mesh);
+    }
+
+    /**
+     * Places a tree the app built itself (a worker's own GPU device, a file,
+     * any builder writing the GPU layout) as the mesh's tree from the next
+     * update, in place of whatever it has. It is final, as tinybvh's tree is:
+     * a GPU tree or tinybvh's that comes later for the mesh is dropped, a
+     * tinybvh build still running is cancelled, and (given before the first
+     * update that brings the mesh) no builds start for it at all. A deforming
+     * mesh's drift rebuilds still replace it. `onTree` reports it with
+     * `builtBy: 'app'`, as do `meshStatus` and `counts.onAppTrees`.
+     *
+     * The layout must be the mesh's (built from the geometry given to
+     * {@link addMesh}, with its triangle flags and materials) in the scene's
+     * triangle format; `f32` nodes are quantized here for a quantized scene,
+     * and a quantized tree needs a quantized scene. A deforming mesh needs an
+     * `f32` tree (its refit works on one). An indexed scene welds each mesh's
+     * vertices unless `weld: false` (or the mesh deforms), and an indexed tree
+     * built on the mesh's own vertices doesn't name the welded ones: such a
+     * scene refuses it. Throws a RangeError for these and for a tree deeper
+     * than `gpuMaxDepth`. The layout's arrays are read at the update; keep them
+     * unchanged until then.
+     */
+    placeTree(mesh: number, layout: GpuLayoutMeshBvh): void {
+        this.checkLive();
+        const state = this.meshes.get(mesh);
+        if (!state || state.group >= 0) throw new RangeError(`SceneTrees.placeTree: no mesh ${mesh}`);
+        if (state.mergedInto !== null) throw new RangeError(`SceneTrees.placeTree: mesh ${mesh} was merged away into static group ${state.mergedInto}; it has no tree of its own`);
+        const where = `SceneTrees.placeTree (mesh ${mesh})`;
+        if (layout.triangleCount !== state.triangleCount) throw new RangeError(`${where}: the tree has ${layout.triangleCount} triangles, the mesh ${state.triangleCount}`);
+        const leaves = layout.triangleLeaves ?? 'records';
+        if (leaves !== this.triangleLeaves) throw new RangeError(`${where}: the tree has ${leaves} triangles, the scene holds ${this.triangleLeaves}`);
+        const nodes = layout.nodeFormat ?? 'f32';
+        if (nodes === 'quantized' && this.nodeFormat === 'f32') throw new RangeError(`${where}: a quantized tree needs a quantized scene (this one is f32)`);
+        if (nodes === 'quantized' && state.deforming) throw new RangeError(`${where}: a deforming mesh needs an f32 tree (its refit keeps an f32 copy)`);
+        if (this.triangleLeaves === 'indexed' && this.weld && !state.deforming) {
+            throw new RangeError(`${where}: this indexed scene welds each mesh's vertices, which an app's indexed tree doesn't know; make the scene with weld: false`);
+        }
+        if (layout.maxDepth > this.gpuMaxDepth) throw new RangeError(`${where}: the tree is ${layout.maxDepth} levels deep, more than gpuMaxDepth (${this.gpuMaxDepth})`);
+        // Builds not started yet never start; a tinybvh build running is cancelled (its tree would only replace this one).
+        if (this.newMeshes.includes(mesh)) state.ownTree = true;
+        state.abort?.abort();
+        // Any other CPU-written tree still waiting for the mesh (a held refinement, an earlier placeTree) goes: this one is newer.
+        this.arrived = this.arrived.filter((tree) => tree.source !== 'tinybvh' || tree.slot !== mesh);
+        this.arrived.push({ source: 'tinybvh', slot: mesh, generation: state.generation, bvh: layout as MeshBvh, app: true });
+        this.notifyWaiters();
     }
 
     // -----------------------------------------------------------------------
@@ -1530,6 +1624,8 @@ export class SceneTrees {
             mesh.mergedInto = group;
             mesh.geometry = null;
             this.newMeshes = this.newMeshes.filter((slot) => slot !== mesh.slot);
+            // A tree the app placed for it has nothing left to serve.
+            this.arrived = this.arrived.filter((tree) => tree.slot !== mesh.slot);
         });
     }
 
@@ -1540,16 +1636,24 @@ export class SceneTrees {
     /** Starts the GPU batch for the new meshes, then their tinybvh builds, biggest first. */
     private startBuilds(encoder: GPUCommandEncoder): void {
         const now = performance.now();
-        const states = this.newMeshes.map((slot) => this.meshes.get(slot)!).filter((state) => state.geometry !== null);
+        const all = this.newMeshes.map((slot) => this.meshes.get(slot)!).filter((state) => state.geometry !== null);
         // Indexed: the positions go in first, while the geometry is still here (tinybvh's build may move it into a worker).
         // A growth past the device limit throws here with nothing changed and the meshes still new, so a later update retries them.
-        if (this.positions) this.placePositions(states, encoder);
+        if (this.positions) this.placePositions(all, encoder);
         this.newMeshes = [];
+        // Meshes the app gave a tree before their builds started (placeTree) build nothing.
+        for (const state of all) {
+            if (!state.ownTree) continue;
+            state.geometry = null;
+            state.startedAt = now;
+        }
+        const states = all.filter((state) => !state.ownTree);
         const builder = this.firstTreesReady ? this.firstTrees : null;
         for (const state of states) {
             state.startedAt = now;
             state.gpu = builder ? 'building' : 'none';
-            state.tinybvh = 'building';
+            // GPU-only (refine: false): tinybvh builds only what the GPU refuses (gpuRefused starts it then).
+            state.tinybvh = this.refine || !builder ? 'building' : 'none';
             if (!builder) state.fallbackReason = this.noGpuReason ?? 'the GPU builder is not ready';
         }
         if (builder && states.length > 0) {
@@ -1562,9 +1666,10 @@ export class SceneTrees {
             if (deforming.length > 0) this.startGpuBuilds(builder, deforming, { readLayouts: true, rebuild: false });
         }
         // tinybvh after the GPU build has started: the GPU's writeBuffer has copied the arrays by now,
-        // so moving them into a worker is safe (keep this order).
+        // so moving them into a worker is safe (keep this order). GPU-only (refine: false): only the
+        // meshes the GPU won't build; the others keep their geometry for a fallback (gpuRefused).
         const bySize = [...states].sort((a, b) => b.triangleCount - a.triangleCount);
-        for (const state of bySize) this.startTinybvhBuild(state);
+        for (const state of bySize) if (this.refine || !builder) this.startTinybvhBuild(state);
     }
 
     /** Starts GPU builds. `rebuild` marks a deforming mesh's drift rebuild: refused, the mesh keeps refitting its tree. Returns whether anything started. */
@@ -1705,6 +1810,9 @@ export class SceneTrees {
                 continue;
             }
             report.finished(built.slot, built.generation, 'built', undefined, gpuMs);
+            // The batch has read the mesh's arrays (GPU-only meshes keep theirs until now, for a fallback).
+            this.gpuReadsGeometryLater.delete(built.slot);
+            if (!this.refine && !rebuild && state.tinybvh === 'none') state.geometry = null;
             // A rebuild's mesh already had its first tree: its state stays as the first builds left it.
             if (!rebuild) state.gpu = 'built';
             this.gpuTreesBuilt++;
@@ -1723,6 +1831,12 @@ export class SceneTrees {
         state.fallbackReason = reason;
         this.gpuTreesRefused++;
         this.reconcileReserve();
+        // GPU-only (refine: false): tinybvh builds the meshes the GPU couldn't, the declared fallback.
+        if (!this.refine && state.tinybvh === 'none' && state.geometry !== null && !this.disposed) {
+            state.tinybvh = 'building';
+            this.startTinybvhBuild(state);
+            this.notifyWaiters();
+        }
     }
 
     private startTinybvhBuild(state: MeshSlot): void {
@@ -1785,7 +1899,7 @@ export class SceneTrees {
             // An arrived tree counts (it is placed at the next update), except a tinybvh tree that waits: the same rule as takeArrived's.
             const waitsForGpu = this.tinybvhTreeWaits(state, state.gpu === 'building', adoptionPending, loadBatchBuilding);
             const gpuWaits = loadBatchBuilding && this.deformingSlot(state.slot);
-            const arrived = this.arrived.some((tree) => tree.slot === state.slot && tree.generation === state.generation && (tree.source === 'gpu' ? !gpuWaits : !waitsForGpu));
+            const arrived = this.arrived.some((tree) => tree.slot === state.slot && tree.generation === state.generation && (tree.source === 'gpu' ? !gpuWaits : tree.app === true || !waitsForGpu));
             if (arrived) continue;
             if (state.gpu === 'building' || state.tinybvh === 'building') waiting++;
         }
@@ -1841,6 +1955,8 @@ export class SceneTrees {
         const taken: ArrivedTree[] = [];
         const waiting: ArrivedTree[] = [];
         const tinybvhNow = new Set<number>();
+        /** Slots getting an app's tree now (placeTree): a GPU tree dropped for them was not beaten by tinybvh. */
+        const appNow = new Set<number>();
         const gpuQueued = new Set(this.arrived.filter((tree) => tree.source === 'gpu' && !tree.rebuild && this.currentState(tree.slot, tree.generation)).map((tree) => tree.slot));
         const waitForAdoption = this.gpuTreeOutputs === 'adopt' && this.nothingStored();
         const loadBatchBuilding = waitForAdoption && this.loadBatchBuilding();
@@ -1849,11 +1965,13 @@ export class SceneTrees {
             if (!state || tree.source !== 'tinybvh') continue;
             const placed = this.placed.get(tree.slot);
             const gpuTreeFirst = state.gpu === 'building' || (placed?.source === 'gpu' && placed.generation === tree.generation) || gpuQueued.has(tree.slot);
-            if (this.tinybvhTreeWaits(state, gpuTreeFirst, waitForAdoption, loadBatchBuilding)) {
+            // An app's tree (placeTree) is placed at once: holdRefinements and adoption hold tinybvh's only.
+            if (!tree.app && this.tinybvhTreeWaits(state, gpuTreeFirst, waitForAdoption, loadBatchBuilding)) {
                 waiting.push(tree);
             } else {
                 taken.push(tree);
                 tinybvhNow.add(tree.slot);
+                if (tree.app) appNow.add(tree.slot);
             }
         }
         for (const tree of this.arrived) {
@@ -1870,7 +1988,7 @@ export class SceneTrees {
             if (state && (tree.rebuild || !hasTinybvhTree)) {
                 taken.push(tree);
             } else {
-                if (state && hasTinybvhTree && state.fallbackReason === null) state.fallbackReason = "tinybvh's tree arrived before the GPU's";
+                if (state && hasTinybvhTree && state.fallbackReason === null && !appNow.has(tree.slot) && !placed?.app) state.fallbackReason = "tinybvh's tree arrived before the GPU's";
                 if (tree.rebuild) this.deforming?.rebuildRefused(tree.slot);
                 if (tree.stored) {
                     // Stored between updates, never placed: its ranges hold nothing anyone traces.
@@ -1883,7 +2001,7 @@ export class SceneTrees {
         }
         // A mesh whose first tree is tinybvh's, with the GPU tree still building: say why.
         for (const tree of taken) {
-            if (tree.source !== 'tinybvh') continue;
+            if (tree.source !== 'tinybvh' || tree.app) continue;
             const state = this.meshes.get(tree.slot)!;
             if (!this.placed.has(tree.slot) && state.gpu === 'building' && state.fallbackReason === null) state.fallbackReason = "tinybvh's tree arrived before the GPU's";
         }
@@ -1926,7 +2044,7 @@ export class SceneTrees {
         const replaced = new Map<number, TreeBuilder>();
         for (const tree of arrived) {
             const old = this.placed.get(tree.slot);
-            if (old) replaced.set(tree.slot, old.source);
+            if (old) replaced.set(tree.slot, builtBy(old));
         }
 
         if (this.gpuTreeOutputs === 'adopt') {
@@ -2152,7 +2270,7 @@ export class SceneTrees {
             const placed = this.placed.get(tree.slot);
             if (!state || (!tree.rebuild && placed?.generation === tree.generation)) {
                 // What the next update's takeArrived would do: the mesh is gone, or tinybvh's tree came first.
-                if (state && state.fallbackReason === null) state.fallbackReason = "tinybvh's tree arrived before the GPU's";
+                if (state && state.fallbackReason === null && !placed?.app) state.fallbackReason = "tinybvh's tree arrived before the GPU's";
                 if (tree.rebuild) this.deforming?.rebuildRefused(tree.slot);
                 dropped.add(tree);
                 this.releaseOutputs(tree.built.outputs);
@@ -2483,6 +2601,7 @@ export class SceneTrees {
             maxDepth: size.maxDepth,
             bounds: box ? Array.from(box) : size.bounds,
             source: tree.source,
+            app: tree.source === 'tinybvh' && tree.app === true,
             generation: tree.generation,
         };
         this.placed.set(tree.slot, placed);
@@ -2517,13 +2636,15 @@ export class SceneTrees {
             state.cpuPose.moved = false;
             state.cpuPose.due = state.cpuPose.positions !== null;
         }
-        if (replaced === 'gpu' && tree.source === 'tinybvh') this.swaps++;
+        if (replaced === 'gpu' && tree.source === 'tinybvh' && !placed.app) this.swaps++;
+        // GPU-only: the mesh's geometry kept for a fallback is let go once a tree from either builder is in.
+        if (!this.refine && state.geometry !== null && state.tinybvh === 'none' && state.gpu !== 'building') state.geometry = null;
         this.onTree?.({
             mesh: state.group >= 0 ? null : state.slot,
             group: state.group >= 0 ? state.group : null,
-            builtBy: tree.source,
+            builtBy: builtBy(placed),
             replaced,
-            fallbackReason: tree.source === 'tinybvh' && replaced === null ? state.fallbackReason : null,
+            fallbackReason: tree.source === 'tinybvh' && !placed.app && replaced === null ? state.fallbackReason : null,
             triangleCount: placed.triangleCount,
             ms: performance.now() - state.startedAt,
         });
@@ -2656,6 +2777,11 @@ export class SceneTrees {
     private checkLive(): void {
         if (this.disposed) throw new Error('@pmndrs/bvh: the SceneTrees was disposed');
     }
+}
+
+/** Who made a placed tree, as the API names it. */
+function builtBy(tree: PlacedTree): TreeBuilder {
+    return tree.app ? 'app' : tree.source;
 }
 
 function checkMaterial(material: number | undefined): void {

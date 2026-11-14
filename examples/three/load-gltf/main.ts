@@ -63,7 +63,7 @@ function drawTimeline(events: readonly SceneTreeEvent[]): void {
     const height = (canvas.height = canvas.clientHeight * devicePixelRatio);
     const context = canvas.getContext('2d')!;
     context.clearRect(0, 0, width, height);
-    const meshes = new Map<number, { triangles: number; gpu?: number; tinybvh?: number }>();
+    const meshes = new Map<number, { triangles: number; gpu?: number; tinybvh?: number; app?: number }>();
     for (const event of events) {
         if (event.mesh === null) continue;
         const entry = meshes.get(event.mesh) ?? { triangles: event.triangleCount };

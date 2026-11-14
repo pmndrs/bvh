@@ -140,6 +140,34 @@ export function deformingOnCpu(trees: SceneTrees, cloth: MeshGeometry, posedPosi
     // #endregion
 }
 
+export function rebuildNow(trees: SceneTrees, mesh: number): void {
+    // #region rebuild
+    // After a big pose change (a ragdoll, a cut): rebuilt from the latest GPU pose at the next update, drift or not.
+    if (!trees.rebuild(mesh)) console.log('nothing to rebuild from: no subgroups, no GPU pose or no tree yet');
+    // #endregion
+}
+
+export async function placeOwnTree(device: GPUDevice, crate: MeshGeometry, crateLayout: GpuLayoutMeshBvh, matrix: Float32Array): Promise<SceneTrees> {
+    // #region place-tree
+    const trees = await SceneTrees.create(device);
+    const mesh = trees.addMesh(crate);
+    // A tree you built (another device, a file, any builder of the GPU layout) from the same geometry:
+    // given before the first update, the mesh starts no builds; later, its builds are cancelled or dropped.
+    trees.placeTree(mesh, crateLayout);
+    trees.addInstance({ mesh, objectToWorld: matrix });
+    // The next update places it: trees.meshStatus(mesh).builtBy === 'app'.
+    // #endregion
+    return trees;
+}
+
+export async function gpuOnly(device: GPUDevice): Promise<SceneTrees> {
+    // #region gpu-only
+    // GPU trees only: tinybvh builds just the meshes the GPU refuses (and every mesh without subgroups).
+    const trees = await SceneTrees.create(device, { refine: false });
+    // #endregion
+    return trees;
+}
+
 export async function options(device: GPUDevice): Promise<SceneTrees> {
     // #region options
     const trees = await SceneTrees.create(device, {

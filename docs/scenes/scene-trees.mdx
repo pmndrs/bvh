@@ -126,6 +126,45 @@ const [start, end] = new BigInt64Array(read.getMappedRange());
 console.log(`update: ${Number(end - start) / 1e6} ms on the GPU; builds so far: ${trees.counts.gpuBuildTimestampMs ?? '-'} ms`);
 ```
 
+## GPU trees only
+
+With `refine: false`, a device with `subgroups` keeps its GPU trees: tinybvh builds only the meshes the GPU gave no
+usable tree (too big for a batch, deeper than `gpuMaxDepth`, a batch that failed), as the declared fallback, and their
+`fallbackReason` says why. It suits scenes that change often, where tinybvh's better trees would arrive too late to
+matter, and tools that compare the GPU builder alone. Each mesh's geometry is kept until its GPU tree is in (for that
+fallback). Without `subgroups`, or with `gpuFirstTrees: false`, tinybvh builds every mesh either way.
+
+{/* snippet: gpu-only */}
+```ts
+// GPU trees only: tinybvh builds just the meshes the GPU refuses (and every mesh without subgroups).
+const trees = await SceneTrees.create(device, { refine: false });
+```
+
+## Trees you built
+
+`placeTree(mesh, layout)` places a tree the app made (on a worker's own device, from a file, with any builder that
+writes the GPU layout) as the mesh's tree from the next update. It is final, as tinybvh's is: given before the first
+update that brings the mesh, no build starts for it; given later, a tinybvh build still running is cancelled and a GPU
+tree that comes after it is dropped. A deforming mesh's rebuilds still replace it. `onTree`, `meshStatus` and
+`counts.onAppTrees` say `'app'`.
+
+{/* snippet: place-tree */}
+```ts
+const trees = await SceneTrees.create(device);
+const mesh = trees.addMesh(crate);
+// A tree you built (another device, a file, any builder of the GPU layout) from the same geometry:
+// given before the first update, the mesh starts no builds; later, its builds are cancelled or dropped.
+trees.placeTree(mesh, crateLayout);
+trees.addInstance({ mesh, objectToWorld: matrix });
+// The next update places it: trees.meshStatus(mesh).builtBy === 'app'.
+```
+
+The limits: the tree must be built from the geometry given to `addMesh` (with its triangle flags and materials), in the
+scene's triangle format; `f32` nodes are quantized for a quantized scene, but a quantized tree needs a quantized scene;
+a deforming mesh needs an `f32` tree; an indexed scene welds each mesh's vertices unless `weld: false` (or the mesh
+deforms), and refuses an indexed tree then; and the tree must be within `gpuMaxDepth`. Each refusal is a `RangeError`.
+The layout's arrays are read at the next update.
+
 ## Rebinding when a buffer grows
 
 The node and triangle buffers grow by doubling. A growth replaces the `GPUBuffer` and bumps `trees.version`. Make your
@@ -168,6 +207,7 @@ const trees = await SceneTrees.create(device, {
 | `workers` | a pool of its own | A `BvhWorkerPool` to share, or options for the one it makes (and disposes). |
 | `transferGeometry` | `false` | Move each mesh's arrays into the worker instead of copying them. |
 | `mergeStaticInstances` | `true` | [Merged static instances](/scenes/merged-static): instances added with `static: true` before the first update merge into world-space trees. Nothing else is touched. |
+| `refine` | `true` | tinybvh builds every mesh too and its tree replaces the GPU's. `false`: [GPU trees only](#gpu-trees-only). |
 | `holdRefinements` | `false` | tinybvh trees wait until `releaseRefinements()`, for tools that check a scene mid-swap. |
 | `gpuMaxDepth` | `GPU_TREE_MAX_DEPTH` (47) | Deeper trees are refused, keeping every tree within the walk's stack. |
 | `topLevel` | `'auto'` | The GPU top level with subgroups, the CPU one without. `'cpu'`: always the CPU one. |

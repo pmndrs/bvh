@@ -1,20 +1,27 @@
 /**
  * SceneTrees' tooling API in Node (scene-trees.test.ts has the trees
- * themselves): timestamps around an update and on GPU builds. The first trees
- * come from `GpuFirstTrees` over the stand-in H-PLOC (tests/support/fake-hploc.ts),
- * whose trees are tinybvh's with one triangle per leaf; the quantize pass
- * runs as its CPU twin.
+ * themselves): build events, GPU-only scenes, the app's own trees, rebuilds
+ * on request, and timestamps around an update and on GPU builds. The first
+ * trees come from `GpuFirstTrees` over the stand-in H-PLOC
+ * (tests/support/fake-hploc.ts), whose trees are tinybvh's with one triangle
+ * per leaf; the quantize pass runs as its CPU twin, and the CPU walk reads
+ * the scene's buffers from the fake GPU.
  */
 
 import { describe, expect, it } from 'vitest';
-import { createFakeGpu, type FakeBinding, type FakeEncoder, type FakeGpu } from '../../tests/support/fake-gpu.ts';
+import { createFakeGpu, type FakeBinding, type FakeBuffer, type FakeEncoder, type FakeGpu } from '../../tests/support/fake-gpu.ts';
 import { FakeHploc } from '../../tests/support/fake-hploc.ts';
 import { addFakeTimestamps } from '../../tests/support/fake-timestamps.ts';
-import { quantizeNodeWords } from '../quantized-nodes.ts';
+import { quantizeNodes, quantizeNodeWords } from '../quantized-nodes.ts';
+import { createCpuTracer } from '../trace/cpu-traversal.ts';
+import { TOP_HEADER_WORD } from '../trace/layout.ts';
+import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
 import { tessellatedQuad } from '../trace/oracle-fixtures.ts';
-import { GpuFirstTrees } from './gpu-first-trees.ts';
+import type { TraceSceneData } from '../trace/scene-assembly.ts';
+import type { TopLevelBvh } from '../trace/top-level.ts';
+import { GpuFirstTrees, type FirstTreeBuilder } from './gpu-first-trees.ts';
 import { createBvhWorkerPool, type BvhPoolBuildEvent } from '../worker/pool.ts';
-import { SceneTrees, type SceneBuildEvent, type SceneTreesOptions } from './scene-trees.ts';
+import { SceneTrees, type SceneBuildEvent, type SceneTreeEvent, type SceneTreesOptions } from './scene-trees.ts';
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
@@ -110,6 +117,164 @@ describe('SceneTrees build events', () => {
             expect(event.reason).toMatch(/gpuMaxDepth/);
         }
         scene.dispose();
+    });
+});
+
+/** The scene's buffers as the fake GPU holds them, for the CPU walk. */
+function readScene(scene: SceneTrees): TraceSceneData {
+    const { nodes, triangles, topLevel, positions } = scene.buffers;
+    const bytes = (buffer: GPUBuffer) => (buffer as unknown as FakeBuffer).bytes.slice().buffer;
+    const top = bytes(topLevel);
+    const header = new Uint32Array(top, 0, 4);
+    return {
+        nodes: bytes(nodes),
+        nodeFormat: scene.nodeFormat,
+        triangles: bytes(triangles),
+        triangleLeaves: scene.triangleLeaves,
+        positions: positions ? bytes(positions) : new ArrayBuffer(0),
+        positionLayout: scene.positionLayout,
+        topLevel: { buffer: top, instanceCount: header[TOP_HEADER_WORD.instanceCount], nodeCount: header[TOP_HEADER_WORD.nodeCount] } as TopLevelBvh,
+    } as unknown as TraceSceneData;
+}
+
+const down = (x: number, y: number) => ({ origin: [x, y, 3] as const, direction: [0, 0, -1] as const, tMin: 0, tMax: 100 });
+
+describe('SceneTrees GPU-only (refine: false)', () => {
+    it('keeps the GPU trees, builds nothing with tinybvh, and falls back to tinybvh for a mesh the GPU refused', async () => {
+        const poolEvents: BvhPoolBuildEvent[] = [];
+        const pool = createBvhWorkerPool({ worker: 'never', onBuild: (event) => poolEvents.push(event) });
+        const { scene, frame, hploc } = await setUp({ refine: false, workers: pool, warn: () => {} });
+        const a = scene.addMesh(tessellatedQuad(4, 1));
+        scene.addInstance({ mesh: a, objectToWorld: IDENTITY, instanceIndex: 1 });
+        frame();
+        await scene.whenRefined();
+        frame();
+        expect(scene.meshStatus(a).builtBy).toBe('gpu');
+        expect(scene.counts).toMatchObject({ onGpuTrees: 1, onTinybvhTrees: 0, tinybvhBuilding: 0, swaps: 0 });
+        expect(scene.refining).toBe(false);
+        expect(poolEvents).toEqual([]);
+        expect(createCpuTracer(readScene(scene)).closest(down(0.1, 0.2))?.instanceIndex).toBe(1);
+
+        // The next batch fails: its mesh falls back to tinybvh, the declared fallback.
+        hploc.failFinish.add(1);
+        const b = scene.addMesh(tessellatedQuad(3, 1));
+        scene.addInstance({ mesh: b, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 0, 0, 1], instanceIndex: 2 });
+        frame();
+        await until(() => scene.counts.onTinybvhTrees === 0 && poolEvents.some((event) => event.phase === 'finished'), 'the fallback build');
+        await scene.whenRefined();
+        frame();
+        expect(scene.meshStatus(b)).toMatchObject({ builtBy: 'tinybvh' });
+        expect(scene.meshStatus(b).fallbackReason).toMatch(/failed/);
+        expect(scene.meshStatus(a).builtBy).toBe('gpu');
+        expect(poolEvents.filter((event) => event.phase === 'queued')).toHaveLength(1);
+        expect(createCpuTracer(readScene(scene)).closest(down(5.1, 0.2))?.instanceIndex).toBe(2);
+        scene.dispose();
+        pool.dispose();
+    });
+});
+
+describe('SceneTrees.placeTree', () => {
+    it("places the app's tree: before the first update no build starts, later ones are cancelled or dropped", async () => {
+        const trees: SceneTreeEvent[] = [];
+        const builds: SceneBuildEvent[] = [];
+        const { scene, frame, hploc } = await setUp({ onTree: (event) => trees.push(event), onBuild: (event) => builds.push(event) });
+        const quad = tessellatedQuad(4, 1);
+        const own = await buildMeshBvhAsync(quad, { maxLeafPrimitives: 3 });
+        const a = scene.addMesh(quad);
+        scene.addInstance({ mesh: a, objectToWorld: IDENTITY, instanceIndex: 7 });
+        scene.placeTree(a, own);
+        frame();
+        expect(hploc.batches).toEqual([]); // no GPU build
+        expect(builds).toEqual([]); // and no tinybvh build
+        expect(scene.meshStatus(a)).toMatchObject({ builtBy: 'app', fallbackReason: null });
+        expect(scene.counts).toMatchObject({ onAppTrees: 1, onGpuTrees: 0, onTinybvhTrees: 0, waitingForFirstTree: 0 });
+        expect(trees.map((event) => event.builtBy)).toEqual(['app']);
+        await scene.whenBuilt();
+        expect(createCpuTracer(readScene(scene)).closest(down(0.1, 0.2))?.instanceIndex).toBe(7);
+
+        // After the builds started: tinybvh's is cancelled, the GPU's dropped; the app's tree stays.
+        const b = scene.addMesh(tessellatedQuad(5, 1));
+        scene.addInstance({ mesh: b, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 0, 0, 1], instanceIndex: 8 });
+        frame();
+        scene.placeTree(b, await buildMeshBvhAsync(tessellatedQuad(5, 1)));
+        frame();
+        await scene.whenRefined();
+        await until(() => builds.filter((event) => event.mesh === b && event.phase === 'finished').length === 2, "b's builds finished");
+        frame();
+        frame();
+        expect(scene.meshStatus(b).builtBy).toBe('app');
+        expect(builds.find((event) => event.mesh === b && event.builder === 'tinybvh' && event.phase === 'finished')?.outcome).toBe('cancelled');
+        expect(scene.counts.swaps).toBe(0);
+        expect(scene.meshStatus(b).fallbackReason).toBeNull();
+        const tracer = createCpuTracer(readScene(scene));
+        expect(tracer.closest(down(5.1, 0.2))?.instanceIndex).toBe(8);
+        expect(tracer.closest(down(0.1, 0.2))?.instanceIndex).toBe(7);
+
+        // Refused: another mesh's tree, the other triangle format, a quantized tree in an f32 scene, too deep.
+        expect(() => scene.placeTree(a, own.triangleCount === 32 ? { ...own, triangleCount: 31 } : own)).toThrow(/triangles/);
+        expect(() => scene.placeTree(a, { ...own, triangleLeaves: 'indexed' })).toThrow(/indexed/);
+        expect(() => scene.placeTree(a, { ...own, maxDepth: 99 })).toThrow(/gpuMaxDepth/);
+        scene.dispose();
+        const f32 = await setUp({ nodeFormat: 'f32' });
+        const mesh = f32.scene.addMesh(quad);
+        expect(() => f32.scene.placeTree(mesh, quantizeNodes(own))).toThrow(/quantized scene/);
+        f32.scene.dispose();
+    });
+});
+
+describe('SceneTrees.rebuild', () => {
+    it('asks for a deforming mesh\'s rebuild from its GPU pose at the next update, and says when it can\'t', async () => {
+        const gpu = createFakeGpu({}, { features: ['subgroups'], kernels: { bvhqQuantize: quantizeStandIn } });
+        const requests: { geometry: unknown; readLayouts: boolean }[][] = [];
+// Refuses first builds (tinybvh's trees come), and records a rebuild's request (from the GPU pose: never answered here).
+        const builder: FirstTreeBuilder = {
+            prepare: () => Promise.resolve(),
+            build: (batch, options) => {
+                requests.push(batch.map((request) => ({ geometry: request.geometry, readLayouts: options?.readLayouts ?? false })));
+                const fromPose = batch.filter((request) => 'positionBuffer' in request.geometry);
+                return {
+                    notBuilt: batch.filter((request) => !fromPose.includes(request)).map(({ slot, generation }) => ({ slot, generation, reason: 'refused (test)' })),
+                    batches: fromPose.length > 0 ? [new Promise<never>(() => {})] : [],
+                    buildingBytes: 0,
+                };
+            },
+        };
+        const builds: SceneBuildEvent[] = [];
+        const scene = await SceneTrees.create(gpu.device, { firstTreeBuilder: builder, topLevel: 'cpu', workers: { worker: 'never' }, onBuild: (event) => builds.push(event) });
+        const frame = () => {
+            const encoder = gpu.createEncoder();
+            scene.update(encoder);
+            gpu.submit(encoder);
+        };
+        const rock = scene.addMesh(tessellatedQuad(2, 1));
+        const cloth = scene.addMesh(tessellatedQuad(4, 1), { deforming: true });
+        scene.addInstance({ mesh: cloth, objectToWorld: IDENTITY });
+        expect(() => scene.rebuild(rock)).toThrow(/not added as deforming/);
+        expect(scene.rebuild(cloth)).toBe(false); // no tree, no pose
+        frame();
+        await scene.whenRefined();
+        frame();
+        expect(scene.meshStatus(cloth).builtBy).toBe('tinybvh');
+        expect(scene.rebuild(cloth)).toBe(false); // a tree, but no GPU pose yet
+        const positionBuffer = gpu.device.createBuffer({ size: 25 * 12, usage: 0x80 | 0x4 });
+        scene.setPose(cloth, { positionBuffer, vertexCount: 25 });
+        expect(scene.rebuild(cloth)).toBe(true);
+        const before = requests.length;
+        frame();
+        expect(requests.length).toBe(before + 1);
+        expect(requests.at(-1)![0].readLayouts).toBe(true);
+        expect((requests.at(-1)![0].geometry as { positionBuffer?: GPUBuffer }).positionBuffer).toBe(positionBuffer);
+        expect(scene.deformingCounts.driftRebuilds).toBe(1);
+        expect(builds.filter((event) => event.rebuild).map((event) => event.phase)).toEqual(['requested']);
+        frame(); // asked once: no second rebuild
+        expect(requests.length).toBe(before + 1);
+        scene.dispose();
+
+        // Without subgroups there is no GPU builder to rebuild with.
+        const plain = await setUp();
+        const mesh = plain.scene.addMesh(tessellatedQuad(2, 1), { deforming: true });
+        expect(plain.scene.rebuild(mesh)).toBe(false);
+        plain.scene.dispose();
     });
 });
 

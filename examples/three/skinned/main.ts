@@ -122,6 +122,12 @@ overlay.build(log.build(trees));
 overlay.tree(log.tree(trees, sync.meshHandles));
 overlay.set('characters', `${COUNT} × ${(geometry.index!.count / 3).toLocaleString('en-US')} triangles`);
 overlay.range('speed', 0, 3, 0.1, speed, (value) => (speed = value));
+// SceneTrees.rebuild: each character's tree rebuilt now from its current pose, one per update (the drift rule does it on its own).
+overlay.button('rebuild every character now', () => {
+    let asked = 0;
+    for (const handle of sync.meshHandles) if (trees.meshStatus(handle).deforming && trees.rebuild(handle)) asked++;
+    overlay.set('rebuilds asked', asked > 0 ? asked : 'none (no GPU builder, or no pose yet)');
+});
 overlay.note('Hover a character: the GPU ray walks the refit tree, so the marker sits on the skinned surface. three\'s CPU raycast (which skins on the CPU) is the check.');
 
 const pointer = new Vector2(2, 2);

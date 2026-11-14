@@ -54,6 +54,7 @@ export class SceneTreesLog {
         const gpuFirst = this.events.filter((event) => event.builtBy === 'gpu').length;
         if (counts.onGpuTrees) parts.push(`gpu (H-PLOC) ×${counts.onGpuTrees}`);
         if (counts.onTinybvhTrees) parts.push(`tinybvh ×${counts.onTinybvhTrees}`);
+        if (counts.onAppTrees) parts.push(`placed by the page ×${counts.onAppTrees}`);
         if (counts.waitingForFirstTree) parts.push(`waiting ×${counts.waitingForFirstTree}`);
         const reasons = new Set<string>();
         if (trees.gpuFirstTrees.reason) reasons.add(trees.gpuFirstTrees.reason);
