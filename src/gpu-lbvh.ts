@@ -168,7 +168,23 @@ export function checkOptions(options: GpuBuildOptions): Required<GpuBuildOptions
     const traversalCost = options.traversalCost ?? 1;
     const intersectionCost = options.intersectionCost ?? 1;
     if (!(traversalCost > 0) || !(intersectionCost > 0)) throw new RangeError('the SAH costs must be positive');
-    return { maxLeafPrimitives: maxLeaf, traversalCost, intersectionCost, triangleLeaves: checkTriangleLeaves(options.triangleLeaves, 'GPU build'), nodeFormat: checkNodeFormat(options.nodeFormat, 'GPU build') };
+    const triangleLeading = options.triangleLeading ?? [];
+    if (!triangleLeading.every((units) => Number.isInteger(units) && units >= 0)) throw new RangeError('triangleLeading must hold non-negative integers');
+    return {
+        maxLeafPrimitives: maxLeaf,
+        traversalCost,
+        intersectionCost,
+        triangleLeaves: checkTriangleLeaves(options.triangleLeaves, 'GPU build'),
+        nodeFormat: checkNodeFormat(options.nodeFormat, 'GPU build'),
+        triangleLeading,
+    };
+}
+
+/** Checks a batch's `triangleLeading` against its meshes: none, or one entry per mesh. */
+export function checkTriangleLeading(triangleLeading: readonly number[], meshCount: number): void {
+    if (triangleLeading.length !== 0 && triangleLeading.length !== meshCount) {
+        throw new RangeError(`triangleLeading has ${triangleLeading.length} entries for ${meshCount} meshes`);
+    }
 }
 
 export function checkGeometry(geometry: GpuMeshGeometry, index: number): void {
@@ -366,6 +382,7 @@ export class GpuLbvhBuilder {
         if (!this.pipelines || !this.sortPipelines) throw new Error('@pmndrs/bvh: call prepare() before building');
         if (geometries.length === 0) throw new RangeError('a batch needs at least one mesh');
         const settings = checkOptions(options);
+        checkTriangleLeading(settings.triangleLeading, geometries.length);
         geometries.forEach(checkGeometry);
         const plan = planGpuLbvhBatches(this.device, geometries);
         if (plan.batches.length !== 1 || plan.tooBig.length > 0) {
@@ -445,6 +462,10 @@ export interface MeshPlacement {
     readonly geometry: GpuMeshGeometry;
     readonly triangleStart: number;
     readonly triangleCount: number;
+    /** The mesh's first triangle in the output triangles: `triangleStart` plus every gap up to and including its own (`triangleLeading`). */
+    readonly outTriangleStart: number;
+    /** Output triangles left free before the mesh's (`GpuBuildOptions.triangleLeading`). */
+    readonly triangleLeading: number;
     readonly innerStart: number;
     readonly innerCount: number;
     readonly vertexCount: number;
@@ -468,15 +489,18 @@ export function indexBytes(mesh: Pick<MeshPlacement, 'indexFormat' | 'indexSkip'
     return (mesh.indexSkip + mesh.triangleCount * 3) * bytesPerIndex;
 }
 
-/** Lays the meshes out one after another in every batch buffer. */
-export function placeMeshes(geometries: readonly GpuMeshGeometry[]): MeshPlacement[] {
+/** Lays the meshes out one after another in every batch buffer; the output triangles leave `triangleLeading[mesh]` free before each mesh's. */
+export function placeMeshes(geometries: readonly GpuMeshGeometry[], triangleLeading: readonly number[] = []): MeshPlacement[] {
     let triangleStart = 0;
+    let outTriangleStart = 0;
     let innerStart = 0;
     let positionByteStart = 0;
     let indexByteStart = 0;
     let flagsWordStart = 0;
-    return geometries.map((geometry) => {
+    return geometries.map((geometry, meshIndex) => {
         const triangleCount = meshTriangleCount(geometry);
+        const leading = triangleLeading[meshIndex] ?? 0;
+        outTriangleStart += leading;
         let vertexCount: number;
         let positionStride = 3;
         let indexFormat: number = LBVH_INDEX_FORMAT.none;
@@ -500,6 +524,8 @@ export function placeMeshes(geometries: readonly GpuMeshGeometry[]): MeshPlaceme
             geometry,
             triangleStart,
             triangleCount,
+            outTriangleStart,
+            triangleLeading: leading,
             innerStart,
             innerCount: Math.max(1, triangleCount - 1),
             vertexCount,
@@ -512,6 +538,7 @@ export function placeMeshes(geometries: readonly GpuMeshGeometry[]): MeshPlaceme
             hasFlags,
         };
         triangleStart += triangleCount;
+        outTriangleStart += triangleCount;
         innerStart += placement.innerCount;
         positionByteStart += align4(positionBytes(geometry));
         indexByteStart += align4(indexBytes(placement));
@@ -550,6 +577,7 @@ export function buildTables(meshes: readonly MeshPlacement[]): {
         tables[at + LBVH_MESH.indexOffset] = indexUnits + mesh.indexSkip;
         tables[at + LBVH_MESH.flagsOffset] = mesh.flagsWordStart;
         tables[at + LBVH_MESH.hasFlags] = mesh.hasFlags ? 1 : 0;
+        tables[at + LBVH_MESH.outTriangleStart] = mesh.outTriangleStart;
     }
     tables.set(tiles, tilesOffset);
     tables.set(sortTable.tiles, sortTilesOffset);
@@ -563,6 +591,8 @@ export function buildTables(meshes: readonly MeshPlacement[]): {
 export interface BatchTotals {
     readonly meshes: number;
     readonly triangles: number;
+    /** Output triangles: {@link triangles} plus the gaps left before meshes (`triangleLeading`). */
+    readonly outTriangles: number;
     /** Radix-tree inner nodes: `max(1, triangles - 1)` per mesh. */
     readonly inner: number;
     /** Vertex bytes in the batch's positions (each mesh's rounded up to 4). */
@@ -577,12 +607,13 @@ export interface BatchTotals {
     readonly sortTiles: number;
 }
 
-const NO_MESHES: BatchTotals = { meshes: 0, triangles: 0, inner: 0, positionBytes: 0, indexBytes: 0, flagWords: 0, tiles: 0, sortTiles: 0 };
+const NO_MESHES: BatchTotals = { meshes: 0, triangles: 0, outTriangles: 0, inner: 0, positionBytes: 0, indexBytes: 0, flagWords: 0, tiles: 0, sortTiles: 0 };
 
 export function addBatchTotals(a: BatchTotals, b: BatchTotals): BatchTotals {
     return {
         meshes: a.meshes + b.meshes,
         triangles: a.triangles + b.triangles,
+        outTriangles: a.outTriangles + b.outTriangles,
         inner: a.inner + b.inner,
         positionBytes: a.positionBytes + b.positionBytes,
         indexBytes: a.indexBytes + b.indexBytes,
@@ -599,6 +630,7 @@ export function batchTotals(meshes: readonly MeshPlacement[]): BatchTotals {
             addBatchTotals(totals, {
                 meshes: 1,
                 triangles: mesh.triangleCount,
+                outTriangles: mesh.triangleLeading + mesh.triangleCount,
                 inner: mesh.innerCount,
                 positionBytes: align4(positionBytes(mesh.geometry)),
                 indexBytes: align4(indexBytes(mesh)),
@@ -661,7 +693,7 @@ export function lbvhBatchBuffers(totals: BatchTotals, triangleLeaves: GpuLayoutT
         // Every mesh's stats, then the climb's queue count.
         stats: meshes * LBVH_STATS_BYTES + 16,
         outNodes: inner * GPU_LAYOUT_NODE_BYTES,
-        outTriangles: triangles * gpuLayoutTriangleBytes(triangleLeaves),
+        outTriangles: totals.outTriangles * gpuLayoutTriangleBytes(triangleLeaves),
         outParents: inner * 4,
         continueArgs: 16,
         tables: tableWords(totals) * 4,
@@ -727,7 +759,7 @@ export class GpuLbvhBatch {
         this.pipelines = pipelines;
         this.sortPipelines = sortPipelines;
         this.meshCount = geometries.length;
-        this.meshes = placeMeshes(geometries);
+        this.meshes = placeMeshes(geometries, options.triangleLeading);
         const last = this.meshes[this.meshes.length - 1];
         const innerTotal = last.innerStart + last.innerCount;
         const { tables, tilesOffset, tileCount, sortTilesOffset, sortTable } = buildTables(this.meshes);
@@ -1032,7 +1064,7 @@ export function meshResult(mesh: MeshPlacement, index: number, stats: Uint32Arra
     return {
         nodeOffset: stats[LBVH_STAT.nodeOffset],
         nodeCount,
-        triangleOffset: mesh.triangleStart,
+        triangleOffset: mesh.outTriangleStart,
         triangleCount: mesh.triangleCount,
         leafCount: stats[LBVH_STAT.leafCount],
         maxDepth: stats[LBVH_STAT.maxDepth],

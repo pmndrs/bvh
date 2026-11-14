@@ -60,6 +60,7 @@ import {
     geometryTotals,
     MAP_MODE_READ,
     meshResult,
+    checkTriangleLeading,
     placeMeshes,
     planMeshBatches,
     readTreeLayouts,
@@ -181,7 +182,7 @@ export function hplocBatchBuffers(
         // Every mesh's stats, then the word lbvhStart clears for the LBVH's climb queue (unused here).
         stats: meshes * LBVH_STATS_BYTES + 16,
         outNodes: quantizeOnEmit ? (inner + meshes) * GPU_LAYOUT_QUANTIZED_NODE_BYTES : inner * GPU_LAYOUT_NODE_BYTES,
-        outTriangles: triangles * gpuLayoutTriangleBytes(triangleLeaves),
+        outTriangles: totals.outTriangles * gpuLayoutTriangleBytes(triangleLeaves),
         outParents: parents ? inner * 4 : 4,
         tables: tableWords(totals) * 4,
         primitiveBoxes: triangles * 32,
@@ -476,6 +477,7 @@ export class GpuHplocBuilder {
         if (!this.pipelines || !this.sortPipelines) throw new Error('@pmndrs/bvh: call prepare() before building');
         if (geometries.length === 0) throw new RangeError('a batch needs at least one mesh');
         const settings = checkHplocOptions(options);
+        checkTriangleLeading(settings.triangleLeading, geometries.length);
         geometries.forEach(checkGeometry);
         const plan = planGpuHplocBatches(this.device, geometries);
         if (plan.batches.length !== 1 || plan.tooBig.length > 0) {
@@ -557,7 +559,7 @@ export class GpuHplocBatch {
         this.pipelines = pipelines;
         this.sortPipelines = sortPipelines;
         this.meshCount = geometries.length;
-        this.meshes = placeMeshes(geometries);
+        this.meshes = placeMeshes(geometries, options.triangleLeading);
         const last = this.meshes[this.meshes.length - 1];
         const triangleTotal = last.triangleStart + last.triangleCount;
         const innerTotal = last.innerStart + last.innerCount;

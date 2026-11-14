@@ -172,6 +172,8 @@ export const LBVH_MESH = {
     /** The mesh's first flag word in the batch's flags. */
     flagsOffset: 9,
     hasFlags: 10,
+    /** The mesh's first triangle in the output triangles: `triangleStart` plus the gaps left before meshes (`triangleLeading`). */
+    outTriangleStart: 11,
 } as const;
 export const LBVH_MESH_WORDS = 16;
 
@@ -322,6 +324,7 @@ struct LbvhMesh {
     indexOffset: u32,
     flagsOffset: u32,
     hasFlags: u32,
+    outTriangleStart: u32,
 }
 
 fn lbvhMesh(index: u32) -> LbvhMesh {
@@ -339,6 +342,7 @@ fn lbvhMesh(index: u32) -> LbvhMesh {
         lbvhTables[at + ${mesh.indexOffset}u],
         lbvhTables[at + ${mesh.flagsOffset}u],
         lbvhTables[at + ${mesh.hasFlags}u],
+        lbvhTables[at + ${mesh.outTriangleStart}u],
     );
 }
 
@@ -979,7 +983,7 @@ fn lbvhLeafBox(mesh: LbvhMesh, split: u32, side: u32, position: u32) -> LbvhBox 
 }
 
 fn lbvhTriangleBox(mesh: LbvhMesh, position: u32) -> LbvhBox {
-    let base = (mesh.triangleStart + position) * LBVH_TRIANGLE_WORDS;
+    let base = (mesh.outTriangleStart + position) * LBVH_TRIANGLE_WORDS;
     var lower = vec3f(LBVH_FLOAT_MAX);
     var upper = vec3f(-LBVH_FLOAT_MAX);
     for (var corner = 0u; corner < 3u; corner += 1u) {
@@ -1105,7 +1109,7 @@ fn lbvhFinish(@builtin(global_invocation_id) id: vec3u) {
 // triangle instead, vec4u(i0, i1, i2, triangle | flags << 28), the mesh's own vertex indices.
 fn lbvhWriteTriangle(mesh: LbvhMesh, triangle: u32, position: u32) {
     if (lbvhParams.indexedLeaves == 1u) {
-        let base = (mesh.triangleStart + position) * 4u;
+        let base = (mesh.outTriangleStart + position) * 4u;
         for (var corner = 0u; corner < 3u; corner += 1u) {
             lbvhOutTriangles[base + corner] = min(lbvhVertexOf(mesh, triangle, corner), max(mesh.vertexCount, 1u) - 1u);
         }
@@ -1116,7 +1120,7 @@ fn lbvhWriteTriangle(mesh: LbvhMesh, triangle: u32, position: u32) {
         lbvhOutTriangles[base + 3u] = (triangle & ${hex(GPU_LAYOUT_INDEXED_ID_MASK)}) | ((indexedFlags & 3u) << ${GPU_LAYOUT_INDEXED_FLAG_SHIFT}u);
         return;
     }
-    let base = (mesh.triangleStart + position) * LBVH_TRIANGLE_WORDS;
+    let base = (mesh.outTriangleStart + position) * LBVH_TRIANGLE_WORDS;
     for (var corner = 0u; corner < 3u; corner += 1u) {
         // A bad index was counted by lbvhBoxes (and the build refused); clamping only keeps the read in range.
         let vertex = min(lbvhVertexOf(mesh, triangle, corner), max(mesh.vertexCount, 1u) - 1u);

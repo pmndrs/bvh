@@ -156,6 +156,15 @@ export interface GpuBuildOptions {
      * A coordinate of magnitude 2^100 or more, or a non-finite one, makes a quantized box empty on that axis (hits there are lost).
      */
     readonly nodeFormat?: 'f32' | 'quantized';
+    /**
+     * Per mesh of a batch: triangles (in the output format's units, 48 or 16
+     * bytes) left free before the mesh's triangles in the batch's triangle
+     * buffer, so a scene that adopts the buffer can write what goes there (an
+     * indexed scene's mesh header and side tables: `SceneTrees` with
+     * `gpuTreeOutputs: 'adopt'`). Each range's `triangleOffset` is after its
+     * gap. Default: none (every mesh's triangles right after the last's).
+     */
+    readonly triangleLeading?: readonly number[];
 }
 
 /** One mesh's tree inside a batch's shared buffers ({@link GpuTreeBuffers}). */
