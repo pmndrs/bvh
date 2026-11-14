@@ -93,12 +93,13 @@ Everything below is on `main` and pushed to origin. No release, tag or npm publi
 - **Planes:** every plane is the tightest the `f32` decode allows, searched both ways, on the CPU and the GPU alike (2026-11-14; before, the GPU could land one step tighter than the CPU, both valid).
 - **Memory, Sponza:** nodes 185.1 → 74.5 MiB (BVH4) → 40.5 MiB (CWBVH).
 - **Collapse time, Sponza, one core:** 1.35 s (BVH4), 1.83 s (CWBVH).
-- **Speed, best effort** (M5, 2026-11-14, under the lock but with Chrome open; three runs per scene; design note section 8). Closest hit on incoherent rays, wide over f32:
-  - merged trees: CWBVH 1.38-1.44x on Bistro interior (0.97-1.02x on Sponza); BVH4 1.28-1.32x on Sponza (1.03-1.25x on Bistro interior);
-  - instanced trees: 0.56-0.86x for both formats;
-  - every answer equals f32's, ties apart.
-- **The gate** (≥1.3x on both the M5 and the RTX 3060) is met on the M5 only per scene, on merged trees.
-- **Levers built, not timed:** L7 (`wideWalk: 'single'`, a single-loop BVH4 walk, for the instanced-tree hypothesis) and L1 (`wideDecode: 'folded'`, Ylitie's one-FMA plane decode, padded so the hits stay the binary walk's). Both are in the oracle and the quiet pass.
+- **Speed, M5 quiet pass** (2026-11-14 at `11d19f6`, every app closed, load 1.2-2.2; three runs per scene; design note section 8; rows in `bench/results/trace.csv`). Closest hit on incoherent rays (surface and air grid), wide over f32:
+  - merged trees, Sponza: BVH4 1.27-1.34x, BVH4 folded 1.34-1.43x; CWBVH 0.98-1.02x, folded 1.06-1.11x;
+  - merged trees, Bistro interior: CWBVH 1.39-1.41x, folded 1.45-1.46x, workgroup stack 1.36-1.38x; BVH4 1.03-1.25x, folded 1.05-1.28x;
+  - instanced trees: 0.55-0.92x nested, 0.88-0.97x with BVH4's single loop;
+  - every answer equals f32's, ties apart (0 differing of about 33.3M per run).
+- **Levers (timed):** L1 (`wideDecode: 'folded'`) is faster on every row, 1.01-1.08x for BVH4 and 1.03-1.13x for CWBVH. L7 (`wideWalk: 'single'`, BVH4) is 1.06-1.48x the nested walk on incoherent instanced rays but still below f32 there, and slower on primary rays and merged trees (0.66-0.96x).
+- **The gate** (≥1.3x on both the M5 and the RTX 3060) is met on the M5 only per scene, on merged trees: CWBVH (any variant) on Bistro interior, BVH4 folded on Sponza. No format meets it on both scenes. Choosing a format is Dennis's call; no default has changed.
 - **Precision timing:** the "Quiet pass" section below; the RTX 3060 runs are in runbook section 2d.
 - **Timed pages** now hold the shared GPU lock (`/tmp/rt-gpu.lock`) and record the machine's load (`tests/gpu/README.md`, "Timed pages").
 
@@ -152,7 +153,7 @@ node --experimental-transform-types --no-warnings tests/gpu/pages/trace-bench/su
 
 Then commit `bench/results/trace.csv` on the branch. Don't merge or push.
 
-**Today's numbers are best effort** (2026-11-14, design note section 8). They were taken under the lock with the load average at 2-6, but Chrome was open for browsing, so they are not quiet. L7 and L1 have not been timed at all.
+**Done once** (2026-11-14 at `11d19f6`, by the pathtracer's quiet-pass session): the numbers are in design note section 8 and the rows in `bench/results/trace.csv`. Run it again only for a change that could move the walks' speed.
 
 **Consumers** (survey of ~/Developer, 2026-11-11)
 - **ddgi and its rc-\* copies:** on the frozen copy; they switch at P3.

@@ -1,6 +1,6 @@
 # Wide nodes: BVH4 and CWBVH (the traversal experiment)
 
-## Status (2026-11-14): built, off by default; correctness gates pass on the Apple M5; best-effort M5 timings in section 8 (the quiet pass is in HANDOFF): the gate is met on merged trees only, per scene (CWBVH on Bistro interior, BVH4 on Sponza); the RTX 3060 has not run
+## Status (2026-11-14): built, off by default; correctness gates pass on the Apple M5; the M5 quiet pass is in section 8: the gate is met on merged trees only, per scene (CWBVH on Bistro interior, BVH4 folded on Sponza); the RTX 3060 has not run
 
 Two experimental scene node formats sit next to `'f32' | 'quantized'`: `nodeFormat: 'bvh4'` (4-wide, tinybvh's `BVH4_GPU` node) and `nodeFormat: 'cwbvh8'` (Ylitie, Karras and Laine 2017, the compressed 8-wide BVH, tinybvh's `BVH8_CWBVH` node). Both are off by default. The hit contract does not change: `BvhHit`, the 40- and 24-byte records, `GPU_LAYOUT_VERSION` 2, the `bvh*` names, the `bvhTrianglePasses` filter hook, ray masks and the watertight `bvhEdgeFunction` triangle test.
 
@@ -151,7 +151,7 @@ No NVIDIA RTX SDK code. The paper was read; tinybvh's MIT code is what was porte
 - **`bvh-wide-collapse`:** the GPU collapse alone (section 2): 21 trees per format pass `checkWideTree` and give `f32`'s hits on 63,000 rays.
 - **`bvh-wide-refit`:** the GPU refit (section 2) on 12 trees per format. Six meshes each come as tinybvh's tree collapsed on the CPU and as H-PLOC's CPU twin collapsed on the GPU with its map. Each is placed between padding, posed and refit on the GPU. The wide nodes and records equal the CPU's word for word (`refitWide`, `repackWide`; 0 words differ), the padding is untouched, `checkWideTree` passes on the posed records, and the hits equal the posed `f32` tree's on 36,000 rays per format, with 0 ties. The CPU pose's pack (`encodePackFrom`) gives the same nodes.
 - **`scene-trees-deforming`** with BVH4 and CWBVH, records and indexed: a cloth's GPU tree (collapsed on the GPU with its map) refit from 3 poses, then tinybvh's tree after the swap from 4 more, a held bend until a drift rebuild (H-PLOC, collapsed on the GPU), then 2 CPU poses on the rebuilt tree through the GPU pack. Every check gives 0 disagreements with tinybvh `f32` trees of the same pose, the same as the `f32` and quantized variants.
-- **`trace-bench-surface-sponza`** (section 8): every wide answer equals `f32`'s on 7.8M rays per run, ties apart.
+- **`trace-bench-surface-sponza` and `-bistro-interior`** (section 8, the quiet pass): every wide answer equals `f32`'s, of about 33.3M answers per run, ties apart.
 - **Unit tests:** `src/wide-nodes.test.ts` (every triangle reached exactly once; every decoded box holds every corner below it; CWBVH's leaf rules; the refit repacks to the same bytes in the same pose and holds a new pose; the refit map's repack equals `refitWide` on every test mesh, split leaves and combined roots included). `src/trace/wide-scene.test.ts` (instanced and merged, records and indexed, masks and a filter, any-hit far and near: every closest hit has the `f32` hit's `t`, ties counted, any-hit identical). `src/scene/scene-trees.test.ts` (`SceneTrees with wide nodes`; `setPoseCpu` for `bvh4` and `cwbvh8`).
 - **`tools/wide-nodes.ts`** (CPU walk, about 20k air-grid and 10-16k secondary rays per scene): 0 hits differ from `f32`; 6-15 ties on Bistro interior merged (none elsewhere).
 
@@ -178,38 +178,64 @@ CWBVH's 40.5 MiB on Sponza is B3's measured 42,488,000 bytes. Quantized binary n
 
 The wide trees take a third to two thirds of the node visits, as width should. CWBVH tests up to 36% more triangles on Sponza, where `CombineLeafs(3)` and the leaf limit of 3 give up boxes that the binary tree's smaller leaves had. Many-mesh Bistro interior gains least on its instanced tree: each instance entry costs a whole wide root (B3's 0.82x).
 
-**GPU speed, best effort** (not a quiet pass: the load average was low, but Chrome was open for browsing during the runs, which the load check cannot see; the precision runs are HANDOFF's "Quiet pass"). Apple M5 Pro, 18 cores, Chrome 157 headless; `trace-bench-surface-*` section 8 at commit `92ec9e7`, full profile: 5 paired rounds, formats back to back, the order reversed every other round, each timing 0.5 s of back-to-back dispatches after warm-up; under the shared GPU lock, 1-minute load 2.4-5.7 before and after every run, 1-3 Chrome GPU processes; the rows say `machine/quiet` 1 because the load check passed). Three runs per scene (Bistro interior's second run timed out in the runner's DevTools call and was run again). Wide over `f32`: **min..max of the three runs' medians.**
+**GPU speed: the quiet pass** (2026-11-14, run by the pathtracer's quiet-pass session with every app closed; HANDOFF "Quiet pass"). Apple M5 Pro, 18 cores, Chrome 157 headless; `trace-bench-surface-*` section 8 at commit `11d19f6`, full profile: 5 paired rounds, formats back to back, the order reversed every other round, each timing 0.5 s of back-to-back dispatches after warm-up; under the shared GPU lock, 1-minute load 1.2-2.2 before and after every run, 1 Chrome GPU process (the page's own); every run counted as quiet (`machine/quiet` 1). Three runs per scene. Wide over `f32`: **min..max of the three runs' medians.** The rows are in `bench/results/trace.csv` (commit `11d19f6`). `bvh4-single` is lever L7 (the single-loop walk), `-folded` lever L1 (the folded plane decode), section 9.
 
 | Closest hit | Sponza primary | Sponza surface | Sponza air grid | Bistro int. primary | Bistro int. surface | Bistro int. air grid |
 | --- | --- | --- | --- | --- | --- | --- |
-| BVH4, merged | 1.29..1.37 | **1.31..1.32** | 1.28..1.28 | 1.33..1.35 | 1.03..1.04 | 1.23..1.25 |
-| CWBVH, merged | 0.98..1.01 | 0.97..0.98 | 1.02..1.02 | 1.45..1.46 | **1.39..1.44** | **1.38..1.44** |
-| CWBVH workgroup, merged | 0.96..1.01 | 0.95..0.96 | 0.99..1.00 | 1.41..1.43 | 1.37..1.40 | 1.36..1.40 |
-| BVH4, instanced | 1.38..1.42 | 0.69..0.70 | 0.84..0.86 | 1.33..1.35 | 0.66..0.66 | 0.82..0.83 |
-| CWBVH, instanced | 1.15..1.20 | 0.56..0.57 | 0.72..0.75 | 1.22..1.25 | 0.65..0.66 | 0.78..0.80 |
-| CWBVH workgroup, instanced | 1.13..1.17 | 0.55..0.56 | 0.71..0.73 | 1.20..1.21 | 0.65..0.65 | 0.77..0.78 |
+| BVH4, merged | 1.26..1.29 | **1.30..1.34** | 1.27..1.28 | 1.35..1.35 | 1.03..1.04 | 1.25..1.25 |
+| BVH4 folded, merged | 1.31..1.37 | **1.36..1.43** | **1.34..1.34** | 1.40..1.40 | 1.05..1.05 | 1.27..1.28 |
+| BVH4 single, merged | 0.97..1.00 | 1.05..1.10 | 1.02..1.02 | 1.15..1.15 | 0.96..0.96 | 1.12..1.12 |
+| CWBVH, merged | 0.93..0.99 | 0.98..1.02 | 1.01..1.01 | 1.42..1.45 | **1.40..1.41** | **1.39..1.40** |
+| CWBVH folded, merged | 1.03..1.09 | 1.06..1.09 | 1.10..1.11 | 1.53..1.57 | **1.46..1.46** | **1.45..1.46** |
+| CWBVH workgroup, merged | 0.90..0.96 | 0.96..0.99 | 0.97..0.99 | 1.40..1.41 | **1.38..1.38** | **1.36..1.36** |
+| BVH4, instanced | 1.40..1.41 | 0.69..0.70 | 0.86..0.87 | 1.35..1.35 | 0.67..0.67 | 0.82..0.83 |
+| BVH4 folded, instanced | 1.49..1.50 | 0.75..0.75 | 0.92..0.92 | 1.36..1.40 | 0.68..0.68 | 0.85..0.85 |
+| BVH4 single, instanced | 0.93..0.93 | 0.88..0.89 | 0.91..0.91 | 1.03..1.04 | 0.96..0.96 | 0.97..0.97 |
+| CWBVH, instanced | 1.16..1.20 | 0.56..0.57 | 0.74..0.74 | 1.19..1.25 | 0.66..0.66 | 0.79..0.80 |
+| CWBVH folded, instanced | 1.28..1.32 | 0.63..0.64 | 0.83..0.83 | 1.28..1.33 | 0.70..0.70 | 0.84..0.84 |
+| CWBVH workgroup, instanced | 1.14..1.16 | 0.55..0.56 | 0.73..0.73 | 1.16..1.20 | 0.65..0.65 | 0.78..0.78 |
 
 | Any hit | Sponza primary | surface | air grid | Bistro int. primary | surface | air grid |
 | --- | --- | --- | --- | --- | --- | --- |
-| BVH4, merged | 0.93..0.94 | 1.18..1.20 | 1.09..1.10 | 1.18..1.19 | 0.90..0.91 | 1.00..1.01 |
-| CWBVH, merged | 0.59..0.59 | 1.08..1.08 | 1.22..1.23 | 1.48..1.50 | 1.51..1.56 | 1.53..1.57 |
-| BVH4, instanced | 0.88..0.88 | 0.63..0.63 | 0.62..0.63 | 0.98..0.98 | 0.63..0.65 | 0.72..0.73 |
-| CWBVH, instanced | 0.85..0.85 | 0.64..0.65 | 0.69..0.69 | 1.04..1.05 | 0.72..0.74 | 0.79..0.80 |
+| BVH4, merged | 0.92..0.94 | 1.19..1.21 | 1.09..1.11 | 1.17..1.18 | 0.89..0.89 | 1.00..1.00 |
+| BVH4 folded, merged | 0.97..1.00 | 1.24..1.29 | 1.14..1.17 | 1.23..1.23 | 0.91..0.91 | 1.02..1.02 |
+| BVH4 single, merged | 0.76..0.78 | 1.03..1.06 | 0.96..0.99 | 1.06..1.06 | 0.85..0.85 | 0.95..0.95 |
+| CWBVH, merged | 0.57..0.59 | 1.07..1.10 | 1.22..1.24 | 1.48..1.48 | 1.52..1.52 | 1.54..1.54 |
+| CWBVH folded, merged | 0.66..0.66 | 1.19..1.21 | 1.34..1.37 | 1.62..1.62 | 1.60..1.60 | 1.62..1.62 |
+| CWBVH workgroup, merged | 0.55..0.56 | 1.03..1.04 | 1.17..1.19 | 1.40..1.41 | 1.47..1.47 | 1.49..1.49 |
+| BVH4, instanced | 0.88..0.88 | 0.63..0.63 | 0.62..0.62 | 0.97..0.98 | 0.65..0.65 | 0.72..0.72 |
+| BVH4 folded, instanced | 0.91..0.92 | 0.67..0.67 | 0.66..0.66 | 1.01..1.02 | 0.67..0.67 | 0.74..0.74 |
+| BVH4 single, instanced | 0.84..0.84 | 0.90..0.90 | 0.92..0.92 | 0.98..0.99 | 0.93..0.93 | 0.94..0.94 |
+| CWBVH, instanced | 0.84..0.85 | 0.64..0.64 | 0.68..0.68 | 1.03..1.04 | 0.74..0.74 | 0.79..0.79 |
+| CWBVH folded, instanced | 0.92..0.93 | 0.72..0.72 | 0.76..0.76 | 1.11..1.11 | 0.78..0.78 | 0.84..0.84 |
+| CWBVH workgroup, instanced | 0.78..0.79 | 0.63..0.63 | 0.66..0.66 | 0.98..0.98 | 0.72..0.72 | 0.78..0.78 |
 
-`f32` rates for scale (Mrays/s, closest, median of rounds per run): Sponza instanced surface 65.6-67.7, merged surface 119.0-121.1; Bistro interior instanced surface 34.4-34.7, merged surface 39.6-41.8.
+**The lever A/Bs**, within a round (the same trees, the same rays):
 
-Hits: 0 of all answers differ from `f32` in any format and run; ties (another triangle at exactly the same `t`) 126 over Sponza's three runs and 912 over Bistro interior's, of about 4.6M answers per run.
+| | Sponza closest | Sponza any | Bistro int. closest | Bistro int. any |
+| --- | --- | --- | --- | --- |
+| L1: BVH4 folded over BVH4 (every tree and set) | 1.04..1.08 | 1.04..1.07 | 1.01..1.04 | 1.02..1.05 |
+| L1: CWBVH folded over CWBVH (every tree and set) | 1.08..1.13 | 1.09..1.13 | 1.03..1.09 | 1.05..1.10 |
+| L7: BVH4 single over nested, instanced, surface / air grid | 1.26..1.27 / 1.06 | 1.42 / 1.48 | 1.45 / 1.18 | 1.43..1.44 / 1.30 |
+| L7: BVH4 single over nested, instanced, primary | 0.66 | 0.95 | 0.77 | 1.01 |
+| L7: BVH4 single over nested, merged (every set) | 0.77..0.81 | 0.83..0.89 | 0.85..0.93 | 0.90..0.96 |
 
-**Clock and order.** The M5's clock ramps over the first second or two of work (the pathtracer's trace-timing page saw a pass flip between 9 and 4.5 ms). Here every timing is 0.5 s of back-to-back dispatches inside a page that keeps the GPU busy from start to end, and a case's formats run back to back with the order reversed every other round. The raw rates show no ramp: across the 5 rounds the median spread of a loaded rate is 0.3%; round 1 over the median of rounds 2-5 is 1.000 (0.90-1.11); the single-dispatch rate over the loaded rate is 1.000 (0.95-1.04); the per-round ratio spread within a run is 0.5% (median), worst 28% on one primary-ray closest-hit case. The three runs' medians agree to 1-6%.
+`f32` rates for scale (Mrays/s, closest, median of rounds per run): Sponza instanced surface 67.7-68.5, merged surface 112.9-122.2; Bistro interior instanced surface 35.6, merged surface 42.0.
 
-What these runs say, to be confirmed by the quiet pass:
+Hits: 0 answers differ from `f32` in any format, walk, decode and run, of about 33.3M answers per run; ties (another triangle at exactly the same `t`) 231 over Sponza's three runs and 1,803 over Bistro interior's.
 
-- **On one big tree (merged), width pays, and which width depends on the scene.** Bistro interior (many small meshes merged into one tree): CWBVH 1.38-1.44x closest-hit on incoherent rays and 1.51-1.57x any-hit, BVH4 1.03-1.25x. Sponza (fewer, larger meshes): BVH4 1.28-1.32x, CWBVH 0.97-1.02x. The CPU walk counted 0.34-0.39x the node visits for CWBVH on both merged trees, so Sponza's CWBVH loses its gain elsewhere: it tests 22-36% more triangles there (merged leaves of up to 3, and split leaves keep the parent's box: L4), where Bistro interior's merged tree tests 0.94-1.00x.
-- **On the instanced trees (132 and 1,186 meshes) both formats are slower on incoherent rays** (0.56-0.86x) though they visit 0.56-0.78x the nodes; coherent primary rays gain (1.13-1.42x). The suspect is the walk's shape: a mesh loop nested in the top-level loop (section 3). L7 tests it.
-- **The CWBVH workgroup stack is 1-4% slower** than the private stack on the M5.
-- **Against the gate (1.3x closest-hit on incoherent rays, M5 and RTX 3060):** on the M5 it is met only on merged trees and only per scene: CWBVH on Bistro interior (1.38-1.44x), BVH4 on Sponza's surface set (1.31-1.32x; its air grid is 1.28x). No format meets it on both scenes, and none on instanced trees. The RTX 3060 has not run.
+**Clock and order.** The M5's clock ramps over the first second or two of work (the pathtracer's trace-timing page saw a pass flip between 9 and 4.5 ms). Here every timing is 0.5 s of back-to-back dispatches inside a page that keeps the GPU busy from start to end, and a case's formats run back to back with the order reversed every other round. The best-effort runs at `92ec9e7` showed no ramp in the raw rates: across the 5 rounds the median spread of a loaded rate was 0.3%; round 1 over the median of rounds 2-5 was 1.000 (0.90-1.11); the single-dispatch rate over the loaded rate 1.000 (0.95-1.04). In the quiet pass the three runs' medians agree to 0-7%, the widest on primary-ray closest hits.
 
-The provisional runs on the loaded machine (2026-11-13, `machine/quiet` 0 rows) agreed with these within 1-4%.
+What the quiet pass says:
+
+- **On one big tree (merged), width pays, and which width depends on the scene.** Bistro interior (many small meshes merged into one tree): CWBVH 1.39-1.41x closest-hit on incoherent rays, 1.45-1.46x folded, and 1.52-1.62x any-hit; BVH4 1.03-1.28x. Sponza (fewer, larger meshes): BVH4 1.27-1.34x, 1.34-1.43x folded; CWBVH 0.98-1.02x, 1.06-1.11x folded. The CPU walk counted 0.34-0.39x the node visits for CWBVH on both merged trees, so Sponza's CWBVH loses its gain elsewhere: it tests 22-36% more triangles there (merged leaves of up to 3, and split leaves keep the parent's box: L4), where Bistro interior's merged tree tests 0.94-1.00x.
+- **L1, the folded decode, is faster on every row:** 1.01-1.08x for BVH4 and 1.03-1.13x for CWBVH, more on Sponza than on Bistro interior. It changes no answer.
+- **L7, the single loop, helps instanced trees but does not rescue them.** On incoherent instanced rays it is 1.06-1.48x the nested walk, but the best instanced result is still 0.88-0.97x `f32` closest-hit. It loses on coherent primary rays (0.66-0.77x closest) and on every merged row (0.77-0.96x). So the nested walk's shape is part of the instanced loss, not all of it: each instance entry still costs a whole wide root, as on the CPU walk.
+- **On the instanced trees (132 and 1,186 meshes) every format is slower than `f32` on incoherent rays** (0.55-0.97x, the single loop included) though they visit 0.56-0.78x the nodes; coherent primary rays gain with the nested walk (1.14-1.50x closest).
+- **The CWBVH workgroup stack is 1-8% slower** than the private stack on the M5.
+- **Against the gate (1.3x closest-hit on incoherent rays, M5 and RTX 3060):** on the M5 it is met only on merged trees and only per scene. On Bistro interior every CWBVH variant meets it (1.36-1.46x) and no BVH4 does (1.03-1.28x). On Sponza BVH4 folded meets it (1.34-1.43x), exact BVH4 meets it on surface rays only (1.30-1.34x; air grid 1.27-1.28x), and no CWBVH does (at most 1.11x). No format meets it on both scenes, and none on instanced trees. The RTX 3060 has not run.
+
+The best-effort runs (`92ec9e7`, Chrome open; their rows say `machine/quiet` 1 because the load check cannot see Chrome) agree with the quiet pass within 0-6%. Between them every plane became the tightest the `f32` decode allows (section 2), a change of at most one step per plane.
 
 **Windows (RTX 3060 Laptop): what to run**
 
@@ -220,17 +246,17 @@ Run it three times per scene (`trace-bench-surface-sponza`, `trace-bench-surface
 
 ## 9. Levers not built (measured options, after the gate)
 
-- **L1, the folded decode: built** as `wideDecode: 'folded'` for both formats (`TraceModuleOptions`, `TraceBatchKernel`; default `'exact'`). Per node and axis `a = 2^e / d`, `b = (p - o) / d`; each plane's distance is `fma(q, a, b)` (Ylitie's form), and each axis's near distance moves down and far distance up by `2^-20 * (|b| + (|p| + 255 * 2^e) * |1/d|)`. That covers the folded arithmetic's absolute error, the exact path's, and the half ulp by which `p + q * 2^e` rounds (the encoder checks the rounded plane, not the real one), with a margin of about 4x. So the folded box contains the exact path's computed box, and the hits stay the binary walk's. An axis whose `1/d` is huge (a direction component near 0) gets a huge pad: that axis stops culling for that ray, which costs visits, never hits. Checked by the `trace-oracle` variants `wide-*-folded-*` (tinybvh, LBVH single loop, merged indexed H-PLOC with the workgroup stack; CWBVH's hook passes run folded): on the M5, full profile, 0 of 2M shared-edge rays slip (B3's leak class), the one-ulp seams leak 10,927 of 200k against records' 11,287 (the padded boxes take rays the exact slab test rounds away, as quantized nodes do: never more), and the 21 folded CWBVH hook cases have 0 mismatches. Section 8's `bvh4-folded` and `cwbvh8-folded` layouts (the same scenes through folded kernels) time it; it has not been timed yet.
+- **L1, the folded decode: built** as `wideDecode: 'folded'` for both formats (`TraceModuleOptions`, `TraceBatchKernel`; default `'exact'`). Per node and axis `a = 2^e / d`, `b = (p - o) / d`; each plane's distance is `fma(q, a, b)` (Ylitie's form), and each axis's near distance moves down and far distance up by `2^-20 * (|b| + (|p| + 255 * 2^e) * |1/d|)`. That covers the folded arithmetic's absolute error, the exact path's, and the half ulp by which `p + q * 2^e` rounds (the encoder checks the rounded plane, not the real one), with a margin of about 4x. So the folded box contains the exact path's computed box, and the hits stay the binary walk's. An axis whose `1/d` is huge (a direction component near 0) gets a huge pad: that axis stops culling for that ray, which costs visits, never hits. Checked by the `trace-oracle` variants `wide-*-folded-*` (tinybvh, LBVH single loop, merged indexed H-PLOC with the workgroup stack; CWBVH's hook passes run folded): on the M5, full profile, 0 of 2M shared-edge rays slip (B3's leak class), the one-ulp seams leak 10,927 of 200k against records' 11,287 (the padded boxes take rays the exact slab test rounds away, as quantized nodes do: never more), and the 21 folded CWBVH hook cases have 0 mismatches. Section 8's `bvh4-folded` and `cwbvh8-folded` layouts (the same scenes through folded kernels) time it: on the M5 quiet pass it is faster on every row, 1.01-1.08x for BVH4 and 1.03-1.13x for CWBVH.
 - **L2, triangle-group postponing** (Ylitie §3.3): push the triangle group when few lanes of the warp want to test triangles. It needs subgroup ballots in uniform control flow.
 - **L3, compressed triangles** (`CWBVH_COMPRESSED_TRIS`, Baldwin-Weber): not compatible with the watertight test, so ruled out by the hit contract.
 - **L4, exact boxes for split leaves:** tinybvh's `SplitLeafs` copies the parent leaf's box; boxes from the triangles would cut CWBVH's extra triangle tests on Sponza.
 - **L5, the collapse on the GPU and in the workers: both built** (section 2), and the GPU refit. Neither GPU pass is timed: a one-dispatch climb would replace the `maxDepth` cost dispatches if they show.
 - **L6, BVH4's workgroup stack**, if the private stack turns out to be what CWBVH's workgroup stack fixes.
-- **L7, a single-loop wide walk: built for BVH4** as `wideWalk: 'single'` (`TraceModuleOptions`, `TraceBatchKernel`; default `'nested'`). One loop and one 136-entry stack for both levels with the instance marker, as the binary walk has, so a lane that finishes an instance's tree steps the top level in the same iteration as lanes still inside theirs. Top-level entries are the binary walk's references, mesh entries BVH4's inner child words (node indices, never the marker); the node step is the nested walk's text (`bvh4NodeStepWgsl`). The closest hit keeps the record of the instance that last changed it. CWBVH would need the top level's references packed into its two-word entries; not built until BVH4's A/B says the shape matters. Checked like the nested walk: `trace-oracle` variants `wide-bvh4-single-*` (records, masks off with any-hit near, merged indexed H-PLOC, materials; the BVH4 hook passes run single), `trace-wide-compile`, and section 8's `bvh4-single` layout (BVH4's scene through the single-loop kernel).
+- **L7, a single-loop wide walk: built for BVH4** as `wideWalk: 'single'` (`TraceModuleOptions`, `TraceBatchKernel`; default `'nested'`). One loop and one 136-entry stack for both levels with the instance marker, as the binary walk has, so a lane that finishes an instance's tree steps the top level in the same iteration as lanes still inside theirs. Top-level entries are the binary walk's references, mesh entries BVH4's inner child words (node indices, never the marker); the node step is the nested walk's text (`bvh4NodeStepWgsl`). The closest hit keeps the record of the instance that last changed it. CWBVH would need the top level's references packed into its two-word entries; not built until BVH4's A/B says the shape matters. Checked like the nested walk: `trace-oracle` variants `wide-bvh4-single-*` (records, masks off with any-hit near, merged indexed H-PLOC, materials; the BVH4 hook passes run single), `trace-wide-compile`, and section 8's `bvh4-single` layout (BVH4's scene through the single-loop kernel). On the M5 quiet pass it is 1.06-1.48x the nested walk on incoherent instanced rays, yet still 0.88-0.97x `f32` closest-hit there, and slower on primary rays (0.66-0.77x closest) and on every merged row (0.77-0.96x).
 
 ## 10. Follow-ups
 
-1. The quiet-machine M5 runs and the RTX 3060 runs (section 8, runbook 2d), then the gate.
-2. The L1 and L7 A/Bs on the quiet pass (HANDOFF); L7 for CWBVH if BVH4's single loop wins on instanced trees.
+1. The RTX 3060 runs (section 8, runbook 2d), then the gate. The M5 quiet pass is done (section 8).
+2. L7 for CWBVH only if instanced trees matter enough: BVH4's single loop gains on incoherent instanced rays but stays below `f32`, so the instanced loss needs more than the walk's shape.
 3. Time the GPU collapse, the time to first trees, and the GPU refit's pack per deforming mesh (all built, none timed).
 4. If the gate passes: triangle postponing (L2) as a measured lever, `serialize` for wide scenes, and `/three`'s `wideStack`.
