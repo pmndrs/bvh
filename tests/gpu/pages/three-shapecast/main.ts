@@ -124,13 +124,13 @@ fn shapecastPageSphereTriangle(shape: vec4f, a: vec3f, b: vec3f, c: vec3f) -> bo
     const anyCast = bvh.getShapecastFn({ name: 'shapecastPageAny', shape: 'vec4', intersectsBounds: sphereBounds, intersectsTriangle: sphereTriangle });
 
     // Counting: private state in a code node the hooks and the readers share.
-    const counter = code('var<private> shapecastPageCount: u32;');
+    const counter = code('var<private> shapecastPageCounter: u32;');
     const countTriangle = wgslFn(
         /* wgsl */ `
 fn shapecastPageCountTriangle(shape: vec4f, a: vec3f, b: vec3f, c: vec3f, instance: u32, triangle: u32) -> bool {
     let offset = bvhClosestPointToTriangle(shape.xyz, a, b, c).point - shape.xyz;
     if (dot(offset, offset) <= shape.w * shape.w) {
-        shapecastPageCount += 1u;
+        shapecastPageCounter += 1u;
     }
     return false;
 }`,
@@ -138,8 +138,8 @@ fn shapecastPageCountTriangle(shape: vec4f, a: vec3f, b: vec3f, c: vec3f, instan
     );
     const countKeep = wgslFn(`fn shapecastPageKeep(shape: vec4f, score: f32) -> bool { return score <= shape.w * shape.w; }`);
     const countCast = bvh.getShapecastFn({ name: 'shapecastPageCount', shape: 'vec4', intersectsBounds: sphereBounds, intersectsTriangle: countTriangle, keep: countKeep });
-    const resetCount = wgslFn(`fn shapecastPageResetCount() -> u32 { shapecastPageCount = 0u; return 0u; }`, [counter as never]);
-    const readCount = wgslFn(`fn shapecastPageReadCount() -> u32 { return shapecastPageCount; }`, [counter as never]);
+    const resetCount = wgslFn(`fn shapecastPageResetCount() -> u32 { shapecastPageCounter = 0u; return 0u; }`, [counter as never]);
+    const readCount = wgslFn(`fn shapecastPageReadCount() -> u32 { return shapecastPageCounter; }`, [counter as never]);
     const librarySphere = wgslFn(`fn shapecastPageLibrary(shape: vec4f) -> vec2u { return vec2u(select(0u, 1u, bvhIntersectsSphere(shape.xyz, shape.w)), bitcast<u32>(bvhClosestPoint(shape.xyz, 1e30).distance)); }`, [bvh.module as never]);
 
     const out = new StorageBufferAttribute(new Uint32Array(count * 4), 4);

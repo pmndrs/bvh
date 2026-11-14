@@ -358,7 +358,7 @@ export type BvhShapecastHook = BvhTslNode;
  * type is given, then its own arguments.
  */
 export interface BvhShapecastFnOptions {
-    /** The WGSL name of the function (and the prefix of its walk, private state and adapters). Default `bvhThreeShapecast<n>`, numbered in creation order. */
+    /** The WGSL name of the function (its walk, private state and adapters are `<name>_bvh*`; a hook may not use those names). Default `bvhThreeShapecast<n>`, numbered in creation order. */
     readonly name?: string;
     /**
      * The TSL type of the value the cast is called with and every hook gets
@@ -442,14 +442,20 @@ class BvhShapecastWalkNode extends BvhTraceModuleNode {
 
     protected override textFor(builder: NodeBuilder): string {
         const { castName: name, shapeType, hooks } = this;
-        const shape: [string, string][] = shapeType ? [[`${name}Shape`, shapeType]] : [];
+        const shape: [string, string][] = shapeType ? [[`${name}_bvhShape`, shapeType]] : [];
         const call = (hook: BvhShapecastHook, what: string, args: readonly (readonly [string, string])[], type: string, leading = false): string => {
             const declared = hookInputCount(hook, builder, what) - shape.length;
             if (declared < 0 || (leading ? declared > args.length : declared !== args.length)) {
                 throw new RangeError(`@pmndrs/bvh/three: the shapecast's ${what} takes ${declared + shape.length} arguments; expected ${shape.length ? 'the shape, then ' : ''}${leading ? `up to ${args.length}` : args.length}`);
             }
             const nodes = [...shape, ...args.slice(0, declared)].map(([snippet, nodeType]) => expression(snippet, nodeType));
-            return (hook(...nodes) as Node).build(builder, type) as string;
+            const snippet = (hook(...nodes) as Node).build(builder, type) as string;
+            // The cast declares its own name and `<name>_bvh*`: a hook by one of those names would be declared twice.
+            const called = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(snippet)?.[1];
+            if (called !== undefined && (called === name || called.startsWith(`${name}_bvh`))) {
+                throw new RangeError(`@pmndrs/bvh/three: the shapecast's ${what} is named ${called}, as the cast "${name}" names its own functions; rename the hook or the cast`);
+            }
+            return snippet;
         };
         return this.text
             .replace('__BVH_SHAPECAST_BOUNDS__', () => call(hooks.bounds, 'intersectsBounds', [['bounds.min', 'vec3'], ['bounds.max', 'vec3']], 'float'))
@@ -638,24 +644,24 @@ export class BvhTraceNodes {
         const masks = this.rayMasks;
         const walkText = /* wgsl */ `
 // ---- The caller's shapecast ${name} (BvhTraceNodes.getShapecastFn) ----
-${shapeWgsl ? `var<private> ${name}Shape: ${shapeWgsl};` : ''}
-fn ${name}Bounds(bounds: BvhShapecastBounds) -> f32 {
+${shapeWgsl ? `var<private> ${name}_bvhShape: ${shapeWgsl};` : ''}
+fn ${name}_bvhBounds(bounds: BvhShapecastBounds) -> f32 {
     return f32(__BVH_SHAPECAST_BOUNDS__);
 }
-fn ${name}Keep(score: f32) -> bool {
+fn ${name}_bvhKeep(score: f32) -> bool {
     return __BVH_SHAPECAST_KEEP__;
 }
-fn ${name}Triangle(triangle: BvhShapecastTriangle) -> bool {
+fn ${name}_bvhTriangle(triangle: BvhShapecastTriangle) -> bool {
     return __BVH_SHAPECAST_TRIANGLE__;
 }
-${shapecastWalkWgsl(`${name}Walk`, { bounds: `${name}Bounds`, keep: `${name}Keep`, triangle: `${name}Triangle` }, masks, true)}`;
+${shapecastWalkWgsl(`${name}_bvhWalk`, { bounds: `${name}_bvhBounds`, keep: `${name}_bvhKeep`, triangle: `${name}_bvhTriangle` }, masks, true)}`;
         const walk = new BvhShapecastWalkNode(walkText, this.storageNodes, name, shapeType, { bounds: options.intersectsBounds, keep: options.keep ?? null, triangle: options.intersectsTriangle });
         const parameters = [shapeWgsl ? `shape: ${shapeWgsl}` : '', masks ? 'mask: u32' : ''].filter(Boolean).join(', ');
         const entry = wgslFn(
             /* wgsl */ `
 fn ${name}(${parameters}) -> bool {
-    ${shapeWgsl ? `${name}Shape = shape;` : ''}
-    return ${name}Walk(${masks ? 'mask' : ''});
+    ${shapeWgsl ? `${name}_bvhShape = shape;` : ''}
+    return ${name}_bvhWalk(${masks ? 'mask' : ''});
 }`,
             [...(shape !== null && typeof shape !== 'string' ? [shape] : []), walk, this.module] as never,
         ) as unknown as (...args: unknown[]) => BvhTslNode;
