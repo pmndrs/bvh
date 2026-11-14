@@ -314,20 +314,24 @@ export function buildPrimitiveLayout(kind: BvhPrimitiveKind, input: BvhPointsInp
     writeRecords(kind, mode, entries, positions, new Float32Array(inputRecords), new Uint32Array(inputRecords), false);
     const inputFloats = new Float32Array(inputRecords);
     // Per primitive: its box (exact in f32: the corners are f32) and its centre.
-    const boxes = new Float32Array(n * 6);
+    // Points need no boxes: a point's box is its centre (exact, the corners are f32).
+    const boxes = kind === 'segments' ? new Float32Array(n * 6) : null;
     const centres = new Float64Array(n * 3);
     for (let k = 0; k < n; k++) {
         const base = k * stride;
         for (let axis = 0; axis < 3; axis++) {
             const a = inputFloats[base + axis];
             const b = kind === 'segments' ? inputFloats[base + 4 + axis] : a;
-            boxes[k * 6 + axis] = Math.min(a, b);
-            boxes[k * 6 + 3 + axis] = Math.max(a, b);
+            if (boxes) {
+                boxes[k * 6 + axis] = Math.min(a, b);
+                boxes[k * 6 + 3 + axis] = Math.max(a, b);
+            }
             centres[k * 3 + axis] = (a + b) * 0.5;
         }
     }
     const order = new Uint32Array(n);
     for (let k = 0; k < n; k++) order[k] = k;
+    const arrays: BuildArrays = { order, centres, boxes };
     const nodeCapacity = Math.max(1, n - 1);
     const nodes = new ArrayBuffer(n === 0 ? 0 : nodeCapacity * GPU_LAYOUT_NODE_BYTES);
     const nodeFloats = new Float32Array(nodes);
@@ -336,7 +340,7 @@ export function buildPrimitiveLayout(kind: BvhPrimitiveKind, input: BvhPointsInp
     const bounds = Float32Array.of(Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity);
     const rangeBox = new Float32Array(6);
     const writeChild = (node: number, side: number, first: number, count: number): void => {
-        boxOfRange(boxes, order, first, count, rangeBox);
+        boxOfRange(arrays, first, count, rangeBox);
         const base = node * GPU_LAYOUT_NODE_WORDS + side * 8;
         for (let axis = 0; axis < 3; axis++) {
             nodeFloats[base + axis] = rangeBox[axis];
@@ -344,7 +348,7 @@ export function buildPrimitiveLayout(kind: BvhPrimitiveKind, input: BvhPointsInp
         }
     };
     if (n > 0) {
-        boxOfRange(boxes, order, 0, n, bounds);
+        boxOfRange(arrays, 0, n, bounds);
         nodeCount = 1;
         if (n === 1) {
             writeChild(0, 0, 0, 1);
@@ -364,7 +368,7 @@ export function buildPrimitiveLayout(kind: BvhPrimitiveKind, input: BvhPointsInp
                 const count = work.pop()!;
                 const first = work.pop()!;
                 const node = work.pop()!;
-                const leftCount = splitRange(centres, order, first, count, depth >= PRIMITIVE_MEDIAN_DEPTH);
+                const leftCount = splitRange(arrays, first, count, depth >= PRIMITIVE_MEDIAN_DEPTH);
                 const halves = [
                     [first, leftCount],
                     [first + leftCount, count - leftCount],
@@ -391,7 +395,11 @@ export function buildPrimitiveLayout(kind: BvhPrimitiveKind, input: BvhPointsInp
     const primitives = new ArrayBuffer(n * stride * 4);
     const outWords = new Uint32Array(primitives);
     const inWords = new Uint32Array(inputRecords);
-    for (let position = 0; position < n; position++) outWords.set(inWords.subarray(order[position] * stride, (order[position] + 1) * stride), position * stride);
+    for (let position = 0; position < n; position++) {
+        const from = order[position] * stride;
+        const to = position * stride;
+        for (let word = 0; word < stride; word++) outWords[to + word] = inWords[from + word];
+    }
     options.onProgress?.(1);
     return {
         kind,
@@ -406,22 +414,68 @@ export function buildPrimitiveLayout(kind: BvhPrimitiveKind, input: BvhPointsInp
     };
 }
 
-/** The box around the primitives at `order[first..first+count)`, into `out`. */
-function boxOfRange(boxes: Float32Array, order: Uint32Array, first: number, count: number, out: Float32Array): void {
+/**
+ * The builder's working arrays, kept in tree order: every split swaps a
+ * primitive's order entry, centre and box together, so each pass over a
+ * range reads memory in sequence (an indirection through `order` cost about
+ * ten times as much on a million points).
+ */
+interface BuildArrays {
+    readonly order: Uint32Array;
+    /** `x, y, z` per primitive. */
+    readonly centres: Float64Array;
+    /** `minX, minY, minZ, maxX, maxY, maxZ` per segment; null for points (a point's box is its centre). */
+    readonly boxes: Float32Array | null;
+}
+
+function swapPrimitives(arrays: BuildArrays, i: number, j: number): void {
+    const { order, centres, boxes } = arrays;
+    const o = order[i];
+    order[i] = order[j];
+    order[j] = o;
+    for (let k = 0; k < 3; k++) {
+        const c = centres[i * 3 + k];
+        centres[i * 3 + k] = centres[j * 3 + k];
+        centres[j * 3 + k] = c;
+    }
+    if (!boxes) return;
+    for (let k = 0; k < 6; k++) {
+        const b = boxes[i * 6 + k];
+        boxes[i * 6 + k] = boxes[j * 6 + k];
+        boxes[j * 6 + k] = b;
+    }
+}
+
+/** The box around the primitives at tree positions `first..first+count-1`, into `out`. */
+function boxOfRange(arrays: BuildArrays, first: number, count: number, out: Float32Array): void {
     let x0 = Infinity;
     let y0 = Infinity;
     let z0 = Infinity;
     let x1 = -Infinity;
     let y1 = -Infinity;
     let z1 = -Infinity;
-    for (let i = first, end = first + count; i < end; i++) {
-        const base = order[i] * 6;
-        if (boxes[base] < x0) x0 = boxes[base];
-        if (boxes[base + 1] < y0) y0 = boxes[base + 1];
-        if (boxes[base + 2] < z0) z0 = boxes[base + 2];
-        if (boxes[base + 3] > x1) x1 = boxes[base + 3];
-        if (boxes[base + 4] > y1) y1 = boxes[base + 4];
-        if (boxes[base + 5] > z1) z1 = boxes[base + 5];
+    const { boxes, centres } = arrays;
+    if (boxes) {
+        for (let base = first * 6, end = (first + count) * 6; base < end; base += 6) {
+            if (boxes[base] < x0) x0 = boxes[base];
+            if (boxes[base + 1] < y0) y0 = boxes[base + 1];
+            if (boxes[base + 2] < z0) z0 = boxes[base + 2];
+            if (boxes[base + 3] > x1) x1 = boxes[base + 3];
+            if (boxes[base + 4] > y1) y1 = boxes[base + 4];
+            if (boxes[base + 5] > z1) z1 = boxes[base + 5];
+        }
+    } else {
+        for (let base = first * 3, end = (first + count) * 3; base < end; base += 3) {
+            const x = centres[base];
+            const y = centres[base + 1];
+            const z = centres[base + 2];
+            if (x < x0) x0 = x;
+            if (x > x1) x1 = x;
+            if (y < y0) y0 = y;
+            if (y > y1) y1 = y;
+            if (z < z0) z0 = z;
+            if (z > z1) z1 = z;
+        }
     }
     out[0] = x0;
     out[1] = y0;
@@ -432,68 +486,80 @@ function boxOfRange(boxes: Float32Array, order: Uint32Array, first: number, coun
 }
 
 /**
- * Splits `order[first..first+count)` in place and returns the left count (1
- * to `count - 1`): at the middle of the centres' longest axis (three-mesh-bvh's
- * `CENTER`), or at the median along it when `median` is set or the middle
- * leaves a side empty.
+ * Splits tree positions `first..first+count-1` in place and returns the left
+ * count (1 to `count - 1`): at the middle of the centres' longest axis
+ * (three-mesh-bvh's `CENTER`), or at the median along it when `median` is set
+ * or the middle leaves a side empty.
  */
-function splitRange(centres: Float64Array, order: Uint32Array, first: number, count: number, median: boolean): number {
+function splitRange(arrays: BuildArrays, first: number, count: number, median: boolean): number {
+    const { centres } = arrays;
     const end = first + count;
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let z0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    let z1 = -Infinity;
+    for (let base = first * 3, last = end * 3; base < last; base += 3) {
+        const x = centres[base];
+        const y = centres[base + 1];
+        const z = centres[base + 2];
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+        if (z < z0) z0 = z;
+        if (z > z1) z1 = z;
+    }
     let axis = 0;
-    let widest = -1;
-    let low = 0;
-    let high = 0;
-    for (let a = 0; a < 3; a++) {
-        let min = Infinity;
-        let max = -Infinity;
-        for (let i = first; i < end; i++) {
-            const value = centres[order[i] * 3 + a];
-            if (value < min) min = value;
-            if (value > max) max = value;
-        }
-        if (max - min > widest) {
-            widest = max - min;
-            axis = a;
-            low = min;
-            high = max;
-        }
+    let widest = x1 - x0;
+    let low = x0;
+    let high = x1;
+    if (y1 - y0 > widest) {
+        axis = 1;
+        widest = y1 - y0;
+        low = y0;
+        high = y1;
+    }
+    if (z1 - z0 > widest) {
+        axis = 2;
+        widest = z1 - z0;
+        low = z0;
+        high = z1;
     }
     const half = count >> 1;
-    if (widest <= 0) return half; // every centre the same: any halves
+    if (!(widest > 0)) return half; // every centre the same: any halves
     if (!median) {
         const pivot = (low + high) * 0.5;
         let left = first;
         let right = end - 1;
         while (left <= right) {
-            if (centres[order[left] * 3 + axis] < pivot) {
+            if (centres[left * 3 + axis] < pivot) {
                 left++;
             } else {
-                const swap = order[left];
-                order[left] = order[right];
-                order[right] = swap;
+                swapPrimitives(arrays, left, right);
                 right--;
             }
         }
         const leftCount = left - first;
         if (leftCount > 0 && leftCount < count) return leftCount;
     }
-    selectNth(centres, order, axis, first, end - 1, first + half);
+    selectNth(arrays, axis, first, end - 1, first + half);
     return half;
 }
 
 /** Quickselect: puts the `nth` smallest centre along `axis` at `nth`, smaller ones before it. */
-function selectNth(centres: Float64Array, order: Uint32Array, axis: number, lo: number, hi: number, nth: number): void {
+function selectNth(arrays: BuildArrays, axis: number, lo: number, hi: number, nth: number): void {
+    const { centres } = arrays;
     while (hi > lo) {
-        const pivot = centres[order[(lo + hi) >> 1] * 3 + axis];
+        const pivot = centres[((lo + hi) >> 1) * 3 + axis];
         let i = lo;
         let j = hi;
         while (i <= j) {
-            while (centres[order[i] * 3 + axis] < pivot) i++;
-            while (centres[order[j] * 3 + axis] > pivot) j--;
+            while (centres[i * 3 + axis] < pivot) i++;
+            while (centres[j * 3 + axis] > pivot) j--;
             if (i <= j) {
-                const swap = order[i];
-                order[i] = order[j];
-                order[j] = swap;
+                swapPrimitives(arrays, i, j);
                 i++;
                 j--;
             }
