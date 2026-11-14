@@ -84,6 +84,7 @@ Each runs the suites of `compare/core/` (the same as `pnpm compare:node`) on the
 | `compare/queries` | box, sphere, closest point (three-mesh-bvh, Rapier) | the GPU builder's tree answers the same CPU queries | every answer agrees |
 | `compare/scene` | scene trees over thousands of moving objects: ours, bvh.js, `ObjectBVH`; live frustum culling | the GPU top-level refit every frame | `ObjectBVH` agrees before and after the motion |
 | `compare/gpu` | GPU closest and any hit against three-mesh-bvh/webgpu, paired rounds | a GPU-built tree traced by the same kernel | every ray agrees |
+| `compare/sdf` | SDF build time on the GPU against three-mesh-bvh's `webgpu_sdfGeneration` kernel (its v0.9.18 example's WGSL as published, SAH tree), 32³/64³/128³, paired rounds; ours signed (three all-hit rays, parity vote) and unsigned (closest point alone, the floor of either); the same welded geometry, centred on the origin because their kernel's `vec4f(p, 1) * matrix` is right only for a centred box | SceneTrees' GPU-built tree straight into a three texture (`generateSdfTexture`), shown as a slice | every voxel's distance agrees with ours (theirs and our unsigned field); signs are compared and reported, not gated (one +Z ray against a vote of three) |
 
 ## Public-API gaps the examples ran into
 

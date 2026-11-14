@@ -163,6 +163,13 @@ export const EXAMPLES: readonly ExampleEntry[] = [
         description: 'GPU traversal, ours against three-mesh-bvh/webgpu, closest and any hit, in paired rounds; a GPU-built tree traced by the same kernel.',
         timeoutMs: 240_000,
     },
+    {
+        name: 'compare-sdf',
+        path: 'compare/sdf',
+        title: 'compare/sdf',
+        description: 'SDF generation time on the GPU against three-mesh-bvh\'s webgpu_sdfGeneration kernel at several resolutions, in paired rounds, distances and signs checked; the scene\'s GPU-built tree straight into a three texture, shown as a slice.',
+        timeoutMs: 240_000,
+    },
 ];
 
 /** Where an example's source is browsed. */
