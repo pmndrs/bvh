@@ -1,0 +1,166 @@
+name: Release to npm
+
+# Run by hand (Actions > Release to npm > Run workflow) on main, with the version to publish.
+# Pushing to main never publishes; only this does.
+#
+# What it does, in order:
+#   1. Refuses a bad version, a version already on npm or tagged, a prerelease on `latest`, and a
+#      commit whose CI run (ci.yml: lint/typecheck/test/build, the SwiftShader GPU pages and the
+#      wasm reproduce check) did not pass.
+#   2. Runs lint, typecheck, test and build again here, since this job builds what is published.
+#   3. Commits the version to package.json ("Release x.y.z") and tags it vx.y.z.
+#   4. Removes "private": true for the publish only (main keeps it, so a stray local
+#      `npm publish` is refused) and publishes with provenance.
+#   5. Pushes the tag and the commit to main, then rebuilds the docs so their version label updates.
+# With "dry run" ticked it stops after `npm publish --dry-run`: nothing is published, committed or pushed.
+#
+# npm sign-in: npm trusted publishing (npmjs.com > @pmndrs/bvh > Settings > Trusted publisher:
+# GitHub Actions, repository pmndrs/bvh, workflow release.yml, environment npm) needs no secret. npm only offers it
+# for a package that already exists, so the first publish needs an NPM_TOKEN secret (a granular
+# token with publish rights to @pmndrs); delete the secret once trusted publishing is set up.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish, without the v (0.1.0, 0.1.0-alpha.0)'
+        required: true
+        type: string
+      tag:
+        description: 'npm dist-tag (a prerelease cannot go to latest)'
+        required: true
+        default: latest
+        type: choice
+        options: [latest, next, alpha, beta, rc]
+      dry_run:
+        description: 'Dry run: check, build and pack, but publish nothing'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: write # the release commit and tag
+      id-token: write # npm trusted publishing and provenance
+      actions: write # reads CI's result for this commit; starts the docs workflow afterwards
+    env:
+      VERSION: ${{ inputs.version }}
+      DIST_TAG: ${{ inputs.tag }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          filter: blob:none
+      - uses: pnpm/action-setup@v6.1.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Check the version and tag
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "::error::'$VERSION' is not a version like 0.1.0 or 0.1.0-alpha.0"; exit 1
+          fi
+          if [[ "$VERSION" == *-* && "$DIST_TAG" == latest ]]; then
+            echo "::error::$VERSION is a prerelease; pick next, alpha, beta or rc, not latest"; exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::tag v$VERSION already exists"; exit 1
+          fi
+          name=$(node -p "require('./package.json').name")
+          if npm view "$name@$VERSION" version 2>/dev/null | grep -q .; then
+            echo "::error::$name@$VERSION is already on npm"; exit 1
+          fi
+          echo "Releasing $name@$VERSION on '$DIST_TAG' from ${GITHUB_SHA::7} (dry run: $DRY_RUN)"
+
+      # Every check-run on this commit from ci.yml must have passed, so the GPU pages and the wasm
+      # reproduce check gate the release without running again here.
+      - name: CI passed on this commit
+        run: |
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&event=push" \
+            --jq '[.workflow_runs[] | select(.path == ".github/workflows/ci.yml")] | sort_by(.run_attempt) | last | "\(.id) \(.status) \(.conclusion)"')
+          if [ -z "$runs" ] || [ "$runs" = "null null null" ]; then
+            echo "::error::no CI run for ${GITHUB_SHA::7}; push it and wait for CI"; exit 1
+          fi
+          read -r id status conclusion <<<"$runs"
+          if [ "$status" != completed ]; then
+            echo "::error::CI run $id for ${GITHUB_SHA::7} is still $status; run this again when it finishes"; exit 1
+          fi
+          if [ "$conclusion" != success ]; then
+            echo "::error::CI run $id for ${GITHUB_SHA::7} ended '$conclusion'"; exit 1
+          fi
+          echo "CI run $id passed"
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      # Builds dist/ and runs scripts/verify-artifacts.mjs (fails if a licence header is lost).
+      - run: pnpm build
+      - name: The built package imports in Node
+        run: node -e "import('./dist/index.js').then(m => console.log(Object.keys(m).length + ' exports'))"
+
+      - name: Commit the version and tag it
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898283+github-actions[bot]@users.noreply.github.com'
+          npm pkg set version="$VERSION"
+          git add package.json
+          git commit -m "Release $VERSION"
+          git tag -a "v$VERSION" -m "@pmndrs/bvh $VERSION"
+
+      # Trusted publishing needs npm 11.5.1 or later.
+      - name: npm version
+        run: |
+          node -e "const [a,b,c]=process.argv[1].split('.').map(Number); process.exit(a>11||(a==11&&(b>5||(b==5&&c>=1)))?0:1)" "$(npm --version)" || npm install -g npm@11
+          npm --version
+
+      - name: What will be published
+        run: |
+          npm pkg delete private
+          npm pack --dry-run
+
+      # --ignore-scripts: prepublishOnly would repeat the checks above.
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ "$DRY_RUN" = true ]; then
+            npm publish --dry-run --ignore-scripts --access public --tag "$DIST_TAG"
+          else
+            npm publish --provenance --ignore-scripts --access public --tag "$DIST_TAG"
+          fi
+
+      # npm cannot take a version back, so this comes after the publish. If main moved during the
+      # run, the commit is rebased onto it; the tag stays on the commit that was published.
+      - name: Push the tag and the release commit
+        if: inputs.dry_run == false
+        run: |
+          git checkout -- package.json
+          git push origin "v$VERSION"
+          for attempt in 1 2 3; do
+            git pull --rebase origin main && git push origin HEAD:main && exit 0
+            git rebase --abort 2>/dev/null || true
+            sleep 5
+          done
+          echo "::error::published and tagged, but the release commit did not reach main; push it by hand"
+          exit 1
+
+      - name: Rebuild the docs
+        if: inputs.dry_run == false
+        run: gh workflow run docs.yml --ref main

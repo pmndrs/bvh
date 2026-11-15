@@ -35,8 +35,8 @@ Physics uses shapecast, closest point and box queries, which stay here. When a c
 
 ## Publishing the docs
 
-The site is the `.mdx` pages in `docs/` built by pmndrs/docs, with the TypeDoc reference at `/api`. It has never been
-published. The workflow is `.github/workflows/docs.yml` ("Build documentation and deploy to GitHub Pages"):
+The site is the `.mdx` pages in `docs/` built by pmndrs/docs, with the TypeDoc reference at `/api`. It was first
+deployed on 2026-11-15. The workflow is `.github/workflows/docs.yml` ("Build documentation and deploy to GitHub Pages"):
 
 - On every push to `main` and every pull request that touches `docs/`, `src/`, `typedoc.json`, `tools/docs-site.ts` or
   the workflow, it checks the code samples (`pnpm docs:check`), builds the API reference (`pnpm docs:api`) and the site
@@ -63,3 +63,27 @@ the domain works.
 
 To look at the site locally: `pnpm docs:api`, `pnpm docs:site`, then `npx -y serve docs-site`. `docs:site` needs network
 access the first time (it runs `npx @pmndrs/docs@4`).
+
+## Releasing to npm
+
+Pushing to `main` never publishes. A release is `.github/workflows/release.yml` ("Release to npm"), run by hand on
+`main`: Actions, Release to npm, Run workflow, with the version (`0.1.0-alpha.0`), the npm dist-tag, and "dry run" if
+you only want to see what would be published.
+
+It refuses the run if the version is malformed, already on npm or already tagged, or is a prerelease going to
+`latest`, or if CI did not pass on that commit (so the GPU pages and the wasm reproduce check gate a release without
+running again). Then it runs lint, typecheck, test and build, commits the version ("Release x.y.z"), tags it
+`vx.y.z`, publishes with provenance, pushes the tag and the commit to `main`, and rebuilds the docs. `main` keeps
+`"private": true`; the workflow drops it for the publish only, so a stray local `npm publish` is refused.
+
+What the owner has to do once:
+
+1. **npm access:** publish rights to the `@pmndrs` scope.
+2. **First publish:** `@pmndrs/bvh` is not on npm yet, and npm only offers trusted publishing for a package that
+   exists. Add a repository secret `NPM_TOKEN` (a granular token that can publish to `@pmndrs`) for the first run.
+3. **After it:** on npmjs.com, `@pmndrs/bvh`, Settings, Trusted publisher: GitHub Actions, repository `pmndrs/bvh`,
+   workflow `release.yml`, environment `npm`. Then delete the `NPM_TOKEN` secret; the workflow signs in through
+   GitHub's OIDC token.
+
+The job runs in the `npm` environment, which GitHub creates on the first run. Add a required reviewer there if a
+release should wait for approval.
