@@ -186,7 +186,7 @@ Section 8's walks agreed on every ray (`different` 0 in every entry). Indexed le
 
 `quantizeJobs: 'batched'` changed nothing here (613.2 either way).
 
-**Examples:** all 41 smoke pages passed on the RTX, `three-load-gltf` included (it fails only on SwiftShader). Screenshots now show the canvas; the ones looked at draw correctly. Two cosmetic notes: `three/pathtracer`'s HUD shows depth, nodes and triangles 0 for its GPU tree, and `babylon/gpu-trace`'s shadows look blocky.
+**Examples:** all 41 smoke pages passed on the RTX, `three-load-gltf` included (it fails only on SwiftShader). Screenshots now show the canvas; the ones looked at draw correctly. Two cosmetic notes: `three/pathtracer`'s HUD shows depth, nodes and triangles 0 for its GPU tree, and `babylon/gpu-trace`'s shadows look blocky. Both fixed 2026-11-15 in the examples: the HUD now counts merged static groups' trees (the pathtracer's meshes are all static, so its one tree is a group's), and `gpu-trace` traced at an eighth of the size in every smoke run, not only on a software adapter.
 
 Not covered by this run: D3D12 compile times (no page records them), the Intel UHD benches (correctness only), SDF against three-mesh-bvh on the RTX beyond `compare/sdf`'s smoke.
 

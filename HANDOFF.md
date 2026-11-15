@@ -150,7 +150,6 @@ Everything below was on `main` and pushed to origin on 2026-11-13. No release, t
 **Open** (rewritten 2026-11-14 after the build-out; the 2026-11-13 list is in git history)
 - **M5: the surface-ray page's sections 8 and 9** (`?skip=hit-record,leaves,any-order`, 3 runs each on Sponza and Bistro interior), which settle the provisional `triangleLeaves` and `quantizedDecode` defaults; also `bvh-hploc-profile` for the quantized emit. If folded decode is clearly faster on merged trees there, reconsider it (merged trees are the default).
 - **Not measured on the RTX:** D3D12 compile times, SDF against three-mesh-bvh. Intel UHD timings are not wanted (correctness only).
-- **Cosmetic, seen in the RTX screenshots:** `three/pathtracer`'s HUD shows depth, nodes and triangles 0 for its GPU tree; `babylon/gpu-trace`'s shadows look blocky.
 - **pmndrs/bvh#1 on the Mac:** `wgsl-f32-arithmetic` and `trace-cpu-agreement` on the M5, and `trace-oracle` once. Webpack and esbuild dev servers are untested with the worker handshake.
 - **CI has never run on GitHub** (nothing pushed since the jobs were written). Its SwiftShader flags work on Linux; on Windows Chrome 157 `--use-angle=swiftshader` gives no adapter (`tests/gpu/README.md`). Consider adding `sdf-oracle`, `trace-clustered` and `three-shapecast` to the CI job.
 - **WASM on Linux/macOS:** the first `pnpm bvh:wasm --check` there with the new prefix-map flags.
