@@ -18,7 +18,7 @@
  */
 
 import { halfArea, leafSlotsOf, parentSlotsOf, PRIMITIVE_BOX_FLOATS, refitOnCpu, relativeSahCost } from '../refit-cpu.ts';
-import { BVH_NODE_BYTES } from './layout.ts';
+import { BVH_NODE_BYTES } from '../gpu-layout.ts';
 import { buildSahTree, DEFAULT_SAH_OPTIONS } from './sah-builder.ts';
 import { isIdentityTransform, throwMergedTransformChange, transformBounds } from './top-level.ts';
 

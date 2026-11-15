@@ -26,12 +26,15 @@ import {
     indexedLeadingUnits,
     materialCode,
     positionStrideFloats,
+    writeIndexedMeshHeader,
+    DEFAULT_NODE_FORMAT,
+    gpuLayoutNodeBytes,
+    gpuLayoutNodeSlots,
     type PositionLayout,
     type TriangleLeaves,
-    writeIndexedMeshHeader,
-} from './layout.ts';
+    type GpuLayoutNodeFormat,
+} from '../gpu-layout.ts';
 import { checkNodeFormat, quantizeNodes } from '../quantized-nodes.ts';
-import { DEFAULT_NODE_FORMAT, gpuLayoutNodeBytes, gpuLayoutNodeSlots, type GpuLayoutNodeFormat } from '../gpu-layout.ts';
 import { checkTriangleLeaves, indexedFromRecords, weldExactBits, weldPositions } from '../indexed-leaves.ts';
 import { checkTriangleFlags, triangleMaterialCodes } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';

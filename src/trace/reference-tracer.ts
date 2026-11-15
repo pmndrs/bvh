@@ -37,7 +37,7 @@ export type { TraceRay } from './rays.ts';
 import type { TraceSceneInstance } from './scene-assembly.ts';
 import type { TrianglePasses } from './triangle-filter.ts';
 import { triangleMaterialCodes } from '../mesh-input.ts';
-import { BVH_QUERY_ANY, BVH_QUERY_CLOSEST, NO_MATERIAL, RAY_MASK_ALL, checkInstanceMask, materialCode, type BvhQuery } from './layout.ts';
+import { BVH_QUERY_ANY, BVH_QUERY_CLOSEST, NO_MATERIAL, RAY_MASK_ALL, checkInstanceMask, materialCode, type BvhQuery } from '../gpu-layout.ts';
 
 
 export interface ReferenceHit {

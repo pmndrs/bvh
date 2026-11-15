@@ -69,7 +69,7 @@ import {
     TOP_LEVEL_HEADER_BYTES,
     TOP_LEVEL_HEADER_WORDS,
     TRACE_STACK_SIZE,
-} from './layout.ts';
+} from '../gpu-layout.ts';
 import { MERGED_INSTANCE_INDEX } from './static-merge.ts';
 import { createTopLevelBuilder, type TopLevelBuilder, type TopLevelResult } from './top-level-async.ts';
 import { invertAffineInto, isIdentityTransform, throwMergedTransformChange, type Mat4 } from './top-level.ts';

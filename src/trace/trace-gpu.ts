@@ -13,9 +13,8 @@
 import type { TraceSceneData } from './scene-assembly.ts';
 import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl, closestPointKernelWgsl, hitRecordBytes, WALK_COUNTS_BYTES, type AnyHitOrder, type QuantizedDecode } from './wgsl.ts';
 import { CLOSEST_POINT_RECORD_BYTES, POINT_QUERY_BYTES } from './query-wgsl.ts';
-import { RAY_MASK_ALL, type NodeFormat, type PositionLayout, type TriangleLeaves } from './layout.ts';
+import { RAY_MASK_ALL, DEFAULT_NODE_FORMAT, type NodeFormat, type PositionLayout, type TriangleLeaves } from '../gpu-layout.ts';
 import { RAY_BYTES } from './rays.ts';
-import { DEFAULT_NODE_FORMAT } from '../gpu-layout.ts';
 /**
  * The three storage buffers the tracer reads, and an indexed scene's fourth.
  *

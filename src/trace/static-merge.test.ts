@@ -17,7 +17,7 @@ import {
     TRIANGLE_WORD,
     TRIANGLE_WORDS,
     materialFromFlags,
-} from './layout.ts';
+} from '../gpu-layout.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
 import { addToTally, compareAny, compareClosest, newTally, NORMAL_COSINE_TOLERANCE, normalCosine } from './oracle-compare.ts';

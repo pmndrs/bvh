@@ -59,10 +59,10 @@ import {
     makeReference,
     referenceCount,
     referenceIndex,
-} from './layout.ts';
+    QUANTIZED_NODE_WORDS,
+} from '../gpu-layout.ts';
 import type { TraceRay } from './rays.ts';
 import { decodeQuantizedNode, readNodeFrame, type NodeFrame } from '../quantized-nodes.ts';
-import { GPU_LAYOUT_QUANTIZED_NODE_WORDS as QUANTIZED_NODE_WORDS } from '../gpu-layout.ts';
 import type { TraceSceneData } from './scene-assembly.ts';
 import type { TrianglePasses } from './triangle-filter.ts';
 import type { AnyHitOrder } from './wgsl.ts';

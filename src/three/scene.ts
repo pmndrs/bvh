@@ -63,7 +63,7 @@
  */
 
 import { Matrix4, type BatchedMesh, type BufferAttribute, type BufferGeometry, type InstancedMesh, type InterleavedBufferAttribute, type Layers, type Material, type Mesh, type Object3D } from 'three';
-import { MAX_MATERIAL } from '../trace/layout.ts';
+import { MAX_MATERIAL } from '../gpu-layout.ts';
 import { TRIANGLE_MATERIAL_NONE } from '../mesh-input.ts';
 import type { MeshGeometry } from '../trace/mesh-bvh.ts';
 import type { TraceSceneInstance } from '../trace/scene-assembly.ts';

@@ -47,7 +47,7 @@ import {
     TRIANGLE_WORDS,
     type BvhQuery,
     type TriangleLeaves,
-} from './layout.ts';
+} from '../gpu-layout.ts';
 import { isIndexedSceneTriangles } from './indexed-scene-buffers.ts';
 
 /** A candidate hit on a flagged triangle, as the filter sees it. The same fields as the WGSL `BvhCandidate`. */

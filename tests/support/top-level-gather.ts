@@ -4,7 +4,7 @@
  */
 
 import type { FakeBinding } from './fake-gpu.ts';
-import { INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_LEVEL_HEADER_WORDS } from '../../src/trace/layout.ts';
+import { INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_LEVEL_HEADER_WORDS } from '../../src/gpu-layout.ts';
 import { TOP_LEVEL_INSTANCE_ENTRY_WORD, TOP_LEVEL_INSTANCE_ENTRY_WORDS, TOP_LEVEL_MESH_ABSENT, TOP_LEVEL_MESH_ENTRY_WORDS } from '../../src/trace/top-level-gpu.ts';
 
 /** The gather's WGSL, line by line on the CPU: what the fake device runs for `bvhTopLevelGather`. */

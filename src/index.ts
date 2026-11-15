@@ -121,19 +121,10 @@ export {
     type HplocStage,
 } from './gpu-hploc.ts';
 export { HPLOC_STAT } from './gpu-hploc-wgsl.ts';
-export {
-    geometryTotals,
-    GpuLbvhBatch,
-    GpuLbvhBuilder,
-    LBVH_STAGES,
-    lbvhBatchBytes,
-    planGpuLbvhBatches,
-    type BatchBytes,
-    type BatchPlanOptions,
-    type BatchTotals,
-    type LbvhStage,
-} from './gpu-lbvh.ts';
+export { GpuLbvhBatch, GpuLbvhBuilder, LBVH_STAGES, lbvhBatchBytes, planGpuLbvhBatches, type LbvhStage } from './gpu-lbvh.ts';
 export { LBVH_STAT } from './gpu-lbvh-wgsl.ts';
+// What both GPU builders' batch planners and byte counts take and give.
+export { geometryTotals, type BatchBytes, type BatchPlanOptions, type BatchTotals } from './gpu-batch.ts';
 
 // CPU twins of the GPU builders: the same trees, built in plain TypeScript, as references.
 export { buildHplocOnCpu, type HplocMortonCodes, type HplocOptions, type HplocTieBreak } from './hploc-cpu.ts';

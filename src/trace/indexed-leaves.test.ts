@@ -17,7 +17,7 @@ import {
     weldWithinTolerance,
 } from '../index.ts';
 import { createCpuTracer, type CpuHit } from './cpu-traversal.ts';
-import { INDEXED_FLAG_FILTER, INDEXED_TRIANGLE_WORDS, MAX_MATERIAL, MESH_HEADER_WORD, TRIANGLE_FLAG_FILTER } from './layout.ts';
+import { INDEXED_FLAG_FILTER, INDEXED_TRIANGLE_WORDS, MAX_MATERIAL, MESH_HEADER_WORD, TRIANGLE_FLAG_FILTER } from '../gpu-layout.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhFromTopology, buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
 import { createRandom, randomAffine, randomRays, randomTriangleSoup, tessellatedQuad } from './oracle-fixtures.ts';
@@ -27,7 +27,8 @@ import type { TraceRay } from './rays.ts';
 import { PRIMITIVE_BOX_FLOATS, refitOnCpu } from '../refit-cpu.ts';
 import { TRACE_MODULE_ENTRIES, traceModuleEntries, traceModuleWgsl } from './wgsl.ts';
 import { hplocBatchBytes } from '../gpu-hploc.ts';
-import { geometryTotals, lbvhBatchBytes } from '../gpu-lbvh.ts';
+import { geometryTotals } from '../gpu-batch.ts';
+import { lbvhBatchBytes } from '../gpu-lbvh.ts';
 
 describe('GPU batch sizes', () => {
     it('count 16 bytes per triangle of output with indexed leaves, so more triangles fit a capped batch', () => {

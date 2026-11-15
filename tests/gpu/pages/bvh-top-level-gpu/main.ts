@@ -21,7 +21,7 @@ import { assembleTraceScene, type TraceSceneData, type TraceSceneInstance } from
 import { buildMeshBvhWithTinyBvh } from '../../../../src/trace/mesh-bvh-topology.ts';
 import { createTinyBvhBuilder } from '../../../../src/tinybvh.ts';
 import { createRandom, randomAffine, randomRays, randomTriangleSoup, tessellatedQuad } from '../../../../src/trace/oracle-fixtures.ts';
-import { INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_LEVEL_HEADER_WORDS } from '../../../../src/trace/layout.ts';
+import { INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_LEVEL_HEADER_WORDS } from '../../../../src/gpu-layout.ts';
 import { TraceBatchKernel, type TraceSceneBuffers } from '../../../../src/trace/trace-gpu.ts';
 import { assert, runGpuTest } from '../../client.ts';
 import { compareWithReference, readBuffer, readScene, traceOnGpu } from '../../scene-check.ts';

@@ -34,12 +34,11 @@
  * on the CPU instead, with or without subgroups.
  */
 
-import type { GpuLayoutMeshBvh } from '../gpu-layout.ts';
+import { BVH_NODE_WORDS, type GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import { GpuMeshRefit, GpuMeshRefitKernels, GpuRefitBoxPool, type MeshRefitVertices } from '../gpu-mesh-refit.ts';
 import type { GpuMeshBuffers } from '../mesh-input.ts';
 import { relativeSahCost } from '../refit-cpu.ts';
 import { dequantizeNodes } from '../quantized-nodes.ts';
-import { BVH_NODE_WORDS } from '../trace/layout.ts';
 
 /** Refit cost over the built tree's above which a pose counts as drifted (within 10% of a fresh build is the BVH's done-when). */
 export const DRIFT_THRESHOLD = 1.1;

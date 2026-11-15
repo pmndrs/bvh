@@ -33,7 +33,7 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createFakeGpu } from '../../tests/support/fake-gpu.ts';
 import { SceneTrees } from '../scene/scene-trees.ts';
-import { NO_MATERIAL, TRIANGLE_FLAG_FILTER } from '../trace/layout.ts';
+import { NO_MATERIAL, TRIANGLE_FLAG_FILTER } from '../gpu-layout.ts';
 import { createTinyBvhBuilder } from '../tinybvh.ts';
 import { createCpuTracer } from '../trace/cpu-traversal.ts';
 import { buildMeshBvhWithTinyBvh } from '../trace/mesh-bvh-topology.ts';

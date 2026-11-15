@@ -5,7 +5,7 @@
  */
 
 import type { FakeBinding, FakeKernel } from './fake-gpu.ts';
-import { INDEXED_FLAG_SHIFT, INDEXED_ID_MASK, TRIANGLE_WORD, TRIANGLE_WORDS } from '../../src/trace/layout.ts';
+import { INDEXED_FLAG_SHIFT, INDEXED_ID_MASK, TRIANGLE_WORD, TRIANGLE_WORDS } from '../../src/gpu-layout.ts';
 import { MERGED_SOURCE_WORDS } from '../../src/scene/merged-identity-gpu.ts';
 import { quantizeNodeWords } from '../../src/quantized-nodes.ts';
 

@@ -37,7 +37,7 @@ import { CENTER, estimateMemoryInBytes, MeshBVH, SAH } from 'three-mesh-bvh';
 import { GPU_LAYOUT_NODE_BYTES, GPU_LAYOUT_TRIANGLE_BYTES } from '../src/gpu-layout.ts';
 import { LBVH_SCRATCH_NODE_WORDS, LBVH_STATE_WORDS, LBVH_NODE_INFO_WORDS, LBVH_STATS_BYTES } from '../src/gpu-lbvh-wgsl.ts';
 import { HPLOC_CLIMB_WORDS, HPLOC_RECORD_WORDS } from '../src/gpu-hploc-wgsl.ts';
-import { align4, buildTables, indexBytes, placeMeshes, planMeshBatches, positionBytes, UNIFORM_STRIDE } from '../src/gpu-lbvh.ts';
+import { align4, buildTables, indexBytes, placeMeshes, planMeshBatches, positionBytes, UNIFORM_STRIDE } from '../src/gpu-batch.ts';
 import { radixPassCount } from '../src/gpu-radix-sort.ts';
 import { scanTileSumWords } from '../src/gpu-scan.ts';
 import { PRIMITIVE_BOX_FLOATS } from '../src/refit-cpu.ts';
@@ -164,7 +164,7 @@ function classify(triangles: number, parts: Record<string, number>): BatchBytes 
     return { triangles, inputs, scratch, outputs, parts };
 }
 
-/** The planner's batches (src/gpu-lbvh.ts `planMeshBatches`) for a buffer limit, with the builders' bytes-per-triangle constants (the largest buffer's share). */
+/** The planner's batches (src/gpu-batch.ts `planMeshBatches`) for a buffer limit, with the builders' bytes-per-triangle constants (the largest buffer's share). */
 function plan(geometries: readonly Geometry[], limitBytes: number, bytesPerTriangle: number, maxMeshTriangles: number): { batches: number[][]; tooBig: number[] } {
     const device = { limits: { maxStorageBufferBindingSize: limitBytes, maxBufferSize: limitBytes } } as unknown as GPUDevice;
     return planMeshBatches(device, geometries, bytesPerTriangle, maxMeshTriangles);

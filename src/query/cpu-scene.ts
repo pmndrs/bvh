@@ -21,7 +21,7 @@
 
 import type { MeshBvh, MeshGeometry } from '../trace/mesh-bvh.ts';
 import { createCpuTracer, type CpuTracer } from '../trace/cpu-traversal.ts';
-import { INSTANCE_RECORD_WORDS, INSTANCE_WORD, INSTANCE_MASK_SHIFT, NODE_WORD, BVH_NODE_WORDS, EMPTY_CHILD_INDEX, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS, RAY_MASK_ALL } from '../trace/layout.ts';
+import { INSTANCE_RECORD_WORDS, INSTANCE_WORD, INSTANCE_MASK_SHIFT, NODE_WORD, BVH_NODE_WORDS, EMPTY_CHILD_INDEX, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS, RAY_MASK_ALL } from '../gpu-layout.ts';
 import { BVH_CONTAINED, type BvhTraverseCallbacks } from './cpu-mesh-bvh.ts';
 import { BvhBox3, type BvhBox3Like } from './shapes.ts';
 import { assembleTraceScene, type TraceSceneData, type TraceSceneInstance } from '../trace/scene-assembly.ts';

@@ -14,7 +14,7 @@ import { FakeHploc } from '../../tests/support/fake-hploc.ts';
 import { addFakeTimestamps } from '../../tests/support/fake-timestamps.ts';
 import { quantizeNodes, quantizeNodeWords } from '../quantized-nodes.ts';
 import { createCpuTracer } from '../trace/cpu-traversal.ts';
-import { TOP_HEADER_WORD } from '../trace/layout.ts';
+import { TOP_HEADER_WORD } from '../gpu-layout.ts';
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
 import { tessellatedQuad } from '../trace/oracle-fixtures.ts';
 import type { TraceSceneData } from '../trace/scene-assembly.ts';

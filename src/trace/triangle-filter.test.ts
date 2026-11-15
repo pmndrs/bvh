@@ -23,7 +23,7 @@ import {
     TRIANGLE_FLAG_FILTER,
     TRIANGLE_WORD,
     TRIANGLE_WORDS,
-} from './layout.ts';
+} from '../gpu-layout.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
 import { addToTally, compareAny, compareClosest, newTally } from './oracle-compare.ts';

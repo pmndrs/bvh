@@ -3,7 +3,7 @@
  * the two-level BVH, plus a batch kernel that traces a buffer of rays.
  *
  * The source is a TypeScript string (not a `.wgsl` file) so the layout
- * constants from `layout.ts` are spliced in and the shader can never disagree
+ * constants from `gpu-layout.ts` are spliced in and the shader can never disagree
  * with the builders about a word offset.
  *
  * The walk, in one paragraph. A single loop and one small stack serve both
@@ -63,14 +63,14 @@ import {
     INDEXED_FLAG_SHIFT,
     INDEXED_ID_MASK,
     QUANTIZED_NODE_BYTES,
-    type NodeFormat,
     MERGED_SIDE_MATERIAL_SHIFT,
     MERGED_SIDE_SOURCE_BITS,
+    DEFAULT_NODE_FORMAT,
+    type NodeFormat,
     type PositionLayout,
     type TriangleLeaves,
-} from './layout.ts';
+} from '../gpu-layout.ts';
 import { DEFAULT_TRIANGLE_FILTER_WGSL } from './triangle-filter.ts';
-import { DEFAULT_NODE_FORMAT } from '../gpu-layout.ts';
 import { closestPointBatchEntryWgsl, queriesWgsl } from './query-wgsl.ts';
 import { countedWalkWgsl, walkCountsTypesWgsl, WALK_COUNTS_BYTES, WALK_COUNTS_WORD } from './walk-counters.ts';
 
@@ -155,7 +155,7 @@ const BVH_QUERY_ANY: u32 = ${BVH_QUERY_ANY}u;
 // The ray mask of bvhTraceClosest/bvhTraceAny: every instance is visible.
 const BVH_RAY_MASK_ALL: u32 = ${hex(RAY_MASK_ALL)};
 
-// ---- Memory layout (generated from layout.ts) -------------------------------
+// ---- Memory layout (generated from gpu-layout.ts) ---------------------------
 
 // One BVH node holds both child boxes. A child with count > 0 is a leaf of
 // 'count' primitives starting at 'index'; count == 0 means an inner node at 'index'.
@@ -1350,7 +1350,7 @@ fn bvhBoxHalfArea(boxMin: vec3f, boxMax: vec3f) -> f32 {
 
 // Only in a module with ray masks.
 const INSTANCE_MASK_WGSL = /* wgsl */ `
-// The instance mask: 8 bits at bits 8-15 of the instance flags (layout.ts).
+// The instance mask: 8 bits at bits 8-15 of the instance flags (gpu-layout.ts).
 const BVH_INSTANCE_MASK_SHIFT: u32 = ${INSTANCE_MASK_SHIFT}u;
 const BVH_INSTANCE_MASK_ALL: u32 = ${hex(INSTANCE_MASK_ALL)};
 

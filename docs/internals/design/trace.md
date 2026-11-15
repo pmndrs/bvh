@@ -1,6 +1,6 @@
 # BVH walk and GPU layout
 
-This is the part of ddgi's tracer design (the T0.10 spike) that belongs to the BVH: the GPU layout the builders write, the WGSL walk that reads it, the watertight triangle test, and the oracle and CPU walk that check them. How the builders produce the layout is in [bvh-builders.md](bvh-builders.md). The code is in `src/trace/` (`layout.ts`, `wgsl.ts`, `cpu-traversal.ts`, `oracle-compare.ts`, `oracle-fixtures.ts`) and `src/gpu-layout.ts`. Probe tracing and the GI scheduling that sit on top of it stay in webgpu-ddgi.
+This is the part of ddgi's tracer design (the T0.10 spike) that belongs to the BVH: the GPU layout the builders write, the WGSL walk that reads it, the watertight triangle test, and the oracle and CPU walk that check them. How the builders produce the layout is in [bvh-builders.md](bvh-builders.md). The code is in `src/gpu-layout.ts` (the layout) and `src/trace/` (`wgsl.ts`, `cpu-traversal.ts`, `oracle-compare.ts`, `oracle-fixtures.ts`). Probe tracing and the GI scheduling that sit on top of it stay in webgpu-ddgi.
 
 ## In one paragraph
 

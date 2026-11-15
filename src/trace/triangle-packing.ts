@@ -4,7 +4,7 @@
  * elsewhere (`mesh-bvh-topology.ts`). Internal: not exported from the module index.
  */
 
-import { MAX_REFERENCE_INDEX, TRIANGLE_BYTES, TRIANGLE_WORD, TRIANGLE_WORDS } from './layout.ts';
+import { MAX_REFERENCE_INDEX, TRIANGLE_BYTES, TRIANGLE_WORD, TRIANGLE_WORDS } from '../gpu-layout.ts';
 import type { MeshGeometry } from './mesh-bvh.ts';
 import { packedTriangleFlags } from '../mesh-input.ts';
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BVH_NODE_BYTES, MAX_LEAF_PRIMITIVES, NO_PARENT, NODE_WORD, EMPTY_CHILD_INDEX, TRIANGLE_BYTES, TRIANGLE_WORD, nodeView } from './layout.ts';
+import { BVH_NODE_BYTES, MAX_LEAF_PRIMITIVES, NO_PARENT, NODE_WORD, EMPTY_CHILD_INDEX, TRIANGLE_BYTES, TRIANGLE_WORD, nodeView } from '../gpu-layout.ts';
 import { createTinyBvhBuilder } from '../index.ts';
 import type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';

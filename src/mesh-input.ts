@@ -37,9 +37,9 @@ export interface MeshInput {
 
 /** A {@link MeshInput.triangleMaterials} entry meaning "no material here": the hit takes its instance's. */
 export const TRIANGLE_MATERIAL_NONE = 0xffff;
-/** Largest per-triangle material (as `MAX_MATERIAL` in trace/layout.ts). */
+/** Largest per-triangle material (as `MAX_MATERIAL` in gpu-layout.ts). */
 const MAX_TRIANGLE_MATERIAL = 0xfffe;
-/** Bits 16-31 of a triangle's flags: its material + 1 (`MATERIAL_SHIFT` in trace/layout.ts). */
+/** Bits 16-31 of a triangle's flags: its material + 1 (`MATERIAL_SHIFT` in gpu-layout.ts). */
 const TRIANGLE_MATERIAL_SHIFT = 16;
 
 /**
@@ -86,7 +86,7 @@ export function packedTriangleFlags(geometry: MeshInput, triangleCount: number, 
     return flags;
 }
 
-/** The triangle flag bits a mesh's input may set: bit 0, `TRIANGLE_FLAG_FILTER` (trace/layout.ts). */
+/** The triangle flag bits a mesh's input may set: bit 0, `TRIANGLE_FLAG_FILTER` (gpu-layout.ts). */
 export const TRIANGLE_FLAGS_INPUT_MASK = 1;
 
 /**

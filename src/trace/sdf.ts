@@ -22,8 +22,7 @@
  * field at `p` (three-mesh-bvh's sampling, too).
  */
 
-import { DEFAULT_NODE_FORMAT } from '../gpu-layout.ts';
-import { RAY_MASK_ALL, type NodeFormat, type PositionLayout, type TriangleLeaves } from './layout.ts';
+import { DEFAULT_NODE_FORMAT, RAY_MASK_ALL, type NodeFormat, type PositionLayout, type TriangleLeaves } from '../gpu-layout.ts';
 import { CLOSEST_POINT_MAX_DISTANCE, INSIDE_TEST_DIRECTIONS, INSIDE_TEST_MAJORITY, type InsideRule } from './query-wgsl.ts';
 import { traceSourceFormats, type TraceSceneBuffers } from './trace-gpu.ts';
 import { traceModuleWgsl } from './wgsl.ts';

@@ -16,7 +16,7 @@
 import { describe, expect, it } from 'vitest';
 import { createFakeGpu, type FakeBuffer, type FakeGpu } from '../../tests/support/fake-gpu.ts';
 import { createCpuTracer, type CpuHit } from '../trace/cpu-traversal.ts';
-import { INSTANCE_FLAG, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS } from '../trace/layout.ts';
+import { INSTANCE_FLAG, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS } from '../gpu-layout.ts';
 import { MERGED_INSTANCE_INDEX } from '../trace/static-merge.ts';
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
 import type { MeshGeometry } from '../trace/mesh-bvh.ts';

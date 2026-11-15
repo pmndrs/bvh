@@ -1,27 +1,331 @@
 // The tracer's layout, the WGSL walk and its CPU port, the oracle, the tree and
 // top-level builders over that layout, and the worker wrappers (moved from
-// ddgi-core in BX.2).
-export * from './layout.ts';
-export * from './rays.ts';
-export * from './wgsl.ts';
+// ddgi-core in BX.2). Each name is listed on purpose, as in src/index.ts: a new
+// export here is an API decision.
+
+// The layout the walk reads: word positions, flags, masks, materials and the stack references.
+export {
+    BVH_NODE_BYTES,
+    BVH_NODE_WORDS,
+    BVH_QUERY_ANY,
+    BVH_QUERY_CLOSEST,
+    checkInstanceMask,
+    EMPTY_CHILD_INDEX,
+    hitMaterialCode,
+    INDEXED_FLAG_FILTER,
+    INDEXED_FLAG_FLIP_FRONT_FACE,
+    INDEXED_FLAG_SHIFT,
+    INDEXED_ID_MASK,
+    INDEXED_TRIANGLE_BYTES,
+    INDEXED_TRIANGLE_WORD,
+    INDEXED_TRIANGLE_WORDS,
+    indexedLeadingUnits,
+    indexedMaterialCode,
+    indexedMaterialTableUnits,
+    INSTANCE_FLAG,
+    INSTANCE_MASK_ALL,
+    INSTANCE_MASK_BITS,
+    INSTANCE_MASK_SHIFT,
+    INSTANCE_RECORD_BYTES,
+    INSTANCE_RECORD_WORDS,
+    INSTANCE_WORD,
+    instanceMaskFromFlags,
+    makeReference,
+    MATERIAL_BITS,
+    MATERIAL_SHIFT,
+    materialCode,
+    materialFromCode,
+    materialFromFlags,
+    MAX_LEAF_PRIMITIVES,
+    MAX_MATERIAL,
+    MAX_MERGED_SOURCES,
+    MAX_REFERENCE_INDEX,
+    MERGED_SIDE_MATERIAL_SHIFT,
+    MERGED_SIDE_SOURCE_BITS,
+    MESH_HEADER_WORD,
+    NO_MATERIAL,
+    NO_PARENT,
+    NODE_WORD,
+    nodeView,
+    positionStrideFloats,
+    QUANTIZED_NODE_BYTES,
+    QUANTIZED_NODE_WORDS,
+    RAY_MASK_ALL,
+    REF_COUNT_SHIFT,
+    REF_INDEX_MASK,
+    REF_INSTANCE_MARKER,
+    referenceCount,
+    referenceIndex,
+    TOP_HEADER_WORD,
+    TOP_LEVEL_HEADER_BYTES,
+    TOP_LEVEL_HEADER_WORDS,
+    TRACE_STACK_SIZE,
+    TRACER_GPU_LAYOUT_VERSION,
+    TRIANGLE_BYTES,
+    TRIANGLE_FLAG_ALPHA_TEST,
+    TRIANGLE_FLAG_FILTER,
+    TRIANGLE_FLAG_FLIP_FRONT_FACE,
+    TRIANGLE_WORD,
+    TRIANGLE_WORD_SOURCE_INSTANCE,
+    TRIANGLE_WORDS,
+    writeIndexedMeshHeader,
+    type BvhQuery,
+    type NodeFormat,
+    type NodeView,
+    type PositionLayout,
+    type TriangleLeaves,
+} from '../gpu-layout.ts';
+
+// Rays, the WGSL walk (closest/any, batch kernels, closest point, inside test) and its GPU runners.
+export {
+    packRays,
+    RAY_BYTES,
+    RAY_FLOATS,
+    unpackRay,
+    type TraceRay,
+} from './rays.ts';
+export {
+    BATCH_PARAMS_BYTES,
+    BATCH_PARAMS_WORD,
+    BATCH_WORKGROUP_SIZE,
+    batchEntryWgsl,
+    batchKernelWgsl,
+    closestPointKernelWgsl,
+    HIT_RECORD_BYTES,
+    HIT_RECORD_COMPACT_BYTES,
+    HIT_RECORD_COMPACT_WORD,
+    HIT_RECORD_WORD,
+    hitRecordBytes,
+    TRACE_MODULE_ENTRIES,
+    TRACE_MODULE_ENTRIES_INDEXED,
+    traceModuleEntries,
+    traceModuleWgsl,
+    triangleGeometryWgsl,
+    WALK_COUNTS_BYTES,
+    WALK_COUNTS_WORD,
+    type AnyHitOrder,
+    type BatchKernelOptions,
+    type BindingSlot,
+    type ClosestPointKernelOptions,
+    type ModuleBindingEntry,
+    type QuantizedDecode,
+    type TraceModuleOptions,
+} from './wgsl.ts';
 export { CLOSEST_POINT_MAX_DISTANCE, CLOSEST_POINT_RECORD_BYTES, CLOSEST_POINT_RECORD_WORD, INSIDE_TEST_DIRECTIONS, INSIDE_TEST_MAJORITY, POINT_QUERY_BYTES, QUERY_BOX_PADDING, type InsideRule } from './query-wgsl.ts';
-export * from './trace-gpu.ts';
-export * from './sdf.ts';
-export * from './triangle-packing.ts';
-export * from './triangle-filter.ts';
-export * from './mesh-bvh.ts';
-export * from './mesh-bvh-topology.ts';
-export * from './mesh-bvh-build.ts';
-export * from './mesh-bvh-async.ts';
-export * from './sah-builder.ts';
-export * from './top-level.ts';
-export * from './top-level-shape.ts';
-export * from './top-level-async.ts';
-export * from './top-level-gpu.ts';
-export * from './scene-assembly.ts';
-export * from './static-merge.ts';
-export * from './clustered-scene.ts';
-export * from './cpu-traversal.ts';
-export * from './reference-tracer.ts';
-export * from './oracle-compare.ts';
-export * from './oracle-fixtures.ts';
+export {
+    ClosestPointBatchKernel,
+    TraceBatchKernel,
+    traceSourceFormats,
+    uploadTraceScene,
+    type ClosestPointBatch,
+    type ClosestPointBatchKernelOptions,
+    type TraceBatch,
+    type TraceBatchKernelOptions,
+    type TraceSceneBuffers,
+} from './trace-gpu.ts';
+export {
+    createSdfTexture,
+    generateSdfCpu,
+    readSdf,
+    SDF_PARAMS_BYTES,
+    SDF_WORKGROUP_SIZE,
+    SdfGenerator,
+    sdfKernelWgsl,
+    sdfResolution,
+    sdfValueCpu,
+    sdfVoxelCenter,
+    type SdfCpuSource,
+    type SdfEncodeOptions,
+    type SdfGenerateOptions,
+    type SdfGeneratorOptions,
+    type SdfGrid,
+    type SdfKernelOptions,
+    type SdfOptions,
+    type SdfOutput,
+    type SdfSign,
+    type SdfSlices,
+    type SdfTarget,
+} from './sdf.ts';
+
+// Triangles in tree order, and the triangle filter.
+export {
+    checkGeometry,
+    countTriangles,
+    growBoxByTriangle,
+    packTriangles,
+    type CheckedGeometry,
+} from './triangle-packing.ts';
+export {
+    DEFAULT_TRIANGLE_FILTER_WGSL,
+    NO_TRIANGLE_FILTER_WGSL,
+    TRIANGLE_FILTER_SIGNATURE_WGSL,
+    writeTriangleFilterFlags,
+    type TriangleCandidate,
+    type TriangleFilter,
+    type TriangleFilterTarget,
+    type TrianglePasses,
+    type TriangleRecordRange,
+} from './triangle-filter.ts';
+
+// Mesh trees in the tracer's layout: from a topology, tinybvh, the CPU SAH builder, and in a worker.
+export {
+    meshBvhTransferables,
+    type MeshBvh,
+    type MeshBvhBuildOptions,
+    type MeshGeometry,
+} from './mesh-bvh.ts';
+export {
+    buildMeshBvhFromTopology,
+    buildMeshBvhWithTinyBvh,
+    TOPOLOGY_WORDS_PER_NODE,
+    type MeshTreeTopology,
+    type MeshTreeTopologyOptions,
+} from './mesh-bvh-topology.ts';
+export {
+    buildMeshBvhAsync,
+    releaseInlineTinyBvh,
+    tinyBvhHeapBytes,
+} from './mesh-bvh-build.ts';
+export {
+    createMeshBvhBuilder,
+    type MeshBvhBuilder,
+    type MeshBvhBuilderConfig,
+} from './mesh-bvh-async.ts';
+export {
+    buildSahTree,
+    DEFAULT_SAH_OPTIONS,
+    type SahBuildOptions,
+    type SahTree,
+} from './sah-builder.ts';
+
+// The top level (CPU, worker and GPU) and scene assembly: placing trees, merged static groups, clusters.
+export {
+    buildTopLevel,
+    IDENTITY_TRANSFORM,
+    invertAffine,
+    invertAffineInto,
+    isIdentityTransform,
+    throwMergedTransformChange,
+    transformBounds,
+    WORLD_BOX_PADDING,
+    type Mat4,
+    type TopLevelBvh,
+    type TraceInstance,
+} from './top-level.ts';
+export {
+    buildTopLevelShape,
+    topLevelInputTransferables,
+    TopLevelShapeKeeper,
+    topLevelShapeTransferables,
+    type TopLevelBuildInput,
+    type TopLevelCheck,
+    type TopLevelShape,
+} from './top-level-shape.ts';
+export {
+    createTopLevelBuilder,
+    type TopLevelBuilder,
+    type TopLevelBuilderConfig,
+    type TopLevelResult,
+} from './top-level-async.ts';
+export {
+    GpuTopLevel,
+    packTopLevelInstance,
+    QUALITY_CHECK_INTERVAL_MS,
+    TOP_LEVEL_INSTANCE_ENTRY_WORD,
+    TOP_LEVEL_INSTANCE_ENTRY_WORDS,
+    TOP_LEVEL_MESH_ABSENT,
+    TOP_LEVEL_MESH_ENTRY_WORDS,
+    TOP_LEVEL_REBUILD_COST_RATIO,
+    topLevelGatherWgsl,
+    type GpuTopLevelCounters,
+    type GpuTopLevelFrame,
+    type GpuTopLevelInstance,
+    type GpuTopLevelOptions,
+    type PlacedMeshTree,
+} from './top-level-gpu.ts';
+export {
+    assembleTraceScene,
+    buildTraceScene,
+    meshRefitPlacement,
+    type MergedStaticTrees,
+    type MeshRefitPlacement,
+    type TraceSceneAssemblyOptions,
+    type TraceSceneBuildOptions,
+    type TraceSceneData,
+    type TraceSceneInstance,
+    type TraceSceneMergedGroup,
+    type TraceSceneMeshPlacement,
+} from './scene-assembly.ts';
+export {
+    MERGED_INSTANCE_INDEX,
+    mergeStaticGeometry,
+    writeMergedIndexedIdentity,
+    writeMergedTriangleIdentity,
+    type StaticMergeGroup,
+    type StaticMergeOptions,
+    type StaticMergePlan,
+    type StaticMergeSource,
+} from './static-merge.ts';
+export {
+    clusterTraceScene,
+    DEFAULT_CLUSTER_PRIMITIVE_LIMIT,
+    meshClusters,
+    type ClusteredTraceSceneData,
+    type MeshCluster,
+    type TraceClusterOptions,
+    type TraceClusterRecord,
+    type TraceClusterStats,
+} from './clustered-scene.ts';
+
+// The CPU port of the walk, and the oracle that checks walks against a reference.
+export {
+    CPU_TRACE_BACK_SIDE,
+    CPU_TRACE_DOUBLE_SIDE,
+    CPU_TRACE_FRONT_SIDE,
+    createCpuTracer,
+    newTraceStats,
+    type CpuHit,
+    type CpuTraceOptions,
+    type CpuTracer,
+    type CpuTracerOptions,
+    type CpuTraceScene,
+    type CpuTraceStats,
+} from './cpu-traversal.ts';
+export {
+    buildReferenceScene,
+    REFERENCE_TOLERANCE,
+    traceAnyReference,
+    traceClosestReference,
+    type ReferenceHit,
+    type ReferenceOcclusion,
+    type ReferenceScene,
+    type ReferenceSceneOptions,
+    type ReferenceTraceOptions,
+} from './reference-tracer.ts';
+export {
+    addToTally,
+    compareAny,
+    compareClosest,
+    newTally,
+    NORMAL_COSINE_TOLERANCE,
+    normalCosine,
+    T_TOLERANCE,
+    type Comparison,
+    type ComparisonTally,
+    type TracedHit,
+} from './oracle-compare.ts';
+export {
+    createRandom,
+    randomAffine,
+    randomRays,
+    randomTriangleSoup,
+    randomUnitVector,
+    SHARED_EDGE_RAY_CATEGORIES,
+    sharedEdgeRays,
+    tessellatedQuad,
+    toFloat32Ray,
+    type Random,
+    type SharedEdgeRayCategory,
+    type SharedEdgeRayOptions,
+    type Vector3,
+} from './oracle-fixtures.ts';

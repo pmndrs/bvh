@@ -11,11 +11,10 @@
 import { describe, expect, it } from 'vitest';
 import { createFakeGpu, type FakeBinding, type FakeBuffer } from '../../tests/support/fake-gpu.ts';
 import { FakeHploc } from '../../tests/support/fake-hploc.ts';
-import type { GpuLayoutMeshBvh } from '../gpu-layout.ts';
+import { TOP_HEADER_WORD, type GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import { quantizeNodeWords } from '../quantized-nodes.ts';
 import { deserializeLayout, serializeLayout } from '../serialize.ts';
 import { createCpuTracer } from '../trace/cpu-traversal.ts';
-import { TOP_HEADER_WORD } from '../trace/layout.ts';
 import type { MeshGeometry } from '../trace/mesh-bvh.ts';
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
 import { createRandom, randomTriangleSoup, tessellatedQuad } from '../trace/oracle-fixtures.ts';

@@ -1,6 +1,6 @@
 import { GPU_LAYOUT_VERSION } from '../index.ts';
 import { describe, expect, it } from 'vitest';
-import { TRACER_GPU_LAYOUT_VERSION } from './layout.ts';
+import { TRACER_GPU_LAYOUT_VERSION } from '../gpu-layout.ts';
 import { batchEntryWgsl, batchKernelWgsl, closestPointKernelWgsl, HIT_RECORD_BYTES, HIT_RECORD_COMPACT_BYTES, HIT_RECORD_COMPACT_WORD, HIT_RECORD_WORD, hitRecordBytes, traceModuleWgsl, triangleGeometryWgsl } from './wgsl.ts';
 import { CLOSEST_POINT_RECORD_BYTES, CLOSEST_POINT_RECORD_WORD, POINT_QUERY_BYTES } from './query-wgsl.ts';
 
@@ -134,7 +134,7 @@ describe('the spatial queries (queries, shapecast) and the triangle helpers', ()
 
 describe('the GPU layout version', () => {
     it("is the one the tracer's WGSL was written against", () => {
-        // If this fails, @pmndrs/bvh changed its layout: review layout.ts and the walk in wgsl.ts, then bump TRACER_GPU_LAYOUT_VERSION.
+        // If this fails, @pmndrs/bvh changed its layout: review gpu-layout.ts and the walk in wgsl.ts, then bump TRACER_GPU_LAYOUT_VERSION.
         expect(GPU_LAYOUT_VERSION).toBe(TRACER_GPU_LAYOUT_VERSION);
     });
 });

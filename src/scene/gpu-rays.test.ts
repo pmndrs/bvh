@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import { createFakeGpu, type FakeBinding, type FakeBuffer, type FakeKernel } from '../../tests/support/fake-gpu.ts';
 import { createCpuTracer, newTraceStats, type CpuHit } from '../trace/cpu-traversal.ts';
-import { TOP_HEADER_WORD } from '../trace/layout.ts';
+import { TOP_HEADER_WORD } from '../gpu-layout.ts';
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
 import { createRandom, randomRays, tessellatedQuad } from '../trace/oracle-fixtures.ts';
 import { packRays, RAY_FLOATS, unpackRay } from '../trace/rays.ts';

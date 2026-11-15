@@ -73,7 +73,7 @@ import {
     type BatchPlanOptions,
     type BatchTotals,
     type MeshPlacement,
-} from './gpu-lbvh.ts';
+} from './gpu-batch.ts';
 import type { GpuMeshGeometry, GpuMeshTreeRange, GpuTreeBuffers } from './mesh-input.ts';
 import { LBVH_FIRST_ROUND_TRIANGLES, LBVH_PARAMS_BYTES, LBVH_STATS_BYTES, LBVH_STATS_WORDS, LBVH_WORKGROUP_SIZE } from './gpu-lbvh-wgsl.ts';
 import {

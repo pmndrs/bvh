@@ -8,7 +8,8 @@
 
 import { describe, expect, it } from 'vitest';
 import { hplocBatchBytes, hplocScratchPoolBytes, planGpuHplocBatches } from './gpu-hploc.ts';
-import { geometryTotals, lbvhBatchBytes, planGpuLbvhBatches } from './gpu-lbvh.ts';
+import { geometryTotals } from './gpu-batch.ts';
+import { lbvhBatchBytes, planGpuLbvhBatches } from './gpu-lbvh.ts';
 import type { GpuMeshGeometry } from './mesh-input.ts';
 
 const device = { limits: { maxStorageBufferBindingSize: 1 << 30, maxBufferSize: 1 << 30 } } as unknown as GPUDevice;

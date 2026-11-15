@@ -24,7 +24,7 @@
 //   src/indexed-leaves.ts and src/quantized-nodes.ts make from the default
 //   layout; tests in src/tinybvh-formats.test.ts check it.
 //
-// The GPU layout is defined in src/trace/layout.ts
+// The GPU layout is defined in src/gpu-layout.ts
 // (and the WGSL generated from it). The structs below repeat it; a test there
 // checks that this file's output is byte for byte what the JavaScript
 // conversion (buildMeshBvhFromTopology) makes from the same tinybvh tree.
@@ -122,7 +122,7 @@ static bool arrayBytes(uint64_t count, uint64_t elementBytes, size_t& bytes)
 }
 
 // ---------------------------------------------------------------------------
-// The tracer's GPU layout (src/trace/layout.ts).
+// The tracer's GPU layout (src/gpu-layout.ts).
 // ---------------------------------------------------------------------------
 
 // One node: the boxes of its two children (Aila-Laine layout). A child with
@@ -706,7 +706,7 @@ static const int FRAME_MIN_EXPONENT = -100;
 static const double FRAME_LIMIT = 1267650600228229401496703205376.0;  // 2^100
 static const double QUANTIZE_MARGIN_STEPS = 1.0 / 1024.0;
 static const uint32_t QUANTIZED_EMPTY_AXIS = 0xffffffffu;
-// The reference's count shift and index mask (trace/layout.ts).
+// The reference's count shift and index mask (gpu-layout.ts).
 static const uint32_t REFERENCE_COUNT_SHIFT = 28;
 static const uint32_t REFERENCE_INDEX_MASK = 0x0fffffffu;
 

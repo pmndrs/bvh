@@ -39,7 +39,7 @@
  * `clusterTraceScene`'s statistics are not kept (its placements are).
  */
 
-import { GPU_LAYOUT_VERSION, gpuLayoutNodeBytes } from './gpu-layout.ts';
+import { GPU_LAYOUT_VERSION, gpuLayoutNodeBytes, INDEXED_TRIANGLE_BYTES, positionStrideFloats, TRACE_STACK_SIZE, TRIANGLE_BYTES } from './gpu-layout.ts';
 import {
     encodeSerializedFormats,
     readSerializedHeader,
@@ -50,7 +50,6 @@ import {
     SERIALIZED_HEADER_BYTES,
     SERIALIZED_SCENE_FORMAT_VERSION,
 } from './serialize.ts';
-import { INDEXED_TRIANGLE_BYTES, positionStrideFloats, TRACE_STACK_SIZE, TRIANGLE_BYTES } from './trace/layout.ts';
 import type { TraceSceneData, TraceSceneMergedGroup, TraceSceneMeshPlacement } from './trace/scene-assembly.ts';
 import type { TopLevelBvh } from './trace/top-level.ts';
 
