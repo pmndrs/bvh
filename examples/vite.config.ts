@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname, resolve, sep } from 'node:path';
-import { defineConfig, type Plugin } from 'vite';
+import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { EXAMPLES } from './shared/examples.ts';
 
 // The examples site: an index page and one folder per example
@@ -92,7 +92,8 @@ export default defineConfig({
                     if (id.includes('/node_modules/@babylonjs/')) return 'babylon';
                     if (id.includes('/src/three/')) return 'bvh-three';
                     if (id.includes('/src/babylon/')) return 'bvh-babylon';
-                    if (id.startsWith(resolve(repoRoot, 'src') + sep)) return 'bvh';
+                    // Module ids use forward slashes on Windows too.
+                    if (id.startsWith(`${normalizePath(resolve(repoRoot, 'src'))}/`)) return 'bvh';
                     return undefined;
                 },
             },
