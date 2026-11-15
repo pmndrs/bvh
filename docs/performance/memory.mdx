@@ -84,6 +84,7 @@ refit needs the copy). `gpuQuantizeOnEmit: false` brings back the quantize pass.
   with no copy: 32 bytes less per triangle (175.3 MiB less for all of Sponza's 5.74M triangles; the furnished room's
   tree 21.0 to 12.4 MB). Same answers bit for bit; query times level with records within a loaded CPU's noise, refits
   0.76-0.95x the time (`bench/cpu-corners.ts`, indicative). The source must stay alive and unchanged between refits.
+  three's `BvhBoundsTree` keeps an indexed tree (a file or `layout`) this way; `computeBoundsTree` builds records.
 - **`gpuTreeOutputs: 'adopt'`:** no copy at load, but the node buffer keeps one node per triangle: 613.6 MiB settled on
   Sponza against 470.0 (both `f32`), unless `trimWhenRefined` packs it afterwards (448.1). Every format adopts since 2026-11-14: a quantized scene adopts batches whose nodes
   H-PLOC wrote quantized (`'adopt'` turns on `gpuQuantizeOnEmit`), and an indexed scene's builds leave each mesh's

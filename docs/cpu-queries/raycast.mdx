@@ -29,7 +29,8 @@ Quantized trees are decoded to 64-byte `f32` nodes when the tree is made. Triang
 (tinybvh writes them, a records tree is converted) and reads every corner from `source.positions` by reference. Every
 query and refit gives the same answer bit for bit. The corners are then the source's live values, so after editing the
 positions call `refit()` before the next query; `serialize()` writes an indexed file, which loads with the same
-geometry as `source`.
+geometry as `source`. three's `BvhBoundsTree` does this for indexed trees on its own
+([The tree object](/three/bounds-tree#save-and-load)).
 
 ## Raycast
 

@@ -194,7 +194,9 @@ export interface BvhBoundsTreeOptions {
     /**
      * A tree already built for this geometry, in our layout (from `generate`,
      * a worker pool or `deserializeLayout`): the build is skipped. It must
-     * hold the geometry's triangles, numbered in index order.
+     * hold the geometry's triangles, numbered in index order. Records or
+     * indexed: an indexed tree stays indexed (16 bytes per triangle, corners
+     * read from the geometry's positions, `CpuMeshBvh`'s `corners: 'positions'`).
      */
     readonly layout?: GpuLayoutMeshBvh;
     /**
@@ -497,8 +499,12 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
             if (!builder) throw new Error('@pmndrs/bvh/three: call `await prepareBoundsTrees()` once before computeBoundsTree (it loads tinybvh)');
             layout = CpuMeshBvh.buildLayout(input, builder, buildOptions);
         }
-        super(layout, { source: input });
-        this.buildOptions = buildOptions;
+        // An indexed tree (a layout or bytes in that format) stays indexed: 16 bytes per triangle, corners read
+        // through its vertex indices from the geometry's positions (CpuMeshBvh `corners: 'positions'`), no
+        // records expansion. Its shifted trees are built the same way. A records tree stays records.
+        const corners = layout.triangleLeaves === 'indexed' ? 'positions' : 'records';
+        super(layout, { source: input, corners });
+        this.buildOptions = corners === 'positions' ? { ...buildOptions, corners } : buildOptions;
         this.builder = options.builder ?? null;
         this.geometry = geometry;
         this.position = snapshot.position;
@@ -1006,8 +1012,9 @@ export function getTriangleHitPointInfo(point: Vector3, geometry: BufferGeometry
 /**
  * Reads bytes from `boundsTree.serialize()` back into a tree for `geometry`,
  * the geometry it was built from (three-mesh-bvh's `MeshBVH.deserialize`; the
- * bytes are our layout, not three-mesh-bvh's format). Doesn't set
- * `geometry.boundsTree`; `setBoundsTree` does.
+ * bytes are our layout, not three-mesh-bvh's format). Either triangle format:
+ * an indexed file gives an indexed tree, which reads its corners from the
+ * geometry's positions. Doesn't set `geometry.boundsTree`; `setBoundsTree` does.
  */
 export function deserializeBoundsTree(bytes: ArrayBuffer | ArrayBufferView, geometry: BufferGeometry, options: BvhBoundsTreeOptions = {}): BvhBoundsTree {
     return new BvhBoundsTree(geometry, { ...options, layout: deserializeLayout(bytes) });
