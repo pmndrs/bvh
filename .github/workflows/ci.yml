@@ -16,10 +16,10 @@ jobs:
     name: Lint, typecheck, test, build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v7.0.1
       # The pnpm version comes from "packageManager" in package.json.
-      - uses: pnpm/action-setup@v4.1.0
-      - uses: actions/setup-node@v4.4.0
+      - uses: pnpm/action-setup@v6.1.1
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 24
           cache: pnpm
@@ -40,23 +40,23 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4.2.2
-      - uses: pnpm/action-setup@v4.1.0
-      - uses: actions/setup-node@v4.4.0
+      - uses: actions/checkout@v7.0.1
+      - uses: pnpm/action-setup@v6.1.1
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # native/build-wasm.ts clones emsdk into tools/emsdk (gitignored), installs the pinned
       # Emscripten there, and refuses a folder at another commit. The key holds the pins.
-      - uses: actions/cache@v4.2.3
+      - uses: actions/cache@v6.1.0
         with:
           path: tools/emsdk
           key: emsdk-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/build-wasm.ts') }}
       - run: pnpm bvh:wasm --check --out "$RUNNER_TEMP/tinybvh-rebuilt.wasm"
       - name: Keep the rebuilt .wasm
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: tinybvh-rebuilt-${{ runner.os }}
           path: ${{ runner.temp }}/tinybvh-rebuilt.wasm
@@ -68,14 +68,14 @@ jobs:
     # The seven pages run with BVH_PAGE_QUERY=profile=ci, the reduced counts of each page that has one (every variant and case still runs); the full profile is for real GPUs.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4.2.2
-      - uses: pnpm/action-setup@v4.1.0
-      - uses: actions/setup-node@v4.4.0
+      - uses: actions/checkout@v7.0.1
+      - uses: pnpm/action-setup@v6.1.1
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - uses: browser-actions/setup-chrome@v1.7.3
+      - uses: browser-actions/setup-chrome@v2.2.0
         id: chrome
         with:
           chrome-version: stable
