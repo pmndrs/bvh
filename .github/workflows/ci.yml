@@ -65,7 +65,7 @@ jobs:
   gpu-swiftshader:
     name: GPU pages (headless Chrome, SwiftShader)
     runs-on: ubuntu-latest
-    # The four pages run with BVH_PAGE_QUERY=profile=ci, the reduced counts of trace-oracle, trace-inline and query-oracle (every variant and case still runs); the full profile is for real GPUs.
+    # The seven pages run with BVH_PAGE_QUERY=profile=ci, the reduced counts of each page that has one (every variant and case still runs); the full profile is for real GPUs.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4.2.2
@@ -88,5 +88,7 @@ jobs:
           BVH_CHROME_FLAGS: --no-sandbox --use-webgpu-adapter=swiftshader --use-angle=swiftshader --enable-unsafe-swiftshader
           BVH_ALLOW_SOFTWARE_ADAPTER: '1'
           # The reduced profile: every variant and case, fewer rays and queries (tests/gpu/pages/trace-oracle/main.ts, query-oracle/main.ts).
+          # sdf-oracle (16^3 grids instead of 32^3), trace-clustered (every format, case and cut, fewer rays) and
+          # three-shapecast (1,024 spheres instead of 8,192) build their scenes in the page, so they need no assets either.
           BVH_PAGE_QUERY: profile=ci
-        run: pnpm test:gpu:page bvh-lbvh-fallback,trace-inline,trace-oracle,query-oracle
+        run: pnpm test:gpu:page bvh-lbvh-fallback,trace-inline,trace-oracle,query-oracle,sdf-oracle,trace-clustered,three-shapecast
