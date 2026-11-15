@@ -3,68 +3,56 @@
 Pushing to `main` never publishes anything. A release is one workflow you start by hand: **Actions → Release to npm →
 Run workflow**. It checks, builds, publishes, tags and pushes for you.
 
+The first version, `0.1.0-alpha.0`, was published by hand on 2026-11-15 (see "The first release" below). Every
+release after it goes through the workflow.
+
 ## Making a release
 
 1. **Push to `main` and wait for CI to pass.** The release refuses a commit whose CI run failed or is still running.
 2. **Open Actions → Release to npm → Run workflow.** Leave the branch on `main` and fill in:
-   - **Version**: the new version, without a `v`, for example `0.1.0-alpha.0`.
+   - **Version**: the new version, without a `v`, for example `0.1.0-alpha.1`.
    - **npm dist-tag**: `alpha`, `beta`, `rc` or `next` for a prerelease, `latest` for a normal release.
    - **Dry run**: tick it to see what would be published without publishing anything.
 3. **Run it.** It takes about five minutes. When it is green:
-   - the version is on npm (`npm view @pmndrs/bvh versions`);
-   - the tag `v0.1.0-alpha.0` is on GitHub;
-   - `main` has a new commit, "Release 0.1.0-alpha.0", so run `git pull` before your next push;
+   - the version is on npm (`npm view @pmndrs/bvh dist-tags`);
+   - the tag `v0.1.0-alpha.1` is on GitHub;
+   - `main` has a new commit, "Release 0.1.0-alpha.1", so run `git pull` before your next push;
    - the docs site is rebuilding with the new version label.
 
 Picking the version and tag:
 
 | Release | Version | Tag | People install it with |
 | --- | --- | --- | --- |
-| First alpha | `0.1.0-alpha.0` | `alpha` | `npm i @pmndrs/bvh@alpha` |
 | Next alpha | `0.1.0-alpha.1` | `alpha` | `npm i @pmndrs/bvh@alpha` |
 | Release candidate | `0.1.0-rc.0` | `rc` | `npm i @pmndrs/bvh@rc` |
 | Release | `0.1.0` | `latest` | `npm i @pmndrs/bvh` |
 
 A version can be published only once, ever. If a release was wrong, publish the next number.
 
+`latest` points at `0.1.0-alpha.0` for now, because a package always has a `latest` and that is the only real
+version. Prereleases go to their own tag, so `latest` stays there until `0.1.0`.
+
 ## One-time setup
 
-Do steps 1 to 3 before the first release, and steps 4 and 5 right after it.
+Done once, on npmjs.com, by a maintainer of `@pmndrs/bvh`:
 
-1. **npm account.** You need an npmjs.com account with two-factor authentication on, and publish rights to the
-   `@pmndrs` scope (an owner of the pmndrs npm organisation adds you to a team with write access).
-2. **A token for the first publish.** Trusted publishing (step 4) is set up on the package's npm page, and that page
-   only exists after the first publish. So the first release signs in with a token:
-   - npmjs.com → your profile picture → **Access Tokens** → **Generate New Token**.
-   - Token name: `bvh first release`.
-   - Tick **Bypass two-factor authentication**, so the workflow can publish without a 2FA code.
-   - **Packages and scopes** → Permissions: **Read and write (publish and stage)** → **Only select packages and
-     scopes** → `@pmndrs`.
-   - Expiration: the shortest option that covers when you will release (7 days is plenty).
-   - **Generate Token** and copy it.
-
-   npm plans to stop direct publishing with tokens in January 2027. Do the first release before then; after it,
-   trusted publishing needs no token.
-3. **Give the token to GitHub.** github.com/pmndrs/bvh → **Settings → Environments → npm** (the release workflow
-   created this environment on its first run) → **Environment secrets → Add environment secret**. Name it
-   `NPM_TOKEN` and paste the token. Only the release job can read it there.
-
-   Optional, on the same page: **Required reviewers** → yourself, so every release waits for your click before it runs.
-
-   Now make the first release (above).
-4. **Switch to trusted publishing.** npmjs.com → **@pmndrs/bvh → Settings → Trusted publishing → Add trusted
-   publisher → GitHub Actions**, and fill in exactly:
+1. **Trusted publisher.** **@pmndrs/bvh → Settings → Trusted publishing → Add trusted publisher → GitHub Actions**,
+   filled in exactly:
    - Organization or user: `pmndrs`
    - Repository: `bvh`
-   - Workflow filename: `release.yml`
+   - Workflow filename: `release.yml` (the filename only; the file is `.github/workflows/release.yml`)
    - Environment name: `npm`
+   - Allowed actions: tick **`npm publish`** too. New trusted publishers only allow `npm stage publish`, and the
+     workflow runs `npm publish`, so without it the Publish step fails.
 
-   npm drops this setting if nothing publishes through it within two days. If the next release is further off, add it
-   when you are about to release.
-5. **Remove the token.** Delete the `NPM_TOKEN` secret on GitHub, and delete the token on npmjs.com (Access Tokens).
-   Then on npmjs.com, **@pmndrs/bvh → Settings → Publishing access → Require two-factor authentication and disallow
-   tokens → Update Package Settings**. Releases keep working, because trusted publishing does not use tokens, and
-   nobody can publish with a leaked token.
+   npm drops a trusted publisher that publishes nothing within two days. If yours is gone when you next release, add
+   it again just before running the workflow.
+2. **Block tokens.** **@pmndrs/bvh → Settings → Publishing access → Require two-factor authentication and disallow
+   tokens → Update Package Settings.** The workflow keeps working, because trusted publishing does not use tokens,
+   and nobody can publish with a leaked token. No `NPM_TOKEN` secret is needed anywhere.
+
+Optional, on GitHub: **Settings → Environments → npm → Required reviewers** → yourself, so each run waits for your
+click before it publishes.
 
 ## When something goes wrong
 
@@ -74,12 +62,48 @@ The run stops with a red error line saying why:
 - **"CI run … ended 'failure'"**: fix it on `main`, push, wait for CI, release from the new commit.
 - **"… is already on npm"** or **"tag … already exists"**: that version is used up; pick the next one.
 - **"… is a prerelease; pick next, alpha, beta or rc"**: a version with `-alpha` and the like can't go on `latest`.
-- **E401, E403 or ENEEDAUTH at Publish**: the token is missing or expired (first release), or the trusted publisher
-  fields don't match exactly (later releases: check the workflow filename and the environment `npm`).
+- **E401, E403, ENEEDAUTH or "not allowed" at Publish**: the trusted publisher is missing (expired after two days),
+  a field doesn't match exactly (workflow filename `release.yml`, environment `npm`), or `npm publish` isn't ticked
+  under Allowed actions.
 - **"published and tagged, but the release commit did not reach main"**: the package is out and tagged; only the
   version bump is missing from `main`. Run `git pull`, `git merge v<version>`, `git push`.
 - **A release that should not be used**: `npm deprecate @pmndrs/bvh@<version> "<why>"` and publish a fixed version.
   npm only allows an unpublish within 72 hours, and the version number stays used up anyway.
+
+## Publishing by hand
+
+Only if the workflow can't be used. Use npm 11.15 or newer (`npm i -g npm@11`; older npm can't log in reliably or
+approve staged versions), on a clean `main` whose CI passed. **Run the lines one at a time**: `npm login` and
+`npm publish` stop to ask for input, and pasted lines that follow become their answers.
+
+```powershell
+git pull
+pnpm install --frozen-lockfile
+npm pkg set version=0.1.0-alpha.1
+git add package.json
+git commit -m "Release 0.1.0-alpha.1"
+git tag -a v0.1.0-alpha.1 -m "@pmndrs/bvh 0.1.0-alpha.1"
+npm pkg delete private
+npm login
+npm publish --access public --tag alpha
+git checkout -- package.json
+git push origin main v0.1.0-alpha.1
+```
+
+`npm publish` runs lint, typecheck, test and build first (`prepublishOnly`, about three minutes), then asks for your
+2FA code. `npm pkg delete private` must come right before it; if `git checkout -- package.json` runs first, npm stops
+with EPRIVATE. A version published by hand has no provenance, since npm can only sign that inside CI.
+
+npm may put the version in staging instead of publishing it. Then only a placeholder is public until you approve
+it: npmjs.com → **Staged Packages** → **Approve** (2FA), or `npm stage list @pmndrs/bvh` and
+`npm stage approve <id>`. Check the result with `npm dist-tag ls @pmndrs/bvh`.
+
+## The first release
+
+`0.1.0-alpha.0` went out by hand on 2026-11-15, because npm's trusted publisher settings live on the package's page
+and the package didn't exist yet. The release commit is `9712461`, tagged `v0.1.0-alpha.0`. npm staged it: a
+placeholder `0.0.0-stage` appeared first and stays in the version list, and after approval `alpha` and `latest` both
+pointed at `0.1.0-alpha.0`. It has no provenance; workflow releases will.
 
 ## What the workflow does
 
@@ -89,8 +113,9 @@ The run stops with a red error line saying why:
 2. Checks that CI passed on the commit, which covers the GPU pages and the tinybvh WASM rebuild.
 3. Runs lint, typecheck, test and build again, because this job builds what gets published.
 4. Commits the version to `package.json` and tags it.
-5. Publishes with provenance (a signed record on npm of which commit and workflow built the package). `main` keeps
-   `"private": true`; the workflow drops it only for the publish, so a stray `npm publish` on a laptop is refused.
+5. Publishes with provenance (a signed record on npm of which commit and workflow built the package), signing in
+   through trusted publishing. `main` keeps `"private": true`; the workflow drops it only for the publish, so a stray
+   `npm publish` on a laptop is refused.
 6. Pushes the tag and the commit to `main` and starts the docs workflow.
 
-A dry run stops after step 5's `npm publish --dry-run`: nothing is published, committed, tagged or pushed.
+A dry run stops at `npm publish --dry-run`: nothing is published, and the commit and tag stay on the runner.

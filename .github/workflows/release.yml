@@ -17,9 +17,9 @@ name: Release to npm
 # How to release and how to set this up: docs/internals/RELEASING.md.
 #
 # npm sign-in: npm trusted publishing (npmjs.com > @pmndrs/bvh > Settings > Trusted publishing:
-# GitHub Actions, repository pmndrs/bvh, workflow release.yml, environment npm) needs no secret. npm only offers it
-# for a package that already exists, so the first publish needs an NPM_TOKEN secret (a granular
-# token with publish rights to @pmndrs); delete the secret once trusted publishing is set up.
+# GitHub Actions, repository pmndrs/bvh, workflow release.yml, environment npm, allowed actions
+# including `npm publish`) needs no secret. An NPM_TOKEN secret, if one is ever added, is only a
+# fallback; npm tries trusted publishing first.
 
 on:
   workflow_dispatch:
