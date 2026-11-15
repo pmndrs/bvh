@@ -9,8 +9,7 @@ name: Release to npm
 #      wasm reproduce check) did not pass.
 #   2. Runs lint, typecheck, test and build again here, since this job builds what is published.
 #   3. Commits the version to package.json ("Release x.y.z") and tags it vx.y.z.
-#   4. Removes "private": true for the publish only (main keeps it, so a stray local
-#      `npm publish` is refused) and publishes with provenance.
+#   4. Publishes with provenance.
 #   5. Pushes the tag and the commit to main, then rebuilds the docs so their version label updates.
 # With "dry run" ticked it stops after `npm publish --dry-run`: nothing is published, committed or pushed.
 #
@@ -134,7 +133,6 @@ jobs:
 
       - name: What will be published
         run: |
-          npm pkg delete private
           npm pack --dry-run
 
       # --ignore-scripts: prepublishOnly would repeat the checks above.
@@ -153,7 +151,6 @@ jobs:
       - name: Push the tag and the release commit
         if: inputs.dry_run == false
         run: |
-          git checkout -- package.json
           git push origin "v$VERSION"
           for attempt in 1 2 3; do
             git pull --rebase origin main && git push origin HEAD:main && exit 0

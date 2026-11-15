@@ -34,7 +34,8 @@ version. Prereleases go to their own tag, so `latest` stays there until `0.1.0`.
 
 ## One-time setup
 
-Done once, on npmjs.com, by a maintainer of `@pmndrs/bvh`:
+Done once, on npmjs.com, by a maintainer of `@pmndrs/bvh`. The trusted publisher was added on 2026-11-15; if no
+release runs through it by 2026-11-17, npm drops it and it has to be added again (step 1).
 
 1. **Trusted publisher.** **@pmndrs/bvh → Settings → Trusted publishing → Add trusted publisher → GitHub Actions**,
    filled in exactly:
@@ -83,16 +84,13 @@ npm pkg set version=0.1.0-alpha.1
 git add package.json
 git commit -m "Release 0.1.0-alpha.1"
 git tag -a v0.1.0-alpha.1 -m "@pmndrs/bvh 0.1.0-alpha.1"
-npm pkg delete private
 npm login
 npm publish --access public --tag alpha
-git checkout -- package.json
 git push origin main v0.1.0-alpha.1
 ```
 
 `npm publish` runs lint, typecheck, test and build first (`prepublishOnly`, about three minutes), then asks for your
-2FA code. `npm pkg delete private` must come right before it; if `git checkout -- package.json` runs first, npm stops
-with EPRIVATE. A version published by hand has no provenance, since npm can only sign that inside CI.
+2FA code. A version published by hand has no provenance, since npm can only sign that inside CI.
 
 npm may put the version in staging instead of publishing it. Then only a placeholder is public until you approve
 it: npmjs.com → **Staged Packages** → **Approve** (2FA), or `npm stage list @pmndrs/bvh` and
@@ -114,8 +112,7 @@ pointed at `0.1.0-alpha.0`. It has no provenance; workflow releases will.
 3. Runs lint, typecheck, test and build again, because this job builds what gets published.
 4. Commits the version to `package.json` and tags it.
 5. Publishes with provenance (a signed record on npm of which commit and workflow built the package), signing in
-   through trusted publishing. `main` keeps `"private": true`; the workflow drops it only for the publish, so a stray
-   `npm publish` on a laptop is refused.
+   through trusted publishing.
 6. Pushes the tag and the commit to `main` and starts the docs workflow.
 
 A dry run stops at `npm publish --dry-run`: nothing is published, and the commit and tag stay on the runner.

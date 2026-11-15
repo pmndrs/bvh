@@ -63,7 +63,7 @@ Dennis asked for full feature coverage as planned before more hand-offs. Everyth
 - Points and lines count as "have" CPU-only (as three-mesh-bvh's); their own centre-split builder and file format.
 - Adopt in quantized scenes turns on the quantized emit; `positionsBuffer` turns weld and merge off.
 - Publishing the docs: Pages is on and first deployed (2026-11-15, `https://pmndrs.github.io/bvh/`); left: domain `bvh.docs.pmnd.rs`, CNAME `bvh.docs` to `pmndrs.github.io`, and whether to deploy on every push instead of by hand.
-- npm releases: `0.1.0-alpha.0` is on npm (published by hand 2026-11-15, commit `9712461`, tag `v0.1.0-alpha.0`; `alpha` and `latest`). Later releases run `release.yml`; left: the trusted publisher on npmjs.com (allowed actions must include `npm publish`) and blocking tokens (`docs/internals/RELEASING.md`, "One-time setup").
+- npm releases: `0.1.0-alpha.0` is on npm (published by hand 2026-11-15, commit `9712461`, tag `v0.1.0-alpha.0`; `alpha` and `latest`). Later releases run `release.yml`; the trusted publisher is set up (2026-11-15; npm drops it if no release uses it within two days); left: blocking tokens (`docs/internals/RELEASING.md`, "One-time setup").
 
 ## Current state (2026-11-13)
 
