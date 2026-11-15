@@ -46,8 +46,11 @@ const app = await createBabylonApp('GPU trace (Babylon)', 'babylon/gpu-trace', {
 const { engine, scene, camera, overlay } = app;
 const device = deviceFromEngine(engine);
 
-// The walk costs a ray per pixel: `?scale=2` traces at half the canvas size. The smoke run (software WebGPU) traces a few thousand pixels.
-const scale = Number(new URLSearchParams(location.search).get('scale') ?? (isSmoke ? 8 : 1));
+// The walk costs a ray per pixel: `?scale=2` traces at half the canvas size. A smoke run on a software adapter (SwiftShader in CI)
+// traces a few thousand pixels (scale 8: Babylon renders the scene and the mask at an eighth of the canvas, so the shadows come out
+// in 8-pixel blocks); on a real GPU it renders at full size like a person's run, so its screenshot shows the shadows as they are.
+const softwareAdapter = (device.adapterInfo as GPUAdapterInfo & { isFallbackAdapter?: boolean }).isFallbackAdapter === true || device.adapterInfo.architecture === 'swiftshader';
+const scale = Number(new URLSearchParams(location.search).get('scale') ?? (isSmoke && softwareAdapter ? 8 : 1));
 if (scale > 1) {
     engine.setHardwareScalingLevel(scale);
     engine.resize();

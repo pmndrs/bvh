@@ -4,7 +4,7 @@
  * `SceneTrees` scene (which builder its trees came from, its bytes).
  */
 
-import { treeSahCost, type GpuLayoutMeshBvh, type SceneTreeEvent, type SceneTrees } from '@pmndrs/bvh';
+import { treeSahCost, type GpuLayoutMeshBvh, type SceneMeshStatus, type SceneTreeEvent, type SceneTrees } from '@pmndrs/bvh';
 import type { BuildInfo, TreeInfo } from './overlay.ts';
 
 /** SAH cost, depth, nodes, triangles and bytes of one tree. */
@@ -75,23 +75,29 @@ export class SceneTreesLog {
         return [...new Set(this.events.map((event) => event.mesh).filter((mesh): mesh is number => mesh !== null))];
     }
 
-    /** Node and triangle counts and bytes of the scene (SceneTrees keeps no CPU copy, so no SAH cost here). */
+    /**
+     * Node and triangle counts, deepest tree and bytes of the scene (SceneTrees keeps no CPU copy, so no SAH cost here):
+     * the meshes' own trees plus the merged static groups' trees. A mesh whose instances are all merged
+     * (`static: true`, `mergeStaticInstances` on by default) has no tree of its own; its triangles are in its group's.
+     */
     tree(trees: SceneTrees, meshes: Iterable<number> = this.meshes()): TreeInfo {
         let nodes = 0;
         let triangles = 0;
         let depth = 0;
-        for (const mesh of meshes) {
-            let status;
-            try {
-                status = trees.meshStatus(mesh);
-            } catch {
-                continue; // removed since
-            }
-            if (!status.placement) continue;
+        const add = (status: SceneMeshStatus) => {
+            if (!status.placement) return;
             nodes += status.placement.nodeCount;
             triangles += status.placement.triangleCount;
             depth = Math.max(depth, status.maxDepth);
+        };
+        for (const mesh of meshes) {
+            try {
+                add(trees.meshStatus(mesh));
+            } catch {
+                // removed since
+            }
         }
+        for (let group = 0; group < trees.counts.mergedGroups; group++) add(trees.groupStatus(group));
         return { sah: null, depth, nodes, triangles, bytes: trees.memory.resident };
     }
 }
