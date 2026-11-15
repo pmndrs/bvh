@@ -53,6 +53,8 @@ Dennis asked for full feature coverage as planned before more hand-offs. Everyth
 
 **Lever run (2026-11-15, `c48fe00`; runbook section 10):** H-PLOC's quantized emit builds Sponza in 35.1 ms against 41.6 for the `f32` build plus the quantize pass, and takes 175 MB off an uncapped peak (1,482.6 to 1,307.3); at the default cap the peak is the same (613.2 and 613.5). Quantized nodes with indexed leaves settle at 236.4 MB against 366.5 with records (uncapped).
 
+**Built 2026-11-15, after the defaults:** the new defaults above, checked on the RTX (`scene-trees-runtime`, `-deforming`, `-mid-swap` in 1,093 s, `bvh-hploc`, `three-trace`, `three-skinned`; Sponza with the library's own defaults, the page's `shipped` variant: 6 batches, peak 612.4 MB, settled 360.1, 0 disagreements); the examples HUD counts merged groups' trees (`three/pathtracer` showed 0) and `babylon/gpu-trace` traces at full size on a real GPU; `/three`'s `BvhBoundsTree` keeps indexed trees indexed (`corners: 'positions'`, no records copy; it reads the geometry's live positions, as three-mesh-bvh does); the API tidy: explicit exports in `src/trace/index.ts`, the shared batch helpers in `src/gpu-batch.ts`, `src/trace/layout.ts` folded into `src/gpu-layout.ts` (every package entry exports the same names as before).
+
 **For Dennis to decide** (from the build-out; each agent's reasoning is in the design notes):
 - SDF default sign `'parity'` (or `'winding'` for overlapping instances).
 - `builtBy: 'app'` added to `TreeBuilder` (code indexing by `builtBy` must handle it); `GpuRayHit.material` uses `NO_MATERIAL`.
@@ -158,5 +160,4 @@ Everything below was on `main` and pushed to origin on 2026-11-13. No release, t
 - **`three-load-gltf` on SwiftShader** fails "no mesh got a GPU first tree" (tinybvh wins the race on a CPU adapter); passes on the RTX.
 - **Old worktree** `~/Developer/bvh-worktrees/reflections-integration` on the Mac: Dennis removes it.
 - **Agent worktrees** under `.claude/worktrees/` on this laptop: all merged into `main`; safe to remove with `git worktree remove`.
-- **API tidy:** `export *` in `src/trace/index.ts`, batch helpers in `gpu-lbvh.ts`, merging the two layout files.
 - **Where others still win** (2026-11-13 numbers, before the levers): three-mesh-bvh's CPU refit on Sponza and memory; Rapier's CPU closest-hit on the knot and the room; bvh.js's scene build. Re-measure after the clean run picks defaults.

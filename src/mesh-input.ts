@@ -6,6 +6,9 @@
  * (docs/internals/design/bvh-framework.md, "Builder contract").
  */
 
+// Bits 16-31 of a triangle's flags hold its material + 1; the largest per-triangle material.
+import { MATERIAL_SHIFT as TRIANGLE_MATERIAL_SHIFT, MAX_MATERIAL as MAX_TRIANGLE_MATERIAL } from './gpu-layout.ts';
+
 /** Triangle geometry in object space, as CPU arrays. Every builder takes it. */
 export interface MeshInput {
     /** `x, y, z` per vertex. */
@@ -37,10 +40,6 @@ export interface MeshInput {
 
 /** A {@link MeshInput.triangleMaterials} entry meaning "no material here": the hit takes its instance's. */
 export const TRIANGLE_MATERIAL_NONE = 0xffff;
-/** Largest per-triangle material (as `MAX_MATERIAL` in gpu-layout.ts). */
-const MAX_TRIANGLE_MATERIAL = 0xfffe;
-/** Bits 16-31 of a triangle's flags: its material + 1 (`MATERIAL_SHIFT` in gpu-layout.ts). */
-const TRIANGLE_MATERIAL_SHIFT = 16;
 
 /**
  * The stored codes of `materials` (material + 1, 0 for none), one per

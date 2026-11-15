@@ -30,6 +30,8 @@ import {
     GPU_LAYOUT_NODE_WORDS,
     GPU_LAYOUT_TRIANGLE_BYTES,
     GPU_LAYOUT_TRIANGLE_WORD,
+    MATERIAL_SHIFT,
+    TRIANGLE_FLAG_FLIP_FRONT_FACE as FLIP_FRONT_FACE,
     type GpuLayoutMeshBvh,
 } from './gpu-layout.ts';
 import { packedTriangleFlags, type MeshInput } from './mesh-input.ts';
@@ -69,10 +71,6 @@ export interface LayoutCheckOptions {
     readonly merged?: LayoutCheckMergedIdentity;
 }
 
-/** Flags bit 1 (gpu-layout.ts `TRIANGLE_FLAG_FLIP_FRONT_FACE`). */
-const FLIP_FRONT_FACE = 2;
-/** Where a merged triangle's material sits in its flags (gpu-layout.ts `MATERIAL_SHIFT`). */
-const MATERIAL_SHIFT = 16;
 
 export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, options: LayoutCheckOptions = {}): string[] {
     return checkLayout(layout, geometry, options, null);
