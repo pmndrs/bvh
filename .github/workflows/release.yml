@@ -10,8 +10,10 @@ name: Release to npm
 #   2. Runs lint, typecheck, test and build again here, since this job builds what is published.
 #   3. Commits the version to package.json ("Release x.y.z") and tags it vx.y.z.
 #   4. Publishes with provenance.
-#   5. Pushes the tag and the commit to main, then rebuilds the docs so their version label updates.
-# With "dry run" ticked it stops after `npm publish --dry-run`: nothing is published, committed or pushed.
+#   5. Pushes the tag and the commit to main, makes the GitHub Release (notes: the version's section of
+#      CHANGELOG.md), then rebuilds the docs so their version label updates.
+# With "dry run" ticked it runs `npm publish --dry-run` and prints the release notes: nothing is
+# published, committed, pushed or released.
 #
 # How to release and how to set this up: docs/internals/RELEASING.md.
 #
@@ -159,6 +161,23 @@ jobs:
           done
           echo "::error::published and tagged, but the release commit did not reach main; push it by hand"
           exit 1
+
+      # The notes are this version's section of CHANGELOG.md ("## x.y.z" up to the next "## "); with no
+      # section, GitHub writes notes from the commits since the last tag.
+      - name: GitHub Release
+        run: |
+          awk -v v="## $VERSION" '$0 == v { on = 1; next } on && /^## / { exit } on' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then notes=(--notes-file "$RUNNER_TEMP/notes.md"); else notes=(--generate-notes); fi
+          flags=(--verify-tag)
+          if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
+          if [ "$DIST_TAG" = latest ]; then flags+=(--latest); else flags+=(--latest=false); fi
+          echo "notes: ${notes[*]}"; echo "flags: ${flags[*]}"
+          if [ "$DRY_RUN" = true ]; then
+            echo "--- release notes (dry run, no release made) ---"
+            if [ "${notes[0]}" = --notes-file ]; then cat "$RUNNER_TEMP/notes.md"; else echo "(GitHub's generated notes)"; fi
+          else
+            gh release create "v$VERSION" --title "$VERSION" "${notes[@]}" "${flags[@]}"
+          fi
 
       - name: Rebuild the docs
         if: inputs.dry_run == false

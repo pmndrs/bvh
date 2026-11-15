@@ -5,8 +5,8 @@ entries in the design notes under `docs/internals/`. The measurements and the re
 only says what happened and when.
 
 The code began in a different repository: `DennisSmolek/webgpu-ddgi`, as `packages/bvh`, the ray tracer under a GPU
-global-illumination library. The commits before 2026-11-10 below are from there. The package has never been published
-to npm, tagged or released; its version is 0.0.0.
+global-illumination library. The commits before 2026-11-10 below are from there. Releases and their notes are in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## 2026-10-30 to 2026-11-04: a tracer, then a package
 
@@ -74,9 +74,21 @@ hit, and three's own types).
 Pathtracer's requests (pmndrs/bvh#1) landed the same day: workers that never lose a build when they can't load, the
 exported shared-edge ray fixtures, and a measured answer on a CPU walk that rounds like the GPU (it can't).
 
+## 2026-11-15: the clean run, defaults, CI and a first publish
+
+- **The clean run** on the RTX 3060 and the Intel UHD (`6c32897`): every correctness page passed on both GPUs, and all
+  41 examples drew on the RTX. Then the lever run (`c48fe00`).
+- **Defaults:** the memory levers that measured as wins are on (the pool's idle timeout, compact deforming layouts,
+  parents only for refits, trimming with adopt, shared refit boxes, batched quantize jobs). Triangle records stay in
+  the leaves and the quantized decode stays exact until the M5 run.
+- **CI on GitHub** runs for the first time: lint, typecheck, tests and build, seven GPU pages on SwiftShader, and the
+  `.wasm` rebuilt byte for byte on Linux and macOS.
+- **The docs site** goes live on GitHub Pages.
+- **npm:** a release workflow, and `0.1.0-alpha.0` published by hand to claim the name.
+
 ## What is next
 
-- The RTX 3060 and Intel UHD still owe correctness and memory runs on the 2026-11 defaults
-  ([the runbook](docs/internals/WINDOWS-RUNBOOK.md)); Dennis decides the indexed-leaves default from them.
-- Publishing the docs site, which needs Pages settings and DNS ([Publishing the docs](docs/internals/README.md)).
-- A first npm release, once the API is settled for 0.1.
+- The M5 run: the pre-release checklist, and the surface-ray sections that settle the triangle-leaves and decode
+  defaults.
+- The docs' own domain, `bvh.docs.pmnd.rs`.
+- ddgi switching to the package (P3).

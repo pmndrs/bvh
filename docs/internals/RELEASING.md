@@ -8,14 +8,16 @@ release after it goes through the workflow.
 
 ## Making a release
 
-1. **Push to `main` and wait for CI to pass.** The release refuses a commit whose CI run failed or is still running.
+1. **Write the notes and push.** Add a `## 0.1.0` section (your version) to [CHANGELOG.md](../../CHANGELOG.md): it
+   becomes the GitHub Release's text. Push to `main` and wait for CI to pass; the release refuses a commit whose CI
+   run failed or is still running.
 2. **Open Actions → Release to npm → Run workflow.** Leave the branch on `main` and fill in:
    - **Version**: the new version, without a `v`, for example `0.1.0-alpha.1`.
    - **npm dist-tag**: `alpha`, `beta`, `rc` or `next` for a prerelease, `latest` for a normal release.
    - **Dry run**: tick it to see what would be published without publishing anything.
 3. **Run it.** It takes about five minutes. When it is green:
    - the version is on npm (`npm view @pmndrs/bvh dist-tags`);
-   - the tag `v0.1.0-alpha.1` is on GitHub;
+   - the tag `v0.1.0-alpha.1` and its GitHub Release are on GitHub;
    - `main` has a new commit, "Release 0.1.0-alpha.1", so run `git pull` before your next push;
    - the docs site is rebuilding with the new version label.
 
@@ -113,6 +115,9 @@ pointed at `0.1.0-alpha.0`. It has no provenance; workflow releases will.
 4. Commits the version to `package.json` and tags it.
 5. Publishes with provenance (a signed record on npm of which commit and workflow built the package), signing in
    through trusted publishing.
-6. Pushes the tag and the commit to `main` and starts the docs workflow.
+6. Pushes the tag and the commit to `main`, makes the GitHub Release from the version's section of `CHANGELOG.md`
+   (GitHub's generated notes if there is none; marked as a prerelease for `-alpha` and the like), and starts the
+   docs workflow.
 
-A dry run stops at `npm publish --dry-run`: nothing is published, and the commit and tag stay on the runner.
+A dry run runs `npm publish --dry-run` and prints the release notes: nothing is published or released, and the commit
+and tag stay on the runner.
