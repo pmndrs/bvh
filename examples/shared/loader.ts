@@ -13,7 +13,7 @@
 import { Box3, LoadingManager, type Mesh, type Object3D, Vector3, type PerspectiveCamera } from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import type { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { assetUrl } from './assets.ts';
+import { assetLoadError, assetUrl } from './assets.ts';
 
 // The asset base and `?model=` live in assets.ts, shared with the three-free glTF reader (vanilla/gltf.ts).
 export { assetsBase, requestedModel } from './assets.ts';
@@ -29,7 +29,9 @@ export interface LoadedModel {
 export async function loadGltf(path: string, manager?: LoadingManager): Promise<LoadedModel> {
     const url = assetUrl(path);
     const start = performance.now();
-    const gltf = await new GLTFLoader(manager).loadAsync(url);
+    const gltf = await new GLTFLoader(manager).loadAsync(url).catch((error: unknown) => {
+        throw assetLoadError(path, error);
+    });
     return { root: gltf.scene, name: path.split('/').pop() ?? path, loadMs: performance.now() - start };
 }
 

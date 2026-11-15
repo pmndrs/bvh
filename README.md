@@ -7,7 +7,8 @@ compute passes, three.js, workers and other libraries on the same device. CPU ra
 queries run over the same layout, with three-mesh-bvh's API in `@pmndrs/bvh/three`.
 
 **Docs: [bvh.docs.pmnd.rs](https://bvh.docs.pmnd.rs)** (the source is [`docs/`](docs/getting-started/introduction.mdx);
-the API reference is at [bvh.docs.pmnd.rs/api](https://bvh.docs.pmnd.rs/api/)).
+the API reference is at [bvh.docs.pmnd.rs/api](https://bvh.docs.pmnd.rs/api/)). **Examples:
+[bvh.docs.pmnd.rs/examples](https://bvh.docs.pmnd.rs/examples/)** (WebGPU; the source is [`examples/`](examples/)).
 
 > **Status:** version 0.0.0, not on npm yet. The API can change before 0.1. Its first user is DDGI
 > ([webgpu-ddgi](https://github.com/DennisSmolek/webgpu-ddgi)), but the package imports nothing from it or from any engine.
@@ -191,7 +192,8 @@ loses them. Sources and commits are in [THIRD_PARTY.md](THIRD_PARTY.md). Only MI
 
 - `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`.
 - GPU pages in headless Chrome: `pnpm test:gpu`, `pnpm test:gpu:page trace-oracle` ([tests/gpu/README.md](tests/gpu/README.md)).
-- Examples: `pnpm examples:dev`, `pnpm examples:build`, `pnpm examples:smoke` ([examples/README.md](examples/README.md)).
+- Examples: `pnpm examples:dev`, `pnpm examples:build`, `pnpm examples:smoke` ([examples/README.md](examples/README.md));
+  the built site runs at [bvh.docs.pmnd.rs/examples](https://bvh.docs.pmnd.rs/examples/).
 - Docs: `pnpm docs:snippets` copies the code samples (`docs/snippets/*.ts`, type-checked and tested) into the pages,
   `pnpm docs:api` builds the TypeDoc reference, `pnpm docs:site` builds the website with pmndrs/docs.
 - Rebuild the `.wasm` with `pnpm bvh:wasm`, or check it with `pnpm bvh:wasm --check`.

@@ -84,9 +84,6 @@
                 font-size: 12px;
                 color: var(--accent);
             }
-            .gap {
-                opacity: 0.55;
-            }
         </style>
     </head>
     <body>
@@ -94,26 +91,20 @@
             <h1><span>@pmndrs/bvh</span> examples</h1>
             <p>
                 Engine-free WebGPU BVHs: GPU H-PLOC and LBVH builders, tinybvh in WebAssembly and a worker pool, GPU refits, and a WGSL walk. Every page shows
-                which builder ran and why, build times, tree stats, ray rates and a frame-time graph. Drop a glTF on any page, or pass
-                <code>?model=downloads/…/scene.gltf</code> to load one from <code>BVH_ASSETS_DIR</code>.
+                which builder ran and why, build times, tree stats, ray rates and a frame-time graph. Every page builds its own scene, so
+                nothing needs downloading. Drop a glTF on most pages, or pass <code>?model=…/scene.gltf&amp;assets=&lt;url&gt;</code> to
+                load one from a folder of your own (<code>BVH_ASSETS_DIR</code> under <code>pnpm examples:dev</code>).
             </p>
             <h2>Vanilla WebGPU (no engine, <code>@pmndrs/bvh</code> only)</h2>
             <div class="grid" id="vanilla"></div>
             <h2>three.js (WebGPURenderer, <code>@pmndrs/bvh/three</code>)</h2>
             <div class="grid" id="three"></div>
+            <h2>Babylon.js (<code>@pmndrs/bvh/babylon</code>)</h2>
+            <div class="grid" id="babylon"></div>
+            <h2>Node (a tree baked ahead of time, loaded with no build)</h2>
+            <div class="grid" id="node"></div>
             <h2>Comparison suite (<code>compare/</code>: three-mesh-bvh, three, bvh-tree, Babylon.js, bvh.js, Rapier)</h2>
             <div class="grid" id="compare"></div>
-            <h2>Not yet</h2>
-            <div class="grid">
-                <div class="card gap">
-                    <span class="title">three/sdf</span>
-                    <div class="description">GPU SDF generation from the trees. The library has no SDF generation yet.</div>
-                </div>
-                <div class="card gap">
-                    <span class="title">vanilla/workers-*, vanilla/fast-first, vanilla/refit, babylon/*</span>
-                    <div class="description">The worker and refit pages of the plan, and Babylon, come next (docs/internals/design/bvh-package-split.md).</div>
-                </div>
-            </div>
         </div>
         <script type="module" src="./shared/index-page.ts"></script>
     </body>

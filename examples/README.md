@@ -2,6 +2,8 @@
 
 A Vite multi-page site (BX.5, BX.6, BX.9 in docs/internals/design/bvh-package-split.md). Each example is one page with its source beside it and the shared overlay.
 
+Hosted at [bvh.docs.pmnd.rs/examples](https://bvh.docs.pmnd.rs/examples/) (today [pmndrs.github.io/bvh/examples](https://pmndrs.github.io/bvh/examples/)): the docs workflow (`.github/workflows/docs.yml`) builds it with `EXAMPLES_BASE=<site path>/examples/` into the docs site's `examples/` folder. The scene assets are not hosted; every page builds its own scene, and `?assets=<url>` with `?model=` loads a glTF from a folder of yours.
+
 ```
 pnpm examples:dev                       # http://localhost:5310
 pnpm examples:build                     # examples/dist (static)

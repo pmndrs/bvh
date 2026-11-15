@@ -22,3 +22,16 @@ export function requestedModel(): string | null {
 export function assetUrl(path: string): string {
     return /^(https?:|blob:|\/)/.test(path) ? path : assetsBase() + path;
 }
+
+/**
+ * A failed `?model=` load as an error that says what to do: a built site (the
+ * hosted examples) has no scene assets, so a bundled path needs `?assets=` there.
+ */
+export function assetLoadError(path: string, cause: unknown): Error {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    const hosted = import.meta.env.PROD && !params.has('assets') && !/^(https?:|blob:|\/)/.test(path);
+    const hint = hosted
+        ? ' The scene assets (Sponza, Bistro, ...) are not part of this site: add ?assets=<url> of a folder that holds the path, or drop a glTF on the page.'
+        : '';
+    return new Error(`Could not load ${path} (${message}).${hint}`, { cause });
+}

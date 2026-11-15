@@ -16,7 +16,7 @@
  * `.gltf` with its files, can be dropped on the page.
  */
 
-import { assetUrl } from '../assets.ts';
+import { assetLoadError, assetUrl } from '../assets.ts';
 import { makeScene, type IndexedMesh, type VanillaInstance, type VanillaScene } from './geometry.ts';
 import { mat4 } from './math.ts';
 
@@ -56,8 +56,10 @@ const GEOMETRY_NEUTRAL = [/^KHR_materials_/, /^KHR_texture_/, /^EXT_texture_/, /
 export async function loadGltfScene(path: string): Promise<VanillaScene> {
     const url = new URL(assetUrl(path), location.href);
     const start = performance.now();
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
+    const response = await fetch(url).catch((error: unknown) => {
+        throw assetLoadError(path, error);
+    });
+    if (!response.ok) throw assetLoadError(path, `HTTP ${response.status}`);
     const bytes = await response.arrayBuffer();
     const fetchRelative = async (uri: string) => {
         const relative = await fetch(new URL(uri, url));
