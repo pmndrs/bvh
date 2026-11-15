@@ -13,7 +13,7 @@
     "exclude": ["**/*.test.ts"],
     "sort": ["kind", "alphabetical"],
     "navigationLinks": {
-        "Docs": "https://bvh.docs.pmnd.rs",
+        "Docs": "https://pmndrs.github.io/bvh/",
         "GitHub": "https://github.com/pmndrs/bvh"
     },
     "validation": {

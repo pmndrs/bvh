@@ -60,6 +60,8 @@ describe('docs pages', () => {
         for (const page of docPages()) {
             const text = readFileSync(page, 'utf8').replace(/```[\s\S]*?```/g, '');
             for (const [, target] of text.matchAll(/\]\((\/[^)\s]*)\)/g)) {
+                // The TypeDoc reference and the examples site are published next to the docs (docs.yml).
+                if (/^\/(api|examples)\//.test(target)) continue;
                 const [route, anchor] = target.split('#');
                 const headings = pages.get(route);
                 if (!headings) broken.push(`${relative(DOCS_DIR, page)}: ${target} (no such page)`);

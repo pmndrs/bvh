@@ -6,11 +6,11 @@ refit on the GPU when things move, and read by a WGSL walk you call from your ow
 compute passes, three.js, workers and other libraries on the same device. CPU raycasts, shapecasts and closest-point
 queries run over the same layout, with three-mesh-bvh's API in `@pmndrs/bvh/three`.
 
-**Docs: [bvh.docs.pmnd.rs](https://bvh.docs.pmnd.rs)** (the source is [`docs/`](docs/getting-started/introduction.mdx);
-the API reference is at [bvh.docs.pmnd.rs/api](https://bvh.docs.pmnd.rs/api/)). **Examples:
-[bvh.docs.pmnd.rs/examples](https://bvh.docs.pmnd.rs/examples/)** (WebGPU; the source is [`examples/`](examples/)).
+**Docs: [pmndrs.github.io/bvh](https://pmndrs.github.io/bvh)** (the source is [`docs/`](docs/getting-started/introduction.mdx);
+the API reference is at [pmndrs.github.io/bvh/api](https://pmndrs.github.io/bvh/api/)). **Examples:
+[pmndrs.github.io/bvh/examples](https://pmndrs.github.io/bvh/examples/)** (WebGPU; the source is [`examples/`](examples/)).
 
-> **Status:** version 0.0.0, not on npm yet. The API can change before 0.1. Its first user is DDGI
+> **Status:** 0.1. The API can still change between 0.x versions; each change is in [CHANGELOG.md](CHANGELOG.md). Its first user is DDGI
 > ([webgpu-ddgi](https://github.com/DennisSmolek/webgpu-ddgi)), but the package imports nothing from it or from any engine.
 
 ## Install
@@ -47,7 +47,7 @@ device.queue.submit([encoder.finish()]);
 const code = `${traceModuleWgsl()}\n/* ... let hit = bvhTraceClosest(BvhRay(origin, 0.0, direction, 1e30)); ... */`;
 ```
 
-A device with `subgroups`, a full kernel and the batch kernel: [First build](https://bvh.docs.pmnd.rs/getting-started/first-build).
+A device with `subgroups`, a full kernel and the batch kernel: [First build](https://pmndrs.github.io/bvh/getting-started/first-build).
 
 ## Quick start: three.js
 
@@ -71,8 +71,8 @@ bvh.update();
 ```
 
 CPU raycasts as drop-ins for three-mesh-bvh (`computeBoundsTree`, `acceleratedRaycast`, `MeshBVH`):
-[CPU raycast in three](https://bvh.docs.pmnd.rs/three/cpu-raycast). Moving from three-mesh-bvh:
-[the mapping, and what's missing](https://bvh.docs.pmnd.rs/three/coming-from-three-mesh-bvh).
+[CPU raycast in three](https://pmndrs.github.io/bvh/three/cpu-raycast). Moving from three-mesh-bvh:
+[the mapping, and what's missing](https://pmndrs.github.io/bvh/three/coming-from-three-mesh-bvh).
 
 ## Quick start: Babylon.js
 
@@ -97,38 +97,38 @@ for (const instance of read.instances) trees.addInstance({ mesh: meshes[instance
 
 Basic, "it works": picking is the same on the WebGL engine, and the GPU half reaches into `WebGPUEngine`'s internal
 `_device`. What it reads, what differs from `scene.pick`, and what to watch for:
-[Babylon.js](https://bvh.docs.pmnd.rs/engines/babylon).
+[Babylon.js](https://pmndrs.github.io/bvh/engines/babylon).
 
 ## What is in the box
 
 Each line links to its page on the docs site.
 
 - **Builders:** tinybvh in WebAssembly, GPU H-PLOC and GPU LBVH, and a chooser that picks one and says why
-  ([Choosing a builder](https://bvh.docs.pmnd.rs/builders/choosing-a-builder)). A new method from a paper is one more
-  builder behind the same contract ([Adding a builder](https://bvh.docs.pmnd.rs/builders/adding-a-builder)).
+  ([Choosing a builder](https://pmndrs.github.io/bvh/builders/choosing-a-builder)). A new method from a paper is one more
+  builder behind the same contract ([Adding a builder](https://pmndrs.github.io/bvh/builders/adding-a-builder)).
 - **`SceneTrees`:** a whole scene on one device, with GPU trees first, tinybvh's swapped in, a GPU top level, and meshes
-  and instances that come and go ([SceneTrees](https://bvh.docs.pmnd.rs/scenes/scene-trees)); moving and deforming
-  meshes refit on the GPU ([Refits](https://bvh.docs.pmnd.rs/scenes/refits)).
+  and instances that come and go ([SceneTrees](https://pmndrs.github.io/bvh/scenes/scene-trees)); moving and deforming
+  meshes refit on the GPU ([Refits](https://pmndrs.github.io/bvh/scenes/refits)).
 - **Clustering:** big meshes cut into clusters, each its own top-level leaf, as three-mesh-bvh's `ClusteredBVH` does
-  ([Clustered top level](https://bvh.docs.pmnd.rs/scenes/clustered-top-level)).
+  ([Clustered top level](https://pmndrs.github.io/bvh/scenes/clustered-top-level)).
 - **GPU queries:** the WGSL walk for closest and any hit, with masks and a triangle filter; ray batches; closest point,
   sphere and box tests and your own shapecast
-  ([Tracing in WGSL](https://bvh.docs.pmnd.rs/tracing/wgsl-walk),
-  [Spatial queries](https://bvh.docs.pmnd.rs/tracing/gpu-queries)).
+  ([Tracing in WGSL](https://pmndrs.github.io/bvh/tracing/wgsl-walk),
+  [Spatial queries](https://pmndrs.github.io/bvh/tracing/gpu-queries)).
 - **Signed distance fields:** a 3D texture or buffer of distances to a scene's triangles, filled on the GPU
-  ([SDF](https://bvh.docs.pmnd.rs/tracing/sdf)).
+  ([SDF](https://pmndrs.github.io/bvh/tracing/sdf)).
 - **CPU queries:** raycast, shapecast, `bvhcast`, closest point and frustum culling on the same layout, with
-  three-mesh-bvh's contracts ([Raycast](https://bvh.docs.pmnd.rs/cpu-queries/raycast)).
+  three-mesh-bvh's contracts ([Raycast](https://pmndrs.github.io/bvh/cpu-queries/raycast)).
 - **Points and lines:** trees over points and line segments on the CPU, with three's raycast thresholds
-  ([Points and lines](https://bvh.docs.pmnd.rs/cpu-queries/points-and-lines)). The GPU walk takes triangles only.
+  ([Points and lines](https://pmndrs.github.io/bvh/cpu-queries/points-and-lines)). The GPU walk takes triangles only.
 - **Serialization and baking:** build trees or whole scenes once, in Node or at build time, and load them later with no
-  build ([Serialization and baking](https://bvh.docs.pmnd.rs/serialization/serialization-and-baking)).
+  build ([Serialization and baking](https://pmndrs.github.io/bvh/serialization/serialization-and-baking)).
 - **Workers:** a tinybvh worker pool that needs no cross-origin isolation
-  ([Workers](https://bvh.docs.pmnd.rs/workers/workers)).
+  ([Workers](https://pmndrs.github.io/bvh/workers/workers)).
 - **three.js:** scenes from `Object3D`, GPU skinning, `BvhTraceNodes` for TSL, and three-mesh-bvh's CPU API as
-  drop-ins ([three.js](https://bvh.docs.pmnd.rs/three/overview)).
+  drop-ins ([three.js](https://pmndrs.github.io/bvh/three/overview)).
 - **Babylon.js:** picking with `scene.pick`'s result, scenes from meshes, and the walk in a `ComputeShader`
-  ([Babylon.js](https://bvh.docs.pmnd.rs/engines/babylon)).
+  ([Babylon.js](https://pmndrs.github.io/bvh/engines/babylon)).
 
 ## Which builder
 
@@ -172,10 +172,10 @@ Memory, Sponza, bytes beyond the app's own geometry: 355.5 MiB in the default la
 three-mesh-bvh's 51.2 MiB, 225.5 MiB with indexed leaves as well (off by default). The GPU build's peak is capped at
 about the scene plus 256 MiB (613 MiB on Sponza, Apple M5, indicative).
 
-How each number was measured, and the rest: [Builds and tracing](https://bvh.docs.pmnd.rs/performance/builds-and-tracing)
-and [Memory](https://bvh.docs.pmnd.rs/performance/memory). The RTX 3060 has run the 2026-11 trace benches (merged
-static instances, the layout variants, the hit record, the any-hit order); `SceneTrees` memory and the cap on it, and
-the Intel UHD, are still to come.
+How each number was measured, and the rest: [Builds and tracing](https://pmndrs.github.io/bvh/performance/builds-and-tracing)
+and [Memory](https://pmndrs.github.io/bvh/performance/memory). The RTX 3060 has run the 2026-11 trace benches (merged
+static instances, the layout variants, the hit record, the any-hit order) and the `SceneTrees` memory runs; the Intel
+UHD is checked for correctness only.
 
 ## Licences
 
@@ -193,12 +193,12 @@ loses them. Sources and commits are in [THIRD_PARTY.md](THIRD_PARTY.md). Only MI
 - `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`.
 - GPU pages in headless Chrome: `pnpm test:gpu`, `pnpm test:gpu:page trace-oracle` ([tests/gpu/README.md](tests/gpu/README.md)).
 - Examples: `pnpm examples:dev`, `pnpm examples:build`, `pnpm examples:smoke` ([examples/README.md](examples/README.md));
-  the built site runs at [bvh.docs.pmnd.rs/examples](https://bvh.docs.pmnd.rs/examples/).
+  the built site runs at [pmndrs.github.io/bvh/examples](https://pmndrs.github.io/bvh/examples/).
 - Docs: `pnpm docs:snippets` copies the code samples (`docs/snippets/*.ts`, type-checked and tested) into the pages,
   `pnpm docs:api` builds the TypeDoc reference, `pnpm docs:site` builds the website with pmndrs/docs.
 - Rebuild the `.wasm` with `pnpm bvh:wasm`, or check it with `pnpm bvh:wasm --check`.
 - Releases: run the "Release to npm" workflow by hand ([docs/internals/RELEASING.md](docs/internals/RELEASING.md)).
 - [HISTORY.md](HISTORY.md): how the package got here, by date. Adding a build method from a paper:
-  [the steps](https://bvh.docs.pmnd.rs/builders/adding-a-builder).
+  [the steps](https://pmndrs.github.io/bvh/builders/adding-a-builder).
 - Contributor notes (design, divergences from the sources, the three-mesh-bvh audit, runbooks):
   [docs/internals/](docs/internals/README.md).
