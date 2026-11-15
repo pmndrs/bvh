@@ -23,7 +23,7 @@
 import { createFakeGpu, installWebGpuGlobals, type FakeBuffer } from '../tests/support/fake-gpu.ts';
 import { SCENE_KERNELS } from '../tests/support/scene-stand-ins.ts';
 import { hplocBatchBytes, hplocScratchPoolBytes, planGpuHplocBatches, type GpuHplocBatch, type GpuHplocBatchOptions, type GpuHplocScratchPool } from '../src/gpu-hploc.ts';
-import { geometryTotals, placeMeshes } from '../src/gpu-lbvh.ts';
+import { geometryTotals, placeMeshes } from '../src/gpu-batch.ts';
 import type { GpuLayoutMeshBvh } from '../src/gpu-layout.ts';
 import { buildHplocOnCpu } from '../src/hploc-cpu.ts';
 import type { GpuMeshGeometry, GpuMeshTreeRange, GpuTreeBuffers, MeshInput } from '../src/mesh-input.ts';

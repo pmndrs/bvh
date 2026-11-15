@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { checkHplocOptions, emittedQuantizedRanges, hplocBatchBytes, planGpuHplocBatches } from './gpu-hploc.ts';
-import { geometryTotals } from './gpu-lbvh.ts';
+import { geometryTotals } from './gpu-batch.ts';
 import { quantizedMeshRanges } from './gpu-quantize.ts';
 import { GPU_LAYOUT_QUANTIZED_NODE_WORDS } from './gpu-layout.ts';
 import { buildHplocOnCpu } from './hploc-cpu.ts';

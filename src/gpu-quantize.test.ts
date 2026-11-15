@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { treeReadbackExtents } from './gpu-lbvh.ts';
+import { treeReadbackExtents } from './gpu-batch.ts';
 import { GPU_LAYOUT_QUANTIZED_NODE_BYTES } from './gpu-layout.ts';
 import { quantizedMeshRanges } from './gpu-quantize.ts';
 import type { GpuMeshTreeRange } from './mesh-input.ts';

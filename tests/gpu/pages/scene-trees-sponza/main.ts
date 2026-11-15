@@ -59,7 +59,7 @@
 
 import { DEFAULT_GPU_MAX_BATCH_BYTES, SceneTrees, type SceneTreesMemory } from '../../../../src/scene/scene-trees.ts';
 import { hplocBatchBytes, hplocScratchPoolBytes, planGpuHplocBatches } from '../../../../src/gpu-hploc.ts';
-import { geometryTotals } from '../../../../src/gpu-lbvh.ts';
+import { geometryTotals } from '../../../../src/gpu-batch.ts';
 import { createBvhWorkerPool, defaultWorkerPoolSize } from '../../../../src/worker/pool.ts';
 import { assembleTraceScene, type TraceSceneData } from '../../../../src/trace/scene-assembly.ts';
 import { buildMeshBvhWithTinyBvh } from '../../../../src/trace/mesh-bvh-topology.ts';

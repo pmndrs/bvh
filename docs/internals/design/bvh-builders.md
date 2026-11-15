@@ -93,6 +93,7 @@ The tracer's top level (ddgi-core's `trace/top-level-gpu.ts`, still in webgpu-dd
 - The trees come back in three shared GPU buffers with an offset per mesh (`GpuTreeBuffers`).
 - `readLayouts` copies them into CPU memory.
 - `planGpuLbvhBatches` splits a scene into batches that fit the device's buffer limits.
+- The batch plumbing both GPU builders share (checks, the planner, mesh placement, the tables, the totals, geometry upload and copy, stats and readback) is in `src/gpu-batch.ts`.
 
 **Handing words between threads.** Every word one climbing thread hands to another goes through atomics with a bounded wait, as in the B1a refit. A tree whose wait ran out is refused (`problem`), never used.
 
@@ -117,7 +118,7 @@ GPU pages: `bvh-lbvh` (scan, sort, trees), `bvh-blas-refit`, `bvh-lbvh-fallback`
 
 `src/gpu-hploc.ts` (`GpuHplocBuilder`) is the target GPU builder: H-PLOC (Benthin et al., HPG 2024), behind the same contract as the LBVH and with the same output (`GpuTreeBuffers`, the tracer's layout).
 
-- It reuses the LBVH's batches, triangle boxes, Morton codes, sort, scans and readback, and climbs the same radix tree.
+- It reuses the LBVH's batches (`src/gpu-batch.ts`), triangle boxes, Morton codes, sort, scans and readback, and climbs the same radix tree.
 - On the way up it merges clusters with PLOC, so its trees are close to a full SAH build's.
 - The kernels are in `src/gpu-hploc-wgsl.ts`, ported from tinybvh's `BuildHPLOC` (MIT, `licenses/tinybvh.txt`).
 
