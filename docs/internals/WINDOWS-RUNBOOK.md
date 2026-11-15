@@ -104,6 +104,8 @@ Columns: `date,commit,device,browser,scene,metric,value`. Without `--append` it 
 
 Per GPU: each correctness page's result; the five ratios (merged, indexed `vec4`, indexed packed, quantized, hit record) with ranges; the Sponza memory rows; compile-time observations. Then Dennis decides the three defaults.
 
+Which GPU's numbers count (Dennis, 2026-11-15): the RTX 3060 and the M5 decide speed and memory defaults. The Intel UHD is the fallback: it must pass every correctness page, and its timings decide nothing (HANDOFF, Hardware).
+
 ## 7. Results: RTX 3060 Laptop, 2026-11-13 (commit `63af716`)
 
 Run on Windows in headless Chrome 157.0.8103.51. Sponza and Bistro interior, section 2 only, three runs each. The rows are in `bench/results/trace.csv`: `run1`-`run3` and `median/` prefixes, plus unprefixed median rows (`bd8ba54`). Each figure below is the median over the runs of each run's median-of-rounds ratio. Above 1 means the option is faster.
@@ -187,3 +189,21 @@ Section 8's walks agreed on every ray (`different` 0 in every entry). Indexed le
 **Examples:** all 41 smoke pages passed on the RTX, `three-load-gltf` included (it fails only on SwiftShader). Screenshots now show the canvas; the ones looked at draw correctly. Two cosmetic notes: `three/pathtracer`'s HUD shows depth, nodes and triangles 0 for its GPU tree, and `babylon/gpu-trace`'s shadows look blocky.
 
 Not covered by this run: D3D12 compile times (no page records them), the Intel UHD benches (correctness only), SDF against three-mesh-bvh on the RTX beyond `compare/sdf`'s smoke.
+
+## 10. The quantized emit and adopt levers: RTX 3060 Laptop, 2026-11-15 (commit `c48fe00`)
+
+Section 3's lever variants by name and `bvh-hploc-profile`, one run each, RTX idle and the downsampler finished. Files in `bench/runs/2026-11-15-c48fe00-levers/`. Every variant 0 disagreements.
+
+| Variant (`scene-trees-sponza`) | Peak MB | Settled MB (nodes / triangles / positions) | First trees ms | GPU build ms |
+| --- | --- | --- | --- | --- |
+| quantized copy, uncapped | 1,482.6 | 366.5 (103.5 / 263 / 0) | 181 | 51 |
+| quantized copy, uncapped, emit | **1,307.3** | 366.5 | 175 | 50 |
+| quantized copy, default cap | 613.2 | 360.8 (97.8 / 263 / 0) | 215 | 71 |
+| quantized copy, default cap, emit | 613.5 | 360.1 | 232 | 112 |
+| quantized adopt (emit implied) | 1,307.3 | 438.3 (175.3 / 263 / 0) | 216 | 78 |
+| quantized indexed copy, uncapped | 1,350.9 | **236.4** (103.5 / 87.7 / 45.2) | 213 | 47 |
+| quantized indexed adopt | 1,175.6 | 308.2 (175.3 / 87.7 / 45.2) | 209 | 44 |
+
+`bvh-hploc-profile` (Sponza, 132 meshes, one batch): the `f32` build plus the quantize pass 41.6 ms (the pass 0.9), the quantized emit 35.1 ms; node bytes during the build 464.1 to 183.8 MB.
+
+Reading it: the emit builds the same nodes (`bvh-hploc` checks word for word; it passed on both GPUs in section 9) about 16% faster and takes 175 MB off an uncapped peak; at the default cap the peak is the same. Quantized nodes with indexed leaves settle at 236.4 MB against 366.5 with records (uncapped, like for like): the 130 MB the `triangleLeaves` default weighs against section 8's 5-17%. Single-run times vary as much as the differences here (section 9's two identical capped copy rows: first trees 471 and 256 ms), so the first-trees column decides nothing.

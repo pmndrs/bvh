@@ -160,6 +160,7 @@ The test needs identical coordinate *bits*, not shared indices. `bvhEdgeFunction
 4. A variant flag inside version 2 (header word 7).
 5. The exact-bit weld is on by default; the tolerance weld is opt-in (`weldTolerance`).
 6. Not yet (2026-11-13). On the RTX 3060, `vec4` cost 3-8% (0.92-0.97x) and packed 5-18% (0.82-0.95x), each timed alone. Records stay the default until a run of indexed leaves with quantized nodes, the new default, on the RTX 3060.
+   **Records stay (2026-11-15), provisional until the M5 times the pair.** The RTX run of the pair (`WINDOWS-RUNBOOK.md`, sections 9 and 10): on quantized nodes `vec4` costs 5-17% of closest-hit rate (0.83-0.95x; packed 0.77-0.87x), more than on `f32` nodes, for 130 MB on Sponza (366.5 to 236.4 MB settled, uncapped). Indexed `vec4` is the memory option; packed only when its further 11 MB matter. The RTX 3060 and the M5 decide; the Intel UHD answers correctness only.
 
 ## Measured (2026-11-12, Apple M5, Chrome 157 headless)
 
@@ -210,7 +211,7 @@ Every indexed answer matched records' on every ray. Reading it: `vec4` costs 3-8
 
 ## Left to do
 
-- The RTX 3060: the oracle pages (not reported from the 2026-11-13 pass), and indexed leaves with quantized nodes together in the paired bench, which decides whether indexed becomes the default. Intel: the oracle pages.
+- The M5: indexed leaves with quantized nodes together (surface-ray page section 8), which confirms or overturns the records default. The RTX 3060 and Intel oracle pages passed in the 2026-11-14 clean run.
 - `/three`'s `BvhBoundsTree` expands indexed trees to records; it would pass `corners: 'positions'` to `CpuMeshBvh` (a `/three` change, not made here).
 - Timings on a GPU: the indexed GPU LBVH build, indexed adoption on Sponza (`scene-trees-sponza` variant `quantized-indexed-adopt`).
 - Built 2026-11-14 (all off by default, defaults unchanged): tinybvh's indexed triangles inside the WASM (Sponza per mesh 0.89x the build time, the WASM peak 1,315.8 to 1,140.4 MiB as one mesh; `tools/tinybvh-formats.ts`), the GPU LBVH's indexed output, `CpuMeshBvh`'s `corners: 'positions'`, adoption in indexed scenes, and the app's positions (`positionsBuffer`). SwiftShader: `bvh-lbvh` (13 of 13 indexed trees the records trees converted), `bvh-hploc`, `scene-trees-runtime` and `scene-trees-mid-swap` (variants `indexed-adopt`, `indexed-adopt-merged-capped`, `quantized-indexed-adopt-merged`, `indexed-app-positions`) pass.

@@ -103,7 +103,8 @@ say what it is.** Where the package makes both sides (`SceneTrees`, `buildTraceS
 without the option agree. Buffers handed to a walk name their own formats: `uploadTraceScene` and
 `trees.traceBuffers` do, and a `TraceBatchKernel` or `BvhTraceNodes` given buffers that don't is refused. The mesh
 builders still write 64-byte trees unless asked, and a scene quantizes them as it places them. Indexed leaves stay
-off: they wait for an RTX 3060 run with both variants on together.
+off: on quantized nodes they cost 5-17% of closest-hit rate on the RTX 3060 and save about 130 MB on
+Sponza, so they are the option to reach for when memory is tight.
 
 Pass the options to `SceneTrees.create`, `buildTraceScene`, the builders' options, `traceModuleWgsl` and
 `TraceBatchKernel`. `SceneTrees` exposes the values it was made with (`trees.triangleLeaves`, `trees.positionLayout`,

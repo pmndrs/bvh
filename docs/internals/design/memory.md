@@ -234,7 +234,7 @@ Levers 4 and 7 and the three notes above (the node buffer's room, refit buffers,
 
 **Reading the ranking.** The load's peak, not the settled scene, is the biggest number and the cheapest to cut (lever 1 changes scheduling, not the layout, so `GPU_LAYOUT_VERSION` stays). Of the resident levers, only indexed leaves and compressed nodes are large. Together, keeping a 4-byte id per triangle and 32-byte nodes, they would take Sponza from 448.1 to about 115 MiB beyond geometry (216 if the geometry has to be added to the GPU for them), against three-mesh-bvh's 51. What is left is the 3.03M nodes: their count follows from leaves of 1.9 triangles, which is lever 5, and the speed measurement has to decide that one.
 
-## Indexed leaves (lever 2, built; off by default, waiting for a run with quantized nodes)
+## Indexed leaves (lever 2, built; off by default, the memory option)
 
 Lever 2 as option B of [indexed-leaves.md](indexed-leaves.md): 16-byte tree-ordered triangles `vec4u(i0, i1, i2, id + flags)`, a 16-byte header per mesh, and our own copy of the positions, welded by exact bits. `tools/memory-breakdown.ts` (Node, the same tinybvh trees, `buildTraceScene`), MiB:
 
@@ -298,7 +298,9 @@ Six switches, each beside the default it would replace. None changes a byte the 
 
 **Checked on SwiftShader** (Windows, the CPU heavily loaded; `profile=ci`; correctness, not speed): `scene-trees-deforming` with two new variants (records with `f32` and with quantized nodes) that turn on every `SceneTrees` lever above, with a second deforming mesh so two refits share one box buffer, a removal whose trim moves the cloth's tree (the GPU refit, the drift rebuild and the CPU poses after it match the reference), compact layouts for the CPU poses and parents found on the CPU: 0 disagreements. `scene-trees-mid-swap`, three new `-levers` variants (adopt merged, quantized copy merged, quantized copy capped: trim, batched quantize, no parents) over every oracle case, with `?variants=levers,copy,adopt-merged&sharedRays=100000`: 0 disagreements, the node buffer the size of its trees after each swap. (The full page, 1M seam rays and every variant, ran past its 900 s limit on SwiftShader under this load before reporting; it has no lever-specific path the filtered run lacks.) `bvh-hploc` builds every case again with `parents: false`: the same nodes and triangles bit for bit, the parents from the nodes equal to the GPU's. `scene-trees-runtime` passes unchanged. `scene-trees-sponza` gained `adopt-trim`, `copy-default-trim`, `copy-default-noparents`, `copy-noparents`, `quantized-copy-default` and `quantized-copy-default-qbatch` for the next real-GPU run (`tools/windows-clean-run.ps1`); not run here (no real GPU).
 
-**Recommendations for Dennis** (none is a default yet):
+**On the RTX 3060** (`scene-trees-sponza`, 2026-11-14, `WINDOWS-RUNBOOK.md` section 9; every variant 0 disagreements): `parents: 'refit'` peak 711.0 to 707.3 MB capped, 1,482.7 to 1,460.7 uncapped; `trimWhenRefined` settled 458.6 to 448.1 (copy, default cap), adopt with trim 613.6 to 448.1; `quantizeJobs: 'batched'` the same bytes (613.2 peak), first trees 257 against 309 ms in one run (single runs vary that much: two identical capped rows gave 471 and 256 ms). `refitBoxes`, `deformingLayouts` and `idleTimeoutMs` act on deforming meshes and idle pools, which Sponza doesn't exercise.
+
+**Recommendations for Dennis** (none is a default yet; proposed again after the clean run, 2026-11-15):
 
 - **`refitBoxes: 'shared'`: make it the default.** No cost found: the same boxes, one buffer instead of one per deforming mesh. Undo: `'per-mesh'`.
 - **`parents: 'refit'`: make it the default.** Nothing reads the parents it drops; a deforming mesh's are found from its nodes in one pass over them (not timed). Saves 3.7 MiB of the capped peak and 11.6 MiB of transient CPU on Sponza, 21.9 MiB of peak uncapped. Undo: `'always'`.
