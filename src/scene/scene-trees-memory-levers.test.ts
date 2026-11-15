@@ -135,8 +135,9 @@ describe("quantizeJobs: 'batched' (one quantize pass per update, not per tree)",
         { name: 'uncapped, indexed, unmerged', options: { gpuMaxBatchBytes: Infinity, triangleLeaves: 'indexed' as const, mergeStaticInstances: false } },
     ]) {
         it(`${variant.name}: the same buffers bit for bit and the same hits, with fewer quantize dispatches and tables`, async () => {
-            const perTree = await load({ ...variant.options, quantizeJobs: 'per-tree' });
-            const batched = await load({ ...variant.options, quantizeJobs: 'batched' });
+            // The quantize pass, not the emit (the default since 2026-11-15), so there is a pass to batch.
+            const perTree = await load({ ...variant.options, gpuQuantizeOnEmit: false, quantizeJobs: 'per-tree' });
+            const batched = await load({ ...variant.options, gpuQuantizeOnEmit: false, quantizeJobs: 'batched' });
             for (const state of ['gpuTrees', 'settled'] as const) {
                 expect(batched[state].nodes).toEqual(perTree[state].nodes);
                 expect(batched[state].triangles).toEqual(perTree[state].triangles);
@@ -173,7 +174,8 @@ describe('the 2026-11-14 levers with the BX.20 ones (where they share code)', ()
         { name: 'uncapped, indexed, unmerged', options: { gpuMaxBatchBytes: Infinity, triangleLeaves: 'indexed' as const, mergeStaticInstances: false } },
     ]) {
         it(`${variant.name}: gpuQuantizeOnEmit with quantizeJobs 'batched' and parents 'refit' gives the quantize pass's buffers bit for bit, with no quantize dispatch`, async () => {
-            const reference = await load({ ...variant.options, quantizeJobs: 'per-tree' });
+            // The defaults before 2026-11-15: the quantize pass per tree, every batch with parents.
+            const reference = await load({ ...variant.options, gpuQuantizeOnEmit: false, quantizeJobs: 'per-tree', parents: 'always' });
             const levers = await load({ ...variant.options, gpuQuantizeOnEmit: true, quantizeJobs: 'batched', parents: 'refit' });
             for (const state of ['gpuTrees', 'settled'] as const) {
                 expect(levers[state].nodes).toEqual(reference[state].nodes);
@@ -255,7 +257,7 @@ describe('SceneTrees.trim and trimWhenRefined (the node buffer packed after the 
         { name: 'copy, quantized on emit, capped, no parents', options: { gpuQuantizeOnEmit: true, parents: 'refit' as const } },
     ]) {
         it(`${variant.name}: trim() packs the nodes to their size, with the same hits; trimWhenRefined does it unasked`, async () => {
-            const plain = await load(variant.options);
+            const plain = await load({ ...variant.options, trimWhenRefined: false });
             const before = plain.scene.memory;
             expect(before.nodes).toBeGreaterThan(before.nodesInUse);
             const version = plain.scene.version;

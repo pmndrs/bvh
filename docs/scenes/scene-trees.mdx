@@ -205,11 +205,11 @@ const trees = await SceneTrees.create(device, {
 | Option | Default | What it does |
 | --- | --- | --- |
 | `gpuFirstTrees` | `true` | H-PLOC first trees on a device with subgroups. `false`: tinybvh only. |
-| `gpuTreeOutputs` | `'copy'` | `'adopt'` makes the load batch's output buffers the scene's own (no copy), for a lower load peak and more node memory after the swaps. Any node and triangle format: quantized scenes adopt batches whose nodes H-PLOC wrote quantized (it turns on `gpuQuantizeOnEmit`), and indexed scenes' builds leave room for each mesh's header. |
-| `gpuQuantizeOnEmit` | `false` (`true` with `'adopt'`) | Quantized scenes: H-PLOC writes the first trees' nodes quantized itself, so a batch holds 32-byte nodes, not 64, and no quantize pass runs (the same trees). Deforming meshes' builds stay `f32`. |
+| `gpuTreeOutputs` | `'copy'` | `'adopt'` makes the load batch's output buffers the scene's own (no copy), for a lower load peak and more node memory after the swaps. Any node and triangle format: quantized scenes adopt batches whose nodes H-PLOC wrote quantized (`gpuQuantizeOnEmit`, the default), and indexed scenes' builds leave room for each mesh's header. |
+| `gpuQuantizeOnEmit` | `true` | Quantized scenes: H-PLOC writes the first trees' nodes quantized itself, so a batch holds 32-byte nodes, not 64, and no quantize pass runs (the same trees). Deforming meshes' builds stay `f32`. A custom first-tree builder that returns `f32` nodes still works with `'copy'`: they are packed on the way in. |
 | `positionsBuffer` | none | Indexed scenes: bind [your own positions buffer](#your-own-positions-buffer) instead of the scene's copy. |
 | `gpuMaxBatchBytes` | 256 MiB | [The build-peak cap](/builders/fallbacks-and-limits#the-build-peak-cap). `Infinity` turns it off. |
-| `workers` | a pool of its own | A `BvhWorkerPool` to share, or options for the one it makes (and disposes). |
+| `workers` | a pool of its own | A `BvhWorkerPool` to share, or options for the one it makes (and disposes). The scene's own pool ends workers idle for 30 s (`SCENE_WORKER_IDLE_TIMEOUT_MS`) unless the options set `idleTimeoutMs`. |
 | `transferGeometry` | `false` | Move each mesh's arrays into the worker instead of copying them. |
 | `mergeStaticInstances` | `true` | [Merged static instances](/scenes/merged-static): instances added with `static: true` before the first update merge into world-space trees. Nothing else is touched. |
 | `refine` | `true` | tinybvh builds every mesh too and its tree replaces the GPU's. `false`: [GPU trees only](#gpu-trees-only). |

@@ -86,7 +86,7 @@ await pool.build(meshes[0], {}, { onStart: () => console.log('mesh 0 is building
 - **Results are transferred**, never copied: nodes, triangles, parents and bounds arrive as `ArrayBuffer`s.
 - **Each worker keeps a WebAssembly heap**, 64 MiB measured (it held the largest Sponza mesh without growing). A pool
   of 4 holds 256 MiB of CPU memory for as long as it lives. `pool.dispose()` frees it, and `idleTimeoutMs` (default
-  `Infinity`) ends a worker left idle that long, so an idle pool holds nothing (`pool.stats.idleEnded` counts them;
+  `Infinity`; 30 s for the pool a `SceneTrees` makes for itself) ends a worker left idle that long, so an idle pool holds nothing (`pool.stats.idleEnded` counts them;
   inline, the calling thread's tinybvh instance is dropped the same way). The next build starts a fresh worker.
 - **Big builds belong here.** A WebAssembly memory can grow but never shrink, and one build grows tinybvh's to about
   230 bytes per triangle (Sponza merged into one 5.7M-triangle mesh: 1,349 MiB). A worker whose build left its memory

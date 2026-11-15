@@ -60,15 +60,14 @@ with `f32` nodes, both under the default 256 MiB cap (Apple M5).
 The GPU build is the biggest number. One H-PLOC batch of all of Sponza holds 1,482.4 MiB (inputs 101.3, scratch 745.6,
 outputs 635.5), and `SceneTrees.memory.peak` measured 1,482.7. The default [build-peak cap](/builders/fallbacks-and-limits#the-build-peak-cap)
 (256 MiB batches, one after another) takes the peak to 613.2 MiB with the default quantized nodes (711.0 with `f32`
-nodes), with the first trees no later (Apple M5, indicative). By default GPU batches still write 64-byte nodes and pack
-them on the way into storage, so the batches are the same size either way.
+nodes), with the first trees no later (Apple M5, indicative).
 
-`gpuQuantizeOnEmit: true` (off by default) has H-PLOC write the quantized nodes itself, in its emit pass: a batch holds
-32-byte nodes and a frame slot per mesh instead of 64-byte nodes, and no quantize pass runs as the trees are copied in.
-The trees are the same bit for bit. One batch of all of Sponza goes from 1,482.4 to 1,307.1 MiB (output nodes 350.6 to
-175.3), and from 1,307.1 to 1,131.8 with indexed leaves; under a cap each batch is smaller by the same 32 bytes per
-node. Deforming meshes' builds stay `f32` (their refit needs the copy). Predicted from the allocation code; not yet
-timed on a GPU.
+Quantized scenes have H-PLOC write the quantized nodes itself, in its emit pass (`gpuQuantizeOnEmit`, on by default
+since 2026-11-15): a batch holds 32-byte nodes and a frame slot per mesh instead of 64-byte nodes, and no quantize pass
+runs as the trees are copied in. The trees are the same bit for bit. One batch of all of Sponza goes from 1,482.6 to
+1,307.3 MiB (RTX 3060 Laptop), and the whole build from 41.6 to 35.1 ms. Under the default cap the peak is the same
+(613.2 against 613.5 MiB): the cap fills each batch to the same bytes, with more meshes in it. Deforming meshes' builds stay `f32` (their
+refit needs the copy). `gpuQuantizeOnEmit: false` brings back the quantize pass.
 
 ## Other memory
 
@@ -103,28 +102,29 @@ timed on a GPU.
 | Build-peak cap (`gpuMaxBatchBytes`) | **on**, 256 MiB | 771 MiB of peak | none measured on first trees (M5) |
 | Quantized nodes (`nodeFormat: 'quantized'`) | **on** | 92.6 MiB resident | closest 1.02-1.22x, any 0.98-1.03x; M5 0.93-0.97x. SAH +0.01-0.66% |
 | Indexed leaves (`triangleLeaves: 'indexed'`) | off | 130 MiB resident (141 with packed positions) | 0.92-0.97x (`vec4`), 0.82-0.95x (packed); M5 0.83-0.99x, 0.75-0.92x |
-| Both | quantized only | 222.6 MiB resident against `f32` records | not measured together yet |
-| Quantized nodes from H-PLOC's emit (`gpuQuantizeOnEmit`) | off | 175.3 MiB of an uncapped batch; 32 bytes per node of any batch | none on traces (same trees); build time not measured yet |
+| Indexed leaves on quantized nodes | off (quantized only) | 130.1 MiB resident against quantized records (366.5 to 236.4, uncapped) | closest 0.83-0.95x (`vec4`), 0.77-0.87x (packed); M5 not measured yet |
+| Quantized nodes from H-PLOC's emit (`gpuQuantizeOnEmit`) | **on** | 175.3 MiB of an uncapped batch; none under the default cap | none on traces (same trees); the build 41.6 to 35.1 ms |
 | The app's positions (`positionsBuffer`, indexed only) | off | 45.2 MiB resident (`vec4`) | none (the same walk) |
 | Compact hit records (`hitNormal: false`) | off | 16 bytes per ray in a batch | the 40-byte record costs 6-12% (0.88-0.94x); M5 0.96-1.15x |
 | Smaller leaves (`maxLeafPrimitives`) | 8 | nothing: tinybvh picks about 1.9 per leaf anyway (8 against 4 saved 0.5 MiB) | |
 
 ### Options that keep the layout
 
-These change where bytes live, not what the walk reads: the same trees and the same hits as the default. All are off
-by default for now. Figures from `tools/memory-breakdown.ts`, Sponza and Bistro exterior.
+These change where bytes live, not what the walk reads: the same trees and the same hits as without them. Since
+2026-11-15 they are on by default, except the trim with `copy` (it would save about 10 MiB for a copy of every node).
+Figures from `tools/memory-breakdown.ts`, Sponza and Bistro exterior; the RTX 3060 measured the same peaks.
 
 | Option | Default | What it does | Saves on Sponza (Bistro exterior) |
 | --- | --- | --- | --- |
-| `SceneTrees.trim()`, `trimWhenRefined: true` | off | packs the node buffer to its trees once nothing is building | **165.5 MiB** settled with `gpuTreeOutputs: 'adopt'` (92.2); 5.3 with `copy` and the default cap (1.4) |
-| `parents: 'refit'` | `'always'` | no parents output in the GPU builds, no parents arrays for meshes that don't deform | 3.7 MiB of peak with the default cap, 21.9 uncapped; 11.6 MiB of CPU during the load |
-| `deformingLayouts: 'compact'` | `'full'` | a deforming mesh keeps its nodes, parents and 4 bytes per triangle for `setPoseCpu`, not its whole tree | 241.0 MiB of CPU if every mesh deformed (118.7); half of each deforming mesh's copy |
-| `refitBoxes: 'shared'` | `'per-mesh'` | deforming meshes' refits share one box buffer, sized for the largest | 168.7 MiB of GPU if every mesh deformed (83.8) |
-| `quantizeJobs: 'batched'` | `'per-tree'` | one quantize pass per update instead of one per GPU tree | a few KiB; 132 passes and 264 small buffers become 7 and 14 (1,296 and 2,592 become 3 and 6) |
-| Worker pool `idleTimeoutMs` | `Infinity` | ends workers left idle that long | 256 MiB of CPU once the pool is idle (4 workers of 64 MiB) |
+| `SceneTrees.trim()`, `trimWhenRefined` | **on** with `'adopt'`, off with `'copy'` | packs the node buffer to its trees once nothing is building | **165.5 MiB** settled with `gpuTreeOutputs: 'adopt'` (92.2); 5.3 with `copy` and the default cap (1.4) |
+| `parents: 'refit'` | **`'refit'`** (`'always'` to keep them) | no parents output in the GPU builds, no parents arrays for meshes that don't deform | 3.7 MiB of peak with the default cap, 21.9 uncapped; 11.6 MiB of CPU during the load |
+| `deformingLayouts: 'compact'` | **`'compact'`** (`'full'`) | a deforming mesh keeps its nodes, parents and 4 bytes per triangle for `setPoseCpu`, not its whole tree | 241.0 MiB of CPU if every mesh deformed (118.7); half of each deforming mesh's copy |
+| `refitBoxes: 'shared'` | **`'shared'`** (`'per-mesh'`) | deforming meshes' refits share one box buffer, sized for the largest | 168.7 MiB of GPU if every mesh deformed (83.8) |
+| `quantizeJobs: 'batched'` | **`'batched'`** (`'per-tree'`) | one quantize pass per update instead of one per GPU tree (only when `gpuQuantizeOnEmit` is off, or for tinybvh's `f32` trees) | a few KiB; 132 passes and 264 small buffers become 7 and 14 (1,296 and 2,592 become 3 and 6) |
+| Worker pool `idleTimeoutMs` | **30 s** for the pool a `SceneTrees` makes; `Infinity` for pools you make | ends workers left idle that long | 256 MiB of CPU once the pool is idle (4 workers of 64 MiB) |
 
-Pass them to `SceneTrees.create(device, { ... })`, or `idleTimeoutMs` in its `workers` options (or to
-`createBvhWorkerPool`). A trim moves trees: `version` changes, so bind groups are made again, and placements read from
+Pass the other value to `SceneTrees.create(device, { ... })` to turn one off, or `idleTimeoutMs` in its `workers`
+options (or to `createBvhWorkerPool`). A trim moves trees: `version` changes, so bind groups are made again, and placements read from
 `meshStatus` before it are stale. `GpuMeshRefit` users can share boxes themselves with `GpuRefitBoxPool`, and keep a
 deforming mesh's CPU copy small with `compactPoseLayout` (which `refitLayoutToPose` takes).
 

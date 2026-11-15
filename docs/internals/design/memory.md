@@ -274,7 +274,7 @@ Lever 3 as option A of [compressed-nodes.md](compressed-nodes.md): 32-byte two-c
 - Speed: M5 0.93-0.97x `f32` (indicative); RTX 3060 Laptop (2026-11-13, median of three runs) closest hits 1.02-1.22x, any hits 0.98-1.03x. The RTX 3060 run made it the default (compressed-nodes.md, question 2).
 - The CPU trees (`CpuMeshBvh`) stay 64 bytes per node: a quantized tree is decoded on construction.
 
-## BX.20: the levers that keep the layout (built, all off by default)
+## BX.20: the levers that keep the layout (built; the defaults since 2026-11-15)
 
 Six switches, each beside the default it would replace. None changes a byte the walk reads, so `GPU_LAYOUT_VERSION` stays 2. Each is checked to give the same trees and hits as its default: in Node (`src/scene/scene-trees-memory-levers.test.ts`, the worker pool's tests, `growable-storage.test.ts`; the fake GPU and the H-PLOC stand-in) and on SwiftShader (below). The bytes are from `tools/memory-breakdown.ts` (`tools/memory-levers.ts`), Node, on Sponza and Bistro exterior; the `SceneTrees` rows load the real `SceneTrees` on the fake GPU, its GPU trees the H-PLOC CPU twin's laid out as a batch's outputs, and its settled and peak numbers repeat the M5's `scene-trees-sponza` ones (360.8 settled and 613.3 peak with the defaults, 613.2 measured; adopt 613.6 settled, the same as measured). MiB:
 
@@ -300,7 +300,7 @@ Six switches, each beside the default it would replace. None changes a byte the 
 
 **On the RTX 3060** (`scene-trees-sponza`, 2026-11-14, `WINDOWS-RUNBOOK.md` section 9; every variant 0 disagreements): `parents: 'refit'` peak 711.0 to 707.3 MB capped, 1,482.7 to 1,460.7 uncapped; `trimWhenRefined` settled 458.6 to 448.1 (copy, default cap), adopt with trim 613.6 to 448.1; `quantizeJobs: 'batched'` the same bytes (613.2 peak), first trees 257 against 309 ms in one run (single runs vary that much: two identical capped rows gave 471 and 256 ms). `refitBoxes`, `deformingLayouts` and `idleTimeoutMs` act on deforming meshes and idle pools, which Sponza doesn't exercise.
 
-**Recommendations for Dennis** (none is a default yet; proposed again after the clean run, 2026-11-15):
+**Dennis's decision (2026-11-15): all six as recommended below, and the quantized emit (`gpuQuantizeOnEmit`) on for quantized scenes.** The table's "Option (default)" column gives the old default, which is now the way to turn each off. The recommendations as they were made:
 
 - **`refitBoxes: 'shared'`: make it the default.** No cost found: the same boxes, one buffer instead of one per deforming mesh. Undo: `'per-mesh'`.
 - **`parents: 'refit'`: make it the default.** Nothing reads the parents it drops; a deforming mesh's are found from its nodes in one pass over them (not timed). Saves 3.7 MiB of the capped peak and 11.6 MiB of transient CPU on Sponza, 21.9 MiB of peak uncapped. Undo: `'always'`.

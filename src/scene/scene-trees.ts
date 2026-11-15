@@ -52,7 +52,7 @@
  *   a merged group's side tables) free before its triangles
  *   (`GpuTreeRequest.triangleLeading`), and the scene writes them at the
  *   adoption. Quantized scenes adopt batches whose nodes H-PLOC wrote
- *   quantized itself (`gpuQuantizeOnEmit`, implied by `'adopt'`).
+ *   quantized itself (`gpuQuantizeOnEmit`, the default).
  *
  * **A cap on the GPU batches' bytes** (`gpuMaxBatchBytes`, 256 MiB by default,
  * `Infinity` for none: the P9 build-peak lever; docs/internals/design/bvh-builders.md,
@@ -165,6 +165,13 @@ const GPU_TREE_NODE_HEADROOM = 1 / 8;
  */
 export const DEFAULT_GPU_MAX_BATCH_BYTES = 256 * 1024 * 1024;
 
+/**
+ * `idleTimeoutMs` of a worker pool a `SceneTrees` makes for itself: 30 s.
+ * Pools the app makes keep `WORKER_IDLE_TIMEOUT_MS` (`Infinity`). P9 lever 4a
+ * (docs/internals/design/memory.md, "BX.20").
+ */
+export const SCENE_WORKER_IDLE_TIMEOUT_MS = 30_000;
+
 const INITIAL_NODES = 1024;
 const INITIAL_TRIANGLES = 2048;
 const USAGE = { COPY_SRC: 0x4, COPY_DST: 0x8, STORAGE: 0x80 } as const;
@@ -184,7 +191,7 @@ export interface SceneTreesOptions {
      * How GPU trees reach the scene's buffers: `'copy'` (default) or `'adopt'`
      * (see the file comment). Any node and triangle format: a quantized scene
      * adopts H-PLOC batches that wrote quantized nodes themselves
-     * ({@link gpuQuantizeOnEmit}, which `'adopt'` turns on), and an indexed
+     * ({@link gpuQuantizeOnEmit}, the default), and an indexed
      * scene's builds leave room for each mesh's header.
      */
     readonly gpuTreeOutputs?: GpuTreeOutputsMode;
@@ -194,8 +201,12 @@ export interface SceneTreesOptions {
      * nodes and a frame slot per mesh instead of 64-byte nodes, and no
      * quantize pass runs as the trees are copied in. The trees are the same,
      * bit for bit. Deforming meshes' builds stay `f32` (their refit needs an
-     * `f32` copy). Default false (the quantize pass), and true with
-     * `gpuTreeOutputs: 'adopt'`, which needs it. Ignored by `f32` scenes.
+     * `f32` copy). Default true (since 2026-11-15: Sponza's build 41.6 to
+     * 35.1 ms on the RTX 3060, an uncapped peak 1,482.6 to 1,307.3 MiB);
+     * false runs the quantize pass instead. `gpuTreeOutputs: 'adopt'` needs
+     * it. A copying scene still takes `f32` trees from a first-tree builder
+     * that doesn't write quantized nodes, and packs them on the way in.
+     * Ignored by `f32` scenes.
      */
     readonly gpuQuantizeOnEmit?: boolean;
     /**
@@ -226,7 +237,13 @@ export interface SceneTreesOptions {
      * as any tree does.
      */
     readonly gpuMaxBatchBytes?: number;
-    /** The worker pool for tinybvh builds, or options for one this scene makes (and disposes). */
+    /**
+     * The worker pool for tinybvh builds, or options for one this scene makes
+     * (and disposes). A pool the scene makes ends workers idle for
+     * {@link SCENE_WORKER_IDLE_TIMEOUT_MS} (30 s) unless the options set
+     * `idleTimeoutMs`: 256 MiB of tinybvh memory back once a load is over,
+     * for a few milliseconds of worker start on the next build.
+     */
     readonly workers?: BvhWorkerPool | BvhWorkerPoolOptions;
     /**
      * Move each mesh's geometry arrays into the worker instead of copying them
@@ -318,45 +335,50 @@ export interface SceneTreesOptions {
     readonly weld?: boolean;
     /**
      * Quantized scenes: how GPU trees are packed on their way into the
-     * storage. `'per-tree'` (the default) records one quantize pass per tree,
+     * storage. `'per-tree'` records one quantize pass per tree,
      * each with its own mesh table and uniform; `'batched'` gathers every tree
      * an update (or a capped batch's own copy) places and records one pass,
      * with one job per batch's node buffer. Same nodes bit for bit; fewer
      * buffers, bind groups and passes (P9, docs/internals/design/memory.md).
+     * Default `'batched'` since 2026-11-15 (Sponza: 7 passes, not 132).
      */
     readonly quantizeJobs?: 'per-tree' | 'batched';
     /**
      * Trim the node buffer whenever the scene is quiet (no build running or
      * waiting, every tree placed) and the buffer holds more than its trees:
      * the trees are packed to the front of a buffer of their exact size (see
-     * {@link SceneTrees.trim}). Default false: the buffer keeps its growth
-     * room, and with `gpuTreeOutputs: 'adopt'` the batch's one node per
-     * triangle (Sponza: 350.6 MiB for 185.1 in use).
+     * {@link SceneTrees.trim}). Default: true with `gpuTreeOutputs: 'adopt'`
+     * (the batch's one node per triangle goes: Sponza settles at 448.1 MiB,
+     * not 613.6), false with `'copy'` (the buffer keeps its growth room;
+     * a trim would save about 10 MiB for a copy of every node).
      */
     readonly trimWhenRefined?: boolean;
     /**
-     * Deforming meshes' refits: `'per-mesh'` (the default) gives each its own
+     * Deforming meshes' refits: `'per-mesh'` gives each its own
      * primitive-box buffer (32 bytes per triangle); `'shared'` gives them one,
      * sized for the largest deforming mesh, used in turn (every refit is
      * recorded one after another in the update's pass). Same boxes, same trees.
+     * Default `'shared'` since 2026-11-15.
      */
     readonly refitBoxes?: 'per-mesh' | 'shared';
     /**
      * What a deforming mesh keeps on the CPU for {@link SceneTrees.setPoseCpu}
-     * once its tree is placed: `'full'` (the default) keeps the tree's layout
+     * once its tree is placed: `'full'` keeps the tree's layout
      * as it came (nodes, 48-byte records, parents); `'compact'` keeps the
      * nodes and parents and 4 bytes per triangle (its original triangle, and
      * the flags and padding words only where any is non-zero), and rebuilds
      * the records a pose needs (`compactPoseLayout`). Same poses bit for bit.
+     * Default `'compact'` since 2026-11-15.
      */
     readonly deformingLayouts?: 'full' | 'compact';
     /**
      * Which trees carry parents (4 bytes per node; only a refit reads them).
-     * `'always'` (the default): every GPU batch writes its parents output and
+     * `'always'`: every GPU batch writes its parents output and
      * every tinybvh tree comes with its parents array. `'refit'` (P9 lever 7):
      * GPU batches are built without the parents output (deforming meshes'
      * read-back layouts get theirs from their nodes, on the CPU), and tinybvh
      * builds of meshes that don't deform leave their parents out. Same trees.
+     * Default `'refit'` since 2026-11-15.
      */
     readonly parents?: 'always' | 'refit';
 }
@@ -928,7 +950,7 @@ export class SceneTrees {
             this.pool = workers;
             this.ownsPool = false;
         } else {
-            this.pool = createBvhWorkerPool(workers ?? {});
+            this.pool = createBvhWorkerPool({ idleTimeoutMs: SCENE_WORKER_IDLE_TIMEOUT_MS, ...(workers ?? {}) });
             this.ownsPool = true;
         }
         if (options.gpuFirstTrees === false) {
@@ -960,19 +982,19 @@ export class SceneTrees {
         this.nodeFormat = options.nodeFormat ?? DEFAULT_NODE_FORMAT;
         if (this.nodeFormat !== 'f32' && this.nodeFormat !== 'quantized') throw new RangeError(`nodeFormat must be 'f32' or 'quantized', got ${String(this.nodeFormat)}`);
         // An adopted batch's nodes are the storage, so a quantized scene adopts only batches that wrote quantized nodes.
-        this.quantizeOnEmit = this.nodeFormat === 'quantized' && (options.gpuQuantizeOnEmit ?? this.gpuTreeOutputs === 'adopt');
+        this.quantizeOnEmit = this.nodeFormat === 'quantized' && (options.gpuQuantizeOnEmit ?? true);
         if (this.nodeFormat === 'quantized' && this.gpuTreeOutputs === 'adopt' && !this.quantizeOnEmit) {
             throw new RangeError("SceneTrees: gpuTreeOutputs: 'adopt' with quantized nodes needs gpuQuantizeOnEmit (an adopted batch's nodes are the storage); leave it out or true");
         }
         this.nodeBytes = this.nodeFormat === 'quantized' ? QUANTIZED_NODE_BYTES : BVH_NODE_BYTES;
-        const quantizeJobs = options.quantizeJobs ?? 'per-tree';
+        const quantizeJobs = options.quantizeJobs ?? 'batched';
         if (quantizeJobs !== 'per-tree' && quantizeJobs !== 'batched') throw new RangeError(`quantizeJobs must be 'per-tree' or 'batched', got ${String(quantizeJobs)}`);
         this.batchQuantize = quantizeJobs === 'batched';
-        this.trimWhenRefined = options.trimWhenRefined ?? false;
-        const deformingLayouts = options.deformingLayouts ?? 'full';
+        this.trimWhenRefined = options.trimWhenRefined ?? this.gpuTreeOutputs === 'adopt';
+        const deformingLayouts = options.deformingLayouts ?? 'compact';
         if (deformingLayouts !== 'full' && deformingLayouts !== 'compact') throw new RangeError(`deformingLayouts must be 'full' or 'compact', got ${String(deformingLayouts)}`);
         this.compactPoseLayouts = deformingLayouts === 'compact';
-        const parents = options.parents ?? 'always';
+        const parents = options.parents ?? 'refit';
         if (parents !== 'always' && parents !== 'refit') throw new RangeError(`parents must be 'always' or 'refit', got ${String(parents)}`);
         this.parentsForRefitOnly = parents === 'refit';
         this.nodeLeading = this.nodeFormat === 'quantized' ? 1 : 0;
@@ -988,7 +1010,7 @@ export class SceneTrees {
         this.cpuTopLevel = this.createTopLevelBuffer(TOP_LEVEL_HEADER_BYTES);
         device.queue.writeBuffer(this.cpuTopLevel, 0, new Uint32Array(TOP_LEVEL_HEADER_WORDS));
         this.identity = new GpuMergedIdentity(device, this.label);
-        const refitBoxes = options.refitBoxes ?? 'per-mesh';
+        const refitBoxes = options.refitBoxes ?? 'shared';
         if (refitBoxes !== 'per-mesh' && refitBoxes !== 'shared') throw new RangeError(`refitBoxes must be 'per-mesh' or 'shared', got ${String(refitBoxes)}`);
         this.deforming = DeformingTrees.isSupported(device) ? new DeformingTrees(device, { label: this.label, refitBoxes }) : null;
     }
@@ -2030,8 +2052,10 @@ export class SceneTrees {
         for (const { slot, generation, reason } of result.refused) refuse(slot, generation, reason);
         if (result.failure) this.warn(`@pmndrs/bvh: ${result.failure}, so ${rebuild ? 'the mesh keeps its refit tree' : 'the meshes wait for tinybvh'}`);
         for (const built of result.built) {
-            if (built.outputs.nodeFormat !== nodeFormat) {
-                // The scene quantizes f32 trees as it copies them in, and copies quantized ones only when it asked for them (gpuQuantizeOnEmit).
+            // A copying quantized scene packs f32 trees on the way in, so a builder that doesn't write quantized nodes is still fine.
+            const packsOnCopy = built.outputs.nodeFormat === 'f32' && this.nodeFormat === 'quantized' && this.gpuTreeOutputs === 'copy';
+            if (built.outputs.nodeFormat !== nodeFormat && !packsOnCopy) {
+                // Quantized trees are copied only when the scene asked for them (gpuQuantizeOnEmit); adopted ones must be what it asked for.
                 const reason = `the first-tree builder returned ${built.outputs.nodeFormat} nodes; SceneTrees asked for ${nodeFormat} GPU trees`;
                 if (this.currentState(built.slot, built.generation)) {
                     this.warn(`@pmndrs/bvh: ${reason}`);

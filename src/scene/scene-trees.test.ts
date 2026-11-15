@@ -52,6 +52,8 @@ class StandInGpuBuilder implements FirstTreeBuilder {
     readonly refuse = new Set<number>();
     /** Labels the batch's nodes quantized, as a misconfigured custom builder would. */
     quantizedOutputs = false;
+    /** Builds `f32` nodes whatever `quantizeOnEmit` asks, as a custom builder that doesn\'t know the option would. */
+    ignoreQuantizeOnEmit = false;
 
     constructor(
         private readonly device: GPUDevice,
@@ -66,8 +68,8 @@ class StandInGpuBuilder implements FirstTreeBuilder {
         this.requests.push([...requests]);
         this.readLayouts.push(options.readLayouts ?? false);
         const readLayouts = options.readLayouts ?? false;
-        const quantizeOnEmit = options.quantizeOnEmit ?? false;
-        this.quantizeOnEmit.push(quantizeOnEmit);
+        this.quantizeOnEmit.push(options.quantizeOnEmit ?? false);
+        const quantizeOnEmit = !this.ignoreQuantizeOnEmit && (options.quantizeOnEmit ?? false);
         const members = requests.map(({ slot, generation, geometry, triangleLeading }) => {
             const cpu = geometry as MeshGeometry;
             return {
@@ -337,9 +339,9 @@ describe('SceneTrees', () => {
         scene.dispose();
     });
 
-    it('refuses a custom builder\'s quantized trees instead of quantizing them again', async () => {
+    it('refuses a custom builder\'s quantized trees when the scene asked for f32 ones (gpuQuantizeOnEmit: false), instead of quantizing them again', async () => {
         const warnings: string[] = [];
-        const { scene, stand, frame } = await setUp({ nodeFormat: 'quantized', holdRefinements: true, warn: (message) => warnings.push(message) });
+        const { scene, stand, frame } = await setUp({ nodeFormat: 'quantized', gpuQuantizeOnEmit: false, holdRefinements: true, warn: (message) => warnings.push(message) });
         const mesh = scene.addMesh(tessellatedQuad(2, 1));
         scene.addInstance({ mesh, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] });
         stand!.quantizedOutputs = true;
@@ -350,6 +352,21 @@ describe('SceneTrees', () => {
         expect(scene.meshStatus(mesh).builtBy).toBe('tinybvh');
         expect(scene.meshStatus(mesh).fallbackReason).toMatch(/quantized nodes/);
         expect(warnings.some((message) => /quantized nodes/.test(message))).toBe(true);
+        scene.dispose();
+    });
+
+    it('takes a custom builder\'s f32 trees when the scene asked for quantized ones (the default emit), and packs them on the way in', async () => {
+        const warnings: string[] = [];
+        const { scene, stand, frame } = await setUp({ nodeFormat: 'quantized', holdRefinements: true, warn: (message) => warnings.push(message) });
+        const mesh = scene.addMesh(tessellatedQuad(2, 1));
+        scene.addInstance({ mesh, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] });
+        stand!.ignoreQuantizeOnEmit = true;
+        frame();
+        expect(stand!.quantizeOnEmit).toEqual([true]);
+        await stand!.finishBatch();
+        frame();
+        expect(scene.meshStatus(mesh).builtBy).toBe('gpu');
+        expect(warnings).toEqual([]);
         scene.dispose();
     });
 

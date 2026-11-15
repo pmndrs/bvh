@@ -282,6 +282,7 @@ export * from './trace/index.ts';
 // merged static groups, and memory stats.
 export {
     DEFAULT_GPU_MAX_BATCH_BYTES,
+    SCENE_WORKER_IDLE_TIMEOUT_MS,
     GPU_TREE_MAX_DEPTH,
     SceneTrees,
     type GpuTreeOutputsMode,

@@ -32,6 +32,13 @@
  * peak), and `quantized-adopt`, `quantized-indexed-adopt` against
  * `quantized-copy`, `quantized-indexed-copy` (peak and settled).
  *
+ * Every lever above is pinned on each variant, off unless its name asks for it,
+ * so rows compare with the 2026-11-14 clean run although `SceneTrees` turns
+ * them on by default since 2026-11-15. `shipped` loads with the library's own
+ * defaults (quantized records, the default cap, the emit and the BX.20
+ * levers), pinning only `mergeStaticInstances: false` (every instance here is
+ * static, and the capped-peak gate plans per mesh).
+ *
  * Each loads the scene with `holdRefinements`, so the GPU trees are in use on
  * their own first, then releases tinybvh's trees. Recorded, from the first update:
  *
@@ -90,7 +97,9 @@ try {
         new URLSearchParams(location.search).get('variants') ??
         'copy,adopt,copy-merged,copy-default,copy-cap512,copy-cap256,copy-cap128,indexed-copy-default,indexed-packed-copy-default,indexed-copy-merged,' +
             // BX.20 (memory.md): the node trim, no parents output, batched quantize passes.
-            'adopt-trim,copy-default-trim,copy-default-noparents,copy-noparents,quantized-copy-default,quantized-copy-default-qbatch'
+            'adopt-trim,copy-default-trim,copy-default-noparents,copy-noparents,quantized-copy-default,quantized-copy-default-qbatch,' +
+            // The library's defaults (2026-11-15), nothing pinned.
+            'shipped'
     ).split(',');
     const scene = await loadBenchScene('sponza', 'scene');
     log(`sponza: ${scene.meshes.length} meshes, ${scene.instances.length} instances, ${scene.uniqueTriangles} triangles (load ${Math.round(scene.loadMs)} ms)`);
@@ -148,34 +157,39 @@ try {
         const pool = createBvhWorkerPool();
         // The BX.20 lever suffixes, then the variant's base name.
         const trim = /-trim\b/.test(variant);
-        const noParents = /-noparents\b/.test(variant);
+        // `shipped` has the library's defaults: parents only for refits, and the emit (below).
+        const noParents = variant === 'shipped' || /-noparents\b/.test(variant);
         const quantizeBatched = /-qbatch\b/.test(variant);
         const base = variant.replace(/-(trim|noparents|qbatch)\b/g, '');
         // `-cap<MB>` sets a cap, `-default` leaves it out (256 MiB), and the rest turn it off (Infinity: one batch).
-        const isDefault = base.endsWith('-default');
+        const shipped = base === 'shipped';
+        const isDefault = shipped || base.endsWith('-default');
         const capMB = isDefault ? String(DEFAULT_GPU_MAX_BATCH_BYTES / MB) : /-cap(\d+)/.exec(base)?.[1];
-        const quantized = base.startsWith('quantized-');
+        const quantized = shipped || base.startsWith('quantized-');
         const name = quantized ? base.slice('quantized-'.length) : base;
         const indexed = name.startsWith('indexed');
         const positionLayout = name.includes('packed') ? 'packed' : 'vec4';
         const adopt = /(^|-)adopt(-|$)/.test(name);
         // A quantized adopt writes its nodes in the emit (SceneTrees turns it on); `-emit` asks for it in copy mode.
-        const emit = quantized && (adopt || name.includes('-emit'));
+        const emit = shipped || (quantized && (adopt || name.includes('-emit')));
         const kernel = kernels[`${quantized ? 'quantized-' : ''}${indexed ? positionLayout : 'records'}`];
         const leaves = indexed ? ('indexed' as const) : ('records' as const);
-        const trees = await SceneTrees.create(device, {
+        const trees = await SceneTrees.create(device, shipped
+            ? // Only `mergeStaticInstances` is pinned: every instance here is static, and the capped-peak gate plans per mesh.
+              { label: `sponza ${variant}`, holdRefinements: true, workers: pool, mergeStaticInstances: false }
+            : {
             gpuMaxBatchBytes: isDefault ? undefined : capMB ? Number(capMB) * MB : Infinity,
             label: `sponza ${variant}`,
             holdRefinements: true,
             gpuTreeOutputs: adopt ? 'adopt' : 'copy',
-            ...(emit ? { gpuQuantizeOnEmit: true } : {}),
+            gpuQuantizeOnEmit: emit,
             mergeStaticInstances: variant.includes('merged'),
             workers: pool,
             ...(indexed ? { triangleLeaves: 'indexed' as const, positionLayout } : {}),
             nodeFormat: quantized ? 'quantized' : 'f32',
-            ...(trim ? { trimWhenRefined: true } : {}),
-            ...(noParents ? { parents: 'refit' as const } : {}),
-            ...(quantizeBatched ? { quantizeJobs: 'batched' as const } : {}),
+            trimWhenRefined: trim,
+            parents: noParents ? 'refit' : 'always',
+            quantizeJobs: quantizeBatched ? 'batched' : 'per-tree',
         });
         const meshes = scene.meshes.map((mesh) => trees.addMesh(mesh));
         scene.instances.forEach((instance, index) => trees.addInstance({ mesh: meshes[instance.meshIndex], instanceIndex: index, objectToWorld: instance.objectToWorld, static: true }));
