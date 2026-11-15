@@ -20,7 +20,10 @@ import { createBvhWorkerPool, defaultWorkerPoolSize, type BvhWorkerPool } from '
 import { createApp } from '../../shared/app.ts';
 import { enableDrop, frameObject, loadGltf, meshesOf, requestedModel, type LoadedModel } from '../../shared/loader.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
-import { isSmoke, ready } from '../../shared/smoke.ts';
+import { isSmoke, isSoftwareAdapter, ready } from '../../shared/smoke.ts';
+
+/** `SceneTreeEvent.fallbackReason` of a mesh whose tinybvh tree came before its GPU tree (`SceneTrees.takeArrived`). */
+const GPU_LOST_RACE = "tinybvh's tree arrived before the GPU's";
 
 const app = await createApp('Load glTF (fast first)', 'three/load-gltf');
 const { device, scene, camera, controls, overlay } = app;
@@ -227,9 +230,16 @@ app.loop(async () => {
         refresh();
         if (isSmoke) {
             const events = log.events;
-            if (trees.gpuFirstTrees.enabled && !events.some((event) => event.builtBy === 'gpu')) throw new Error('no mesh got a GPU first tree');
+            if (trees.gpuFirstTrees.enabled && !events.some((event) => event.builtBy === 'gpu')) {
+                // On a software adapter (SwiftShader) the GPU build is emulated on the CPU (an 18 s batch on Windows) and
+                // the tinybvh workers finish first. SceneTrees then places tinybvh's trees and drops the GPU's, by design,
+                // so no GPU tree is ever placed. Accept that there only when every first tree says it lost that race (the
+                // GPU builder ran, and nothing was refused); on a real GPU the GPU trees must come first.
+                const lostRace = events.every((event) => event.replaced !== null || event.fallbackReason === GPU_LOST_RACE);
+                if (!isSoftwareAdapter(device) || !lostRace || trees.counts.gpuTreesRefused > 0) throw new Error('no mesh got a GPU first tree');
+            }
             if (trees.counts.waitingForFirstTree > 0) throw new Error('meshes still without a tree');
-            await ready(device, { ...overlay.snapshot(), events: events.length });
+            await ready(device, { ...overlay.snapshot(), events: events.length, gpuFirstTreesPlaced: events.filter((event) => event.builtBy === 'gpu').length });
         }
     }
 });

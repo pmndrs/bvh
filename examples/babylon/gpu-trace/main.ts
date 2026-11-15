@@ -38,7 +38,7 @@ import type { Mesh } from '@babylonjs/core/Meshes/mesh.js';
 import type { WebGPUEngine } from '@babylonjs/core/Engines/webgpuEngine.js';
 import { SceneTrees } from '@pmndrs/bvh';
 import { BabylonBvhPicker, bindTraceBuffers, bvhSceneFromBabylon, createTraceComputeShader, deviceFromEngine, type BvhBabylonScene } from '@pmndrs/bvh/babylon';
-import { fail, isSmoke, ready } from '../../shared/smoke.ts';
+import { fail, isSmoke, isSoftwareAdapter, ready } from '../../shared/smoke.ts';
 import { createBabylonApp, runBabylon } from '../../shared/babylon/app.ts';
 import { SceneTreesLog } from '../../shared/stats.ts';
 
@@ -49,8 +49,7 @@ const device = deviceFromEngine(engine);
 // The walk costs a ray per pixel: `?scale=2` traces at half the canvas size. A smoke run on a software adapter (SwiftShader in CI)
 // traces a few thousand pixels (scale 8: Babylon renders the scene and the mask at an eighth of the canvas, so the shadows come out
 // in 8-pixel blocks); on a real GPU it renders at full size like a person's run, so its screenshot shows the shadows as they are.
-const softwareAdapter = (device.adapterInfo as GPUAdapterInfo & { isFallbackAdapter?: boolean }).isFallbackAdapter === true || device.adapterInfo.architecture === 'swiftshader';
-const scale = Number(new URLSearchParams(location.search).get('scale') ?? (isSmoke && softwareAdapter ? 8 : 1));
+const scale = Number(new URLSearchParams(location.search).get('scale') ?? (isSmoke && isSoftwareAdapter(device) ? 8 : 1));
 if (scale > 1) {
     engine.setHardwareScalingLevel(scale);
     engine.resize();

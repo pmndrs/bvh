@@ -80,6 +80,12 @@ export function watchDevice(device: GPUDevice): void {
     });
 }
 
+/** The device runs on a software fallback adapter (SwiftShader in CI, or `--use-webgpu-adapter=swiftshader`), not a real GPU. */
+export function isSoftwareAdapter(device: GPUDevice): boolean {
+    const info = device.adapterInfo as GPUAdapterInfo & { isFallbackAdapter?: boolean };
+    return info.isFallbackAdapter === true || info.architecture === 'swiftshader';
+}
+
 /**
  * The example has shown what it is about. In smoke mode, waits for the GPU to
  * go idle (late validation errors) and reports `data`; otherwise does nothing.

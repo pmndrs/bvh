@@ -42,4 +42,4 @@ CI's flags (`.github/workflows/ci.yml`: `--no-sandbox --use-webgpu-adapter=swift
 ```
 BVH_CHROME_FLAGS="--no-sandbox --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --disable-gpu-compositing" BVH_ALLOW_SOFTWARE_ADAPTER=1 BVH_PAGE_QUERY=profile=ci pnpm test:gpu:page <page>
 ```
-The runner reports the adapter as `google/swiftshader`. SwiftShader has no `subgroups`, so the GPU builders fall back to tinybvh.
+The runner reports the adapter as `google/swiftshader`. Chrome 157's SwiftShader has `subgroups`, so the GPU builders run, but on the CPU: big GPU batches are slow (`three-load-gltf`'s 1.7M triangles take about 18 s), and tinybvh's workers can finish first.
