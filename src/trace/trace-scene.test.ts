@@ -26,7 +26,8 @@ import { addToTally, compareAny, compareClosest, newTally } from './oracle-compa
 import { createRandom, randomAffine, randomRays, randomTriangleSoup, tessellatedQuad } from './oracle-fixtures.ts';
 import { buildReferenceScene, traceAnyReference, traceClosestReference } from './reference-tracer.ts';
 import { assembleTraceScene, type TraceSceneInstance } from './scene-assembly.ts';
-import { buildTopLevel, invertAffine, transformBounds } from './top-level.ts';
+import { BVH_INSTANCE_BOX_PADDING } from '../gpu-instance-box.ts';
+import { buildTopLevel, invertAffine, transformBounds, WORLD_BOX_PADDING } from './top-level.ts';
 
 // Mesh trees come from tinybvh (WASM), the only mesh builder since B0 (DECISIONS 2026-11-04).
 const tinyBvh = await createTinyBvhBuilder();
@@ -66,6 +67,63 @@ describe('invertAffine', () => {
     it('returns null for a collapsed transform', () => {
         const flat = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
         expect(invertAffine(flat)).toBeNull();
+    });
+});
+
+describe('transformBounds', () => {
+    // f32 inputs, so the CPU and the GPU gather see the same numbers.
+    const f = Math.fround;
+    /** `bvhInstanceWorldBox` (gpu-instance-box.ts) for one axis, every operation rounded to f32 (dot as written, unfused). */
+    function gpuAxis(m: readonly number[], b: readonly number[]): [number, number] {
+        const dot = (a: number[], v: number[]) => f(f(f(a[0] * v[0]) + f(a[1] * v[1])) + f(a[2] * v[2]));
+        const center = [0, 1, 2].map((k) => f(f(b[k] + b[3 + k]) * 0.5));
+        const half = [0, 1, 2].map((k) => f(f(b[3 + k] - b[k]) * 0.5));
+        const reach = [0, 1, 2].map((k) => Math.max(Math.abs(b[k]), Math.abs(b[3 + k])));
+        const abs = m.slice(0, 3).map(Math.abs);
+        const worldCenter = f(dot(m.slice(0, 3), center) + m[3]);
+        const worldHalf = dot(abs, half);
+        const padding = f(f(dot(abs, reach) + Math.abs(m[3])) * BVH_INSTANCE_BOX_PADDING);
+        return [f(f(worldCenter - worldHalf) - padding), f(f(worldCenter + worldHalf) + padding)];
+    }
+
+    it('pads each axis by WORLD_BOX_PADDING of its summed term magnitude, as the GPU gather does, around the exact corners', () => {
+        expect(WORLD_BOX_PADDING).toBe(BVH_INSTANCE_BOX_PADDING);
+        const random = createRandom(7);
+        const out = new Float32Array(6);
+        let checked = 0;
+        for (let i = 0; i < 2000; i++) {
+            // Near the origin, far from it (a large translation cancels against the box), and boxes off their own origin.
+            const extent = [10, 1e4, 1e6][i % 3];
+            const matrix = randomAffine(random, { extent, mirror: i % 2 === 1 }).map(f);
+            const centre = [0, 1, 2].map(() => (i % 4 === 0 ? (random() * 2 - 1) * 500 : 0));
+            const size = [0, 1, 2].map(() => (i % 5 === 0 ? 1e-3 : 0.01 + random() * 4));
+            const bounds = [0, 1, 2].map((k) => f(centre[k] - size[k])).concat([0, 1, 2].map((k) => f(centre[k] + size[k])));
+            transformBounds(bounds, matrix, out, 0);
+            for (let axis = 0; axis < 3; axis++) {
+                const m = [matrix[axis], matrix[4 + axis], matrix[8 + axis], matrix[12 + axis]];
+                // The exact corners (doubles of f32 inputs: each product and sum is exact to 2^-53).
+                let low = Infinity;
+                let high = -Infinity;
+                for (let corner = 0; corner < 8; corner++) {
+                    const value = m[0] * bounds[corner & 1 ? 3 : 0] + m[1] * bounds[corner & 2 ? 4 : 1] + m[2] * bounds[corner & 4 ? 5 : 2] + m[3];
+                    low = Math.min(low, value);
+                    high = Math.max(high, value);
+                }
+                const magnitude = [0, 1, 2].reduce((sum, k) => sum + Math.abs(m[k]) * Math.max(Math.abs(bounds[k]), Math.abs(bounds[3 + k])), Math.abs(m[3]));
+                const pad = magnitude * WORLD_BOX_PADDING;
+                // The real content is inside, with at least 15/16 of the padding left after the store into f32.
+                expect(out[axis]).toBeLessThanOrEqual(low - pad * (15 / 16));
+                expect(out[3 + axis]).toBeGreaterThanOrEqual(high + pad * (15 / 16));
+                expect(out[axis]).toBeGreaterThanOrEqual(low - pad * (17 / 16));
+                expect(out[3 + axis]).toBeLessThanOrEqual(high + pad * (17 / 16));
+                // The GPU's box, counted the same way, is within half the padding of it on every side.
+                const [gpuLow, gpuHigh] = gpuAxis(m, bounds);
+                expect(Math.abs(gpuLow - out[axis])).toBeLessThanOrEqual(pad / 2);
+                expect(Math.abs(gpuHigh - out[3 + axis])).toBeLessThanOrEqual(pad / 2);
+                checked++;
+            }
+        }
+        expect(checked).toBe(6000);
     });
 });
 

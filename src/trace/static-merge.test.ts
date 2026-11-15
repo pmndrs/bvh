@@ -334,7 +334,7 @@ describe('merged normals and materials', () => {
 describe('mergeStaticInstances off', () => {
     const bytes = (scene: TraceSceneData): number[] => [scene.nodes, scene.triangles, scene.topLevel.buffer].flatMap((buffer) => Array.from(new Uint8Array(buffer)));
 
-    it('gives the bytes main gave before merging existed (sha-256 pinned from 8c5d1b8)', async () => {
+    it('gives the bytes main gave before merging existed (sha-256 pinned from 8c5d1b8, top-level boxes re-pinned for S4)', async () => {
         const random = createRandom(42);
         const meshes: MeshGeometry[] = [];
         const instances: TraceSceneInstance[] = [];
@@ -347,7 +347,9 @@ describe('mergeStaticInstances off', () => {
         const hash = createHash('sha256');
         for (const buffer of [scene.nodes, scene.triangles, scene.topLevel.buffer]) hash.update(new Uint8Array(buffer));
         hash.update(new Uint8Array(scene.topLevel.recordOrder.buffer));
-        expect(hash.digest('hex')).toBe('d9637acbc4729725a624009c54848cd80b65a72ad79887a9c1a93f33127abf52');
+        // Re-pinned 2026-11-15 when transformBounds took the GPU gather's padding (DIVERGENCES S4): against
+        // 8c5d1b8's pin, only top-level node box words moved (nodes, triangles, records, shape and order unchanged).
+        expect(hash.digest('hex')).toBe('c323b62df04859846a559098e2553c6f44f769a8ffcfe3861c7c2a314f854419');
     });
 
     it('builds exactly the instanced scene, static or not', async () => {

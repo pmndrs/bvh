@@ -17,9 +17,10 @@
  * `BVH_INSTANCE_BOX_PADDING` times the summed magnitude of every term,
  * `dot(abs(r.xyz), max(abs(lower), abs(upper))) + abs(r.w)`: 2^-20, sixteen
  * f32 steps, comfortably more than the handful of roundings involved. The CPU
- * top level pads by 2^-21 of the result for the same reason (the tracer's
- * `transformBounds`); an instance box only decides which instances a ray
- * enters, so a slightly loose one costs nothing measurable.
+ * top level (the tracer's `transformBounds`, `WORLD_BOX_PADDING`) pads by the
+ * same amount of the same sum, around corners it works out in doubles; an
+ * instance box only decides which instances a ray enters, so a slightly loose
+ * one costs nothing measurable.
  */
 
 /** Relative padding of an instance's world box, as a power of two. */
