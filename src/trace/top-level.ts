@@ -105,11 +105,14 @@ export function throwMergedTransformChange(instanceIndex: number, where: string)
 }
 
 /**
- * Relative amount each world box is grown by, so rounding in the ray's move
- * into object space cannot make a ray miss the box of an instance it touches.
- * About four f32 steps.
+ * Relative amount each world box is grown by, so rounding cannot make a ray
+ * miss the box of an instance it touches: the store into f32 (half an f32 step)
+ * and the ray's move into object space on the GPU. It is a fraction of each
+ * axis's summed term magnitude (see {@link transformBounds}), counted the same
+ * way as the GPU gather's `BVH_INSTANCE_BOX_PADDING` (`gpu-instance-box.ts`)
+ * and equal to it: 2^-20, 8 to 16 f32 steps of the largest term.
  */
-export const WORLD_BOX_PADDING = 2 ** -21;
+export const WORLD_BOX_PADDING = 2 ** -20;
 
 /** Smallest determinant magnitude we still treat as an invertible transform. */
 const MIN_DETERMINANT = 1e-30;
@@ -183,6 +186,12 @@ export function invertAffineInto(objectToWorld: Mat4, out: Float64Array, offset 
  * `e[axis] x + e[4 + axis] y + e[8 + axis] z + e[12 + axis]` in that order, so the result is the same
  * to the bit however the loop is written. Written with plain numbers and no arrays: `setTransforms`
  * calls it for every moved instance, 10,000 a frame (T2.M1).
+ *
+ * The padding of an axis is {@link WORLD_BOX_PADDING} times the summed magnitude of its terms,
+ * `|mx| max(|x0|, |x1|) + |my| max(|y0|, |y1|) + |mz| max(|z0|, |z1|) + |t|`, as the GPU gather pads
+ * its Arvo box (`bvhInstanceWorldBox`, DIVERGENCES S4). The corners here are exact to double
+ * rounding, so the store into f32 (at most 2^-24 of that sum) leaves at least 15/16 of the padding
+ * around the exact box.
  */
 export function transformBounds(meshBounds: ArrayLike<number>, objectToWorld: Mat4, out: Float32Array, offset: number): void {
     const e = objectToWorld;
@@ -192,6 +201,9 @@ export function transformBounds(meshBounds: ArrayLike<number>, objectToWorld: Ma
     const x1 = meshBounds[3];
     const y1 = meshBounds[4];
     const z1 = meshBounds[5];
+    const reachX = Math.max(Math.abs(x0), Math.abs(x1));
+    const reachY = Math.max(Math.abs(y0), Math.abs(y1));
+    const reachZ = Math.max(Math.abs(z0), Math.abs(z1));
     for (let axis = 0; axis < 3; axis++) {
         const mx = e[axis];
         const my = e[4 + axis];
@@ -204,7 +216,7 @@ export function transformBounds(meshBounds: ArrayLike<number>, objectToWorld: Ma
             if (value < low) low = value;
             if (value > high) high = value;
         }
-        const pad = (Math.max(Math.abs(low), Math.abs(high)) + (high - low)) * WORLD_BOX_PADDING;
+        const pad = (Math.abs(mx) * reachX + Math.abs(my) * reachY + Math.abs(mz) * reachZ + Math.abs(t)) * WORLD_BOX_PADDING;
         out[offset + axis] = low - pad;
         out[offset + 3 + axis] = high + pad;
     }
