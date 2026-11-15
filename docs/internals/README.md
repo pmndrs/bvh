@@ -55,8 +55,11 @@ What the owner has to do once:
 4. **Run the workflow** on `main` (above). To deploy on every push to `main` instead, change the `if:` of the upload
    step and the deploy job from `github.event_name == 'workflow_dispatch'` to also allow `push`.
 
-Until the domain works, the links in the README and the pages go nowhere. A preview on `pmndrs.github.io/bvh` would need
-`BASE_PATH` set for the build (`npx @pmndrs/docs build --help` lists the settings); that has not been tried.
+Pages is on (source GitHub Actions, 2026-11-15), so until the domain is set the site is at `https://pmndrs.github.io/bvh/`.
+The build reads that address from the Pages settings and sets `BASE_PATH` (`/bvh`) and `NEXT_PUBLIC_URL` from it, so
+the same workflow builds for the custom domain once it is set, with no edit. A local build for `/bvh`, served under
+`/bvh/`, loads every page, asset and the API reference. The README links to `bvh.docs.pmnd.rs`, which go nowhere until
+the domain works.
 
 To look at the site locally: `pnpm docs:api`, `pnpm docs:site`, then `npx -y serve docs-site`. `docs:site` needs network
 access the first time (it runs `npx @pmndrs/docs@4`).

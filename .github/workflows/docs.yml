@@ -1,9 +1,11 @@
 name: Build documentation and deploy to GitHub Pages
 
 # The docs site (pmndrs/docs, the MDX in docs/) with the TypeDoc API reference at /api, on one
-# Pages site: https://bvh.docs.pmnd.rs once the custom domain is set (Settings > Pages) and
-# pmnd.rs has a CNAME for bvh.docs. Pushes and pull requests only build it, to catch MDX errors.
-# Deploying is manual (Actions > this workflow > Run workflow) until Dennis decides to publish. tools/docs-site.ts is the build both here and locally (`pnpm docs:site`); it leaves
+# Pages site. The build reads the site's address from the Pages settings: https://pmndrs.github.io/bvh/
+# today, https://bvh.docs.pmnd.rs once the custom domain is set (Settings > Pages) and pmnd.rs has
+# a CNAME for bvh.docs; the domain is the fallback when the settings can't be read (a fork's PR).
+# Pushes and pull requests only build it, to catch MDX errors.
+# Deploying is manual (Actions > this workflow > Run workflow). tools/docs-site.ts is the build both here and locally (`pnpm docs:site`); it leaves
 # out docs/internals (contributor notes, plain Markdown) and docs/snippets (the code samples,
 # checked by `pnpm test`).
 
@@ -36,6 +38,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: read # the site's address, below
     steps:
       # Full history and tags for the version label in the sidebar (`git describe --tags`), but
       # blobless: past file contents are not fetched.
@@ -52,9 +57,23 @@ jobs:
       # Every code block is its type-checked sample in docs/snippets (pnpm test runs it too).
       - run: pnpm docs:check
       - run: pnpm docs:api
+      # The address Pages serves the site at, and its path: https://pmndrs.github.io/bvh/ gives
+      # BASE_PATH /bvh; a custom domain gives an empty one.
+      - id: site
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url=$(gh api "repos/${{ github.repository }}/pages" --jq .html_url 2>/dev/null || true)
+          url=${url:-https://bvh.docs.pmnd.rs/}
+          url=${url%/}
+          path=$(echo "$url" | sed -E 's#^https?://[^/]+##')
+          echo "Site: $url (base path '${path}')"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
       - run: pnpm docs:site _site
         env:
-          NEXT_PUBLIC_URL: https://bvh.docs.pmnd.rs
+          NEXT_PUBLIC_URL: ${{ steps.site.outputs.url }}
+          BASE_PATH: ${{ steps.site.outputs.path }}
           MDX_BASEURL: https://github.com/${{ github.repository }}/raw/${{ github.event.pull_request.head.sha || github.sha }}/docs
           SOURCECODE_BASEURL: https://github.com/${{ github.repository }}/tree/${{ github.event.pull_request.head.sha || github.sha }}
           EDIT_BASEURL: https://github.com/${{ github.repository }}/edit/${{ github.head_ref || 'main' }}/docs
