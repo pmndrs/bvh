@@ -218,7 +218,8 @@ export function workerLoadFailure(what: string, detail?: string): string {
     return (
         `${what} could not be loaded${detail ? ` (${detail})` : ''}. ` +
         'A bundler may not have shipped the worker file, or a dev server refused it. Under Vite: keep @pmndrs/bvh out of ' +
-        'optimizeDeps (optimizeDeps.exclude), and for a linked checkout outside the project add its folder to server.fs.allow'
+        'optimizeDeps (optimizeDeps.exclude), and for a linked checkout outside the project add its folder to server.fs.allow. ' +
+        'esbuild ships no worker files: add them as entry points (docs: Workers, "Bundlers and dev servers")'
     );
 }
 

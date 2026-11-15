@@ -37,8 +37,8 @@ npm install @babylonjs/core@9.35.0
 | `@pmndrs/bvh/worker` | The tinybvh worker pool and the worker builders. |
 
 The package is ES modules only, with `sideEffects: false`. The worker files are loaded with
-`new Worker(new URL(..., import.meta.url))`, which Vite, webpack 5 and esbuild builds follow without configuration.
-Vite's dev server needs `optimizeDeps: { exclude: ['@pmndrs/bvh'] }`, and a checkout linked from outside the project
+`new Worker(new URL(..., import.meta.url))`, which Vite and webpack 5 builds follow without configuration. esbuild
+doesn't, so its builds run on the main thread unless you add the worker files as entry points. Vite's dev server needs `optimizeDeps: { exclude: ['@pmndrs/bvh'] }`, and a checkout linked from outside the project
 needs its folder in `server.fs.allow`; see [Workers](/workers/workers#bundlers-and-dev-servers).
 
 ## Requirements

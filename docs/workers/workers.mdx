@@ -106,8 +106,24 @@ await pool.build(meshes[0], {}, { onStart: () => console.log('mesh 0 is building
 
 ## Bundlers and dev servers
 
-Production builds of Vite, webpack 5 and esbuild find the worker files from `new Worker(new URL(..., import.meta.url))`
-and emit them. Vite's dev server needs two settings:
+The pool starts its workers with `new Worker(new URL('./x.js', import.meta.url))`. We checked the built package in a
+small app with each bundler:
+
+- **Vite and webpack 5** see that line, bundle the two worker files and ship them. Production builds need no setup.
+- **esbuild** doesn't: it leaves the URL as written and ships no worker files. Everything still works, but the builds
+  run on the main thread (`pool.usesWorkers` is false, `pool.inlineReason` says why). To get workers, build the two
+  worker files as extra entry points, where the bundle looks for them. For a bundle served from the site's root:
+
+```sh
+esbuild src/main.js --bundle --format=esm --outdir=dist \
+  trace/mesh-bvh-worker=node_modules/@pmndrs/bvh/dist/trace/mesh-bvh-worker.js \
+  top-level-worker=node_modules/@pmndrs/bvh/dist/trace/top-level-worker.js
+```
+
+The bundle looks for `../trace/mesh-bvh-worker.js` and `./top-level-worker.js` relative to itself (at the site's root,
+`..` stays at the root). These are file paths inside the package, so check them when you upgrade.
+
+Vite's dev server needs two settings:
 
 - **`optimizeDeps: { exclude: ['@pmndrs/bvh'] }`.** In dev, Vite pre-bundles installed dependencies into
   `node_modules/.vite/deps`, and a pre-bundled copy looks for its workers next to itself, where they don't exist
