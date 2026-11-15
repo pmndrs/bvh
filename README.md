@@ -195,6 +195,7 @@ loses them. Sources and commits are in [THIRD_PARTY.md](THIRD_PARTY.md). Only MI
 - Docs: `pnpm docs:snippets` copies the code samples (`docs/snippets/*.ts`, type-checked and tested) into the pages,
   `pnpm docs:api` builds the TypeDoc reference, `pnpm docs:site` builds the website with pmndrs/docs.
 - Rebuild the `.wasm` with `pnpm bvh:wasm`, or check it with `pnpm bvh:wasm --check`.
+- Releases: run the "Release to npm" workflow by hand ([docs/internals/RELEASING.md](docs/internals/RELEASING.md)).
 - [HISTORY.md](HISTORY.md): how the package got here, by date. Adding a build method from a paper:
   [the steps](https://bvh.docs.pmnd.rs/builders/adding-a-builder).
 - Contributor notes (design, divergences from the sources, the three-mesh-bvh audit, runbooks):

@@ -14,7 +14,9 @@ name: Release to npm
 #   5. Pushes the tag and the commit to main, then rebuilds the docs so their version label updates.
 # With "dry run" ticked it stops after `npm publish --dry-run`: nothing is published, committed or pushed.
 #
-# npm sign-in: npm trusted publishing (npmjs.com > @pmndrs/bvh > Settings > Trusted publisher:
+# How to release and how to set this up: docs/internals/RELEASING.md.
+#
+# npm sign-in: npm trusted publishing (npmjs.com > @pmndrs/bvh > Settings > Trusted publishing:
 # GitHub Actions, repository pmndrs/bvh, workflow release.yml, environment npm) needs no secret. npm only offers it
 # for a package that already exists, so the first publish needs an NPM_TOKEN secret (a granular
 # token with publish rights to @pmndrs); delete the secret once trusted publishing is set up.

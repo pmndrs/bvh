@@ -4,6 +4,12 @@
     "private": true,
     "description": "Engine-free WebGPU BVH: tinybvh in WebAssembly, GPU LBVH and H-PLOC builders, GPU refits, a WGSL ray walk with its CPU port, all writing one shared GPU layout.",
     "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/pmndrs/bvh.git"
+    },
+    "homepage": "https://github.com/pmndrs/bvh#readme",
+    "bugs": "https://github.com/pmndrs/bvh/issues",
     "type": "module",
     "sideEffects": false,
     "packageManager": "pnpm@10.23.0",

@@ -18,7 +18,7 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
   - no build may take minutes.
 - **Correctness gates, not timing gates**, at this prototype stage.
 - **Models:** Opus for code and review, Sonnet or Haiku for small tasks, docs and tests.
-- **Git:** commit locally; pushing `main` is fine; no npm publish, tags or releases. Releases are Dennis's: he runs `.github/workflows/release.yml` by hand (`docs/internals/README.md`, "Releasing to npm"). Agents may run it only as a dry run.
+- **Git:** commit locally; pushing `main` is fine; no npm publish, tags or releases. Releases are Dennis's: he runs `.github/workflows/release.yml` by hand (`docs/internals/RELEASING.md`). Agents may run it only as a dry run.
 - **Levers:** a flexible setting with a measured win may become the default (the 256 MiB cap).
 - **The package ends at the hit** (2026-11-13). The library covers building, refitting, scene trees, the walk and spatial queries. A hit carries the triangle, instance, barycentrics, face normal and an opaque material number.
   - Anything that decides what a hit *looks like* goes in Dennis's separate path tracer repo, or in the shared tracing layer above us: sampling, random numbers, BSDFs, lights, accumulation, textures, and shading-normal or UV interpolation.
@@ -63,7 +63,7 @@ Dennis asked for full feature coverage as planned before more hand-offs. Everyth
 - Points and lines count as "have" CPU-only (as three-mesh-bvh's); their own centre-split builder and file format.
 - Adopt in quantized scenes turns on the quantized emit; `positionsBuffer` turns weld and merge off.
 - Publishing the docs: Pages is on and first deployed (2026-11-15, `https://pmndrs.github.io/bvh/`); left: domain `bvh.docs.pmnd.rs`, CNAME `bvh.docs` to `pmndrs.github.io`, and whether to deploy on every push instead of by hand.
-- npm releases: `release.yml` is ready (2026-11-15); left: an `NPM_TOKEN` secret for the first publish, then npm trusted publishing (`docs/internals/README.md`, "Releasing to npm"), and the first version (P2 step 5 planned `0.1.0-alpha`).
+- npm releases: `release.yml` is ready (2026-11-15); left: the one-time setup in `docs/internals/RELEASING.md` (npm token as the `npm` environment's `NPM_TOKEN` secret for the first publish, then trusted publishing), and the first version (P2 step 5 planned `0.1.0-alpha`).
 
 ## Current state (2026-11-13)
 
