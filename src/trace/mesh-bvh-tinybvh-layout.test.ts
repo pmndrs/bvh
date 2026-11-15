@@ -18,7 +18,7 @@ import {
     type TinyBvhBuilder,
 } from '../index.ts';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { BVH_NODE_BYTES, MAX_LEAF_PRIMITIVES, MAX_REFERENCE_INDEX, TRIANGLE_BYTES } from './layout.ts';
+import { BVH_NODE_BYTES, MAX_LEAF_PRIMITIVES, MAX_REFERENCE_INDEX, TRIANGLE_BYTES } from '../gpu-layout.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhFromTopology, TOPOLOGY_WORDS_PER_NODE } from './mesh-bvh-topology.ts';
 import { createRandom, randomTriangleSoup, tessellatedQuad, type Random } from './oracle-fixtures.ts';
@@ -113,7 +113,7 @@ function soupWithNaN(count: number, seed: number, isNaN: (triangle: number, corn
 }
 
 describe('tinybvh GPU layout written in WASM (B0b)', () => {
-    it('agrees with layout.ts on sizes and limits', () => {
+    it("agrees with the tracer's names on sizes and limits", () => {
         expect(GPU_LAYOUT_NODE_BYTES).toBe(BVH_NODE_BYTES);
         expect(GPU_LAYOUT_TRIANGLE_BYTES).toBe(TRIANGLE_BYTES);
         expect(GPU_LAYOUT_MAX_LEAF_PRIMITIVES).toBe(MAX_LEAF_PRIMITIVES);

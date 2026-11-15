@@ -17,7 +17,7 @@ import {
     weldWithinTolerance,
 } from '../index.ts';
 import { createCpuTracer, type CpuHit } from './cpu-traversal.ts';
-import { INDEXED_FLAG_FILTER, INDEXED_TRIANGLE_WORDS, MAX_MATERIAL, MESH_HEADER_WORD, TRIANGLE_FLAG_FILTER } from './layout.ts';
+import { INDEXED_FLAG_FILTER, INDEXED_TRIANGLE_WORDS, MAX_MATERIAL, MESH_HEADER_WORD, TRIANGLE_FLAG_FILTER } from '../gpu-layout.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhFromTopology, buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
 import { createRandom, randomAffine, randomRays, randomTriangleSoup, tessellatedQuad } from './oracle-fixtures.ts';

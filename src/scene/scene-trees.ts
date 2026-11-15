@@ -116,17 +116,18 @@ import {
     positionStrideFloats,
     writeIndexedMeshHeader,
     QUANTIZED_NODE_BYTES,
+    DEFAULT_NODE_FORMAT,
     type NodeFormat,
     type PositionLayout,
     type TriangleLeaves,
-} from '../trace/layout.ts';
+    type GpuLayoutMeshBvh,
+} from '../gpu-layout.ts';
 import type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from '../trace/mesh-bvh.ts';
 import { nodeQuantizerFor, type QuantizeJob, type QuantizeMesh } from '../gpu-quantize.ts';
 import { quantizeNodes } from '../quantized-nodes.ts';
 import { weldPositions } from '../indexed-leaves.ts';
 import { meshRefitPlacement, type TraceSceneMeshPlacement } from '../trace/scene-assembly.ts';
 import type { MeshRefitVertices } from '../gpu-mesh-refit.ts';
-import { DEFAULT_NODE_FORMAT, type GpuLayoutMeshBvh } from '../gpu-layout.ts';
 import { DeformingTrees, type DeformingTreeCounts } from './deforming-trees.ts';
 import { MERGED_INSTANCE_INDEX, mergeStaticGeometry, writeMergedIndexedIdentity, writeMergedTriangleIdentity, type StaticMergeGroup, type StaticMergePlan } from '../trace/static-merge.ts';
 import { buildTopLevel, IDENTITY_TRANSFORM, throwMergedTransformChange, type Mat4, type TraceInstance } from '../trace/top-level.ts';

@@ -25,7 +25,7 @@ import {
     INSTANCE_WORD,
     TOP_HEADER_WORD,
     TOP_LEVEL_HEADER_BYTES,
-} from './layout.ts';
+} from '../gpu-layout.ts';
 
 /** A column-major 4x4 matrix, as any engine stores one (16 numbers). */
 export type Mat4 = ArrayLike<number>;

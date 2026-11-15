@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EMPTY_CHILD_INDEX, NODE_WORD, nodeView } from './layout.ts';
+import { EMPTY_CHILD_INDEX, NODE_WORD, nodeView } from '../gpu-layout.ts';
 import { createRandom } from './oracle-fixtures.ts';
 import { buildSahTree, DEFAULT_SAH_OPTIONS, type SahBuildOptions } from './sah-builder.ts';
 

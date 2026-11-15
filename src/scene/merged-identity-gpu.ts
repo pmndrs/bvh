@@ -27,7 +27,7 @@ import {
     TRIANGLE_FLAG_FLIP_FRONT_FACE,
     TRIANGLE_WORD,
     TRIANGLE_WORDS,
-} from '../trace/layout.ts';
+} from '../gpu-layout.ts';
 import type { StaticMergeGroup } from '../trace/static-merge.ts';
 import { dispatchWorkgroups2d, WORKGROUP_INDEX_WGSL } from '../gpu-workgroup-scan.ts';
 

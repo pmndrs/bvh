@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import { createTinyBvhBuilder } from '../tinybvh.ts';
 import { buildMeshBvhWithTinyBvh } from '../trace/mesh-bvh-topology.ts';
-import { BVH_NODE_WORDS, EMPTY_CHILD_INDEX, INSTANCE_RECORD_WORDS, NODE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS } from '../trace/layout.ts';
+import { BVH_NODE_WORDS, EMPTY_CHILD_INDEX, INSTANCE_RECORD_WORDS, NODE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS } from '../gpu-layout.ts';
 import { createRandom, randomAffine, randomTriangleSoup, tessellatedQuad } from '../trace/oracle-fixtures.ts';
 import type { TraceSceneInstance } from '../trace/scene-assembly.ts';
 import { transformBounds } from '../trace/top-level.ts';

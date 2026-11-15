@@ -42,7 +42,7 @@ import {
     type GpuLayoutNodeFormat,
 } from './gpu-layout.ts';
 
-/** Bits of the reference word below the leaf count (`REF_COUNT_SHIFT` in trace/layout.ts). */
+/** Bits of the reference word below the leaf count (`REF_COUNT_SHIFT` in gpu-layout.ts). */
 const REFERENCE_COUNT_SHIFT = 28;
 const REFERENCE_INDEX_MASK = 0x0fffffff;
 

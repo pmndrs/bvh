@@ -32,7 +32,7 @@ import {
 import { treeSahCost } from '../layout-check.ts';
 import { PRIMITIVE_BOX_FLOATS, refitOnCpu } from '../refit-cpu.ts';
 import { createCpuTracer, newTraceStats } from './cpu-traversal.ts';
-import { TRIANGLE_FLAG_FILTER } from './layout.ts';
+import { TRIANGLE_FLAG_FILTER } from '../gpu-layout.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhFromTopology, buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
 import { createRandom, randomAffine, randomRays, randomTriangleSoup, tessellatedQuad } from './oracle-fixtures.ts';

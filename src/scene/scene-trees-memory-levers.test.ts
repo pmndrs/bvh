@@ -18,7 +18,7 @@ import { dequantizeNodes, quantizeNodes } from '../quantized-nodes.ts';
 import { createBvhWorkerPool } from '../worker/pool.ts';
 import { createCpuTracer, type CpuHit } from '../trace/cpu-traversal.ts';
 import { buildMeshBvhAsync } from '../trace/mesh-bvh-build.ts';
-import { TOP_HEADER_WORD } from '../trace/layout.ts';
+import { TOP_HEADER_WORD } from '../gpu-layout.ts';
 import type { MeshGeometry } from '../trace/mesh-bvh.ts';
 import { createRandom, randomAffine, randomRays, tessellatedQuad } from '../trace/oracle-fixtures.ts';
 import type { TraceRay } from '../trace/rays.ts';

@@ -69,9 +69,9 @@ export interface LayoutCheckOptions {
     readonly merged?: LayoutCheckMergedIdentity;
 }
 
-/** Flags bit 1 (trace/layout.ts `TRIANGLE_FLAG_FLIP_FRONT_FACE`). */
+/** Flags bit 1 (gpu-layout.ts `TRIANGLE_FLAG_FLIP_FRONT_FACE`). */
 const FLIP_FRONT_FACE = 2;
-/** Where a merged triangle's material sits in its flags (trace/layout.ts `MATERIAL_SHIFT`). */
+/** Where a merged triangle's material sits in its flags (gpu-layout.ts `MATERIAL_SHIFT`). */
 const MATERIAL_SHIFT = 16;
 
 export function checkGpuLayout(layout: GpuLayoutMeshBvh, geometry: MeshInput, options: LayoutCheckOptions = {}): string[] {

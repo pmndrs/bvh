@@ -16,7 +16,7 @@
  * on Sponza, objects and tuples per node cost more than the work itself.
  */
 
-import { BVH_NODE_BYTES, BVH_NODE_WORDS, EMPTY_CHILD_INDEX, MAX_LEAF_PRIMITIVES, NODE_WORD, NO_PARENT, TRIANGLE_WORD, TRIANGLE_WORDS } from './layout.ts';
+import { BVH_NODE_BYTES, BVH_NODE_WORDS, EMPTY_CHILD_INDEX, MAX_LEAF_PRIMITIVES, NODE_WORD, NO_PARENT, TRIANGLE_WORD, TRIANGLE_WORDS } from '../gpu-layout.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { checkGeometry, packTriangles } from './triangle-packing.ts';
 import { TOPOLOGY_EMPTY_CHILD, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from '../topology.ts';

@@ -53,7 +53,7 @@ import {
     checkInstanceMask,
     materialCode,
     type TriangleLeaves,
-} from './layout.ts';
+} from '../gpu-layout.ts';
 import { checkTriangleLeaves } from '../indexed-leaves.ts';
 import type { MeshGeometry } from './mesh-bvh.ts';
 import { checkTriangleFlags, triangleMaterialCodes } from '../mesh-input.ts';

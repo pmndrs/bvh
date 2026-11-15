@@ -108,7 +108,7 @@ The test needs identical coordinate *bits*, not shared indices. `bvhEdgeFunction
   - **Indexed:** `mergeStaticGeometry` already makes world positions and indices per group (`:198-219`; each vertex is transformed once, `:261-264`). They become the group's range in the positions buffer, and word 3 carries the source triangle, filter and flip.
   - **Source and material:** a 4 B hit-time side table per merged triangle (source slot and material), plus a small table from slot to `instanceIndex`.
   - **Cost:** 20 B per triangle plus 12 B per world vertex.
-  - **Not recommended:** keeping merged groups on records, which would need a per-instance mode bit (bits 4-7 are reserved, `src/trace/layout.ts:129`) and a runtime branch in the leaf loop.
+  - **Not recommended:** keeping merged groups on records, which would need a per-instance mode bit (bits 4-7 are reserved, `src/gpu-layout.ts`, `INSTANCE_FLAG`) and a runtime branch in the leaf loop.
 - **Deforming meshes and refit.**
   - The triangle step (`src/gpu-mesh-refit.ts:9-16`) stops writing 36 B of corners per triangle. It copies the posed vertices into the mesh's position range (12 B per vertex) and writes the boxes as before.
   - **The mesh must not be welded.** The copy writes the app's vertex v to scene vertex `vertexBase + v`. `meshRefitPlacement` returns the mesh's `vertexBase`, `vertexCount` and the positions layout for `setTree`, and throws for a mesh the scene welded (the exact-bit weld, on by default, or `weldTolerance`): assemble meshes you will refit with `weld: false`. `setTree` requires `vertexBase` for an indexed tree (0 for a tree in its own buffers), and `encode` refuses a pose whose vertex count differs from the placement's.

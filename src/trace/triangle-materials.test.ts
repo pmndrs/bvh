@@ -14,7 +14,7 @@ import { buildLbvhOnCpu } from '../lbvh-cpu.ts';
 import { packedTriangleFlags, TRIANGLE_MATERIAL_NONE, triangleMaterialCodes } from '../mesh-input.ts';
 import { refitLayoutToPose } from '../refit-cpu.ts';
 import { createCpuTracer } from './cpu-traversal.ts';
-import { MATERIAL_SHIFT, NO_MATERIAL, TRIANGLE_WORD, TRIANGLE_WORDS } from './layout.ts';
+import { MATERIAL_SHIFT, NO_MATERIAL, TRIANGLE_WORD, TRIANGLE_WORDS } from '../gpu-layout.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
 import { addToTally, compareAny, compareClosest, newTally } from './oracle-compare.ts';

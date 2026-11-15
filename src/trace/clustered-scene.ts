@@ -91,9 +91,9 @@ import {
     BVH_NODE_BYTES,
     INSTANCE_RECORD_BYTES,
     QUANTIZED_NODE_BYTES,
-} from './layout.ts';
+    GPU_LAYOUT_QUANTIZED_NODE_WORD,
+} from '../gpu-layout.ts';
 import { decodeMaxPlane, decodeMinPlane, readNodeFrame, type NodeFrame } from '../quantized-nodes.ts';
-import { GPU_LAYOUT_QUANTIZED_NODE_WORD } from '../gpu-layout.ts';
 import { invertAffine, transformBounds, type TopLevelBvh } from './top-level.ts';
 import type { TraceSceneData, TraceSceneMeshPlacement } from './scene-assembly.ts';
 

@@ -74,7 +74,7 @@ export {
     type NodeView,
     type PositionLayout,
     type TriangleLeaves,
-} from './layout.ts';
+} from '../gpu-layout.ts';
 
 // Rays, the WGSL walk (closest/any, batch kernels, closest point, inside test) and its GPU runners.
 export {

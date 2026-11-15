@@ -13,7 +13,7 @@ import { computeReferenceAnswers, evaluateCase, evaluateSharedEdgeCase, sharedEd
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
 import { clusterTraceScene, DEFAULT_CLUSTER_PRIMITIVE_LIMIT, meshClusters, type ClusteredTraceSceneData } from './clustered-scene.ts';
 import { createCpuTracer, newTraceStats, type CpuHit } from './cpu-traversal.ts';
-import { BVH_NODE_WORDS, EMPTY_CHILD_INDEX, INSTANCE_RECORD_WORDS, INSTANCE_WORD, NODE_WORD, TOP_LEVEL_HEADER_WORDS } from './layout.ts';
+import { BVH_NODE_WORDS, EMPTY_CHILD_INDEX, INSTANCE_RECORD_WORDS, INSTANCE_WORD, NODE_WORD, TOP_LEVEL_HEADER_WORDS } from '../gpu-layout.ts';
 import type { MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
 import { randomTriangleSoup, createRandom, randomRays } from './oracle-fixtures.ts';

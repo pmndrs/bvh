@@ -6,7 +6,7 @@
  * too until B0's checks passed, and its mesh path was then deleted
  * (DECISIONS 2026-11-04). B1a moves the top level to the GPU. It takes one
  * axis-aligned box per primitive and produces nodes in the 64-byte two-child
- * layout from `layout.ts`, plus the order the primitives must be stored in so
+ * layout from `gpu-layout.ts`, plus the order the primitives must be stored in so
  * that every leaf points at a contiguous run.
  *
  * How it chooses a split, in plain terms. For a set of primitives it tries
@@ -37,7 +37,7 @@
  * in a worker, in Node tests, or on the main thread.
  */
 
-import { BVH_NODE_BYTES, BVH_NODE_WORDS, EMPTY_CHILD_INDEX, MAX_LEAF_PRIMITIVES, NODE_WORD, NO_PARENT } from './layout.ts';
+import { BVH_NODE_BYTES, BVH_NODE_WORDS, EMPTY_CHILD_INDEX, MAX_LEAF_PRIMITIVES, NODE_WORD, NO_PARENT } from '../gpu-layout.ts';
 
 export interface SahBuildOptions {
     /** Bins per axis. 16 is the usual sweet spot between build time and tree quality. */
@@ -58,7 +58,7 @@ export const DEFAULT_SAH_OPTIONS: SahBuildOptions = {
 };
 
 export interface SahTree {
-    /** `nodeCount` nodes in the layout from `layout.ts`. Child indices are relative to this tree. */
+    /** `nodeCount` nodes in the layout from `gpu-layout.ts`. Child indices are relative to this tree. */
     readonly nodes: ArrayBuffer;
     readonly nodeCount: number;
     /**

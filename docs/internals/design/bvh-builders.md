@@ -27,7 +27,7 @@ node tools/layout-identity.ts            # all three scenes
 node tools/layout-identity.ts sponza     # one scene
 ```
 
-The layout itself is defined in `src/trace/layout.ts`; `src/gpu-layout.ts` holds its sizes and word positions, which layout.ts imports. The C++ repeats it as structs with `static_assert`s on every offset; change both together.
+The layout itself is defined in `src/gpu-layout.ts`: the trees' sizes and word positions, and the tracer's names for them and for the scene around them. The C++ repeats it as structs with `static_assert`s on every offset; change both together.
 
 The build needs WebAssembly SIMD (SIMD128), which every current Chrome, Edge, Firefox and Safari has (Chrome 91, Firefox 89 and Safari 16.4 onwards), so there is no scalar fallback build.
 

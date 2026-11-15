@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import { createFakeGpu, type FakeBuffer } from '../../tests/support/fake-gpu.ts';
 import { gatherStandIn } from '../../tests/support/top-level-gather.ts';
-import { INSTANCE_FLAG, INSTANCE_MASK_SHIFT, MATERIAL_SHIFT, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS } from './layout.ts';
+import { INSTANCE_FLAG, INSTANCE_MASK_SHIFT, MATERIAL_SHIFT, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS } from '../gpu-layout.ts';
 import { createRandom, randomAffine } from './oracle-fixtures.ts';
 import { MERGED_INSTANCE_INDEX } from './static-merge.ts';
 import { buildTopLevel, IDENTITY_TRANSFORM } from './top-level.ts';

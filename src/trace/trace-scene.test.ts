@@ -18,7 +18,7 @@ import {
     TOP_HEADER_WORD,
     TOP_LEVEL_HEADER_WORDS,
     TRACE_STACK_SIZE,
-} from './layout.ts';
+} from '../gpu-layout.ts';
 import { createTinyBvhBuilder } from '../index.ts';
 import type { MeshBvh, MeshGeometry } from './mesh-bvh.ts';
 import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
