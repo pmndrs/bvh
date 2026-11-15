@@ -185,7 +185,7 @@ const cpu = new CpuMeshBvh(tree, { source: geometry }); // the CPU walk reads th
 
 `new CpuMeshBvh(tree, { source: geometry })` expands the tree to 48-byte records once; add `corners: 'positions'` to
 keep its 16-byte triangles and read every corner from the geometry's positions instead (the same answers,
-[CPU raycast](/cpu-queries/raycast)).
+[CPU raycast](/cpu-queries/raycast)). In three, `deserializeBoundsTree(bytes, geometry)` keeps an indexed file indexed.
 
 `deserializeLayout(bytes, { geometry })` checks that the geometry fits the tree:
 
