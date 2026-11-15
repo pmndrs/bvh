@@ -1,5 +1,6 @@
 /**
  * three/triangleIntersect: a port of three-mesh-bvh's `triangleIntersect` example.
+ * Source: three-mesh-bvh's example/triangleIntersect.js (v0.9.18, MIT, Garrett Johnson); see THIRD_PARTY.md.
  *
  * What it demonstrates: `ExtendedTriangle.intersectsTriangle(other, target)`,
  * the triangle-triangle test the tree walks (`bvhcast`) and the

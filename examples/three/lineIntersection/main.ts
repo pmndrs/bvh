@@ -1,5 +1,6 @@
 /**
  * three/lineIntersection: a port of three-mesh-bvh's `lineIntersection` example.
+ * Source: three-mesh-bvh's example/lineIntersection.js (v0.9.18, MIT, Garrett Johnson); see THIRD_PARTY.md.
  *
  * What it demonstrates: raycasting a polyline of hundreds of thousands of
  * segments with a pick threshold, as three-mesh-bvh does with `LineBVH`:

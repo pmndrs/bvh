@@ -30,6 +30,13 @@ const requiredLicenseText = {
     'query/primitive-bvh.js': ['three-mesh-bvh', 'Copyright (c) 2018 Garrett Johnson', 'Permission is hereby granted, free of charge'],
     'query/ray-primitives.js': ['three.js', 'three.js authors', 'Permission is hereby granted, free of charge'],
     'three/points-lines.js': ['three.js', 'three.js authors', 'Permission is hereby granted, free of charge'],
+    'hploc-cpu.js': ['tinybvh', 'Copyright (c) 2024 Jacco Bikker', 'Permission is hereby granted, free of charge'],
+    'lbvh-cpu.js': ['HIPRT', 'Permission is hereby granted, free of charge'],
+    'query/shapes.js': ['three-mesh-bvh', 'Copyright (c) 2018 Garrett Johnson', 'three.js authors', 'Permission is hereby granted, free of charge'],
+    'query/cpu-mesh-bvh.js': ['three-mesh-bvh', 'Copyright (c) 2018 Garrett Johnson', 'three.js authors', 'Permission is hereby granted, free of charge'],
+    'query/debug.js': ['three-mesh-bvh', 'Copyright (c) 2018 Garrett Johnson', 'Permission is hereby granted, free of charge'],
+    'query/three-mesh-bvh-format.js': ['three-mesh-bvh', 'Copyright (c) 2018 Garrett Johnson', 'Permission is hereby granted, free of charge'],
+    'trace/wgsl.js': ['three.js', 'three.js authors', 'Permission is hereby granted, free of charge'],
 };
 for (const [name, lines] of Object.entries(requiredLicenseText)) {
     const file = resolve(dist, name);
@@ -111,4 +118,4 @@ if (problems.length) {
     console.error(problems.join('\n'));
     process.exit(1);
 }
-console.log('Verified dist: exports exist, licence text intact in tinybvh-wasm, gpu-lbvh-wgsl, gpu-hploc-wgsl, three/static-geometry, trace/clustered-scene, query/primitive-bvh, query/ray-primitives and three/points-lines, no .ts imports, no tests, worker entries built (' + workerEntries.size + '), /three and /babylon import in Node, engines only in their own folders.');
+console.log('Verified dist: exports exist, licence text intact in ' + Object.keys(requiredLicenseText).map((name) => name.replace(/\.js$/, '')).join(', ') + ', no .ts imports, no tests, worker entries built (' + workerEntries.size + '), /three and /babylon import in Node, engines only in their own folders.');

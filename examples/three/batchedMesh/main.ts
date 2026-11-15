@@ -1,5 +1,6 @@
 /**
  * three/batchedMesh: a port of three-mesh-bvh's `batchedMesh` example.
+ * Source: three-mesh-bvh's example/batchedMesh.js (v0.9.18, MIT, Garrett Johnson); see THIRD_PARTY.md.
  *
  * What it demonstrates: `computeBatchedBoundsTree` and `acceleratedRaycast` on
  * a `BatchedMesh`. Three geometries (two torus knots and a sphere, about

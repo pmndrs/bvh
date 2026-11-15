@@ -1,5 +1,6 @@
 /**
  * three/voxelize: a port of three-mesh-bvh's `voxelize` example.
+ * Source: three-mesh-bvh's example/voxelize.js (v0.9.18, MIT, Garrett Johnson); see THIRD_PARTY.md.
  *
  * What it demonstrates: two CPU queries on one tree, one per voxel of a grid.
  *

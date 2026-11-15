@@ -1,6 +1,7 @@
 HIPRT (https://github.com/GPUOpen-LibrariesAndSDKs/HIPRT), commit 0629d08568fff39f9a36bf9ee800fc7bac5bb096.
-Ported to WGSL in packages/bvh/src/gpu-lbvh-wgsl.ts (Morton code from hiprt/impl/MortonCode.h;
-findHighestDifferentBit, findParent and EmitTopologyAndFitBounds from hiprt/impl/LbvhBuilderKernels.h).
+Ported to WGSL in src/gpu-lbvh-wgsl.ts (Morton code from hiprt/impl/MortonCode.h;
+findHighestDifferentBit, findParent and EmitTopologyAndFitBounds from hiprt/impl/LbvhBuilderKernels.h),
+and from there to TypeScript in src/lbvh-cpu.ts (the CPU twin).
 
 MIT License
 

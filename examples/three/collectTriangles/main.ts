@@ -1,5 +1,6 @@
 /**
  * three/collectTriangles: a port of three-mesh-bvh's `collectTriangles` example.
+ * Source: three-mesh-bvh's example/collectTriangles.js (v0.9.18, MIT, Garrett Johnson); see THIRD_PARTY.md.
  *
  * What it demonstrates: `tree.shapecast` with a sphere as the shape, collecting
  * every triangle the sphere touches, so a brush can paint a mesh of hundreds

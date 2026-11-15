@@ -1,5 +1,6 @@
 /**
  * three/clippedEdges: a port of three-mesh-bvh's `clippedEdges` example.
+ * Source: three-mesh-bvh's example/clippedEdges.js (v0.9.18, MIT, Garrett Johnson); see THIRD_PARTY.md.
  *
  * What it demonstrates: `tree.shapecast` with a plane as the shape. A
  * clipping plane sweeps through the model; every frame `intersectsBounds`

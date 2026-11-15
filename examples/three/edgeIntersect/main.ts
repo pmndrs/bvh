@@ -1,5 +1,6 @@
 /**
  * three/edgeIntersect: a port of three-mesh-bvh's `edgeIntersect` example.
+ * Source: three-mesh-bvh's example/edgeIntersect.js (v0.9.18, MIT, Garrett Johnson); see THIRD_PARTY.md.
  *
  * What it demonstrates: `tree.bvhcast(otherTree, matrixToLocal, { intersectsTriangles })`,
  * a walk of two trees against each other. Two torus knots spin around each
