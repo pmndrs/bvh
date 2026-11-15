@@ -66,7 +66,8 @@ jobs:
     name: GPU pages (headless Chrome, SwiftShader)
     runs-on: ubuntu-latest
     # The seven pages run with BVH_PAGE_QUERY=profile=ci, the reduced counts of each page that has one (every variant and case still runs); the full profile is for real GPUs.
-    timeout-minutes: 15
+    # A hang guard, not a timing gate: the job has taken 6.5 to 15 minutes on the same commit.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: pnpm/action-setup@v6.1.1
@@ -75,13 +76,11 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - uses: browser-actions/setup-chrome@v2.2.0
-        id: chrome
-        with:
-          chrome-version: stable
+      # The runner image's own Google Chrome (stable). setup-chrome@v2 installs Chrome for Testing
+      # instead, and these pages ran 1.7 to 2.2 times slower under it on SwiftShader.
       - name: Asset-free correctness pages
         env:
-          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          CHROME_PATH: /usr/bin/google-chrome
           # BVH_ALLOW_SOFTWARE_ADAPTER=1 is the runner's explicit opt-in for a software adapter;
           # without it the runner rejects SwiftShader. tests/gpu/chrome.ts appends these to Chrome's flags. SwiftShader has no
           # `subgroups`, so bvh-lbvh-fallback exercises the tinybvh fallback.
