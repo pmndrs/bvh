@@ -14,6 +14,17 @@ format or a public type that people will build on; defaults and additive options
 | 6. Adopt and quantized emit; `positionsBuffer` turns weld and merge off | Keep both | No |
 | 7. `triangleLeaves: 'records'`, `quantizedDecode: 'exact'` | Ship them; both are safe to flip in 0.2 | No |
 
+**Decided by Dennis, 2026-11-16:** every recommendation below is taken, with three notes.
+
+- **1:** keep `'parity'`, but find out why three-mesh-bvh's SDF was 1.7-2.8x faster on SwiftShader and measure it on the
+  RTX (in progress).
+- **3a:** keep both formats, and document that `MeshBVH.deserialize` taking our bytes may be removed later (done: the
+  JSDoc, `docs/three/bounds-tree.mdx` and the serialization page say so).
+- **4a:** keep the snapshot, and add movable scene files as an option, with the scenarios written down (in progress).
+- **5:** points and lines stay CPU-only for 0.1.0; Dennis sees them as a weakness to come back to.
+- **7:** ship with `'records'` and `'exact'`. The README sample now passes the scene's formats to `traceModuleWgsl`, so
+  code copied from it keeps matching if a default flips.
+
 Numbers are from the RTX 3060 Laptop unless marked; M5 numbers are marked "indicative" where the design notes call them
 that. The runbook is `docs/internals/WINDOWS-RUNBOOK.md`.
 

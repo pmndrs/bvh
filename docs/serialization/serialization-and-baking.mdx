@@ -261,8 +261,8 @@ In three, `geometry.boundsTree.serialize()` and `deserializeBoundsTree(bytes, ge
 To hand trees to three-mesh-bvh, or read ones it stored, use its own serialized format: `serializeThreeMeshBvh(tree, {
 index })` writes its `SerializedBVH` (`{ version: 1, roots, index, indirectBuffer }`, indirect mode), and
 `meshBvhFromThreeMeshBvh(data, { positions, indices })` reads one into our layout, keeping its shape and making its boxes
-exact. In three, `MeshBVH.serialize(tree)` and `MeshBVH.deserialize(data, geometry)` take it, the latter our bytes too
-([The tree object](/three/bounds-tree#save-and-load)). It isn't for baking: it holds no triangle records, so loading it
+exact. In three, `MeshBVH.serialize(tree)` and `MeshBVH.deserialize(data, geometry)` take it, the latter our bytes too for now (that may go in a later version;
+use `deserializeBoundsTree` for ours, [The tree object](/three/bounds-tree#save-and-load)). It isn't for baking: it holds no triangle records, so loading it
 builds our layout from the geometry (no SAH build, but a pass over every triangle).
 
 ## Bake at build time

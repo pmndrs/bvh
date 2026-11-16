@@ -44,7 +44,9 @@ trees.update(encoder);
 device.queue.submit([encoder.finish()]);
 
 // Your kernel calls bvhTraceClosest / bvhTraceAny; bind trees.buffers.nodes, .triangles, .topLevel at group 0.
-const code = `${traceModuleWgsl()}\n/* ... let hit = bvhTraceClosest(BvhRay(origin, 0.0, direction, 1e30)); ... */`;
+// Compile the walk for the scene's formats, so it keeps matching if you (or a later default) change them.
+const walk = traceModuleWgsl({ triangleLeaves: trees.triangleLeaves, positionLayout: trees.positionLayout, nodeFormat: trees.nodeFormat });
+const code = `${walk}\n/* ... let hit = bvhTraceClosest(BvhRay(origin, 0.0, direction, 1e30)); ... */`;
 ```
 
 A device with `subgroups`, a full kernel and the batch kernel: [First build](https://pmndrs.github.io/bvh/getting-started/first-build).

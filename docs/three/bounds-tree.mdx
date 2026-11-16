@@ -101,7 +101,8 @@ options:
 Two formats, one call to read either:
 
 - **Ours:** `boundsTree.serialize()` gives our layout's bytes (`serializeLayout`), and
-  `deserializeBoundsTree(bytes, geometry)` or `MeshBVH.deserialize(bytes, geometry)` reads them. These are what the GPU
+  `deserializeBoundsTree(bytes, geometry)` reads them. `MeshBVH.deserialize(bytes, geometry)` reads them too for now,
+  but that may be removed in a later version, so use `deserializeBoundsTree` for our bytes. These are what the GPU
   uploads, so a baked tree loads with no build. See [Serialization and baking](/serialization/serialization-and-baking).
   Either triangle format loads: an indexed file (or an indexed `layout`) stays indexed, 16 bytes per triangle, its
   corners read from the geometry's own positions (`CpuMeshBvh`'s `corners: 'positions'`), with the same answers as the

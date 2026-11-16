@@ -578,6 +578,9 @@ export class BvhBoundsTree extends CpuMeshBvh<BvhBoundsTreeHit> {
      * into it); the tree's shape is kept and its boxes made exact
      * (`meshBvhFromThreeMeshBvh`). The other options are `computeBoundsTree`'s.
      * Doesn't set `geometry.boundsTree`; `setBoundsTree` does.
+     *
+     * Reading our bytes here is a convenience that may be removed in a later
+     * version: load them with {@link deserializeBoundsTree} instead.
      */
     static override deserialize(data: ThreeMeshBvhSerialized | ArrayBuffer | ArrayBufferView, geometry: BufferGeometry, options?: BvhBoundsTreeOptions & { readonly setIndex?: boolean }): BvhBoundsTree;
     /** The core's form (`CpuMeshBvh.deserialize(bytes, options)`), for subclasses whose constructor takes a layout. */
