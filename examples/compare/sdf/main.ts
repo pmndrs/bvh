@@ -59,14 +59,19 @@ const generators: GpuSdf[] = [
     await createTmbvhSdf(app.renderer, mesh, box),
 ];
 if (breakdown) {
-    generators.push(await createOursSdf(app.device, mesh, box, 'winding'));
-    for (const variant of Object.keys(OURS_BREAKDOWN) as OursBreakdown[]) generators.push(await createOursBreakdownSdf(app.device, mesh, box, variant));
-    generators.push(await createOursBreakdownSdf(app.device, mesh, box, 'votes-all', 'winding'), await createOursBreakdownSdf(app.device, mesh, box, 'votes-early', 'winding'));
-    generators.push(await createTmbvhSdf(app.renderer, mesh, box, 'closest'), await createTmbvhSdf(app.renderer, mesh, box, 'ray'));
+    // ?only=closest,closest-general: just those breakdown kernels (by OURS_BREAKDOWN key), for a focused paired run.
+    const only = query.get('only')?.split(',');
+    const wanted = (variant: OursBreakdown) => !only || only.includes(variant);
+    if (!only) generators.push(await createOursSdf(app.device, mesh, box, 'winding'));
+    for (const variant of Object.keys(OURS_BREAKDOWN) as OursBreakdown[]) if (wanted(variant)) generators.push(await createOursBreakdownSdf(app.device, mesh, box, variant));
+    if (!only) {
+        generators.push(await createOursBreakdownSdf(app.device, mesh, box, 'votes-all', 'winding'), await createOursBreakdownSdf(app.device, mesh, box, 'votes-early', 'winding'));
+        generators.push(await createTmbvhSdf(app.renderer, mesh, box, 'closest'), await createTmbvhSdf(app.renderer, mesh, box, 'ray'));
+    }
 }
 /** Breakdown kernels that must give another field bit for bit: [kernel, the field it must equal]. */
 const identical: readonly (readonly [string, string])[] = breakdown
-    ? [
+    ? ([
           ['ours-votes-all', 'ours'],
           ['ours-votes-early', 'ours'],
           ['ours-no-winding', 'ours'],
@@ -76,8 +81,22 @@ const identical: readonly (readonly [string, string])[] = breakdown
           ['ours-first-hit-bounded', 'ours-first-hit'],
           ['ours-votes-all-winding', 'ours-winding'],
           ['ours-votes-early-winding', 'ours-winding'],
-      ]
+          // The identity fast path is the same field bit for bit (query-wgsl.ts, QUERY_IDENTITY_CHECK_WGSL).
+          ['ours-closest-general', 'ours-unsigned'],
+          ['ours-votes-early-general', 'ours'],
+          ['ours-closest-exact', 'ours-unsigned'],
+          ['ours-closest-boxes-only', 'ours-unsigned'],
+      ] as const).filter(([kernel]) => generators.some((generator) => generator.id === kernel))
     : [];
+/** Paired speed-ups logged in breakdown runs: [before, after], before's time over after's per round. */
+const SPEEDUPS: readonly (readonly [string, string])[] = [
+    ['ours-closest-general', 'ours-closest'],
+    ['ours-votes-early-general', 'ours-votes-early'],
+    ['ours-closest-general', 'ours-closest-merged'],
+    ['ours-closest', 'ours-closest-merged'],
+    ['ours-closest-general', 'ours-closest-exact'],
+    ['ours-closest-general', 'ours-closest-boxes-only'],
+];
 /** Kernels whose field is not an SDF to compare with ours (the parts alone). */
 const partsOnly = new Set(['ours-rays3', 'ours-rays-early', 'ours-ray1', 'ours-first-hit-only', 'tmbvh-ray']);
 const bitFailures: string[] = [];
@@ -150,6 +169,15 @@ for (const dim of resolutions) {
         const ratios = a.map((time, i) => theirs[i] / time);
         all.push({ page: 'sdf', scene: sceneName, library: `${id}-over-tmbvh`, metric: `build/${dim}/ratio`, value: median(ratios), unit: 'ratio', method: `three-mesh-bvh's time over ${id} within each round (above 1: ours faster), median of ${rounds} rounds (min ${Math.min(...ratios).toFixed(2)}, max ${Math.max(...ratios).toFixed(2)})`, ranked: true });
         if (breakdown) log(`ratio tmbvh/${id} ${dim}³: ${median(ratios).toFixed(3)} (min ${Math.min(...ratios).toFixed(2)}, max ${Math.max(...ratios).toFixed(2)})`);
+    }
+    // The identity fast path's before over after, within each round (above 1: the fast path is faster).
+    for (const [before, after] of SPEEDUPS) {
+        const a = times.get(before);
+        const b = times.get(after);
+        if (!a || !b) continue;
+        const ratios = a.map((time, i) => time / b[i]);
+        all.push({ page: 'sdf', scene: sceneName, library: `${before}-over-${after}`, metric: `build/${dim}/ratio`, value: median(ratios), unit: 'ratio', method: `${before}'s time over ${after}'s within each round, median of ${rounds} rounds (min ${Math.min(...ratios).toFixed(3)}, max ${Math.max(...ratios).toFixed(3)})`, ranked: false });
+        log(`ratio ${before}/${after} ${dim}³: ${median(ratios).toFixed(3)} (min ${Math.min(...ratios).toFixed(3)}, max ${Math.max(...ratios).toFixed(3)})`);
     }
 }
 

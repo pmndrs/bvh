@@ -2,7 +2,7 @@ import { GPU_LAYOUT_VERSION } from '../index.ts';
 import { describe, expect, it } from 'vitest';
 import { TRACER_GPU_LAYOUT_VERSION } from '../gpu-layout.ts';
 import { batchEntryWgsl, batchKernelWgsl, closestPointKernelWgsl, HIT_RECORD_BYTES, HIT_RECORD_COMPACT_BYTES, HIT_RECORD_COMPACT_WORD, HIT_RECORD_WORD, hitRecordBytes, traceModuleWgsl, triangleGeometryWgsl } from './wgsl.ts';
-import { CLOSEST_POINT_RECORD_BYTES, CLOSEST_POINT_RECORD_WORD, POINT_QUERY_BYTES } from './query-wgsl.ts';
+import { CLOSEST_POINT_RECORD_BYTES, CLOSEST_POINT_RECORD_WORD, POINT_QUERY_BYTES, QUERY_IDENTITY_CHECK_WGSL, withoutQueryIdentityFastPath } from './query-wgsl.ts';
 
 /** Size and alignment of the WGSL types a hit record uses (WGSL spec, "Alignment and size"). */
 const TYPE_LAYOUT: Record<string, { size: number; align: number }> = {
@@ -108,6 +108,21 @@ describe('the spatial queries (queries, shapecast) and the triangle helpers', ()
         expect(shapecastOnly).not.toContain('fn bvhClosestPoint(');
         // Every format compiles the same query text around its own loaders.
         expect(traceModuleWgsl({ queries: true, nodeFormat: 'f32', triangleLeaves: 'indexed', positionLayout: 'packed' })).toContain('fn bvhClosestPointWalk(mask: u32) -> bool');
+    });
+
+    it('take the identity fast path in every stamped walk, and withoutQueryIdentityFastPath takes it out alone', () => {
+        const module = traceModuleWgsl({ queries: true, shapecast: '' });
+        expect(module).toContain(QUERY_IDENTITY_CHECK_WGSL);
+        // One placement for every stamped walk: the fast path is in the shared functions, once.
+        expect(module.split('fn bvhQueryIsIdentity(').length).toBe(2);
+        expect(fnText(module, 'bvhQueryPlacement')).toContain('bvhQueryIsIdentity(instance)');
+        expect(fnText(module, 'bvhQueryWorldBounds')).toContain('placement.identity && bvhQueryIdentityExact(local, localHalf)');
+        expect(fnText(module, 'bvhQueryToWorld')).toContain('placement.identity && bvhQueryIdentityExact(point, vec3f(0.0))');
+        const general = withoutQueryIdentityFastPath(module);
+        expect(fnText(general, 'bvhQueryIsIdentity')).toContain('return false;');
+        // Everything else is the same text.
+        expect(general.replace(fnText(general, 'bvhQueryIsIdentity'), '')).toBe(module.replace(fnText(module, 'bvhQueryIsIdentity'), ''));
+        expect(() => withoutQueryIdentityFastPath(traceModuleWgsl())).toThrow(/no query identity check/);
     });
 
     it('BvhClosestPointRecord has the layout the readers use', () => {

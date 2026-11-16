@@ -80,6 +80,7 @@ import {
     type TraceSceneInstance,
 } from '../../../../src/trace/index.ts';
 import { createTinyBvhBuilder, CpuMeshBvh, type TinyBvhBuilder } from '../../../../src/index.ts';
+import { withoutQueryIdentityFastPath } from '../../../../src/trace/query-wgsl.ts';
 import { sphereIntersectsBox, triangleClosestPointToPoint, BvhVector3 } from '../../../../src/query/shapes.ts';
 import { TRIANGLE_MATERIAL_NONE } from '../../../../src/mesh-input.ts';
 import { createRandom, randomTriangleSoup, randomUnitVector, type Random, type Vector3 } from '../../../../src/trace/oracle-fixtures.ts';
@@ -205,6 +206,35 @@ function degenerateCase(): OracleCase {
     return pageCase('degenerate-triangles', 'A soup in which every third triangle is a segment or a point, plain and under an exact mirrored quarter turn.', [{ positions }], [
         { meshIndex: 0, instanceIndex: 0, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] },
         { meshIndex: 0, instanceIndex: 1, objectToWorld: [0, 2, 0, 0, -1, 0, 0, 0, 0, 0, -1, 0, 4, 1, -2.5, 1] },
+    ]);
+}
+
+/**
+ * Identity instances whose corners the identity fast path must still send through the matrix
+ * (query-wgsl.ts, `bvhQueryIdentityExact`): a floor at y = 0 with both +0 and -0 in its
+ * coordinates and exact zeros in x and z, a few triangles with subnormal coordinates, and a
+ * soup beside them; one more copy of the floor under a translation (the general path).
+ */
+function identityZerosCase(): OracleCase {
+    const random = createRandom(9001);
+    const floor: number[] = [];
+    const at = (i: number) => (i - 4) / 4; // -1 to 1 in quarters: 0 exactly in the middle
+    for (let i = 0; i < 8; i++) {
+        for (let j = 0; j < 8; j++) {
+            const y = (i + j) % 2 === 0 ? 0 : -0;
+            const [x0, x1, z0, z1] = [at(i), at(i + 1), at(j), at(j + 1)];
+            floor.push(x0, y, z0, x1, y, z0, x1, -y, z1, x0, y, z0, x1, y, z1, x0, -y, z1);
+        }
+    }
+    // Subnormal coordinates (1e-40 is below the smallest normal f32, 1.2e-38).
+    floor.push(1e-40, 0.5, -1e-40, 0.25, 0.5, 1e-40, -1e-40, 0.75, 0.25, 0.5, -1e-40, 0.5, 0.75, 1e-40, 0.5, 0.5, 0.25, 1e-40);
+    const soup = randomTriangleSoup(random, 120, 2, 0.4).positions;
+    for (let k = 1; k < soup.length; k += 3) soup[k] += 1; // above the floor
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    return pageCase('identity-zeros', 'Identity instances with +0, -0 and subnormal coordinates (the identity fast path guard), a soup, and a translated copy.', [{ positions: new Float32Array(floor) }, { positions: soup }], [
+        { meshIndex: 0, instanceIndex: 0, objectToWorld: identity },
+        { meshIndex: 1, instanceIndex: 1, objectToWorld: identity, material: 3 },
+        { meshIndex: 0, instanceIndex: 2, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -1.5, 0, 1] },
     ]);
 }
 
@@ -599,6 +629,117 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 `;
 
+/**
+ * The identity fast path check's hooks (query-wgsl.ts, QUERY_IDENTITY_CHECK_WGSL): a sphere-culled
+ * shapecast that hashes the bits of every box and triangle corner it is handed, so the boxes and
+ * corners themselves (not only the answers) must be the same with and without the fast path.
+ */
+const IDENTITY_HOOKS_WGSL = /* wgsl */ `
+var<private> idCenter: vec3f;
+var<private> idRadiusSq: f32;
+var<private> idCount: u32;
+var<private> idBoxes: u32;
+var<private> idBoxHash: u32;
+var<private> idCornerHash: u32;
+
+fn idMix(hash: u32, value: vec3f) -> u32 {
+    let bits = bitcast<vec3u>(value);
+    return ((((((hash ^ bits.x) * 16777619u) ^ bits.y) * 16777619u) ^ bits.z) * 16777619u);
+}
+
+fn bvhShapecastBounds(bounds: BvhShapecastBounds) -> f32 {
+    idBoxes += 1u;
+    idBoxHash = idMix(idMix(idBoxHash, bounds.min), bounds.max);
+    let distanceSq = bvhPointBoxDistanceSq(idCenter, bounds.min, bounds.max);
+    return select(-1.0, distanceSq, distanceSq <= idRadiusSq);
+}
+
+fn bvhShapecastKeep(score: f32) -> bool {
+    return true;
+}
+
+fn bvhShapecastTriangle(triangle: BvhShapecastTriangle) -> bool {
+    idCornerHash = idMix(idMix(idMix(idCornerHash, triangle.a), triangle.b), triangle.c);
+    let offset = bvhClosestPointToTriangle(idCenter, triangle.a, triangle.b, triangle.c).point - idCenter;
+    if (dot(offset, offset) <= idRadiusSq) {
+        idCount += 1u;
+    }
+    return false;
+}
+`;
+
+/** Words per query the identity kernel writes: the closest point's record, the shape tests, the crossings and the shapecast. */
+const IDENTITY_VEC4S = 5;
+
+/** The identity check's kernel: every library query and the hashing shapecast per query point, written out raw. */
+const IDENTITY_KERNEL_WGSL = /* wgsl */ `
+struct IdQuery {
+    centerRadius: vec4f,      // center, sphere radius
+    halfCountRadius: vec4f,   // box half size, shapecast sphere radius
+    axis0: vec4f,
+    axis1: vec4f,
+    axis2: vec4f,
+}
+
+@group(1) @binding(0) var<storage, read> idQueries: array<IdQuery>;
+@group(1) @binding(1) var<storage, read_write> idResults: array<vec4u>;
+
+@compute @workgroup_size(${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+    if (id.x >= arrayLength(&idQueries)) {
+        return;
+    }
+    let query = idQueries[id.x];
+    let center = query.centerRadius.xyz;
+    let half = query.halfCountRadius.xyz;
+    let hit = bvhClosestPoint(center, 1.0e30);
+    let sphere = bvhIntersectsSphere(center, query.centerRadius.w);
+    let box = bvhIntersectsBox(center - half, center + half);
+    let oriented = bvhIntersectsOrientedBox(center, half, mat3x3f(query.axis0.xyz, query.axis1.xyz, query.axis2.xyz));
+    let crossings = bvhRayCrossings(center, BVH_INSIDE_DIRECTION_0);
+    idCenter = center;
+    idRadiusSq = query.halfCountRadius.w * query.halfCountRadius.w;
+    idCount = 0u;
+    idBoxes = 0u;
+    idBoxHash = 2166136261u;
+    idCornerHash = 2166136261u;
+    _ = bvhShapecast();
+    let base = id.x * ${IDENTITY_VEC4S}u;
+    idResults[base] = vec4u(bitcast<u32>(hit.distance), hit.instance, hit.triangle, hit.material);
+    idResults[base + 1u] = vec4u(bitcast<vec2u>(hit.barycentrics), bitcast<u32>(hit.point.x), bitcast<u32>(hit.point.y));
+    idResults[base + 2u] = vec4u(bitcast<u32>(hit.point.z), bitcast<vec3u>(hit.normal));
+    idResults[base + 3u] = vec4u(select(0u, 1u, sphere) | select(0u, 2u, box) | select(0u, 4u, oriented), crossings.count, bitcast<u32>(crossings.winding), idCount);
+    idResults[base + 4u] = vec4u(idBoxes, idBoxHash, idCornerHash, 0u);
+}
+`;
+
+/** Runs the identity kernel over the queries; its raw words. */
+async function runIdentity(device: GPUDevice, pipeline: GPUComputePipeline, buffers: ReturnType<typeof uploadTraceScene>, queries: readonly QueryCase[]): Promise<Uint32Array> {
+    const data = new Float32Array(queries.length * 20);
+    queries.forEach((query, q) => data.set([...query.point, query.radius, ...query.half, query.countRadius, ...query.axes[0], 0, ...query.axes[1], 0, ...query.axes[2], 0], q * 20));
+    const input = storageBuffer(device, 'query-oracle identity in', data);
+    const bytes = queries.length * IDENTITY_VEC4S * 16;
+    const output = storageBuffer(device, 'query-oracle identity out', bytes);
+    const scene = [buffers.nodes, buffers.triangles, buffers.topLevel, ...(buffers.positions ? [buffers.positions] : [])];
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: scene.map((buffer, binding) => ({ binding, resource: { buffer } })) }));
+    pass.setBindGroup(1, device.createBindGroup({ layout: pipeline.getBindGroupLayout(1), entries: [input, output].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
+    pass.dispatchWorkgroups(Math.ceil(queries.length / WORKGROUP));
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    const words = new Uint32Array(await readBuffer(device, output, bytes));
+    input.destroy();
+    output.destroy();
+    return words;
+}
+
+/** Whether a column-major object-to-world matrix is exactly the identity (what the walk's test sees, rounded to f32). */
+function isIdentity(matrix: ArrayLike<number>): boolean {
+    return Array.from(matrix).every((value, k) => Math.fround(value) === (k % 5 === 0 ? 1 : 0));
+}
+
 interface ShapeAnswers {
     readonly words: Uint32Array;
 }
@@ -917,7 +1058,7 @@ await runGpuTest(async ({ device, log }) => {
     endPhase('helpers');
 
     // The reference answers, once per case (they do not depend on the format).
-    const plainCases = [...buildOracleCases(SMALL_SIZES), farFromOriginCase(), degenerateCase(), maskZeroCase()].map(withMasks);
+    const plainCases = [...buildOracleCases(SMALL_SIZES), farFromOriginCase(), degenerateCase(), maskZeroCase(), identityZerosCase()].map(withMasks);
     type Reference = { instances: WorldInstance[]; queries: QueryCase[]; scale: number };
     const reference = (oracleCase: OracleCase, index: number, rayMasks: boolean): Reference => {
         const { instances, magnitude } = worldInstances(oracleCase, tiny, rayMasks);
@@ -945,7 +1086,9 @@ await runGpuTest(async ({ device, log }) => {
             split[key] += (performance.now() - start) / 1000;
         }
     };
-    const pipelines = new Map<string, { kernel: ClosestPointBatchKernel; shapes: GPUComputePipeline }>();
+    const pipelines = new Map<string, { kernel: ClosestPointBatchKernel; shapes: GPUComputePipeline; identity: GPUComputePipeline; general: GPUComputePipeline }>();
+    /** Identity instances walked (not merged), over every variant and case: the identity check must have had some. */
+    let identityInstances = 0;
     for (const variant of VARIANTS) {
         const rayMasks = variant.rayMasks ?? true;
         const formats = { triangleLeaves: variant.triangleLeaves, positionLayout: variant.positionLayout, nodeFormat: variant.nodeFormat };
@@ -968,14 +1111,36 @@ await runGpuTest(async ({ device, log }) => {
             const module = device.createShaderModule({ label: `${variant.name} shapes`, code });
             const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [sceneLayout, ioLayout] });
             const shapes = await device.createComputePipelineAsync({ label: `${variant.name} shapes`, layout: pipelineLayout, compute: { module, entryPoint: 'main' } });
-            compiled = { kernel, shapes };
+            // The identity check: the same kernel with the fast path and without it (every instance through the matrix).
+            const identityLayout = device.createPipelineLayout({
+                bindGroupLayouts: [
+                    sceneLayout,
+                    device.createBindGroupLayout({
+                        entries: [
+                            { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                            { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                        ],
+                    }),
+                ],
+            });
+            const identityCode = `${traceModuleWgsl({ ...formats, rayMasks, queries: true, shapecast: IDENTITY_HOOKS_WGSL })}
+${IDENTITY_KERNEL_WGSL}`;
+            const generalCode = withoutQueryIdentityFastPath(identityCode);
+            assert(generalCode !== identityCode, 'the identity fast path was taken out');
+            const [identity, general] = await Promise.all(
+                [identityCode, generalCode].map((source, k) => {
+                    const label = `${variant.name} identity ${k ? 'general' : 'fast path'}`;
+                    return device.createComputePipelineAsync({ label, layout: identityLayout, compute: { module: device.createShaderModule({ label, code: source }), entryPoint: 'main' } });
+                }),
+            );
+            compiled = { kernel, shapes, identity, general };
             pipelines.set(pipelineKey, compiled);
         }
-        const { kernel, shapes } = compiled;
+        const { kernel, shapes, identity, general } = compiled;
         assert(kernel.nodeFormat === variant.nodeFormat && kernel.triangleLeaves === variant.triangleLeaves, 'the kernel names the formats it was made for');
         split.compileSeconds += (performance.now() - compileStart) / 1000;
 
-        const tallies = { closest: tally(), limited: tally(), masked: tally(), special: tally(), sphere: tally(), box: tally(), orientedBox: tally(), shapecast: tally(), nested: tally(), unculled: tally(), corners: tally() };
+        const tallies = { closest: tally(), limited: tally(), masked: tally(), special: tally(), sphere: tally(), box: tally(), orientedBox: tally(), shapecast: tally(), nested: tally(), unculled: tally(), corners: tally(), identity: tally() };
         for (const [caseIndex, plainCase] of plainCases.entries()) {
             const oracleCase = variant.triangleMaterials ? materialCases[caseIndex] : plainCase;
             const caseReference = rayMasks ? references[caseIndex].masked : references[caseIndex].unmasked;
@@ -995,6 +1160,20 @@ await runGpuTest(async ({ device, log }) => {
                 const special = await runClosest(device, kernel, buffers, points, queries.map((query) => query.special));
                 const unculledCase = UNCULLED_CASES.has(oracleCase.name);
                 const answers = await runShapes(device, shapes, buffers, queries, unculledCase);
+                // The identity fast path: every answer, box and corner the same bits as through the matrix.
+                const walked = oracleCase.instances.filter((instance, position) => !(variant.merged && position % 3 !== 2) && isIdentity(instance.objectToWorld)).length;
+                identityInstances += walked;
+                const [fast, slow] = [await runIdentity(device, identity, buffers, queries), await runIdentity(device, general, buffers, queries)];
+                queries.forEach((_, q) => {
+                    const at = q * IDENTITY_VEC4S * 4;
+                    const differ = [];
+                    for (let w = at; w < at + IDENTITY_VEC4S * 4; w++) if (fast[w] !== slow[w]) differ.push(w - at);
+                    if (differ.length === 0) tallies.identity.agree++;
+                    else {
+                        tallies.identity.mismatches++;
+                        if (failures.length < 40) failures.push(`${where} identity query ${q} (${walked} identity instances): words ${differ.join(', ')} differ from the general path: [${[...fast.subarray(at, at + IDENTITY_VEC4S * 4)]}] against [${[...slow.subarray(at, at + IDENTITY_VEC4S * 4)]}]`);
+                    }
+                });
                 if (CORNER_CASES.has(oracleCase.name)) {
                     // Every corner as the walk moved it, as a point query of radius 0: its triangle is at distance 0,
                     // so the culled walk must find it, unless the padded world box around its leaf left the corner out.
@@ -1079,9 +1258,10 @@ await runGpuTest(async ({ device, log }) => {
     const quantized = report['quantized-records'] as Record<string, Tally>;
     assert(quantized.nested.agree > 0 && quantized.unculled.agree > 0 && quantized.corners.agree > 0, 'the nested-ray and padding checks ran on quantized nodes');
     for (const [name, [yes, no]] of Object.entries(balance)) assert(yes > 0 && no > 0, `${name}: the reference must expect both answers (${yes} / ${no})`);
+    assert(identityInstances > 0, 'the identity check walked identity instances');
     assert(failures.length === 0, failures.slice(0, 12).join('\n'));
-    log(`profile ${profile}: ${QUERIES} queries per case, ${HELPER_CASES} helper cases; expected true / false: ${JSON.stringify(balance)}`);
+    log(`profile ${profile}: ${QUERIES} queries per case, ${HELPER_CASES} helper cases; expected true / false: ${JSON.stringify(balance)}; identity instances walked (cases x variants): ${identityInstances}`);
     const variantSplit = Object.fromEntries(Object.entries(split).map(([key, value]) => [key, Math.round(value * 10) / 10]));
     log(`variant time: ${JSON.stringify(variantSplit)}`);
-    return { profile, phaseSeconds, variantSplit, queriesPerCase: QUERIES, helperCases: HELPER_CASES, helpers: { ray: helpers.ray, nearest: helpers.nearest }, byVariant: report, balance };
+    return { profile, phaseSeconds, variantSplit, identityInstances, queriesPerCase: QUERIES, helperCases: HELPER_CASES, helpers: { ray: helpers.ray, nearest: helpers.nearest }, byVariant: report, balance };
 });
