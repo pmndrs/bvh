@@ -134,8 +134,10 @@ describe('SceneTrees with a movable scene file (placeMovableScene)', () => {
             const { scene, hploc, builds, warnings, frame } = await setUp(variant);
             const placed = placeMovableScene(scene, loaded);
             expect(placed).toMatchObject({ meshes: [0, 1, 2, 3, 4], mergedTreesPlaced: true });
+            // Asked before the first update (as a page does): it resolves at that update, which builds nothing.
+            const built = scene.whenBuilt();
             frame();
-            await scene.whenBuilt();
+            await built;
             expect(hploc.batches).toEqual([]);
             expect(builds).toEqual([]);
             expect(warnings).toEqual([]);

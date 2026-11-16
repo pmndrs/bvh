@@ -4,7 +4,17 @@
  * fresh to compare with the committed files). Browser-safe: no Node imports.
  */
 
-import { buildTraceScene, createTinyBvhBuilder, serializeTraceScene, type TinyBvhBuilder, type TraceSceneData, type TraceSceneInstance } from '@pmndrs/bvh';
+import {
+    buildMovableScene,
+    buildTraceScene,
+    createTinyBvhBuilder,
+    serializeMovableScene,
+    serializeTraceScene,
+    type MovableSceneData,
+    type TinyBvhBuilder,
+    type TraceSceneData,
+    type TraceSceneInstance,
+} from '@pmndrs/bvh';
 import { box, ground, makeScene, sphere, torusKnot, type IndexedMesh, type VanillaScene } from '../../shared/vanilla/geometry.ts';
 import { mat4 } from '../../shared/vanilla/math.ts';
 
@@ -75,4 +85,43 @@ export async function bakeScene(scene: VanillaScene, options: SceneBakeOptions =
     });
     const buildMs = performance.now() - start;
     return { bytes: new Uint8Array(serializeTraceScene(data)), data, buildMs };
+}
+
+export interface BakedMovableScene {
+    /** The file's bytes: what `serializeMovableScene` wrote, with the meshes' geometry. */
+    readonly bytes: Uint8Array;
+    readonly data: MovableSceneData;
+    /** tinybvh's builds, in ms. */
+    readonly buildMs: number;
+}
+
+/**
+ * Builds a movable scene with tinybvh (`buildMovableScene`) and serializes it
+ * with the meshes' geometry, so the page loads it with no model. Instances of
+ * a mesh used once are static and merge (the level: the default scene's
+ * ground, sphere and box); instances of a mesh used more than once can move
+ * (the props: the three knots). With `mergeStaticInstances: false`, every
+ * instance can move. Instance `i` reports `instanceIndex` `i`.
+ */
+export async function bakeMovableScene(scene: VanillaScene, options: SceneBakeOptions = {}, builder?: TinyBvhBuilder): Promise<BakedMovableScene> {
+    const tiny = builder ?? (await createTinyBvhBuilder());
+    const uses = new Map<number, number>();
+    for (const instance of scene.instances) uses.set(instance.mesh, (uses.get(instance.mesh) ?? 0) + 1);
+    const merge = options.mergeStaticInstances !== false;
+    const instances: TraceSceneInstance[] = scene.instances.map((instance, index) => ({
+        meshIndex: instance.mesh,
+        instanceIndex: index,
+        objectToWorld: instance.objectToWorld,
+        material: instance.material,
+        ...(merge && uses.get(instance.mesh) === 1 ? { static: true } : {}),
+    }));
+    const start = performance.now();
+    const data = await buildMovableScene(scene.meshes, instances, {
+        build: (geometry) => tiny.buildLayout(geometry, { maxLeafPrimitives: options.maxLeafPrimitives ?? DEFAULT_LEAF, triangleLeaves: options.triangleLeaves }).layout,
+        triangleLeaves: options.triangleLeaves,
+        nodeFormat: options.nodeFormat,
+        mergeStaticInstances: options.mergeStaticInstances,
+    });
+    const buildMs = performance.now() - start;
+    return { bytes: new Uint8Array(serializeMovableScene(data, { geometry: true })), data, buildMs };
 }

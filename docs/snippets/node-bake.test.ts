@@ -3,23 +3,26 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+    assembleMovableScene,
     assembleTraceScene,
     CpuMeshBvh,
     createCpuTracer,
     createTinyBvhBuilder,
     deserializeLayout,
+    deserializeMovableScene,
     deserializeTraceScene,
     GPU_LAYOUT_VERSION,
     IDENTITY_TRANSFORM,
     isSerializedCurrent,
     readSerializedHeader,
     SERIALIZED_FORMAT_VERSION,
+    SERIALIZED_MOVABLE_SCENE_FORMAT_VERSION,
     SERIALIZED_SCENE_FORMAT_VERSION,
     serializeLayout,
     type TraceRay,
 } from '@pmndrs/bvh';
 import { bakeMesh, readModelMesh, readModelScene } from '../../examples/node/bake/bake.ts';
-import { bakeScene, DEFAULT_LEAF, defaultMesh, defaultScene } from '../../examples/node/bake/model.ts';
+import { bakeMovableScene, bakeScene, DEFAULT_LEAF, defaultMesh, defaultScene } from '../../examples/node/bake/model.ts';
 
 const FIXTURES = join(import.meta.dirname, '../../examples/node/bake/fixtures');
 
@@ -157,6 +160,30 @@ describe('node/bake', () => {
         const tree = await readFile(join(FIXTURES, 'torus-knot.bvh'));
         expect(isSerializedCurrent(tree)).toBe(true);
         expect(new Uint8Array(tree)).toEqual((await bakeMesh(defaultMesh(), {}, tiny)).bytes);
+    });
+
+    it('--scene --movable: the default scene\'s knots can move, the rest merges, and the file loads with its own geometry', async () => {
+        const tiny = await createTinyBvhBuilder();
+        for (const options of [{}, { triangleLeaves: 'indexed' as const, nodeFormat: 'f32' as const }, { mergeStaticInstances: false }]) {
+            const baked = await bakeMovableScene(defaultScene(), options, tiny);
+            const merge = options.mergeStaticInstances !== false;
+            expect(readSerializedHeader(baked.bytes)).toMatchObject({
+                kind: 'movable-scene',
+                formatVersion: SERIALIZED_MOVABLE_SCENE_FORMAT_VERSION,
+                current: true,
+                meshCount: 4,
+                instanceCount: 6,
+                treeCount: merge ? 1 : 4, // the knot's tree, the others merged away
+                mergedGroupCount: merge ? 1 : 0,
+                geometry: true,
+            });
+            const loaded = deserializeMovableScene(baked.bytes);
+            expect(loaded.instances.filter((instance) => !instance.static).map((instance) => instance.meshIndex)).toEqual(merge ? [0, 0, 0] : [0, 0, 0, 1, 2, 3]);
+            // The scene it describes traces as the snapshot of the same scene does.
+            const a = createCpuTracer(assembleMovableScene(loaded));
+            const b = createCpuTracer((await bakeScene(defaultScene(), options, tiny)).data);
+            for (const ray of rays(400, 9)) expect(a.closest(ray)).toEqual(b.closest(ray));
+        }
     });
 
     it('reads a glTF file into the mesh to bake (an embedded buffer, a node transform applied)', async () => {

@@ -28,8 +28,9 @@
  *   merged (static-merge.ts; nothing else is), and each
  *   group's world-space mesh is built the same way as any mesh (GPU tree first,
  *   tinybvh's from a worker later: the merged Sponza takes 1.5 s, so it never
- *   runs on the main thread). Merged instances never move: moving, hiding,
- *   re-masking or removing one throws.
+ *   runs on the main thread), unless the app gave the groups' trees
+ *   ({@link SceneTrees.placeMergedTrees}: a movable scene file's). Merged
+ *   instances never move: moving, hiding, re-masking or removing one throws.
  *
  * **GPU build outputs** (`gpuTreeOutputs`, the P9 peak-memory lever):
  *
@@ -1822,6 +1823,9 @@ export class SceneTrees {
             this.placeTrees(encoder, arrived);
             this.cpuTopLevelStale = true;
         }
+        // An update that started no build (every tree the app's) has nothing to report later: a whenBuilt waiting since
+        // before it resolves here.
+        this.notifyWaiters();
         // A trim moves trees: after the placements above, before anything below writes into a tree.
         if ((this.trimAsked || this.trimWhenRefined) && this.quiet()) this.trimNodes(encoder);
         // CPU poses, after the trees placed above (their copies and growths are in the encoder before these).
