@@ -76,20 +76,39 @@ The variants' trace speed on the M5 (surface-ray pages, paired rounds with the o
 records): indexed leaves 0.83-0.99x with `vec4` positions and 0.75-0.92x packed; quantized nodes 0.93-0.97x. The 40-byte
 hit record measured 0.96-1.15x the 24-byte one.
 
+## Shader compile time
+
+The first time a page makes a pipeline, the browser compiles its WGSL (on Windows through HLSL and DXC). Measured on
+Windows, Chrome 157, 2026-11-16, each on its own with no shader cache (the `compile-times` GPU page):
+
+| Pipeline | RTX 3060 Laptop | Intel UHD |
+| --- | --- | --- |
+| One trace kernel (`TraceBatchKernel`, `BvhTraceNodes`), closest point or shapecast | 140-250 ms | 115-210 ms |
+| `SdfGenerator` | 0.75 s | 0.7 s |
+| The GPU H-PLOC builder (`SceneTrees.create` compiles it) | 0.33 s | 1.4 s |
+| LBVH, refits, quantizer, GPU top level | 90-340 ms each | 90-420 ms each |
+
+The second time it takes 1-16 ms: Chrome keeps compiled shaders in its cache. So:
+
+- **Create early and don't wait for it in the frame.** Start `SceneTrees.create`, `TraceBatchKernel.create`,
+  `SdfGenerator.create` and the rest at startup, together; they compile in parallel and asynchronously.
+- **Use the async calls.** A pipeline made with `createComputePipeline` (not `...Async`) takes as long, and the GPU
+  queue waits behind it: every frame submitted meanwhile stalls. The library only uses the async form.
+- **Keep the variants few.** Each combination of formats and options (`nodeFormat`, `triangleLeaves`, `rayMasks`,
+  queries, your own filter or shapecast) is its own compile.
+
 ## Not measured yet
 
-- On the RTX 3060: the correctness pages for the 2026-11 work, `SceneTrees` memory and the build-peak cap on D3D12,
-  shader compile times, and quantized nodes and indexed leaves together.
-- `quantizedDecode: 'folded'` (the folded decode of quantized nodes, opt-in) on any GPU: the surface-ray pages time it
-  against the exact decode (`folded_over_exact`); it has only passed the correctness pages on SwiftShader.
-- The Intel UHD has not run the 2026-11 work at all.
-- The comparison suite against three-mesh-bvh and others (`compare/`) has run on the Apple M5 only.
+- On the Apple M5: shader compile times, and indexed leaves on quantized nodes and the folded decode
+  (`quantizedDecode: 'folded'`), both timed on the RTX 3060 only so far.
+- The Intel UHD's speed: it passes every correctness page, and its timings decide nothing.
 
 ## Reproducing
 
 - `pnpm test:gpu:page trace-bench-sponza` (and the other `trace-bench-*` pages, run by exact name) runs a trace bench on
   the machine's GPU. Sponza and Bistro need their assets; see `tests/gpu/README.md`.
 - `pnpm test:gpu:page scene-trees-sponza` reports `SceneTrees` load times and memory.
+- `pnpm test:gpu:page compile-times` times the pipeline compiles (`tests/gpu/README.md`).
 - `node bench/three-raycast.ts`, `bench/query-parity.ts` and `bench/closest-point.ts` run the CPU benches in Node.
 
 ## See also

@@ -1,0 +1,5 @@
+{
+    "description": "How long the package's pipelines take to compile on this GPU (Tint, then the backend's compiler: HLSL and DXC/FXC on D3D12, MSL on Metal): the ray walk's batch kernels (quantized and f32, closest and any, with and without the queries), the closest point, a caller's shapecast, the SDF kernel, the H-PLOC and LBVH builders, the refits, the quantizer, the GPU top level, and BvhTraceNodes in three (a TSL compute kernel and a node material). Each on a fresh device, one at a time; pass 1 is cold (a fresh browser profile), pass 2 warm (the browser's shader cache). Reports only.",
+    "timeoutMs": 600000,
+    "manual": true
+}

@@ -96,7 +96,7 @@ Columns: `date,commit,device,browser,scene,metric,value`. Without `--append` it 
 ## 5. Windows caveats and bench practice
 
 - **`.wasm`:** since 2026-11-14 a Windows build is byte for byte the Linux and macOS one: `-fmacro-prefix-map=.\=./` with `-fno-file-reproducible` gives tinybvh's `__FILE__` the Linux spelling (`./tiny_bvh_base.h`, not `.\tiny_bvh_base.h`), so `pnpm bvh:wasm --check` passes here and a Windows-built `.wasm` may be committed (`docs/internals/design/bvh-builders.md`, "Reproducibility"). `pnpm bvh:wasm` installs the pinned emsdk into `tools/emsdk` (gitignored, about 700 MB) on first use.
-- **D3D12 compile times:** the walks and kernels compile through Dawn to D3D12. Note the time to the first result of each page on a cold run; the pose pass's compile cost on Windows is unmeasured (HANDOFF). `docs/internals/DIVERGENCES.md` row L9 records one D3D12 trap: an atomic load is a read-modify-write there, so many threads reading one word serialise. The `webgpu-tsl-compile` skill covers slow first frames.
+- **D3D12 compile times:** the walks and kernels compile through Dawn to D3D12. The `compile-times` page times them (section 13: 140-250 ms per walk pipeline, the SDF kernel 0.7 s, H-PLOC 0.3 s on the RTX and 1.4 s on the Intel UHD, cold); the pose pass's compile cost on Windows is still unmeasured. `docs/internals/DIVERGENCES.md` row L9 records one D3D12 trap: an atomic load is a read-modify-write there, so many threads reading one word serialise. The `webgpu-tsl-compile` skill covers slow first frames.
 - **Bench lock, loaded GPU:** `docs/internals/design/bvh-package-split.md` (Rules): "Medians of several runs, on the RTX 3060 with the GPU loaded (the hardware rules in `ddgi-hardware-target`)". The M5 numbers were taken "under the radiance-cache lane's bench lock" (HANDOFF). The lock's own rules are not written in this repository (`ddgi-hardware-target` is not here), so: run one bench page at a time and nothing else on the GPU; no `pnpm build` or other work in parallel (the one suspect in the unexplained `scene-trees-mid-swap` failure); same power mode every run; three runs per page, then the median of the paired medians. The Intel UHD is for correctness only, with no speed target (`README.md`). `loaded-timing.ts` submits dispatches back to back so the GPU runs at its loaded clock.
 - **Leftovers:** if the runner was killed with `taskkill`, delete the leftover `bvh-gpu-chrome-*` folder in the temp directory and end any headless `chrome.exe` (`tests/gpu/RUNNER.md`).
 
@@ -245,8 +245,51 @@ The open item of section 11: an instance whose transform is exactly the identity
 | The same mesh merged (`static: true`, its own tree) | 0.97 / 1.25 / 1.08 | 1.07 / 1.04 / 1.04 | no (another tree) |
 | Signed field (closest point and the early-out vote), bit-for-bit form | 1.05 / 0.91 / 0.96 | 0.94 / 0.96 / 0.99 | yes |
 
+**One run on an idle RTX** (after the other suite stopped, 23:40; started at 49 °C, mean SM clock 1,453 MHz, the thermal flag on 33 of 45 samples), ms per field at 128³: the old path 70.4, the bit-for-bit form 76.9, read as merged 58.7, the mesh merged 61.9. Ratios as above, 64³ / 128³: bit for bit 0.93 / 0.95, boxes only 0.95 / 0.95, read as merged 1.17 / 1.22, merged 1.10 / 1.17. The same picture.
+
 An earlier run while the other suite was busiest gave the bit-for-bit box form without its guard 1.02-1.03 and with corners as stored 1.04-1.11: the guard alone turns a small gain into a loss.
 
 **Correctness of the bit-for-bit form, full profile:** `query-oracle`, `sdf-oracle`, `trace-oracle`, `trace-inline`, `three-shapecast` and `three-trace` passed on the RTX and the Intel UHD, and the CI job's seven pages on SwiftShader (`profile=ci`). `query-oracle` ran every query a second time with the form taken out and compared every answer word plus a hash of every box and corner the shapecast hook is handed: 234,000 queries per GPU (13 cases, 9 variants, 2,000 points), 0 differ on either GPU (23,400 on SwiftShader). Its new case, a floor at `y = 0` with `+0`, `-0` and exact zeros and some subnormal corners, showed why the guard is needed: without it the Intel UHD gave `-0` normals where the matrix gives `+0` (`normal.z` 0x80000000 against 0) and other box and corner hashes. On SwiftShader `query-oracle` with the second dispatch took 197 s (compiles 73 s) under the same load.
 
 **Decision left to Dennis:** nothing changed in the walk. The bit-for-bit form is slower, so it is not a lever. The form that is faster (about 18%) changes which of two equally near triangles a closest point names, so it would need an opt-in option on every module that compiles queries (`traceModuleWgsl`, `closestPointKernelWgsl` / `ClosestPointBatchKernel`, `sdfKernelWgsl` / `SdfGenerator`, `BvhTraceNodes`). `static: true` (merged) already gets that path. Kept: the `zeros-and-subnormals` case in `query-oracle` (after the undo `query-oracle` passed again: RTX and Intel UHD full profile, SwiftShader `profile=ci`; `compare-sdf` smoke passed on the RTX), and `compare/sdf`'s `closest-identity-as-merged` breakdown kernel (a text patch, not the library) with `?only=`.
+
+## 13. D3D12 compile times: RTX 3060 Laptop and Intel UHD, 2026-11-16
+
+The new manual page `compile-times` (`tests/gpu/pages/compile-times`, reports only) times the package's pipeline compiles: each item on a fresh device, one at a time, from the first `createShaderModule` to the last pipeline promise (the library's own `prepare()` / `create()` where it has one, its pipelines asked for together). Chrome 157.0.8103.51 headless, D3D12 (WGSL through Tint to HLSL, then DXC and the driver). The machine was idle (the other project's suite had stopped); compiles run on the CPU (an i9-11900H) as much as the GPU, and nothing else ran. Files in `bench/runs/2026-11-16-compile/` (local).
+
+```
+BVH_PAGE_QUERY='items=hploc' pnpm test:gpu:page compile-times --gpu nvidia     # one item alone: pass 1 cold, pass 2 warm
+BVH_PAGE_QUERY='items=sdf&nonce' pnpm test:gpu:page compile-times --gpu intel  # the walk's code new to the driver's cache too
+```
+
+**Each item alone in a fresh Chrome profile** (the runner makes one per run), ms. Cold is pass 1 (no browser shader cache); warm is pass 2 on a new device in the same browser (Chrome's shader cache answers). "Nudged" changes one constant of the walk's modules (`?nonce`) so the compiled code is new to the driver's own cache as well: a user's true first launch.
+
+| Item | RTX cold / warm | RTX nudged | Intel cold / warm | Intel nudged |
+| --- | --- | --- | --- | --- |
+| ray walk, closest-hit batch kernel, quantized (default) | 180 / 7 | 195 | 140 / 2 | 133 |
+| the same, `f32` nodes | 167 / 6 | 174 | 131 / 2 | 125 |
+| any-hit batch kernel, quantized | 138 / 2 | 172 | 115 / 2 | 112 |
+| closest hit, quantized, indexed leaves | 195 / 2 | | 147 / 3 | |
+| closest hit in a module with `queries: true` (unused) | 200 / 3 | | 147 / 3 | |
+| closest hit with `createComputePipeline` (sync), to `onSubmittedWorkDone` | 169 / 6 | | 137 / 2 | |
+| `TraceBatchKernel.create()` (closest and any together) | 205 / 2 | | 142 / 3 | |
+| `ClosestPointBatchKernel.create()`, quantized / `f32` | 245 / 3, 238 / 3 | 247 | 206 / 3, 199 / 3 | 202 |
+| a caller's shapecast (`shapecast: hooks`) | 174 / 9 | 188 | 187 / 2 | 136 |
+| `SdfGenerator.create()` | **768** / 3 | 749 | **688** / 4 | 594 |
+| `GpuHplocBuilder.prepare()` (with its radix sort and scan) | 331 / 12 | | **1,393** / 7 | |
+| `GpuLbvhBuilder.prepare()` | 341 / 11 | | 419 / 4 | |
+| `GpuBvhRefitKernels.prepare()` | 106 / 1 | | 138 / 1 | |
+| `GpuMeshRefitKernels.prepare()` (and the refit) | 112 / 1 | | 149 / 2 | |
+| `GpuNodeQuantizer.create()` | 89 / 1 | | 86 / 1 | |
+| `GpuTopLevel.prepare()` | 115 / 4 | | 140 / 4 | |
+| `BvhTraceNodes` in a TSL compute kernel (`traceClosest`), first dispatch less the second | 181 / 4 | 147 | 194 / 5 | 170 |
+| `BvhTraceNodes` in a node material (`traceAny`), `renderer.compileAsync` | 185 / 7 | 183 | 210 / 16 | 264 |
+
+Reading it:
+- **One walk pipeline costs 140-250 ms cold on either GPU; the SDF kernel 0.6-0.8 s** (it holds the closest point and three crossing walks); H-PLOC's `prepare()` 0.33 s on the RTX and **1.4 s on the Intel UHD**. `SceneTrees.create` compiles H-PLOC, the quantizer, the top level and the refits (in parallel); a page that also traces, queries and makes an SDF adds about 0.2 s per kernel and 0.7 s for the SDF.
+- **Warm is 1-16 ms.** Chrome's shader cache answers across devices in one browser, and the default profile keeps it on disk for the next visit (Chrome's GPU shader disk cache; not timed across a browser restart here, since the runner makes a fresh profile each run). With `--disable-gpu-shader-disk-cache` pass 2 was still 1-23 ms: the GPU process keeps its cache in memory for the session.
+- **The driver's own cache saves little:** nudged code (new to every cache) compiled within about 10% of the cold times on both GPUs, mostly within the run-to-run spread, so the cold column is close to a user's first launch.
+- **A synchronous pipeline costs the same time but stalls the queue:** `createComputePipeline` returned at once, and the next `onSubmittedWorkDone` came 169 ms later (RTX); any frame submitted behind it waits that long. The library makes every pipeline with `createComputePipelineAsync`.
+- Items share code: run together in one profile (`pass 1` of an all-items run), later items are partly warm (the mesh refit after the refit 31 ms, the top level 41, a second closest-hit kernel 3-11), so the table times each alone.
+
+Not covered: the Apple M5 (the page runs there as is), a cold start across a browser restart with the disk cache kept, `three-skinned`'s pose pass.
