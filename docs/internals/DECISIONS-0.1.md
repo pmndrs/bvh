@@ -17,10 +17,12 @@ format or a public type that people will build on; defaults and additive options
 **Decided by Dennis, 2026-11-16:** every recommendation below is taken, with three notes.
 
 - **1:** keep `'parity'`, but find out why three-mesh-bvh's SDF was 1.7-2.8x faster on SwiftShader and measure it on the
-  RTX (in progress).
+  RTX. Done: 1.3-1.5x on the RTX, all of it the sign; now 1.2-1.3x, plus an opt-in `'first-hit'` sign as fast as
+  three-mesh-bvh's (`docs/tracing/sdf.mdx`, "Speed").
 - **3a:** keep both formats, and document that `MeshBVH.deserialize` taking our bytes may be removed later (done: the
   JSDoc, `docs/three/bounds-tree.mdx` and the serialization page say so).
-- **4a:** keep the snapshot, and add movable scene files as an option, with the scenarios written down (in progress).
+- **4a:** keep the snapshot, and add movable scene files as an option, with the scenarios written down. Done:
+  `'PBVM'` files and "Which file?" in `docs/serialization/serialization-and-baking.mdx`.
 - **5:** points and lines stay CPU-only for 0.1.0; Dennis sees them as a weakness to come back to.
 - **7:** ship with `'records'` and `'exact'`. The README sample now passes the scene's formats to `traceModuleWgsl`, so
   code copied from it keeps matching if a default flips.

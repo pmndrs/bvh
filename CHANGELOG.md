@@ -14,11 +14,16 @@ shared GPU layout, and a WGSL walk and its CPU port trace it.
   a worker pool. The top level is built on the GPU, and meshes and instances can come and go. GPU refits handle moving
   instances and skinned or morphed meshes. Big meshes can be cut into clusters.
 - **Tracing and queries:** the WGSL walk handles closest and any hits, with masks and a triangle filter, and ray
-  batches. GPU closest point, sphere and box tests and your own shapecast. Signed distance fields filled on the GPU.
+  batches. GPU closest point, sphere and box tests and your own shapecast. Signed distance fields filled on the GPU;
+  the default sign is a ray vote that is right for any closed mesh, and `sign: 'first-hit'` is three-mesh-bvh's faster
+  one-ray sign for closed, outward-wound meshes. On the RTX 3060 our SDF is 1.2-1.3x three-mesh-bvh's time on a 100k
+  mesh with the vote and the same with first-hit.
 - **CPU queries:** raycast, shapecast, `bvhcast`, closest point and frustum culling, with three-mesh-bvh's contracts,
   and trees over points and lines.
 - **Serialization and baking:** build trees or whole scenes once, in Node or at build time, and load them later with
-  no build.
+  no build. A scene file is either a snapshot (the top level baked too, loads as a copy) or movable (mesh trees, the
+  merged static groups' trees and the instances; it loads into `SceneTrees` with no tree built, and its instances can
+  move). `pnpm examples:bake --scene [--movable]` bakes either.
 - **three.js** (`@pmndrs/bvh/three`, three 0.187): scenes from `Object3D`, GPU skinning, `BvhTraceNodes` for TSL, and
   three-mesh-bvh's CPU API as drop-ins. Against three-mesh-bvh 0.9.18: 45 features matched, 2 partly, 5 left out on
   purpose (`docs/internals/PARITY.md`).
