@@ -218,9 +218,9 @@ overlay.range('slice height', 0, 1, 0.01, params.slice, (value) => {
 });
 overlay.range('resolution', 16, 160, 8, params.resolution, (value) => (params.resolution = value));
 overlay.range('margin', 0, 0.3, 0.01, params.margin, (value) => (params.margin = value));
-overlay.select('sign', ['parity', 'winding', 'unsigned'] as const, params.sign, (value) => (params.sign = value));
+overlay.select('sign', ['parity', 'winding', 'first-hit', 'unsigned'] as const, params.sign, (value) => (params.sign = value));
 overlay.button('regenerate', () => void generate());
-overlay.note('The field is generated on the GPU from the same trees the walk traces. Parity: an odd number of crossings is inside; winding: a non-zero signed sum (overlapping parts stay solid).');
+overlay.note('The field is generated on the GPU from the same trees the walk traces. Parity: an odd number of crossings is inside; winding: a non-zero signed sum (overlapping parts stay solid); first hit: the side of the first triangle one ray hits (cheaper, closed meshes only).');
 
 enableDrop(
     (model: LoadedModel) => useScene(model.root, model.name),

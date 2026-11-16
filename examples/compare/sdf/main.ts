@@ -6,11 +6,19 @@
  *
  * The kernels do different work per voxel: both find the closest point; for
  * the sign theirs casts one first-hit ray along +Z and takes the side it hits,
- * ours casts three all-hit rays and takes a parity vote (robust to a ray
- * through an edge or a hole). `ours-unsigned` is the closest point alone, the
- * floor of either. Distances must agree; signs are compared and reported.
+ * ours (the default, parity) casts two or three all-hit rays and takes a vote
+ * (robust to a ray through an edge or a hole). `ours-first-hit` is our opt-in
+ * `sign: 'first-hit'`, their way on our walk; `ours-unsigned` is the closest
+ * point alone, the floor of either. Distances must agree; signs are compared
+ * and reported.
  * What else: the field of the scene's GPU-built tree (SceneTrees), filled into
  * a three texture by `generateSdfTexture` and shown as a slice.
+ *
+ * Options: `?dims=32,64` (the resolutions), `?repeat=N` (N dispatches back to
+ * back per timing, their mean: the GPU at its loaded clock; default 1, one
+ * waited-for dispatch), `?breakdown` (each part of either kernel on its own, and
+ * other ways to sign, `OURS_BREAKDOWN` in compare/gpu/gpu-sdf.ts; the kernels
+ * that must give a library field bit for bit are checked).
  */
 
 import { BufferAttribute, BufferGeometry, DoubleSide, Group, Mesh, MeshStandardMaterial, PlaneGeometry, Vector3 } from 'three';
@@ -21,7 +29,7 @@ import { generateSdfTexture, SceneTreesObject3DSync } from '@pmndrs/bvh/three';
 import { emptyAgreement, type Agreement } from '../../../compare/core/agree.ts';
 import { median, yieldNow } from '../../../compare/core/measure.ts';
 import type { Measurement } from '../../../compare/core/suites.ts';
-import { createOursSdf, createTmbvhSdf, sdfBox, weldedAndCentred, type GpuSdf } from '../../../compare/gpu/gpu-sdf.ts';
+import { createOursBreakdownSdf, createOursSdf, createTmbvhSdf, OURS_BREAKDOWN, sdfBox, weldedAndCentred, type GpuSdf, type OursBreakdown } from '../../../compare/gpu/gpu-sdf.ts';
 import { frameObject } from '../../shared/loader.ts';
 import { createComparePage, expectAgreement, quick } from '../../shared/compare.ts';
 import { ready } from '../../shared/smoke.ts';
@@ -37,11 +45,42 @@ const log = (line: string) => panel.status(line);
 const mesh = weldedAndCentred(geometry);
 const box = sdfBox(mesh.positions, 0.05);
 const scale = Math.hypot(box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]);
-const resolutions = quick ? [32] : [32, 64, 128];
+const query = new URLSearchParams(location.search);
+const resolutions = query.get('dims')?.split(',').map(Number) ?? (quick ? [32] : [32, 64, 128]);
 const rounds = quick ? 2 : 5;
 const perRound = quick ? 2 : 5;
+const repeat = Math.max(1, Number(query.get('repeat')) || 1);
+const breakdown = query.has('breakdown');
 
-const generators: GpuSdf[] = [await createOursSdf(app.device, mesh, box, 'parity'), await createOursSdf(app.device, mesh, box, 'unsigned'), await createTmbvhSdf(app.renderer, mesh, box)];
+const generators: GpuSdf[] = [
+    await createOursSdf(app.device, mesh, box, 'parity'),
+    await createOursSdf(app.device, mesh, box, 'first-hit'),
+    await createOursSdf(app.device, mesh, box, 'unsigned'),
+    await createTmbvhSdf(app.renderer, mesh, box),
+];
+if (breakdown) {
+    generators.push(await createOursSdf(app.device, mesh, box, 'winding'));
+    for (const variant of Object.keys(OURS_BREAKDOWN) as OursBreakdown[]) generators.push(await createOursBreakdownSdf(app.device, mesh, box, variant));
+    generators.push(await createOursBreakdownSdf(app.device, mesh, box, 'votes-all', 'winding'), await createOursBreakdownSdf(app.device, mesh, box, 'votes-early', 'winding'));
+    generators.push(await createTmbvhSdf(app.renderer, mesh, box, 'closest'), await createTmbvhSdf(app.renderer, mesh, box, 'ray'));
+}
+/** Breakdown kernels that must give another field bit for bit: [kernel, the field it must equal]. */
+const identical: readonly (readonly [string, string])[] = breakdown
+    ? [
+          ['ours-votes-all', 'ours'],
+          ['ours-votes-early', 'ours'],
+          ['ours-no-winding', 'ours'],
+          ['ours-votes-early-merged', 'ours'],
+          ['ours-closest', 'ours-unsigned'],
+          ['ours-closest-merged', 'ours-unsigned'],
+          ['ours-first-hit-bounded', 'ours-first-hit'],
+          ['ours-votes-all-winding', 'ours-winding'],
+          ['ours-votes-early-winding', 'ours-winding'],
+      ]
+    : [];
+/** Kernels whose field is not an SDF to compare with ours (the parts alone). */
+const partsOnly = new Set(['ours-rays3', 'ours-rays-early', 'ours-ray1', 'ours-first-hit-only', 'tmbvh-ray']);
+const bitFailures: string[] = [];
 log(`${sceneName}: ${(mesh.positions.length / 3).toLocaleString('en-US')} welded vertices; box ${box.min.map((v) => v.toFixed(2)).join(', ')} to ${box.max.map((v) => v.toFixed(2)).join(', ')}`);
 
 /** Distances (|value|) within float tolerance; signs where ours is farther than 1e-4 of the box from the surface. */
@@ -71,13 +110,13 @@ function compareFields(ours: Float32Array, theirs: Float32Array): { distance: Ag
 const all: Measurement[] = [];
 for (const dim of resolutions) {
     // Warm up (compiles, allocates the texture), then rounds with the order reversed every other round.
-    for (const generator of generators) await generator.generate(dim);
+    for (const generator of generators) await generator.generate(dim, repeat);
     const times = new Map<string, number[]>();
     for (let round = 0; round < rounds; round++) {
         const who = round % 2 === 1 ? [...generators].reverse() : generators;
         for (const generator of who) {
             const samples: number[] = [];
-            for (let i = 0; i < perRound; i++) samples.push(await generator.generate(dim));
+            for (let i = 0; i < perRound; i++) samples.push(await generator.generate(dim, repeat));
             times.set(generator.id, [...(times.get(generator.id) ?? []), median(samples)]);
         }
         await yieldNow();
@@ -85,9 +124,17 @@ for (const dim of resolutions) {
     const fields = new Map<string, Float32Array>();
     for (const generator of generators) fields.set(generator.id, await generator.read());
     const ours = fields.get('ours')!;
+    for (const [kernel, library] of identical) {
+        const a = new Uint32Array(fields.get(kernel)!.buffer);
+        const b = new Uint32Array(fields.get(library)!.buffer);
+        let differ = 0;
+        for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) differ++;
+        log(`${kernel} against ${library} ${dim}³: ${differ ? `${differ} voxels differ` : 'bit for bit'}`);
+        if (differ) bitFailures.push(`${kernel} against ${library} at ${dim}³: ${differ} voxels differ`);
+    }
     const voxels = dim ** 3;
     for (const generator of generators) {
-        const { distance, sign } = generator.id === 'ours' ? { distance: undefined, sign: undefined } : compareFields(ours, fields.get(generator.id)!);
+        const { distance, sign } = generator.id === 'ours' || partsOnly.has(generator.id) ? { distance: undefined, sign: undefined } : compareFields(ours, fields.get(generator.id)!);
         const ms = median(times.get(generator.id)!);
         const method = `${dim}³ voxels; per round the median of ${perRound} generations after a warm-up (${generator.timing}); median of ${rounds} rounds, the order reversed every other round`;
         all.push({ page: 'sdf', scene: sceneName, library: generator.id, metric: `build/${dim}`, value: ms, unit: 'ms', method, agreement: distance, ranked: !distance || distance.disagree === 0 });
@@ -98,26 +145,31 @@ for (const dim of resolutions) {
         log(`${generator.id} ${dim}³: ${ms.toFixed(2)} ms${distance ? `; distances ${distance.disagree} of ${distance.checked} disagree` : ''}${signed ? `, signs ${sign.disagree} of ${sign.checked} differ` : ''}`);
     }
     const theirs = times.get('tmbvh')!;
-    for (const id of ['ours', 'ours-unsigned'] as const) {
+    for (const id of generators.map((g) => g.id).filter((id) => id.startsWith('ours'))) {
         const a = times.get(id)!;
         const ratios = a.map((time, i) => theirs[i] / time);
-        all.push({ page: 'sdf', scene: sceneName, library: `${id}-over-tmbvh`, metric: `build/${dim}/ratio`, value: median(ratios), unit: 'ratio', method: `three-mesh-bvh's time over ${id === 'ours' ? 'ours' : 'ours unsigned'} within each round (above 1: ours faster), median of ${rounds} rounds (min ${Math.min(...ratios).toFixed(2)}, max ${Math.max(...ratios).toFixed(2)})`, ranked: true });
+        all.push({ page: 'sdf', scene: sceneName, library: `${id}-over-tmbvh`, metric: `build/${dim}/ratio`, value: median(ratios), unit: 'ratio', method: `three-mesh-bvh's time over ${id} within each round (above 1: ours faster), median of ${rounds} rounds (min ${Math.min(...ratios).toFixed(2)}, max ${Math.max(...ratios).toFixed(2)})`, ranked: true });
+        if (breakdown) log(`ratio tmbvh/${id} ${dim}³: ${median(ratios).toFixed(3)} (min ${Math.min(...ratios).toFixed(2)}, max ${Math.max(...ratios).toFixed(2)})`);
     }
 }
 
-const names = {
-    ours: '@pmndrs/bvh (parity, 3 rays)',
+const names: Record<string, string> = {
+    ours: '@pmndrs/bvh (parity vote)',
+    'ours-first-hit': '@pmndrs/bvh (first hit, 1 ray)',
     'ours-unsigned': '@pmndrs/bvh (unsigned)',
     tmbvh: 'three-mesh-bvh/webgpu (1 ray, side)',
     'ours-over-tmbvh': 'theirs / ours, paired',
     'ours-unsigned-over-tmbvh': 'theirs / ours unsigned, paired',
+    'ours-first-hit-over-tmbvh': 'theirs / ours first hit, paired',
 };
+for (const generator of generators) names[generator.id] ??= generator.name;
+for (const generator of generators) names[`${generator.id}-over-tmbvh`] ??= `theirs / ${generator.id}, paired`;
 panel.table('SDF build time', all, resolutions.map((dim) => `build/${dim}`), names);
 panel.table('Voxels per second', all, resolutions.map((dim) => `voxels/s/${dim}`), names);
 panel.table('Paired ratio (median of rounds; above 1: ours faster)', all, resolutions.map((dim) => `build/${dim}/ratio`), names);
 panel.table('Signs equal to ours (away from the surface)', all, resolutions.map((dim) => `sign/${dim}`), names);
 panel.paragraph(
-    `Timing: ${generators.map((g) => `${g.name}: ${g.timing}`).join('; ')}. Per voxel, three-mesh-bvh walks the tree twice (closest point, one first-hit ray), ours four times (closest point, three all-hit rays that cannot stop early); the unsigned row is the closest point alone. A sign that differs is a voxel where one ray along +Z and a vote of three rays disagree: an edge, a seam or an open part.`,
+    `Timing: ${generators.map((g) => `${g.name}: ${g.timing}`).join('; ')}. Per voxel, three-mesh-bvh walks the tree twice (closest point, one first-hit ray), ours three or four times by default (closest point, then two all-hit rays that cannot stop early, and a third when those two disagree); sign 'first-hit' walks it twice, as theirs; the unsigned row is the closest point alone. A sign that differs is a voxel where one ray and a vote of three rays disagree: an edge, a seam or an open part.`,
 );
 
 // What else: the scene's GPU-built tree (SceneTrees' H-PLOC first tree) fills a three texture directly, shown as a slice.
@@ -171,6 +223,7 @@ panel.csv(app.device);
 // The smoke check: distances agree everywhere (three-mesh-bvh's and our unsigned field), and the SceneTrees field agrees with ours.
 const distances = all.filter((m) => m.metric.startsWith('build/') && !m.metric.endsWith('/ratio'));
 const checked = expectAgreement(distances, ['tmbvh', 'ours-unsigned'], log);
+if (bitFailures.length) throw new Error(`breakdown kernels differ from the library's fields: ${bitFailures.join('; ')}`);
 if (treeAgreement.distance.disagree) throw new Error(`the SceneTrees field disagrees with the tinybvh tree's on ${treeAgreement.distance.disagree} voxels`);
 for (const generator of generators) generator.dispose();
 let frames = 0;

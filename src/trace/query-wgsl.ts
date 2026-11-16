@@ -557,12 +557,28 @@ ${insideTestWgsl(rayMasks)}`;
  * in both, so a ray cannot slip through a shared edge; a ray exactly on an
  * edge counts both triangles (the walk's rule), which the vote of three rays
  * outweighs.
+ *
+ * `bvhIsInside` and `bvhIsInsideByRule` (the SDF kernel's sign) cast the third
+ * ray only when the first two disagree: the same answer as the majority of
+ * all three, a third fewer walks where the first two agree (most points; on
+ * the RTX 3060 it took the signed SDF 8% faster, docs/tracing/sdf.mdx, "Speed").
+ * To undo it, return `bvhInsideVotes(point)` by the rule `>= BVH_INSIDE_MAJORITY`
+ * from `bvhIsInsideByRule`, as before 2026-11-16.
  */
 function insideTestWgsl(rayMasks: boolean): string {
     const [d0, d1, d2] = INSIDE_TEST_DIRECTIONS.map(wgslVec3);
     const votes = (masked: boolean) => {
         const call = (direction: string) => `bvhInsideVote(bvhRayCrossings${masked ? 'Masked' : ''}(point, ${direction}${masked ? ', mask' : ''}))`;
         return `${call('BVH_INSIDE_DIRECTION_0')}\n        + ${call('BVH_INSIDE_DIRECTION_1')}\n        + ${call('BVH_INSIDE_DIRECTION_2')}`;
+    };
+    // The majority of three by one rule, the third ray only on a split.
+    const majority = (masked: boolean) => {
+        const vote = (direction: string) => `bvhInsideRuleVote(bvhRayCrossings${masked ? 'Masked' : ''}(point, ${direction}${masked ? ', mask' : ''}), winding)`;
+        return `let first = ${vote('BVH_INSIDE_DIRECTION_0')};
+    if (first == ${vote('BVH_INSIDE_DIRECTION_1')}) {
+        return first;
+    }
+    return ${vote('BVH_INSIDE_DIRECTION_2')};`;
     };
     const maskedForms = rayMasks
         ? `
@@ -572,9 +588,14 @@ fn bvhInsideVotesMasked(point: vec3f, mask: u32) -> vec2u {
     return ${votes(true)};
 }
 
+// As bvhIsInsideByRule, over the instances whose mask shares a bit with 'mask'.
+fn bvhIsInsideByRuleMasked(point: vec3f, winding: bool, mask: u32) -> bool {
+    ${majority(true)}
+}
+
 // As bvhIsInside, over the instances whose mask shares a bit with 'mask'.
 fn bvhIsInsideMasked(point: vec3f, mask: u32) -> bool {
-    return bvhInsideVotesMasked(point, mask).x >= BVH_INSIDE_MAJORITY;
+    return bvhIsInsideByRuleMasked(point, false, mask);
 }`
         : '';
     return /* wgsl */ `
@@ -633,16 +654,28 @@ fn bvhInsideVote(crossings: BvhRayCrossings) -> vec2u {
     return vec2u(crossings.count & 1u, select(0u, 1u, crossings.winding != 0));
 }
 
+// One ray's vote by one rule: odd crossings (parity), or a non-zero winding.
+fn bvhInsideRuleVote(crossings: BvhRayCrossings, winding: bool) -> bool {
+    return select((crossings.count & 1u) == 1u, crossings.winding != 0, winding);
+}
+
 // The inside test's votes for 'point' over its three rays: x by parity, y by winding
 // (each 0 to 3; 2 or more is inside). Three full ray walks.
 fn bvhInsideVotes(point: vec3f) -> vec2u {
     return ${votes(false)};
 }
 
+// Whether at least two of the three rays vote 'point' inside, by the winding rule when
+// 'winding', else by parity: bvhInsideVotes(point) by that rule >= 2u, but the third ray
+// is cast only when the first two disagree (two walks for most points, three at most).
+fn bvhIsInsideByRule(point: vec3f, winding: bool) -> bool {
+    ${majority(false)}
+}
+
 // Whether 'point' is inside the scene's closed surfaces: odd crossings on at least two of
-// three rays (parity; bvhInsideVotes(point).y >= 2u for the winding rule).
+// three rays (parity; bvhIsInsideByRule(point, true) for the winding rule).
 fn bvhIsInside(point: vec3f) -> bool {
-    return bvhInsideVotes(point).x >= BVH_INSIDE_MAJORITY;
+    return bvhIsInsideByRule(point, false);
 }${maskedForms}
 `;
 }

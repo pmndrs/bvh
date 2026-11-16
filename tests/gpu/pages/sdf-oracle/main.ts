@@ -1,6 +1,6 @@
 /**
  * SDF oracle: the GPU field (`SdfGenerator`: `bvhClosestPoint` and the inside
- * test's `bvhInsideVotes` per voxel; PARITY 8.10) against the CPU reference
+ * test's `bvhIsInsideByRule` per voxel; PARITY 8.10) against the CPU reference
  * (`generateSdfCpu` over `CpuMeshBvh` trees), voxel for voxel.
  *
  * **Scenes** (instances under rotations, non-uniform scales and a mirror):
@@ -11,7 +11,8 @@
  *   votes decide, and must decide the same on both sides).
  *
  * **Reference.** Each kept instance's mesh is moved to world space (in doubles,
- * rounded once to f32, vertices shared as in the mesh) and built as its own
+ * rounded once to f32, vertices shared as in the mesh; a mirrored instance's
+ * triangles wound back to their authored front) and built as its own
  * `CpuMeshBvh`; `generateSdfCpu` takes them as one scene. The GPU walks the
  * real scene in every node and triangle format (`f32`/`quantized`,
  * records/indexed/packed, merged), and with masks compiled out.
@@ -26,7 +27,8 @@
  *   so one ray decided differently at an edge (doubles against f32) may flip a
  *   vote: at most `OPEN_SIGN_SHARE` of its voxels may differ, reported;
  * - both rules (`parity`, `winding`), `unsigned`, a `maxDistance` band, and a mask
- *   that leaves instances out;
+ *   that leaves instances out; `first-hit` (one ray, the side it hits) on the
+ *   solids only, the one scene it is meant for;
  * - the buffer output and the texture output of the same field: bit for bit.
  *
  * `?profile=ci` (SwiftShader, `BVH_PAGE_QUERY=profile=ci`): every variant and
@@ -167,7 +169,12 @@ function worldTrees(sdfCase: SdfCase, tiny: TinyBvhBuilder, mask?: number): CpuM
                 const x = mesh.positions[v * 3], y = mesh.positions[v * 3 + 1], z = mesh.positions[v * 3 + 2];
                 for (let k = 0; k < 3; k++) positions[v * 3 + k] = e[k] * x + e[4 + k] * y + e[8 + k] * z + e[12 + k];
             }
-            return CpuMeshBvh.build({ positions, indices: mesh.indices ?? undefined }, tiny);
+            // A mirrored instance's world triangles wind the other way: wind them back, so their front is the
+            // authored front, as the GPU's frontFace and winding read it (it matters for first-hit and winding).
+            const det = e[0] * (e[5] * e[10] - e[6] * e[9]) - e[4] * (e[1] * e[10] - e[2] * e[9]) + e[8] * (e[1] * e[6] - e[2] * e[5]);
+            const indices = mesh.indices ? Uint32Array.from(mesh.indices) : Uint32Array.from({ length: mesh.positions.length / 3 }, (_, i) => i);
+            if (det < 0) for (let t = 0; t < indices.length; t += 3) [indices[t + 1], indices[t + 2]] = [indices[t + 2], indices[t + 1]];
+            return CpuMeshBvh.build({ positions, indices }, tiny);
         });
 }
 
@@ -267,6 +274,8 @@ await runGpuTest(async ({ device, log }) => {
                 { label: 'parity', options: { sign: 'parity' } },
                 { label: 'winding', options: { sign: 'winding' } },
             ];
+            // The first-hit sign is right only for closed surfaces apart (docs/tracing/sdf.mdx): the solids.
+            if (sdfCase.name === 'solids') runs.push({ label: 'first-hit', options: { sign: 'first-hit' } });
             if (variant === VARIANTS[0]) {
                 runs.push({ label: 'unsigned', options: { sign: 'unsigned' } });
                 runs.push({ label: 'band 0.3', options: { maxDistance: 0.3 } });

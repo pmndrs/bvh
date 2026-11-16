@@ -207,3 +207,24 @@ Section 3's lever variants by name and `bvh-hploc-profile`, one run each, RTX id
 `bvh-hploc-profile` (Sponza, 132 meshes, one batch): the `f32` build plus the quantize pass 41.6 ms (the pass 0.9), the quantized emit 35.1 ms; node bytes during the build 464.1 to 183.8 MB.
 
 Reading it: the emit builds the same nodes (`bvh-hploc` checks word for word; it passed on both GPUs in section 9) about 16% faster and takes 175 MB off an uncapped peak; at the default cap the peak is the same. Quantized nodes with indexed leaves settle at 236.4 MB against 366.5 with records (uncapped, like for like): the 130 MB the `triangleLeaves` default weighs against section 8's 5-17%. Single-run times vary as much as the differences here (section 9's two identical capped copy rows: first trees 471 and 256 ms), so the first-trees column decides nothing.
+
+## 11. SDF against three-mesh-bvh: RTX 3060 Laptop, 2026-11-16 (commit `6e05ea9`)
+
+`compare/sdf` (`pnpm examples:smoke --filter compare-sdf --gpu nvidia`, `BVH_PAGE_QUERY='full&repeat=4'`, 5 paired rounds; `&knot=2000,250` for the 1M knot, `&breakdown` for each kernel part alone). Headless Chrome 157, D3D12. The GPU ran hot (80-88 °C, Windows' software thermal slowdown active), so the milliseconds drift between runs; the paired ratios hold. Files in `bench/runs/2026-11-16-sdf/` (local).
+
+**Paired ratio, three-mesh-bvh's time over ours** (above 1: ours faster; median of each run's median of rounds, range over runs):
+
+| Ours | 100k knot, 32³ / 64³ / 128³ (3 runs) | 1M knot, 32³ / 64³ / 128³ (2 runs) |
+| --- | --- | --- |
+| parity, before (all three rays) | 0.75 / 0.69 / 0.69 (0.66-0.77) | 1.03 / 0.76 (one breakdown run, 32³ / 64³) |
+| parity, now (third ray on a split) | 0.83 / 0.76 / 0.77 (0.71-0.87) | 1.05 / 0.94 / 0.89 (0.82-1.06) |
+| `sign: 'first-hit'` | 0.95 / 0.98 / 0.99 (0.90-1.07) | 1.13 / 1.17 / 1.04 (1.01-1.20) |
+| unsigned | 1.02 / 1.07 / 1.09 (1.00-1.15) | 1.15 / 1.13 / 1.06 (1.03-1.22) |
+
+**Breakdown, 100k knot, 128³** (the coolest run, ms per field, back to back): closest point alone 76.8 (theirs 73.4); our three all-hit rays alone 40.5, two-or-three 27.0, one 12.6; our first-hit ray 5.1, theirs 3.8. Whole fields: three rays 112.7, two-or-three 103.5, first-hit 81.3, theirs 79.2. The winding sum costs nothing (113.9 without it). On a merged scene (no per-box instance transform) the closest point takes 63.6 (17% less), the default field 87.4. Seeding the closest point with the first hit's distance saved nothing (143.4 against 144.4).
+
+Reading it: the closest point costs the same in both; the gap is the sign. An all-hit ray costs about 2.5 first-hit rays, and the vote needs two or three. On the 1M knot the closest point dominates and the libraries are level. The 1.7-2.8x on SwiftShader does not carry over to the RTX (1.3-1.5x before this run, 1.2-1.3x now). Every breakdown kernel that should equal a library field did, bit for bit, at every size on both knots (the early-out vote against all three rays, parity and winding).
+
+Correctness: `sdf-oracle` passed on the RTX (full profile, with the new first-hit runs) and on SwiftShader (`profile=ci`); `three-sdf` and `compare-sdf` smoke passed on the RTX; `pnpm test` 854 passed.
+
+Not done: the M5; an exact-identity fast path in the shapecast walk (an instance whose transform is the identity could skip the per-box transform as merged trees do: the measured 17% on the closest point), which touches every query and wants the query oracles on both GPUs first.

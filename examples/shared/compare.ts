@@ -4,7 +4,7 @@
  * measurement tables (the same suites the Node runner runs, compare/core/),
  * a "what else you can do" note, and CSV rows to copy.
  *
- * Scenes: `?scene=torus-knot` (default, 100k triangles), `?scene=furnished-room`,
+ * Scenes: `?scene=torus-knot` (default, 100k triangles; `?knot=2000,250` for 1M), `?scene=furnished-room`,
  * `?scene=sponza` (from the assets base, see examples/README.md), or `?model=`
  * a glTF; the model's meshes are merged into one world-space mesh, as the Node
  * runner merges a scene. Smoke runs and `?quick` use a 20k-triangle knot and
@@ -164,7 +164,9 @@ async function loadGeometry(): Promise<{ geometry: CompareGeometry; name: string
     const model = params.get('model');
     const paths = model ? [model] : scene && SCENE_MODELS[scene] ? SCENE_MODELS[scene] : null;
     if (!paths) {
-        const knot = quick ? torusKnot(200, 50) : torusKnot();
+        // `?knot=tubular,radial` for another knot (2 x tubular x radial triangles; the default 1000,50).
+        const [tubular, radial] = (params.get('knot') ?? '').split(',').map(Number);
+        const knot = tubular > 0 && radial > 0 ? torusKnot(tubular, radial) : quick ? torusKnot(200, 50) : torusKnot();
         return { geometry: { ...knot, name: 'torus-knot' }, name: knot.name };
     }
     const parts = [];
