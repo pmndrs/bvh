@@ -1,19 +1,36 @@
 ---
 title: Serialization and baking
-description: Build trees or whole scenes once (in Node, at build time), save the bytes, check them, and load them later with no build at all.
+description: Build trees or whole scenes once (in Node, at build time), save the bytes, check them, and load them later with no build at all. Scenes whose instances move have a file of their own.
 nav: 75
 sourcecode: src/serialize.ts
 ---
 
-Two kinds of file, one header:
+Three kinds of file, one header:
 
 - **A tree:** `serializeLayout(layout)` writes one mesh's tree as one `ArrayBuffer`; `deserializeLayout(bytes)` reads it
   back. Load it into a scene you assemble, into `SceneTrees`, or into a CPU tree.
 - **A scene:** `serializeTraceScene(scene)` writes a whole assembled scene (every tree, the top level, instances,
-  materials); `deserializeTraceScene(bytes)` reads it back, ready to upload with no build and no assembly.
+  materials); `deserializeTraceScene(bytes)` reads it back, ready to upload with no build and no assembly. Nothing in it
+  moves.
+- **A movable scene:** `serializeMovableScene(scene)` writes the mesh trees and the instance list;
+  `placeMovableScene(trees, deserializeMovableScene(bytes))` loads them into `SceneTrees`. The top level is built at
+  load, and the instances can move.
 
-`readSerializedHeader(bytes)` reads either file's 64-byte header without loading it. tinybvh's WebAssembly needs no GPU,
+`readSerializedHeader(bytes)` reads any file's 64-byte header without loading it. tinybvh's WebAssembly needs no GPU,
 so a Node script can bake everything ahead of time.
+
+## Which file?
+
+| Your scene | File | Why | Loading costs |
+| --- | --- | --- | --- |
+| A static level: nothing moves | Scene | The top level is baked too | A copy to the GPU |
+| A level with a few moving props | Movable scene, the level `static: true` | The level is merged and baked as one tree; the props stay instances | No tree built; the top level is built on the GPU (few instances) |
+| Many instances that move every frame | Movable scene, nothing static | One tree per mesh, shared by its instances | No tree built; the top level, as any `SceneTrees` builds it every frame |
+| Streaming, or an editor: meshes come and go | A tree per mesh, or a movable scene per part with nothing static | Each part loads on its own | No tree built per part; static instances only merge before the first update |
+| Deforming meshes (skinned, morphed) | A tree per mesh, or a movable scene with `deforming` | The rest pose's tree is a start; poses refit it | No first build; refits per pose, and rebuilds when the refit drifts |
+
+A scene file can't take a change: move one instance, and the whole file is stale. A movable scene keeps what doesn't
+move baked (the mesh trees, the merged level) and leaves only the top level to the load.
 
 ## Bake in Node
 
@@ -56,12 +73,12 @@ A loaded tree is a `GpuLayoutMeshBvh`, the same thing any builder returns. Use i
 A file records what it is and the versions it was written with. `readSerializedHeader(bytes)` reads them from the
 header alone:
 
-- `kind`: `'tree'` or `'scene'`;
+- `kind`: `'tree'`, `'scene'` or `'movable-scene'`;
 - `formatVersion` and `layoutVersion`;
 - `current`: true when this package loads the file. When it's false, `reason` says why, in the words
   `deserializeLayout` would throw;
 - the formats (`triangleLeaves`, `nodeFormat`, and a scene's `positionLayout`);
-- the counts, and a tree's `bounds` and `geometryHash`.
+- the counts, a tree's `bounds` and `geometryHash`, and whether a movable scene holds its `geometry`.
 
 It throws only for bytes that are neither kind of file. `isSerializedCurrent(bytes)` is the yes or no, and never
 throws. To fall back instead of failing:
@@ -135,8 +152,63 @@ merged static instances, or cut into clusters (`clusterTraceScene`; the placemen
 are not). A loaded scene writes the same bytes again, and traces the same hits as the scene it was saved from.
 
 **A scene file is a snapshot.** Its top level is baked, so its instances can't move, and its merged meshes hold their
-instances' transforms. For a scene whose instances move, bake one tree per mesh, then assemble them at load or place them
-in `SceneTrees`.
+instances' transforms. For a scene whose instances move, use a [movable scene](#movable-scene-files), or bake one tree
+per mesh and place them in `SceneTrees` yourself.
+
+## Movable scene files
+
+A movable scene file holds:
+
+- one tree per mesh (none for meshes that only merged instances use);
+- the merged static groups' trees;
+- every instance: its mesh, transform, mask, material and `static` flag;
+- with `{ geometry: true }`, the meshes' positions, indices, flags and materials.
+
+It has no top level. `SceneTrees` builds that at load, and moves instances as it always does.
+
+{/* snippet: bake-movable */}
+```ts
+import { buildMovableScene, serializeMovableScene } from '@pmndrs/bvh';
+
+const tiny = await createTinyBvhBuilder();
+// static: true for what never moves (merged now, as SceneTrees would merge it); the props can move.
+const instances = [...level.map((instance) => ({ ...instance, static: true })), ...props];
+const scene = await buildMovableScene(meshes, instances, { build: (mesh) => tiny.buildLayout(mesh, { maxLeafPrimitives: 8 }).layout });
+// One tree per mesh, the merged groups' trees, the instances. With { geometry: true } it stores the meshes too, and loads with no model.
+await writeFile(path, new Uint8Array(serializeMovableScene(scene)));
+```
+
+{/* snippet: load-movable */}
+```ts
+import { deserializeMovableScene, placeMovableScene } from '@pmndrs/bvh';
+
+// The app's geometry, checked against each mesh's hash.
+const scene = deserializeMovableScene(await (await fetch(url)).arrayBuffer(), { geometries });
+const trees = await SceneTrees.create(device, { nodeFormat: scene.nodeFormat, triangleLeaves: scene.triangleLeaves });
+// Every mesh, tree and instance; given before the first update, nothing is built but the top level.
+const placed = placeMovableScene(trees, scene);
+// Later, any instance that isn't static moves as in any SceneTrees.
+trees.setTransform(placed.instances[prop], matrix);
+```
+
+**Static instances are merged at bake time.** `buildMovableScene` merges them as `SceneTrees` would at its first
+update, and stores each group's tree. At that first update, `SceneTrees` merges again and takes the stored trees
+(`placeMergedTrees`). If its groups differ (other static instances, other transforms), it builds them instead and
+warns. Merged instances can't move, as in any `SceneTrees`.
+
+**The geometry.** `SceneTrees` needs each mesh's geometry. Pass the app's to `deserializeMovableScene`, which checks it
+against each mesh's hash and throws on a mismatch. Or store it in the file with `{ geometry: true }`, so the file loads
+with no model.
+
+A few rules:
+
+- Create the `SceneTrees` with the file's `triangleLeaves` and `nodeFormat`. An indexed scene also needs `weld: false`,
+  as with `placeTree`.
+- Load it before the first update for no build. After that (streaming a part in), static instances stay instances, and
+  meshes only they used are built.
+- `mergeStaticInstances: false` on the `SceneTrees` does the same: nothing merges, and those meshes are built.
+- `assembleMovableScene(scene)` gives the same scene as a `TraceSceneData`, for `uploadTraceScene` or the CPU walk.
+- A mesh baked with `deforming` keeps an `f32` tree, and its instances never merge.
 
 ## Baked trees in SceneTrees
 
@@ -235,6 +307,23 @@ description  JSON: each mesh's and merged group's placement, the top level's nod
 nodes, triangles, top level, recordOrder (u32), positions: the scene's buffers, byte for byte
 ```
 
+A movable scene file has its own magic and format version, and the same words 0-2:
+
+```text
+header, 16 words (64 bytes, little-endian)
+    0      magic 'PBVM'
+    1      format version (SERIALIZED_MOVABLE_SCENE_FORMAT_VERSION, now 1)
+    2      GPU layout version (GPU_LAYOUT_VERSION, now 2)
+    3      formats: bits 0-7 triangles, bits 8-15 nodes (the scene's, for SceneTrees.create)
+    4      meshes          5  merged static groups      6  instances      7  mesh trees
+    8-10   byte sizes: description, trees, geometry (0: no geometry)
+    11-15  0
+description  JSON: per mesh its geometry hash, where its tree and geometry are, and deforming; per group where its tree
+             is; the instances
+trees        whole tree files ('PBVH', each with its geometry hash): the mesh trees, then the groups'
+geometry     positions, indices, triangle flags and materials, each padded to 4 bytes
+```
+
 **Files from another version are refused, not converted.** That holds for the byte format and for the layout version.
 A tree is cheap to rebuild, and a wrong word position would only show up as wrong rays. Bake again when
 `GPU_LAYOUT_VERSION` changes, which is a breaking release. A scene that needs a deeper trace stack than the walk has
@@ -310,19 +399,23 @@ Bake again when any of these change:
   from. The geometry hash catches a changed position or index, but not changed flags or materials.
 - **The mesh space:** a baked tree is in the mesh's own space. Moving or scaling the mesh object changes nothing, but a
   transform baked into the positions is part of the file (a glTF merged to world space, as `examples:bake` does).
-- **A scene file's instances:** their transforms, masks and materials are part of the file.
+- **A scene file's instances:** their transforms, masks and materials are part of the file. In a movable scene they
+  are only where the instances start, but static ones are baked into their group's tree: a change there means the
+  group is built at load.
 - **The options:** `maxLeafPrimitives`, `triangleLeaves`, `nodeFormat`, and the builder (a tinybvh tree and an H-PLOC
   tree of one mesh differ). The formats are in the header, so a reader sees what it was given; the other options only
   change the tree.
-- **`GPU_LAYOUT_VERSION`, `SERIALIZED_FORMAT_VERSION` or `SERIALIZED_SCENE_FORMAT_VERSION`:** a breaking release. The
-  file is refused, not converted.
+- **`GPU_LAYOUT_VERSION`, or the file's own format version** (`SERIALIZED_FORMAT_VERSION`,
+  `SERIALIZED_SCENE_FORMAT_VERSION`, `SERIALIZED_MOVABLE_SCENE_FORMAT_VERSION`): a breaking release. The file is refused,
+  not converted.
 
 A newer tinybvh may build a different (equally valid) tree from the same mesh. An old bake still loads, and traces the
 same hits. A refit changes the tree's boxes, but it's applied at load and never baked, so bake the rest pose.
 
 ## The bake CLI
 
-`pnpm examples:bake` bakes a model with tinybvh in Node and writes a tree or a scene, with no GPU involved:
+`pnpm examples:bake` bakes a model with tinybvh in Node and writes a tree, a scene or a movable scene, with no GPU
+involved:
 
 ```bash
 pnpm examples:bake                                  # the default torus knot -> examples/node/bake/fixtures/torus-knot.bvh
@@ -331,6 +424,7 @@ pnpm examples:bake model.glb --leaf 4 --quantized   # smaller leaves, 32-byte no
 pnpm examples:bake model.glb --indexed              # 16-byte indexed triangles: load next to the same geometry
 pnpm examples:bake --scene                          # the default scene -> examples/node/bake/fixtures/knots.scene.bvh
 pnpm examples:bake model.glb --scene                # one tree per glTF mesh, its nodes as instances -> model.scene.bvh
+pnpm examples:bake model.glb --scene --movable      # the same as a movable scene, with its geometry -> model.movable.bvh
 ```
 
 It reads `.glb` and `.gltf` files, but not Draco, meshopt or quantized positions. It prints the counts, the build time,
@@ -339,16 +433,20 @@ and the kind, formats and versions it wrote.
 - **Tree files** carry their geometry's hash.
 - **`--scene`** marks every instance static (a scene file's instances can't move anyway), so meshes used once merge into
   one world-space mesh. `--no-merge` keeps them as instances.
+- **`--scene --movable`** writes a movable scene with the meshes' geometry. Instances of a mesh used once are static and
+  merge (the level); instances of a mesh used more than once can move (the props). `--no-merge` lets every instance
+  move.
 - **`--f32`** gives 64-byte nodes. A scene's default is quantized, a tree's is `f32`.
 
 ## An example
 
 [`node/bake`](https://github.com/pmndrs/bvh/tree/main/examples/node/bake) is the CLI above (`cli.ts`, `bake.ts`,
-`model.ts`) and a page that loads either kind of file with no build at all. The page:
+`model.ts`) and a page that loads any kind of file with no build at all. The page:
 
 1. reads the header with `readSerializedHeader`;
-2. loads the file with `deserializeLayout` or `deserializeTraceScene`;
-3. uploads it, and traces it with the WGSL walk in the shared ray-cast view.
+2. loads the file with `deserializeLayout`, `deserializeTraceScene` or `deserializeMovableScene`;
+3. uploads it (a movable scene goes into `SceneTrees`, and its props bob up and down), and traces it with the WGSL walk
+   in the shared ray-cast view.
 
 The overlay's `builtBy` says `baked tree: torus-knot.bvh` or `baked scene: <name>`. It also shows the fetch and deserialize
 times, and the header's versions next to this package's.
@@ -356,6 +454,7 @@ times, and the header's versions next to this package's.
 An indexed tree loads next to the default knot, or next to the glTF named by `?model=` (merged to world space as the
 CLI does it). The page refuses it next to anything else.
 
-`?bake=<url>` (try `fixtures/knots.scene.bvh`) or a dropped `.bvh` loads another file. The smoke run checks three
-files: the default tree, an indexed tree baked in the page, and the committed scene file. It compares each against the
-CPU walk, and the committed files byte for byte against fresh bakes.
+`?bake=<url>` (try `fixtures/knots.scene.bvh`) or a dropped `.bvh` loads another file. The smoke run checks four
+files: the default tree, an indexed tree baked in the page, the committed scene file, and the default scene as a movable
+scene baked in the page (still, then with its props moved). It compares each against the CPU walk, the committed files
+byte for byte against fresh bakes, and checks that the movable scene built no tree.

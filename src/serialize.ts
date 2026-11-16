@@ -1,14 +1,16 @@
 /**
  * Saving a built tree and loading it again: build once (in Node, a worker, or
  * at build time), store the bytes, and load them later with no build at all.
- * A whole assembled scene has its own file (serialize-scene.ts); both start
- * with the same three words, which {@link readSerializedHeader} reads.
+ * A whole assembled scene has its own file (serialize-scene.ts), and so does
+ * a movable scene (serialize-movable-scene.ts: mesh trees and instances, for
+ * `SceneTrees`); all three start with the same three words, which
+ * {@link readSerializedHeader} reads.
  *
  * The bytes are a 64-byte header followed by the layout's three arrays as they
  * are uploaded to the GPU:
  *
  *     header (16 words, little-endian)
- *         0  magic 'PBVH' (a scene file: 'PBVS')
+ *         0  magic 'PBVH' (a scene file: 'PBVS', a movable scene: 'PBVM')
  *         1  format version (SERIALIZED_FORMAT_VERSION)
  *         2  GPU layout version (GPU_LAYOUT_VERSION)
  *         3  nodeCount
@@ -62,11 +64,15 @@ const NODE_FORMAT_SHIFT = 8;
 const MAGIC = 0x48564250;
 /** 'PBVS' read as a little-endian u32: a scene (serialize-scene.ts). */
 export const SCENE_MAGIC = 0x53564250;
+/** 'PBVM' read as a little-endian u32: a movable scene (serialize-movable-scene.ts). */
+export const MOVABLE_SCENE_MAGIC = 0x4d564250;
 
 /** Version of the byte format above (the header and the order of the arrays), apart from the GPU layout's own version. */
 export const SERIALIZED_FORMAT_VERSION = 1;
 /** Version of the scene file's byte format (serialize-scene.ts), apart from the GPU layout's own version. */
 export const SERIALIZED_SCENE_FORMAT_VERSION = 1;
+/** Version of the movable scene file's byte format (serialize-movable-scene.ts), apart from the GPU layout's own version. */
+export const SERIALIZED_MOVABLE_SCENE_FORMAT_VERSION = 1;
 
 /** Both files' header: 16 little-endian words. */
 export const SERIALIZED_HEADER_BYTES = 64;
@@ -106,6 +112,27 @@ export const SCENE_HEADER_WORD = {
     /** Entries (u32) of `topLevel.recordOrder`. */
     recordOrderLength: 13,
     positionBytes: 14,
+} as const;
+
+/** The movable scene file's header words (serialize-movable-scene.ts); 0-2 are the tree's. */
+export const MOVABLE_SCENE_HEADER_WORD = {
+    magic: 0,
+    formatVersion: 1,
+    layoutVersion: 2,
+    /** Bits 0-7 triangles, 8-15 nodes (the tree's codes): the scene's formats, for `SceneTrees.create`. */
+    formats: 3,
+    meshCount: 4,
+    /** Merged static groups whose trees the file holds. */
+    mergedGroupCount: 5,
+    instanceCount: 6,
+    /** Mesh trees the file holds (meshes only merged instances use have none). */
+    treeCount: 7,
+    /** Bytes of the JSON description, padded with spaces to a multiple of 4. */
+    descriptionBytes: 8,
+    /** Bytes of the tree files, one after another. */
+    treeBytes: 9,
+    /** Bytes of the meshes' geometry (0 when the file was written without it). */
+    geometryBytes: 10,
 } as const;
 
 /** Header word 3 of a scene, bits 16-23: the positions' layout. */
@@ -163,6 +190,21 @@ export interface SerializedTreeHeader extends SerializedHeaderCommon {
     readonly geometryHash: readonly [number, number] | null;
 }
 
+/** A movable scene's header (`serializeMovableScene`). */
+export interface SerializedMovableSceneHeader extends SerializedHeaderCommon {
+    readonly kind: 'movable-scene';
+    /** The meshes (`MovableSceneData.meshes`). */
+    readonly meshCount: number;
+    /** Mesh trees in the file: meshes that only merged static instances use have none. */
+    readonly treeCount: number;
+    /** Merged static groups whose trees the file holds (`MovableSceneData.mergedGroups`). */
+    readonly mergedGroupCount: number;
+    /** The instances (`MovableSceneData.instances`), merged ones included. */
+    readonly instanceCount: number;
+    /** The file holds the meshes' geometry, so it loads without the app's. */
+    readonly geometry: boolean;
+}
+
 /** A scene's header (`serializeTraceScene`). */
 export interface SerializedSceneHeader extends SerializedHeaderCommon {
     readonly kind: 'scene';
@@ -180,16 +222,17 @@ export interface SerializedSceneHeader extends SerializedHeaderCommon {
     readonly requiredStackSize: number;
 }
 
-/** What {@link readSerializedHeader} returns: `kind` tells a tree from a scene. */
-export type SerializedHeader = SerializedTreeHeader | SerializedSceneHeader;
+/** What {@link readSerializedHeader} returns: `kind` tells a tree, a scene and a movable scene apart. */
+export type SerializedHeader = SerializedTreeHeader | SerializedSceneHeader | SerializedMovableSceneHeader;
 
 function bytesView(bytes: ArrayBuffer | ArrayBufferView): Uint8Array {
     return ArrayBuffer.isView(bytes) ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength) : new Uint8Array(bytes);
 }
 
 /**
- * Reads the 64-byte header of a tree ({@link serializeLayout}) or a scene
- * (`serializeTraceScene`) without loading it: what it is, the versions it
+ * Reads the 64-byte header of a tree ({@link serializeLayout}), a scene
+ * (`serializeTraceScene`) or a movable scene (`serializeMovableScene`)
+ * without loading it: what it is, the versions it
  * was written with, whether this package loads it (`current`, and `reason`
  * when not), its formats and counts. Throws only when the bytes are neither
  * (too short, or another magic). Words 3 onwards are read as this package's
@@ -202,15 +245,15 @@ export function readSerializedHeader(bytes: ArrayBuffer | ArrayBufferView): Seri
     const header = new DataView(view.buffer, view.byteOffset, HEADER_BYTES);
     const word = (index: number) => header.getUint32(index * 4, true);
     const magic = word(HEADER_WORD.magic);
-    if (magic !== MAGIC && magic !== SCENE_MAGIC) throw new Error('readSerializedHeader: not a serialized @pmndrs/bvh tree or scene (bad magic)');
-    const kind = magic === MAGIC ? 'tree' : 'scene';
+    if (magic !== MAGIC && magic !== SCENE_MAGIC && magic !== MOVABLE_SCENE_MAGIC) throw new Error('readSerializedHeader: not a serialized @pmndrs/bvh tree or scene (bad magic)');
+    const kind = magic === MAGIC ? 'tree' : magic === SCENE_MAGIC ? 'scene' : 'movable-scene';
     const formatVersion = word(HEADER_WORD.formatVersion);
     const layoutVersion = word(HEADER_WORD.layoutVersion);
-    const ownFormat = kind === 'tree' ? SERIALIZED_FORMAT_VERSION : SERIALIZED_SCENE_FORMAT_VERSION;
+    const ownFormat = kind === 'tree' ? SERIALIZED_FORMAT_VERSION : kind === 'scene' ? SERIALIZED_SCENE_FORMAT_VERSION : SERIALIZED_MOVABLE_SCENE_FORMAT_VERSION;
 
-    const formatsWord = word(kind === 'tree' ? HEADER_WORD.formats : SCENE_HEADER_WORD.formats);
+    const formatsWord = word(kind === 'tree' ? HEADER_WORD.formats : kind === 'scene' ? SCENE_HEADER_WORD.formats : MOVABLE_SCENE_HEADER_WORD.formats);
     const { triangleLeaves, nodeFormat } = decodeSerializedFormats(formatsWord);
-    const unknownBits = kind === 'tree' ? formatsWord >>> 16 : formatsWord >>> 24;
+    const unknownBits = kind === 'scene' ? formatsWord >>> 24 : formatsWord >>> 16;
     const positionCode = (formatsWord >>> SCENE_POSITION_LAYOUT_SHIFT) & 0xff;
     const positionLayout = positionCode === SCENE_POSITION_LAYOUT.vec4 ? 'vec4' : positionCode === SCENE_POSITION_LAYOUT.packed ? 'packed' : null;
 
@@ -223,6 +266,20 @@ export function readSerializedHeader(bytes: ArrayBuffer | ArrayBufferView): Seri
     else if (kind === 'scene' && positionLayout === null) reason = `position layout ${positionCode} is not one this package reads (0 vec4, 1 packed); rebuild the scene`;
     else if (unknownBits !== 0) reason = `the formats word has bits this package doesn't know (0x${formatsWord.toString(16)}); rebuild the ${what}`;
     const common = { formatVersion, layoutVersion, current: reason === null, reason, triangleLeaves, nodeFormat };
+
+    if (kind === 'movable-scene') {
+        const at = MOVABLE_SCENE_HEADER_WORD;
+        return {
+            kind,
+            ...common,
+            byteLength: HEADER_BYTES + word(at.descriptionBytes) + word(at.treeBytes) + word(at.geometryBytes),
+            meshCount: word(at.meshCount),
+            treeCount: word(at.treeCount),
+            mergedGroupCount: word(at.mergedGroupCount),
+            instanceCount: word(at.instanceCount),
+            geometry: word(at.geometryBytes) > 0,
+        };
+    }
 
     if (kind === 'scene') {
         const at = SCENE_HEADER_WORD;
@@ -259,7 +316,7 @@ export function readSerializedHeader(bytes: ArrayBuffer | ArrayBufferView): Seri
 }
 
 /**
- * True when `bytes` are a tree or a scene this package loads (the versions
+ * True when `bytes` are a tree or a scene (of either kind) this package loads (the versions
  * its own, the formats known): the check before loading a bake, or in CI over
  * the committed ones. False for anything else, never a throw.
  */
@@ -360,6 +417,20 @@ export function serializeLayout(layout: GpuLayoutMeshBvh, options: SerializeLayo
     return out;
 }
 
+/**
+ * {@link serializeLayout} with a geometry hash already known (from
+ * {@link meshGeometryHash}) in words 14-15: a movable scene's trees, whose
+ * geometry may not be at hand when they are written. Not exported by the
+ * package.
+ */
+export function serializeLayoutWithHash(layout: GpuLayoutMeshBvh, hash: readonly [number, number]): ArrayBuffer {
+    const out = serializeLayout(layout);
+    const header = new DataView(out, 0, HEADER_BYTES);
+    header.setUint32(HEADER_WORD.geometryHash * 4, hash[0], true);
+    header.setUint32((HEADER_WORD.geometryHash + 1) * 4, hash[1], true);
+    return out;
+}
+
 /** Options of {@link deserializeLayout}. */
 export interface DeserializeLayoutOptions {
     /**
@@ -388,6 +459,7 @@ export function deserializeLayout(bytes: ArrayBuffer | ArrayBufferView, options:
         throw new Error('deserializeLayout: not a serialized @pmndrs/bvh tree (bad magic)');
     }
     if (header.kind === 'scene') throw new Error('deserializeLayout: these bytes are a scene file (serializeTraceScene); read them with deserializeTraceScene');
+    if (header.kind === 'movable-scene') throw new Error('deserializeLayout: these bytes are a movable scene file (serializeMovableScene); read them with deserializeMovableScene');
     if (header.formatVersion !== SERIALIZED_FORMAT_VERSION) throw new Error(`deserializeLayout: byte format ${header.formatVersion}, this package reads ${SERIALIZED_FORMAT_VERSION}`);
     if (!header.current) throw new Error(`deserializeLayout: ${header.reason}`);
     const { nodeCount, triangleCount } = header;

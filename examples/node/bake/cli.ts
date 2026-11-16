@@ -1,13 +1,15 @@
 /**
  * node/bake: bake a model's BVH in Node and write it to a file.
  *
- *     pnpm examples:bake [model.glb|model.gltf] [--out file.bvh] [--leaf 8] [--indexed] [--quantized | --f32] [--scene [--no-merge]]
+ *     pnpm examples:bake [model.glb|model.gltf] [--out file.bvh] [--leaf 8] [--indexed] [--quantized | --f32] [--scene [--movable] [--no-merge]]
  *
  * With no model, the default torus knot is baked to examples/node/bake/fixtures/torus-knot.bvh,
  * the file the example page loads. `--scene` bakes a whole scene instead (every mesh's tree, the
  * top level, instances and materials: `serializeTraceScene`); with no model, the default scene goes
- * to examples/node/bake/fixtures/knots.scene.bvh. The page (index.html) loads either kind with
- * `?bake=<url>` or a dropped file, and builds nothing.
+ * to examples/node/bake/fixtures/knots.scene.bvh. `--scene --movable` writes a movable scene instead
+ * (mesh trees, merged groups' trees and instances: `serializeMovableScene`), which the page loads into
+ * `SceneTrees` so its instances can move. The page (index.html) loads every kind with `?bake=<url>`
+ * or a dropped file, and builds nothing.
  */
 
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -15,7 +17,7 @@ import { dirname, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { readSerializedHeader } from '@pmndrs/bvh';
 import { bakeMesh, defaultOutputName, readModelMesh, readModelScene } from './bake.ts';
-import { bakeScene, defaultMesh, defaultScene } from './model.ts';
+import { bakeMovableScene, bakeScene, defaultMesh, defaultScene } from './model.ts';
 
 const USAGE = `Usage: pnpm examples:bake [model.glb|model.gltf] [options]
 
@@ -29,7 +31,11 @@ const USAGE = `Usage: pnpm examples:bake [model.glb|model.gltf] [options]
   --f32           Bake 64-byte f32 nodes (the default for a tree).
   --scene         Bake the whole scene: one tree per glTF mesh, the nodes as instances, the top level, materials.
                   Every instance is static, so meshes used once are merged into one world-space mesh.
-  --no-merge      With --scene: keep every instance an instance (no merged static mesh).
+  --movable       With --scene: a movable scene file, loaded into SceneTrees so the instances can move (the top level
+                  is built at load). Instances of a mesh used once are static and merge; instances of a mesh used
+                  more than once can move. Carries the meshes' geometry. Default name <model>.movable.bvh.
+  --no-merge      With --scene: keep every instance an instance (no merged static mesh; with --movable, every
+                  instance can move).
   --help          This text.`;
 
 const { values, positionals } = parseArgs({
@@ -41,6 +47,7 @@ const { values, positionals } = parseArgs({
         f32: { type: 'boolean' },
         scene: { type: 'boolean' },
         'no-merge': { type: 'boolean' },
+        movable: { type: 'boolean' },
         help: { type: 'boolean' },
     },
     allowPositionals: true,
@@ -61,16 +68,32 @@ if (values['no-merge'] && !values.scene) {
     console.error(`--no-merge is for --scene\n\n${USAGE}`);
     process.exit(2);
 }
+if (values.movable && !values.scene) {
+    console.error(`--movable is for --scene\n\n${USAGE}`);
+    process.exit(2);
+}
 
 const model = positionals[0] ?? null;
 const scene = values.scene ?? false;
-const out = resolve(values.out ?? (model ? defaultOutputName(model, scene) : resolve(import.meta.dirname, 'fixtures', defaultOutputName(null, scene))));
+const movable = values.movable ?? false;
+const out = resolve(values.out ?? (model ? defaultOutputName(model, scene, movable) : resolve(import.meta.dirname, 'fixtures', defaultOutputName(null, scene, movable))));
 const maxLeafPrimitives = values.leaf === undefined ? undefined : Number(values.leaf);
 const triangleLeaves = values.indexed ? 'indexed' : 'records';
 const name = model ?? (scene ? 'default scene' : 'default torus knot');
 
 let bytes: Uint8Array;
-if (scene) {
+if (scene && movable) {
+    const source = model ? await readModelScene(model) : defaultScene();
+    const baked = await bakeMovableScene(source, { maxLeafPrimitives, triangleLeaves, nodeFormat: values.f32 ? 'f32' : 'quantized', mergeStaticInstances: !values['no-merge'] });
+    bytes = baked.bytes;
+    const merged = baked.data.instances.filter((instance) => instance.static).length;
+    const trees = baked.data.meshes.filter((mesh) => mesh.tree).length;
+    const groups = baked.data.mergedGroups.length;
+    console.log(
+        `${name}: ${source.meshes.length} meshes (${trees} tree${trees === 1 ? '' : 's'}), ${source.instances.length} instances (${source.instances.length - merged} can move, ${merged} merged into ${groups} static group${groups === 1 ? '' : 's'}), ` +
+            `built by tinybvh in ${baked.buildMs.toFixed(1)} ms; the top level is built where it loads`,
+    );
+} else if (scene) {
     const source = model ? await readModelScene(model) : defaultScene();
     const baked = await bakeScene(source, { maxLeafPrimitives, triangleLeaves, nodeFormat: values.f32 ? 'f32' : 'quantized', mergeStaticInstances: !values['no-merge'] });
     bytes = baked.bytes;

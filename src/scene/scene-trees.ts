@@ -28,8 +28,9 @@
  *   merged (static-merge.ts; nothing else is), and each
  *   group's world-space mesh is built the same way as any mesh (GPU tree first,
  *   tinybvh's from a worker later: the merged Sponza takes 1.5 s, so it never
- *   runs on the main thread). Merged instances never move: moving, hiding,
- *   re-masking or removing one throws.
+ *   runs on the main thread), unless the app gave the groups' trees
+ *   ({@link SceneTrees.placeMergedTrees}: a movable scene file's). Merged
+ *   instances never move: moving, hiding, re-masking or removing one throws.
  *
  * **GPU build outputs** (`gpuTreeOutputs`, the P9 peak-memory lever):
  *
@@ -126,6 +127,7 @@ import type { MeshBvh, MeshBvhBuildOptions, MeshGeometry } from '../trace/mesh-b
 import { nodeQuantizerFor, type QuantizeJob, type QuantizeMesh } from '../gpu-quantize.ts';
 import { quantizeNodes } from '../quantized-nodes.ts';
 import { weldPositions } from '../indexed-leaves.ts';
+import { meshGeometryHash } from '../serialize.ts';
 import { meshRefitPlacement, type TraceSceneMeshPlacement } from '../trace/scene-assembly.ts';
 import type { MeshRefitVertices } from '../gpu-mesh-refit.ts';
 import { DeformingTrees, type DeformingTreeCounts } from './deforming-trees.ts';
@@ -572,6 +574,15 @@ export interface SceneInstanceChange {
     readonly material?: number | null;
 }
 
+/**
+ * A tree for one static group the first update merges ({@link SceneTrees.placeMergedTrees}): built from the group's
+ * world-space geometry (`mergeStaticGeometry`'s `groups[g].geometry`), with that geometry's `meshGeometryHash`.
+ */
+export interface SceneMergedTree {
+    readonly tree: GpuLayoutMeshBvh;
+    readonly geometryHash: readonly [number, number];
+}
+
 /** Where a mesh's tree sits. Numbers only: it must never hold a tree's arrays (they would stay on the heap). */
 interface PlacedTree {
     readonly nodeOffset: number;
@@ -876,6 +887,8 @@ export class SceneTrees {
     private readonly placed = new Map<number, PlacedTree>();
     private readonly groups: MergedGroup[] = [];
     private plan: StaticMergePlan | null = null;
+    /** Trees for the groups the first update merges (placeMergedTrees), or null. */
+    private mergedTreesToPlace: readonly SceneMergedTree[] | null = null;
     /** Meshes added since the last update: their builds start at the next. */
     private newMeshes: number[] = [];
     /** Instances whose top-level entry must be written (or removed) at the next update. */
@@ -1641,6 +1654,76 @@ export class SceneTrees {
         this.notifyWaiters();
     }
 
+    /**
+     * Trees for the static groups the first update will merge, in the order
+     * it makes them: the order of `mergeStaticGeometry`'s groups over this
+     * scene's meshes and static instances (in the order they were added), as
+     * `buildMovableScene` bakes them. Given before the first update, each
+     * group takes its tree as a mesh takes one from {@link placeTree}: no
+     * build starts for it, and `groupStatus(g).builtBy` is `'app'`.
+     *
+     * The groups are only known at the first update. If they don't match the
+     * trees there (another number of groups, or a group whose world-space
+     * geometry hashes differently: other meshes, transforms or static
+     * instances than the bake's), the trees are dropped, the groups are built
+     * as usual, and `warn` says why. The format checks are {@link placeTree}'s,
+     * made here (a RangeError): the scene's triangle format, quantized trees
+     * only in a quantized scene, no weld in an indexed scene, a depth within
+     * `gpuMaxDepth`.
+     *
+     * Returns false, and keeps nothing, when this scene merges nothing more:
+     * `mergeStaticInstances: false`, or the first update is past (static
+     * instances added from then on stay ordinary instances).
+     */
+    placeMergedTrees(trees: readonly SceneMergedTree[]): boolean {
+        this.checkLive();
+        const where = 'SceneTrees.placeMergedTrees';
+        if (this.updates > 0 || !this.mergeStatic) return false;
+        trees.forEach(({ tree }, group) => {
+            const leaves = tree.triangleLeaves ?? 'records';
+            if (leaves !== this.triangleLeaves) throw new RangeError(`${where}: group ${group}'s tree has ${leaves} triangles, the scene holds ${this.triangleLeaves}`);
+            if ((tree.nodeFormat ?? 'f32') === 'quantized' && this.nodeFormat === 'f32') throw new RangeError(`${where}: group ${group}'s tree is quantized, and this scene is f32`);
+            if (this.indexed && this.weld) throw new RangeError(`${where}: this indexed scene welds each group's vertices, which a baked indexed tree doesn't know; make the scene with weld: false`);
+            if (tree.maxDepth > this.gpuMaxDepth) throw new RangeError(`${where}: group ${group}'s tree is ${tree.maxDepth} levels deep, more than gpuMaxDepth (${this.gpuMaxDepth})`);
+        });
+        this.mergedTreesToPlace = trees.length > 0 ? [...trees] : null;
+        return true;
+    }
+
+    /** The first update, after the merge: the trees placeMergedTrees gave become the groups' trees, if they are the groups'. */
+    private placeMergedTreesNow(): void {
+        const trees = this.mergedTreesToPlace;
+        this.mergedTreesToPlace = null;
+        if (!trees) return;
+        const groups = this.groups;
+        const mismatch = (): string | null => {
+            if (trees.length !== groups.length) return `${trees.length} trees for ${groups.length} merged groups`;
+            for (const [index, { group }] of groups.entries()) {
+                const { tree, geometryHash } = trees[index];
+                const triangles = group.sourceInstances.length;
+                if (tree.triangleCount !== triangles) return `group ${index} has ${triangles} triangles, its tree ${tree.triangleCount}`;
+                const hash = meshGeometryHash(group.geometry);
+                if (hash[0] !== geometryHash[0] || hash[1] !== geometryHash[1]) {
+                    return `group ${index}'s world-space geometry is not the one its tree was baked from (other meshes, transforms or static instances)`;
+                }
+            }
+            return null;
+        };
+        const reason = mismatch();
+        if (reason !== null) {
+            this.warn(`SceneTrees.placeMergedTrees: the trees don't match the static groups the first update merged (${reason}); building the groups instead`);
+            return;
+        }
+        groups.forEach(({ meshSlot }, index) => {
+            const state = this.meshes.get(meshSlot)!;
+            state.ownTree = true;
+            const { tree } = trees[index];
+            // A records group's ids are written into its records as it is placed: into a copy, so the app's tree stays as baked.
+            const bvh = (this.indexed ? tree : { ...tree, triangles: tree.triangles.slice(0) }) as MeshBvh;
+            this.arrived.push({ source: 'tinybvh', slot: meshSlot, generation: state.generation, bvh, app: true });
+        });
+    }
+
     // -----------------------------------------------------------------------
     // The frame
     // -----------------------------------------------------------------------
@@ -1720,7 +1803,10 @@ export class SceneTrees {
         for (const outputs of this.outputsToRelease) this.releaseOutputs(outputs);
         this.outputsToRelease = [];
 
-        if (this.updates === 1 && this.mergeStatic) this.planMerges();
+        if (this.updates === 1 && this.mergeStatic) {
+            this.planMerges();
+            this.placeMergedTreesNow();
+        }
         if (this.newMeshes.length > 0) {
             this.loadStartedAt ??= performance.now();
             this.startBuilds(encoder);
@@ -1737,6 +1823,9 @@ export class SceneTrees {
             this.placeTrees(encoder, arrived);
             this.cpuTopLevelStale = true;
         }
+        // An update that started no build (every tree the app's) has nothing to report later: a whenBuilt waiting since
+        // before it resolves here.
+        this.notifyWaiters();
         // A trim moves trees: after the placements above, before anything below writes into a tree.
         if ((this.trimAsked || this.trimWhenRefined) && this.quiet()) this.trimNodes(encoder);
         // CPU poses, after the trees placed above (their copies and growths are in the encoder before these).

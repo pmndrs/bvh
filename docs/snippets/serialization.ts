@@ -78,6 +78,40 @@ export async function loadScene(device: GPUDevice, url: string): Promise<void> {
     buffers.destroy();
 }
 
+// #region bake-movable
+import { buildMovableScene, serializeMovableScene } from '@pmndrs/bvh';
+
+// #endregion
+
+export async function bakeMovable(meshes: readonly MeshInput[], level: readonly TraceSceneInstance[], props: readonly TraceSceneInstance[], path: string): Promise<void> {
+    // #region bake-movable
+    const tiny = await createTinyBvhBuilder();
+    // static: true for what never moves (merged now, as SceneTrees would merge it); the props can move.
+    const instances = [...level.map((instance) => ({ ...instance, static: true })), ...props];
+    const scene = await buildMovableScene(meshes, instances, { build: (mesh) => tiny.buildLayout(mesh, { maxLeafPrimitives: 8 }).layout });
+    // One tree per mesh, the merged groups' trees, the instances. With { geometry: true } it stores the meshes too, and loads with no model.
+    await writeFile(path, new Uint8Array(serializeMovableScene(scene)));
+    // #endregion
+}
+
+// #region load-movable
+import { deserializeMovableScene, placeMovableScene } from '@pmndrs/bvh';
+
+// #endregion
+
+export async function loadMovable(device: GPUDevice, url: string, geometries: readonly MeshGeometry[], prop: number, matrix: Float32Array): Promise<SceneTrees> {
+    // #region load-movable
+    // The app's geometry, checked against each mesh's hash.
+    const scene = deserializeMovableScene(await (await fetch(url)).arrayBuffer(), { geometries });
+    const trees = await SceneTrees.create(device, { nodeFormat: scene.nodeFormat, triangleLeaves: scene.triangleLeaves });
+    // Every mesh, tree and instance; given before the first update, nothing is built but the top level.
+    const placed = placeMovableScene(trees, scene);
+    // Later, any instance that isn't static moves as in any SceneTrees.
+    trees.setTransform(placed.instances[prop], matrix);
+    // #endregion
+    return trees;
+}
+
 // #region baked-scene-trees
 import { SceneTrees, type MeshGeometry } from '@pmndrs/bvh';
 

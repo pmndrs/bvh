@@ -17,6 +17,10 @@
  *   `?model=` (merged to world space as the CLI does). `deserializeLayout(bytes,
  *   { geometry })` refuses other geometry (the file carries its hash).
  * - A scene file uploads as it is (an indexed one carries its positions).
+ * - A movable scene file (`--scene --movable`) goes into `SceneTrees`
+ *   (`deserializeMovableScene`, `placeMovableScene`): every tree, the merged
+ *   groups' too, is placed with no build, the top level is built here, and
+ *   the props (instances of a mesh used more than once) move.
  *
  * The file is `fixtures/torus-knot.bvh`, `?bake=<url>` names another (try
  * `fixtures/knots.scene.bvh`), and a dropped `.bvh` replaces it. The walk
@@ -24,24 +28,33 @@
  */
 
 import {
+    assembleMovableScene,
     createCpuTracer,
     createTinyBvhBuilder,
     deserializeLayout,
+    deserializeMovableScene,
     deserializeTraceScene,
     GPU_LAYOUT_VERSION,
     IDENTITY_TRANSFORM,
     INSTANCE_RECORD_BYTES,
     NODE_WORD,
+    placeMovableScene,
     readSerializedHeader,
+    SceneTrees,
     SERIALIZED_FORMAT_VERSION,
+    SERIALIZED_MOVABLE_SCENE_FORMAT_VERSION,
     SERIALIZED_SCENE_FORMAT_VERSION,
     serializeLayout,
     TOP_LEVEL_HEADER_BYTES,
     uploadTraceScene,
     type GpuLayoutMeshBvh,
     type MeshGeometry,
+    type MovableSceneData,
+    type PlacedMovableScene,
+    type SerializedHeader,
     type TraceSceneBuffers,
     type TraceSceneData,
+    type TraceSceneInstance,
     type TraceSource,
 } from '@pmndrs/bvh';
 import { assembleLayouts } from '../../shared/builders.ts';
@@ -56,7 +69,7 @@ import { vec3 } from '../../shared/vanilla/math.ts';
 import { RayCastView, VIEW_MODES, type ViewMode } from '../../shared/vanilla/raycast-view.ts';
 import fixtureUrl from './fixtures/torus-knot.bvh?url';
 import sceneFixtureUrl from './fixtures/knots.scene.bvh?url';
-import { bakeScene, DEFAULT_LEAF, defaultMesh, defaultScene } from './model.ts';
+import { bakeMovableScene, bakeScene, DEFAULT_LEAF, defaultMesh, defaultScene } from './model.ts';
 
 const app = await createVanillaApp('Node bake', 'node/bake');
 const { device, camera, overlay, canvas } = app;
@@ -64,9 +77,37 @@ const { device, camera, overlay, canvas } = app;
 const params = new URLSearchParams(location.search);
 const requested = params.get('bake');
 const modelPath = params.get('model');
-const settings = { mode: 'normal' as ViewMode, shadows: true };
+const settings = { mode: 'normal' as ViewMode, shadows: true, move: true };
 const view = RayCastView.create(device, app.format);
-let current: { kind: 'tree' | 'scene'; layout: GpuLayoutMeshBvh | null; data: TraceSceneData; buffers: TraceSceneBuffers; source: TraceSource; radius: number } | null = null;
+
+/** A movable scene in SceneTrees: the scene's own instances, and where the props are now. */
+interface Movable {
+    readonly trees: SceneTrees;
+    readonly placed: PlacedMovableScene;
+    readonly scene: MovableSceneData;
+    instances: TraceSceneInstance[];
+}
+let current: {
+    kind: SerializedHeader['kind'];
+    layout: GpuLayoutMeshBvh | null;
+    /** The CPU walk's copy of what the view traces (a movable scene's, with its props where they are now). */
+    data: () => TraceSceneData;
+    buffers: TraceSceneBuffers | null;
+    movable: Movable | null;
+    source: TraceSource;
+    radius: number;
+} | null = null;
+
+/** Moves a movable scene's props (its instances that aren't static) up and down, by `time` seconds into the bob. */
+function moveProps(movable: Movable, time: number): void {
+    movable.instances = movable.scene.instances.map((instance, index) => {
+        if (instance.static) return instance;
+        const objectToWorld = Array.from(instance.objectToWorld);
+        objectToWorld[13] += 0.6 * Math.sin(time * 1.7 + index);
+        movable.trees.setTransform(movable.placed.instances[index], objectToWorld);
+        return { ...instance, objectToWorld };
+    });
+}
 
 /** The geometry an indexed tree is loaded next to: the glTF of `?model=` merged to world space (as the CLI bakes it), else the default knot. */
 let appGeometry: Promise<MeshGeometry> | null = null;
@@ -96,16 +137,32 @@ function sceneBounds(data: TraceSceneData): number[] {
 async function useBake(bytes: ArrayBuffer, name: string, fetchMs: number): Promise<void> {
     // The header first: what the file is and whether this package reads it (a stale bake says why).
     const header = readSerializedHeader(bytes);
-    const own = header.kind === 'tree' ? SERIALIZED_FORMAT_VERSION : SERIALIZED_SCENE_FORMAT_VERSION;
+    const own = header.kind === 'tree' ? SERIALIZED_FORMAT_VERSION : header.kind === 'scene' ? SERIALIZED_SCENE_FORMAT_VERSION : SERIALIZED_MOVABLE_SCENE_FORMAT_VERSION;
     overlay.set('header', `${header.kind}, byte format ${header.formatVersion}, GPU layout version ${header.layoutVersion} (this package: ${own} and ${GPU_LAYOUT_VERSION})`);
     if (!header.current) throw new Error(`${name} is a stale bake: ${header.reason}`);
 
     let layout: GpuLayoutMeshBvh | null = null;
     let data: TraceSceneData;
+    let movable: Movable | null = null;
     let bounds: ArrayLike<number>;
     let loadMs: number;
     let geometryNote = '';
-    if (header.kind === 'scene') {
+    if (header.kind === 'movable-scene') {
+        if (!header.geometry) throw new Error(`${name} was written without its meshes' geometry, and this page has no model to load it next to: bake it with the CLI (--scene --movable), which stores it`);
+        const start = performance.now();
+        const scene = deserializeMovableScene(bytes); // mesh trees, merged groups' trees, instances, and the geometry SceneTrees takes
+        // The scene's formats; an indexed movable scene's trees name the meshes' own vertices, so no weld.
+        const trees = await SceneTrees.create(device, { label: 'bake', triangleLeaves: scene.triangleLeaves, nodeFormat: scene.nodeFormat, ...(scene.triangleLeaves === 'indexed' ? { weld: false } : {}) });
+        const placed = placeMovableScene(trees, scene); // every tree placed: the first update builds nothing but the top level
+        loadMs = performance.now() - start;
+        movable = { trees, placed, scene, instances: [...scene.instances] };
+        data = assembleMovableScene(scene);
+        bounds = sceneBounds(data);
+        const moving = scene.instances.filter((instance) => !instance.static).length;
+        const groups = `${header.mergedGroupCount} merged static group${header.mergedGroupCount === 1 ? '' : 's'}`;
+        overlay.set('scene', `${header.meshCount} meshes, ${header.instanceCount} instances (${moving} move, the rest in ${groups}); the top level is built here`);
+        overlay.tree({ sah: null, depth: data.maxMeshDepth, nodes: null, triangles: null, bytes: data.byteLength });
+    } else if (header.kind === 'scene') {
         const start = performance.now();
         data = deserializeTraceScene(bytes); // the whole scene: trees, top level, instances, materials
         loadMs = performance.now() - start;
@@ -128,17 +185,20 @@ async function useBake(bytes: ArrayBuffer, name: string, fetchMs: number): Promi
     // Nothing was built: the builder is the file.
     overlay.build({ builtBy: `baked ${header.kind}: ${name}`, fallbackReason: null, cpuMs: 0 });
     overlay.set('file', `${name}, ${formatBytes(bytes.byteLength)}`);
-    overlay.set('fetch + deserialize', `${fetchMs.toFixed(1)} ms + ${loadMs.toFixed(2)} ms (no build)`);
+    overlay.set('fetch + deserialize', `${fetchMs.toFixed(1)} ms + ${loadMs.toFixed(2)} ms (${movable ? 'with SceneTrees.create and placeMovableScene; ' : ''}no build)`);
     overlay.set('formats', `${header.triangleLeaves} triangles${geometryNote}, ${header.nodeFormat} nodes`);
 
-    const buffers = uploadTraceScene(device, data, 'bake');
-    const source: TraceSource = buffers; // an uploaded scene is a TraceSource as it is
+    // A movable scene traces from SceneTrees (updated each frame); the others upload as they are.
+    const buffers = movable ? null : uploadTraceScene(device, data, 'bake');
+    const source: TraceSource = movable ? movable.trees : buffers!; // an uploaded scene and a SceneTrees are both TraceSources
     await view.prepare(source);
     const old = current;
     const b = bounds;
-    current = { kind: header.kind, layout, data, buffers, source, radius: Math.hypot(b[3] - b[0], b[4] - b[1], b[5] - b[2]) / 2 };
+    const cpu = movable ? () => assembleMovableScene({ ...movable.scene, instances: movable.instances }) : () => data;
+    current = { kind: header.kind, layout, data: cpu, buffers, movable, source, radius: Math.hypot(b[3] - b[0], b[4] - b[1], b[5] - b[2]) / 2 };
     camera.frame(Array.from(b));
-    old?.buffers.destroy();
+    old?.buffers?.destroy();
+    old?.movable?.trees.dispose();
 }
 
 async function loadUrl(url: string): Promise<void> {
@@ -151,8 +211,9 @@ async function loadUrl(url: string): Promise<void> {
 
 overlay.select('show', VIEW_MODES, settings.mode, (value) => (settings.mode = value));
 overlay.checkbox('shadows (any hit)', settings.shadows, (value) => (settings.shadows = value));
+overlay.checkbox('move the props (a movable scene)', settings.move, (value) => (settings.move = value));
 overlay.note(
-    'Nothing is built here: the file was baked by `pnpm examples:bake` in Node (a tree, or a scene with --scene), checked with readSerializedHeader, read with deserializeLayout or deserializeTraceScene and traced by the WGSL walk. Drop another .bvh, or open ?bake=<url> (an indexed tree loads next to the default knot, or ?model=<glTF>). Drag to orbit.',
+    'Nothing is built here: the file was baked by `pnpm examples:bake` in Node (a tree, a scene with --scene, a movable scene with --scene --movable), checked with readSerializedHeader, read with deserializeLayout, deserializeTraceScene or deserializeMovableScene (into SceneTrees, whose props move) and traced by the WGSL walk. Drop another .bvh, or open ?bake=<url> (an indexed tree loads next to the default knot, or ?model=<glTF>). Drag to orbit.',
 );
 
 let pointer: [number, number] | null = null;
@@ -205,6 +266,10 @@ app.loop({
     },
     render(encoder, target) {
         if (!current) return;
+        if (current.movable) {
+            if (settings.move) moveProps(current.movable, performance.now() / 1000);
+            current.movable.trees.update(encoder); // trees placed at the first update, the top level brought up to date every frame
+        }
         const width = canvas.width;
         const height = canvas.height;
         const pick = pointer ? ([Math.floor(pointer[0] * width), Math.floor(pointer[1] * height)] as const) : null;
@@ -215,7 +280,7 @@ app.loop({
 
 /** The view's last frame against the CPU walk over the loaded scene (at least 50 hits); throws on any difference it can't explain. */
 async function checkView(what: string): Promise<Agreement> {
-    const agreement = await checkViewAgainstCpu(view, (aspect) => camera.basis(aspect), createCpuTracer(current!.data));
+    const agreement = await checkViewAgainstCpu(view, (aspect) => camera.basis(aspect), createCpuTracer(current!.data()));
     if (agreement.hits < 50) throw new Error(`${what}: the view hits too little: ${JSON.stringify(agreement)}`);
     return agreement;
 }
@@ -235,6 +300,10 @@ const sameBytes = (a: ArrayBuffer | Uint8Array, b: ArrayBuffer | Uint8Array) => 
  *    page with its geometry and loaded next to it.
  * 3. With no `?bake=`: the committed scene file (`--scene`), whose bytes are
  *    those of the default scene baked fresh in the page.
+ * 4. With no `?bake=`: the default scene as a movable scene (`--scene
+ *    --movable`), baked in the page and loaded into SceneTrees: every tree is
+ *    the file's (none built), and the view agrees with the CPU walk with the
+ *    props where the file put them, then moved.
  *
  * Anything else fails the run.
  */
@@ -263,7 +332,7 @@ async function smokeRun(): Promise<void> {
     await useBake(serializeLayout(indexedTree, { geometry: knot }), 'torus-knot (indexed, baked in the page)', 0);
     await afterFrames(3);
     const indexed = await checkView('the indexed tree');
-    if (current!.data.triangleLeaves !== 'indexed') throw new Error('the indexed bake was not traced as an indexed scene');
+    if (current!.data().triangleLeaves !== 'indexed') throw new Error('the indexed bake was not traced as an indexed scene');
 
     // The committed scene file, and the same scene baked in the page.
     await loadUrl(sceneFixtureUrl);
@@ -273,8 +342,32 @@ async function smokeRun(): Promise<void> {
     const sceneFresh = sameBytes((await bakeScene(defaultScene(), {}, tiny)).bytes, committed);
     if (!sceneFresh) throw new Error('the committed scene file differs from the default scene baked fresh in the page: run pnpm examples:bake --scene');
 
-    overlay.set('check', 'tree, indexed tree and scene agree with the CPU walk; the files are identical to fresh bakes');
-    await ready(device, { ...overlay.snapshot(), agreement: { tree, indexed, scene }, fresh, sceneFresh, builtByBake: overlay.snapshot().build });
+    // A movable scene: into SceneTrees, the props still, then moved.
+    settings.move = false;
+    const movableBake = await bakeMovableScene(defaultScene(), {}, tiny);
+    await useBake(movableBake.bytes.buffer as ArrayBuffer, 'knots (movable, baked in the page)', 0);
+    const { trees, scene: movableScene } = current!.movable!;
+    await trees.whenBuilt();
+    await afterFrames(3);
+    const movableStill = await checkView('the movable scene');
+    moveProps(current!.movable!, 1.3);
+    await afterFrames(3);
+    const movableMoved = await checkView('the movable scene, props moved');
+    const counts = trees.counts;
+    const ownTrees = movableScene.meshes.filter((mesh) => mesh.tree).length + movableScene.mergedGroups.length;
+    if (counts.onAppTrees !== ownTrees || counts.onGpuTrees !== 0 || counts.onTinybvhTrees !== 0 || counts.mergedGroups !== movableScene.mergedGroups.length) {
+        throw new Error(`the movable scene built trees of its own: ${JSON.stringify(counts)} (expected ${ownTrees} trees from the file)`);
+    }
+
+    overlay.set('check', 'tree, indexed tree, scene and movable scene (still and moved) agree with the CPU walk; the files are identical to fresh bakes; the movable scene built no tree');
+    await ready(device, {
+        ...overlay.snapshot(),
+        agreement: { tree, indexed, scene, movableStill, movableMoved },
+        fresh,
+        sceneFresh,
+        movableTrees: { fromFile: counts.onAppTrees, gpu: counts.onGpuTrees, tinybvh: counts.onTinybvhTrees, mergedGroups: counts.mergedGroups },
+        builtByBake: overlay.snapshot().build,
+    });
 }
 
 // For the smoke run's screenshot: the pointer in the middle until the mouse moves.

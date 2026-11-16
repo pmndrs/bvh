@@ -36,7 +36,8 @@
  * reads both. A scene from another GPU layout or format version is refused,
  * not converted, as a tree is. A scene file is the snapshot of one assembled
  * scene: its instances can't move (the top level is baked), and
- * `clusterTraceScene`'s statistics are not kept (its placements are).
+ * `clusterTraceScene`'s statistics are not kept (its placements are). For
+ * instances that move, see serialize-movable-scene.ts.
  */
 
 import { GPU_LAYOUT_VERSION, gpuLayoutNodeBytes, INDEXED_TRIANGLE_BYTES, positionStrideFloats, TRACE_STACK_SIZE, TRIANGLE_BYTES } from './gpu-layout.ts';
@@ -167,6 +168,7 @@ export function deserializeTraceScene(bytes: ArrayBuffer | ArrayBufferView): Tra
         throw new Error(`${where}: not a serialized @pmndrs/bvh scene (bad magic)`);
     }
     if (header.kind === 'tree') throw new Error(`${where}: these bytes are one mesh's tree (serializeLayout); read them with deserializeLayout`);
+    if (header.kind === 'movable-scene') throw new Error(`${where}: these bytes are a movable scene (serializeMovableScene); read them with deserializeMovableScene`);
     if (!header.current) throw new Error(`${where}: ${header.reason}`);
     if (view.byteLength !== header.byteLength) throw new RangeError(`${where}: the header's sizes add up to ${header.byteLength} bytes, got ${view.byteLength}; the file is cut short or corrupt`);
     const triangleLeaves = header.triangleLeaves!;

@@ -13,6 +13,7 @@ These are the internal design notes, kept beside the docs site but not part of i
 | `design/indexed-leaves.md`, `design/compressed-nodes.md` | The two layout variants, with their measurements |
 | `design/memory.md` | Every buffer, ours and three-mesh-bvh's, and the levers |
 | `design/clustered-bvh.md` | three-mesh-bvh's `ClusteredBVH` (PARITY 8.9): what it is, how it maps onto our layout, `clusterTraceScene` and its checks |
+| `design/scene-files.md` | The two scene files: the snapshot and the movable scene (for `SceneTrees`), the scenarios each is for, and how merged static groups are baked |
 | `DIVERGENCES.md` | Every way the code differs from its sources, and why |
 | `PARITY.md` | The audit against three-mesh-bvh 0.9.18, row by row |
 | `three.md` | `@pmndrs/bvh/three` in full detail (the user pages are `docs/three/*.mdx`) |

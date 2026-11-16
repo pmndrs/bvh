@@ -63,7 +63,7 @@ export async function readModelScene(path: string): Promise<VanillaScene> {
     );
 }
 
-/** A default file name: the model's name, or `torus-knot` (`knots` for the default scene), with `.bvh` (`.scene.bvh` for a scene). */
-export function defaultOutputName(model: string | null, scene = false): string {
-    return `${model ? basename(model, extname(model)) : scene ? 'knots' : 'torus-knot'}${scene ? '.scene' : ''}.bvh`;
+/** A default file name: the model's name, or `torus-knot` (`knots` for the default scene), with `.bvh` (`.scene.bvh` for a scene, `.movable.bvh` for a movable one). */
+export function defaultOutputName(model: string | null, scene = false, movable = false): string {
+    return `${model ? basename(model, extname(model)) : scene ? 'knots' : 'torus-knot'}${scene ? (movable ? '.movable' : '.scene') : ''}.bvh`;
 }

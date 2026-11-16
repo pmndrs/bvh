@@ -167,6 +167,8 @@ The layout's arrays are read at the next update.
 
 Trees baked to files go the same way: `placeTree(mesh, deserializeLayout(bytes, { geometry }))`, which checks the file
 against the mesh's geometry first ([Baked trees in SceneTrees](/serialization/serialization-and-baking#baked-trees-in-scenetrees)).
+A whole scene of them, instances and merged static groups included, is one movable scene file:
+`placeMovableScene(trees, deserializeMovableScene(bytes))` ([Movable scene files](/serialization/serialization-and-baking#movable-scene-files)).
 
 ## Rebinding when a buffer grows
 
