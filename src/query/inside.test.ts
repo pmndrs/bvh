@@ -9,7 +9,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { MeshInput } from '../mesh-input.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
-import { createRandom } from '../trace/oracle-fixtures.ts';
+import { createRandom, randomTriangleSoup } from '../trace/oracle-fixtures.ts';
 import { INSIDE_TEST_DIRECTIONS } from '../trace/query-wgsl.ts';
 import { CpuMeshBvh, insideVotesOf } from './cpu-mesh-bvh.ts';
 import { closedBox, closedSphere, inverted, merge } from '../../tests/support/solids.ts';
@@ -127,6 +127,25 @@ describe('CpuMeshBvh inside test', () => {
         expect(votes.parity).toBe(2);
         expect(bvh.isPointInside([0, 0, 0])).toBe(true);
         expect(bvh.isPointInside([0, 0, 3])).toBe(false);
+    });
+
+    it('isPointInside (the third ray only on a split) is the majority of all three votes, by either rule', () => {
+        // A box open at the top and a random soup: points where the rays split are common.
+        const box = closedBox([-1, -1, -1], [1, 1, 1]);
+        const open = tree(merge({ positions: box.positions, indices: box.indices.filter((_, i) => Math.floor(i / 6) !== 1) }));
+        const soup = tree(randomTriangleSoup(createRandom(5), 200, 1.5, 0.6));
+        const random = createRandom(23);
+        let splits = 0;
+        for (const bvh of [open, soup]) {
+            for (let i = 0; i < 400; i++) {
+                const point = [(random() - 0.5) * 4, (random() - 0.5) * 4, (random() - 0.5) * 4] as [number, number, number];
+                const votes = bvh.insideVotes(point);
+                if (votes.parity === 1 || votes.parity === 2) splits++;
+                expect(bvh.isPointInside(point)).toBe(votes.parity >= 2);
+                expect(bvh.isPointInside(point, 'winding')).toBe(votes.winding >= 2);
+            }
+        }
+        expect(splits).toBeGreaterThan(20);
     });
 
     it('insideVotesOf adds several meshes up as one solid', () => {

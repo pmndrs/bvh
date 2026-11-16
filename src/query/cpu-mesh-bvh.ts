@@ -153,7 +153,7 @@ import { createCpuTracer, CPU_TRACE_BACK_SIDE, CPU_TRACE_DOUBLE_SIDE, CPU_TRACE_
 import { buildMeshBvhWithTinyBvh } from '../trace/mesh-bvh-topology.ts';
 import { buildTopLevel, IDENTITY_TRANSFORM, type TopLevelBvh } from '../trace/top-level.ts';
 import type { TriangleCandidate } from '../trace/triangle-filter.ts';
-import { INSIDE_TEST_DIRECTIONS, INSIDE_TEST_MAJORITY, type InsideRule } from '../trace/query-wgsl.ts';
+import { INSIDE_TEST_DIRECTIONS, type InsideRule } from '../trace/query-wgsl.ts';
 import {
     alignedPackedBoxIntersectsBox,
     BvhBox3,
@@ -793,11 +793,17 @@ export class CpuMeshBvh<Hit = BvhRaycastHit> {
      * overlapping closed parts stay inside, triangles must be wound
      * consistently). Exact for a closed mesh away from its surface; on an open
      * mesh, rays through a hole disagree and the vote decides (docs/tracing/sdf.mdx).
-     * The CPU twin of the GPU's `bvhIsInside`.
+     * The CPU twin of the GPU's `bvhIsInside` (and `bvhIsInsideByRule`): the
+     * third ray is cast only when the first two disagree, the same answer.
      */
     isPointInside(point: BvhVec3Like, rule: InsideRule = 'parity'): boolean {
-        const votes = this.insideVotes(point);
-        return (rule === 'winding' ? votes.winding : votes.parity) >= INSIDE_TEST_MAJORITY;
+        const origin = readVec3(point);
+        const vote = (ray: number) => {
+            const crossings = this.rayCrossings(origin, INSIDE_TEST_DIRECTIONS[ray]);
+            return rule === 'winding' ? crossings.winding !== 0 : (crossings.count & 1) === 1;
+        };
+        const first = vote(0);
+        return first === vote(1) ? first : vote(2);
     }
 
     private cast(ray: BvhRayLike, sideOrOptions: number | BvhRaycastOptions | undefined, nearArgument: number | undefined, farArgument: number | undefined, firstHitOnly: boolean): Hit[] {

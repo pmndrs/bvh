@@ -1090,7 +1090,8 @@ export interface TraceModuleOptions {
      * `bvhIntersectsSphere(center, radius)`, `bvhIntersectsBox(boxMin, boxMax)`
      * and `bvhIntersectsOrientedBox(center, halfSize, rotation)`, and the
      * inside test, `bvhRayCrossings(origin, direction)`,
-     * `bvhInsideVotes(point)` and `bvhIsInside(point)` (docs/tracing/sdf.mdx),
+     * `bvhInsideVotes(point)`, `bvhIsInside(point)` and
+     * `bvhIsInsideByRule(point, winding)` (docs/tracing/sdf.mdx),
      * with `*Masked` forms unless `rayMasks: false`. Default false: the module is
      * the ray walk alone, as before the queries existed.
      */

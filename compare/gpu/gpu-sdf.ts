@@ -26,7 +26,22 @@
  * (their example's own measure).
  */
 
-import { assembleTraceScene, buildMeshBvhWithTinyBvh, createSdfTexture, readSdf, SdfGenerator, uploadTraceScene, type SdfGrid, type SdfSign } from '@pmndrs/bvh';
+import {
+    assembleTraceScene,
+    buildMeshBvhWithTinyBvh,
+    CLOSEST_POINT_MAX_DISTANCE,
+    createSdfTexture,
+    mergeStaticGeometry,
+    readSdf,
+    SDF_PARAMS_BYTES,
+    SDF_WORKGROUP_SIZE,
+    SdfGenerator,
+    traceModuleWgsl,
+    uploadTraceScene,
+    type SdfGrid,
+    type SdfSign,
+    type TraceSceneBuffers,
+} from '@pmndrs/bvh';
 import { BufferAttribute, BufferGeometry, ClampToEdgeWrapping, FloatType, Matrix4, Mesh, MeshBasicMaterial, Quaternion, RedFormat, Vector3 } from 'three';
 import { globalId, storageTexture, uniform, wgslFn } from 'three/tsl';
 import { Storage3DTexture, type WebGPURenderer } from 'three/webgpu';
@@ -36,11 +51,15 @@ import { oursTinyBvh } from '../adapters/ours.ts';
 import type { CompareGeometry } from '../adapters/types.ts';
 
 export interface GpuSdf {
-    readonly id: 'ours' | 'ours-unsigned' | 'tmbvh';
+    readonly id: string;
     readonly name: string;
     readonly timing: 'timestamps' | 'wall clock';
-    /** One generation of a `dim`^3 field over the box: its milliseconds. */
-    generate(dim: number): Promise<number>;
+    /**
+     * One generation of a `dim`^3 field over the box: its milliseconds. With `repeat`
+     * above 1, that many dispatches back to back (the GPU at its loaded clock), the
+     * mean of their times.
+     */
+    generate(dim: number, repeat?: number): Promise<number>;
     /** The last field, x fastest, then y, then z. */
     read(): Promise<Float32Array>;
     dispose(): void;
@@ -87,52 +106,264 @@ export function sdfBox(positions: Float32Array, margin: number): { min: [number,
     return { min, max };
 }
 
-export async function createOursSdf(device: GPUDevice, mesh: { positions: Float32Array; indices: Uint32Array }, box: { min: [number, number, number]; max: [number, number, number] }, sign: SdfSign): Promise<GpuSdf> {
-    const tree = buildMeshBvhWithTinyBvh({ positions: mesh.positions, indices: mesh.indices }, await oursTinyBvh());
-    const scene = uploadTraceScene(device, assembleTraceScene([tree], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] }]), 'compare sdf');
-    const generator = await SdfGenerator.create(device, { label: 'compare sdf', rayMasks: false });
+type Box = { min: [number, number, number]; max: [number, number, number] };
+type WeldedMesh = { positions: Float32Array; indices: Uint32Array };
+
+const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+/** The mesh's tinybvh tree as a one-instance scene, or (`merged`) merged into a world-space tree as a static instance. */
+async function oursScene(device: GPUDevice, mesh: WeldedMesh, merged = false): Promise<TraceSceneBuffers> {
+    const tiny = await oursTinyBvh();
+    if (!merged) return uploadTraceScene(device, assembleTraceScene([buildMeshBvhWithTinyBvh(mesh, tiny)], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY }]), 'compare sdf');
+    const instances = [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY, static: true }];
+    const plan = mergeStaticGeometry([mesh], instances);
+    if (plan.groups.length !== 1) throw new Error('compare sdf: the mesh did not merge');
+    const trees = plan.groups.map((group) => buildMeshBvhWithTinyBvh(group.geometry, tiny));
+    return uploadTraceScene(device, assembleTraceScene([null], instances, {}, { merged: { plan, meshes: trees } }), 'compare sdf merged');
+}
+
+/**
+ * Times `encode` (one dispatch writing the field): `repeat` passes back to back in
+ * one submit, each with its own timestamps, their mean; wall clock from submit to
+ * `onSubmittedWorkDone` over them without `timestamp-query`.
+ */
+function oursTimer(device: GPUDevice) {
     const timestamps = device.features.has('timestamp-query');
-    const querySet = timestamps ? device.createQuerySet({ type: 'timestamp', count: 2 }) : null;
-    const resolve = timestamps ? device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }) : null;
-    const stampRead = timestamps ? device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }) : null;
-    let texture: GPUTexture | null = null;
-    let grid: SdfGrid | null = null;
+    let capacity = 0;
+    let querySet: GPUQuerySet | null = null;
+    let resolve: GPUBuffer | null = null;
+    let stampRead: GPUBuffer | null = null;
+    const grow = (passes: number) => {
+        if (passes <= capacity) return;
+        querySet?.destroy();
+        resolve?.destroy();
+        stampRead?.destroy();
+        capacity = passes;
+        querySet = device.createQuerySet({ type: 'timestamp', count: passes * 2 });
+        resolve = device.createBuffer({ size: passes * 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+        stampRead = device.createBuffer({ size: passes * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    };
     return {
-        id: sign === 'unsigned' ? 'ours-unsigned' : 'ours',
-        name: `@pmndrs/bvh (SdfGenerator, ${sign === 'unsigned' ? 'unsigned' : `${sign}, 3 rays`})`,
-        timing: timestamps ? 'timestamps' : 'wall clock',
-        async generate(dim) {
-            if (!grid || grid.resolution !== dim) {
-                texture?.destroy();
-                grid = { ...box, resolution: dim };
-                texture = createSdfTexture(device, grid, 'compare sdf');
-            }
+        timing: (timestamps ? 'timestamps' : 'wall clock') as GpuSdf['timing'],
+        async time(encode: (encoder: GPUCommandEncoder, timestampWrites?: GPUComputePassTimestampWrites) => void, repeat = 1): Promise<number> {
+            const passes = Math.max(1, Math.floor(repeat));
+            if (timestamps) grow(passes);
             const encoder = device.createCommandEncoder({ label: 'compare sdf' });
-            const timestampWrites = querySet ? { querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } : undefined;
-            generator.encode(encoder, scene, { texture: texture! }, grid, { sign, timestampWrites });
+            for (let pass = 0; pass < passes; pass++) encode(encoder, querySet ? { querySet, beginningOfPassWriteIndex: pass * 2, endOfPassWriteIndex: pass * 2 + 1 } : undefined);
             if (querySet) {
-                encoder.resolveQuerySet(querySet, 0, 2, resolve!, 0);
-                encoder.copyBufferToBuffer(resolve!, 0, stampRead!, 0, 16);
+                encoder.resolveQuerySet(querySet, 0, passes * 2, resolve!, 0);
+                encoder.copyBufferToBuffer(resolve!, 0, stampRead!, 0, passes * 16);
             }
             const start = performance.now();
             device.queue.submit([encoder.finish()]);
             if (!querySet) {
                 await device.queue.onSubmittedWorkDone();
-                return performance.now() - start;
+                return (performance.now() - start) / passes;
             }
-            await stampRead!.mapAsync(GPUMapMode.READ);
-            const stamps = new BigInt64Array(stampRead!.getMappedRange().slice(0));
+            await stampRead!.mapAsync(GPUMapMode.READ, 0, passes * 16);
+            const stamps = new BigInt64Array(stampRead!.getMappedRange(0, passes * 16).slice(0));
             stampRead!.unmap();
-            return Number(stamps[1] - stamps[0]) / 1e6;
+            let total = 0;
+            for (let pass = 0; pass < passes; pass++) total += Number(stamps[pass * 2 + 1] - stamps[pass * 2]) / 1e6;
+            return total / passes;
+        },
+        destroy() {
+            querySet?.destroy();
+            resolve?.destroy();
+            stampRead?.destroy();
+        },
+    };
+}
+
+export async function createOursSdf(device: GPUDevice, mesh: WeldedMesh, box: Box, sign: SdfSign): Promise<GpuSdf> {
+    const scene = await oursScene(device, mesh);
+    const generator = await SdfGenerator.create(device, { label: 'compare sdf', rayMasks: false });
+    const timer = oursTimer(device);
+    let texture: GPUTexture | null = null;
+    let grid: SdfGrid | null = null;
+    return {
+        id: sign === 'unsigned' ? 'ours-unsigned' : sign === 'parity' ? 'ours' : `ours-${sign}`,
+        name: `@pmndrs/bvh (SdfGenerator, ${sign === 'unsigned' ? 'unsigned' : sign === 'first-hit' ? 'first hit, 1 ray' : `${sign} vote, 2 or 3 rays`})`,
+        timing: timer.timing,
+        async generate(dim, repeat) {
+            if (!grid || grid.resolution !== dim) {
+                texture?.destroy();
+                grid = { ...box, resolution: dim };
+                texture = createSdfTexture(device, grid, 'compare sdf');
+            }
+            return timer.time((encoder, timestampWrites) => generator.encode(encoder, scene, { texture: texture! }, grid!, { sign, timestampWrites }), repeat);
         },
         read: () => readSdf(device, { texture: texture! }, grid!),
         dispose() {
             texture?.destroy();
             scene.destroy();
             generator.destroy();
-            querySet?.destroy();
-            resolve?.destroy();
-            stampRead?.destroy();
+            timer.destroy();
+        },
+    };
+}
+
+/**
+ * Kernels for compare/sdf's `?breakdown`: each a part of ours, or another way to
+ * sign, on the same trace module (`queries: true`, no ray masks) as `SdfGenerator`'s,
+ * writing the same texture. For finding where the time goes; not the library's kernel.
+ */
+export const OURS_BREAKDOWN = {
+    /** The library's kernel before 2026-11-16: closest point, then all three rays, the vote by `sign`. */
+    'votes-all': 'closest point + 3 all-hit rays (no early out)',
+    /** The third ray only when the first two disagree. */
+    'votes-early': 'closest point + 2 or 3 all-hit rays (early out)',
+    closest: 'closest point only',
+    rays3: '3 all-hit rays only',
+    'rays-early': '2 or 3 all-hit rays only (early out)',
+    ray1: '1 all-hit ray only',
+    'no-winding': 'closest point + 3 all-hit rays, no winding sum',
+    'first-hit-only': '1 first-hit ray only',
+    'closest-face': 'closest point, signed by the closest face (no ray)',
+    'first-hit-bounded': '1 first-hit ray, then the closest point within its hit distance',
+    'closest-merged': 'closest point only, merged scene (no per-box transform)',
+    'votes-early-merged': 'closest point + 2 or 3 rays, merged scene',
+} as const;
+export type OursBreakdown = keyof typeof OURS_BREAKDOWN;
+
+const CLOSEST_WGSL = 'let hit = bvhClosestPoint(point, params.maxDistance);\n    let distance = select(params.maxDistance, hit.distance, hit.distance >= 0.0);';
+const VOTES_EARLY_WGSL = `let winding = params.sign == 2u;
+    let v0 = bvhInsideVote(bvhRayCrossings(point, BVH_INSIDE_DIRECTION_0));
+    let v1 = bvhInsideVote(bvhRayCrossings(point, BVH_INSIDE_DIRECTION_1));
+    var votes = select(v0.x, v0.y, winding) + select(v1.x, v1.y, winding);
+    if (votes == 1u) {
+        let v2 = bvhInsideVote(bvhRayCrossings(point, BVH_INSIDE_DIRECTION_2));
+        votes += select(v2.x, v2.y, winding);
+    }`;
+const FIRST_HIT_WGSL = 'let firstHit = bvhTraceClosest(BvhRay(point, 0.0, BVH_INSIDE_DIRECTION_0, 3.0e38));';
+const VOTES_ALL_WGSL = `${CLOSEST_WGSL}
+    let votes = bvhInsideVotes(point);
+    return select(distance, -distance, select(votes.x, votes.y, params.sign == 2u) >= BVH_INSIDE_MAJORITY);`;
+
+const BREAKDOWN_BODIES: Record<OursBreakdown, string> = {
+    'votes-all': VOTES_ALL_WGSL,
+    'votes-early': `${CLOSEST_WGSL}\n    ${VOTES_EARLY_WGSL}\n    return select(distance, -distance, votes >= BVH_INSIDE_MAJORITY);`,
+    closest: `${CLOSEST_WGSL}\n    return distance;`,
+    rays3: 'let votes = bvhInsideVotes(point);\n    return f32(votes.x) + f32(votes.y) * 4.0;',
+    'rays-early': `${VOTES_EARLY_WGSL}\n    return f32(votes);`,
+    ray1: 'let crossings = bvhRayCrossings(point, BVH_INSIDE_DIRECTION_0);\n    return f32(crossings.count) + f32(crossings.winding) * 0.25;',
+    'no-winding': VOTES_ALL_WGSL,
+    'first-hit-only': `${FIRST_HIT_WGSL}\n    return select(firstHit.t, -firstHit.t, !firstHit.frontFace);`,
+    'closest-face': `${CLOSEST_WGSL}\n    return select(distance, -distance, hit.distance > 0.0 && dot(hit.normal, point - hit.point) < 0.0);`,
+    // The hit point is on a triangle, so the nearest one is no farther: start the closest-point
+    // walk there (a margin for rounding), and walk again unbounded if that found nothing.
+    'first-hit-bounded': `${FIRST_HIT_WGSL}
+    var limit = params.maxDistance;
+    if (firstHit.t >= 0.0) {
+        limit = min(limit, firstHit.t * 1.0001 + 1e-30);
+    }
+    var hit = bvhClosestPoint(point, limit);
+    if (hit.distance < 0.0 && limit < params.maxDistance) {
+        hit = bvhClosestPoint(point, params.maxDistance);
+    }
+    let distance = select(params.maxDistance, hit.distance, hit.distance >= 0.0);
+    return select(distance, -distance, firstHit.t >= 0.0 && !firstHit.frontFace);`,
+    'closest-merged': `${CLOSEST_WGSL}\n    return distance;`,
+    'votes-early-merged': `${CLOSEST_WGSL}\n    ${VOTES_EARLY_WGSL}\n    return select(distance, -distance, votes >= BVH_INSIDE_MAJORITY);`,
+};
+
+const WINDING_SUM_WGSL = 'bvhCrossingWinding += select(1, -1, hit.frontFacing != triangle.mirrored);';
+
+function breakdownWgsl(variant: OursBreakdown): string {
+    let module = traceModuleWgsl({ rayMasks: false, queries: true });
+    if (variant === 'no-winding') {
+        if (!module.includes(WINDING_SUM_WGSL)) throw new Error('compare sdf: the crossing walk has changed; update no-winding');
+        module = module.replace(WINDING_SUM_WGSL, '');
+    }
+    return `${module}
+struct CmpSdfParams {
+    boxMin: vec3f,
+    maxDistance: f32,
+    voxelSize: vec3f,
+    sign: u32,
+    resolution: vec3u,
+    mask: u32,
+    zOffset: u32,
+}
+@group(1) @binding(0) var<uniform> params: CmpSdfParams;
+@group(1) @binding(1) var cmpSdfOutput: texture_storage_3d<r32float, write>;
+
+fn cmpSdfValue(point: vec3f) -> f32 {
+    ${BREAKDOWN_BODIES[variant]}
+}
+
+@compute @workgroup_size(${SDF_WORKGROUP_SIZE}, ${SDF_WORKGROUP_SIZE}, ${SDF_WORKGROUP_SIZE})
+fn cmpSdfGenerate(@builtin(global_invocation_id) id: vec3u) {
+    if (any(id >= params.resolution)) {
+        return;
+    }
+    let point = params.boxMin + (vec3f(id) + 0.5) * params.voxelSize;
+    textureStore(cmpSdfOutput, id, vec4f(cmpSdfValue(point), 0.0, 0.0, 0.0));
+}
+`;
+}
+
+/** One of {@link OURS_BREAKDOWN}'s kernels over the mesh, signed by `sign` where it votes. */
+export async function createOursBreakdownSdf(device: GPUDevice, mesh: WeldedMesh, box: Box, variant: OursBreakdown, sign: 'parity' | 'winding' = 'parity'): Promise<GpuSdf> {
+    const scene = await oursScene(device, mesh, variant.endsWith('-merged'));
+    const code = breakdownWgsl(variant);
+    const pipeline = await device.createComputePipelineAsync({
+        label: `compare sdf ${variant}`,
+        layout: 'auto',
+        compute: { module: device.createShaderModule({ label: `compare sdf ${variant}`, code }), entryPoint: 'cmpSdfGenerate' },
+    });
+    const sceneGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: scene.nodes } },
+            { binding: 1, resource: { buffer: scene.triangles } },
+            { binding: 2, resource: { buffer: scene.topLevel } },
+        ],
+    });
+    const params = device.createBuffer({ label: 'compare sdf params', size: SDF_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const timer = oursTimer(device);
+    let texture: GPUTexture | null = null;
+    let fieldGroup: GPUBindGroup | null = null;
+    let dim = 0;
+    return {
+        id: `ours-${variant}${sign === 'winding' ? '-winding' : ''}`,
+        name: `@pmndrs/bvh breakdown: ${OURS_BREAKDOWN[variant]}${sign === 'winding' ? ', winding' : ''}`,
+        timing: timer.timing,
+        async generate(next, repeat) {
+            if (next !== dim) {
+                dim = next;
+                texture?.destroy();
+                texture = createSdfTexture(device, { resolution: dim }, 'compare sdf');
+                // BvhSdfParams' layout, the voxel size rounded as SdfGenerator rounds it.
+                const data = new ArrayBuffer(SDF_PARAMS_BYTES);
+                const size = [0, 1, 2].map((axis) => Math.fround((box.max[axis] - box.min[axis]) / dim));
+                new Float32Array(data).set([box.min[0], box.min[1], box.min[2], CLOSEST_POINT_MAX_DISTANCE, size[0], size[1], size[2]]);
+                new Uint32Array(data).set([sign === 'winding' ? 2 : 1, dim, dim, dim, 0xffffffff, 0], 7);
+                device.queue.writeBuffer(params, 0, data);
+                fieldGroup = device.createBindGroup({
+                    layout: pipeline.getBindGroupLayout(1),
+                    entries: [
+                        { binding: 0, resource: { buffer: params } },
+                        { binding: 1, resource: texture.createView({ dimension: '3d' }) },
+                    ],
+                });
+            }
+            const groups = Math.ceil(dim / SDF_WORKGROUP_SIZE);
+            return timer.time((encoder, timestampWrites) => {
+                const pass = encoder.beginComputePass({ label: `compare sdf ${variant}`, timestampWrites });
+                pass.setPipeline(pipeline);
+                pass.setBindGroup(0, sceneGroup);
+                pass.setBindGroup(1, fieldGroup!);
+                pass.dispatchWorkgroups(groups, groups, groups);
+                pass.end();
+            }, repeat);
+        },
+        read: () => readSdf(device, { texture: texture! }, { resolution: dim }),
+        dispose() {
+            texture?.destroy();
+            scene.destroy();
+            params.destroy();
+            timer.destroy();
         },
     };
 }
@@ -182,7 +413,29 @@ const COMPUTE_SDF_WGSL = /* wgsl */ `
 
 	`;
 
-export async function createTmbvhSdf(renderer: WebGPURenderer, mesh: { positions: Float32Array; indices: Uint32Array }, box: { min: [number, number, number]; max: [number, number, number] }): Promise<GpuSdf> {
+/** Which part of their kernel runs: all of it (as published), the closest point alone, or the +Z first-hit ray alone (compare/sdf's `?breakdown`). */
+export type TmbvhPart = 'both' | 'closest' | 'ray';
+
+const CLOSEST_LINES = `			var pointResult: PointQueryResult;
+			bvh_ClosestPointToPoint( point, &pointResult );
+`;
+const RAY_LINES = `			var rayResult: IntersectionResult;
+			let ray = Ray( point, vec3f( 0.0, 0.0, 1.0 ), 0.0 );
+			bvh_RaycastFirstHit( ray, &rayResult );
+`;
+const VALUE_LINES = `			let side = select( 1.0, rayResult.side, rayResult.didHit );
+			let value = side * sqrt( pointResult.distanceSq );
+`;
+
+/** Their kernel, or one part of it (the value then the closest distance, or the ray's signed hit distance). */
+function tmbvhKernelWgsl(part: TmbvhPart): string {
+    if (part === 'both') return COMPUTE_SDF_WGSL;
+    for (const lines of [CLOSEST_LINES, RAY_LINES, VALUE_LINES]) if (!COMPUTE_SDF_WGSL.includes(lines)) throw new Error('compare sdf: their kernel text has changed; update the parts');
+    const value = part === 'closest' ? 'let value = sqrt( pointResult.distanceSq );\n' : 'let value = select( 1.0, rayResult.side, rayResult.didHit ) * rayResult.dist;\n';
+    return COMPUTE_SDF_WGSL.replace(part === 'closest' ? RAY_LINES : CLOSEST_LINES, '').replace(VALUE_LINES, value);
+}
+
+export async function createTmbvhSdf(renderer: WebGPURenderer, mesh: { positions: Float32Array; indices: Uint32Array }, box: { min: [number, number, number]; max: [number, number, number] }, part: TmbvhPart = 'both'): Promise<GpuSdf> {
     const three = new BufferGeometry();
     three.setAttribute('position', new BufferAttribute(mesh.positions, 3));
     three.setIndex(new BufferAttribute(mesh.indices.slice(), 1));
@@ -212,17 +465,17 @@ export async function createTmbvhSdf(renderer: WebGPURenderer, mesh: { positions
     let dim = 0;
     let texture = makeTexture(1);
     const parameters = { matrix: uniform(matrix), dim: uniform(0, 'uint'), globalId, output: storageTexture(texture) };
-    const computeShader = wgslFn(COMPUTE_SDF_WGSL, [fns.closestPointToPoint, fns.raycastFirstHit]);
+    const computeShader = wgslFn(tmbvhKernelWgsl(part), part === 'both' ? [fns.closestPointToPoint, fns.raycastFirstHit] : [part === 'closest' ? fns.closestPointToPoint : fns.raycastFirstHit]);
     const kernel = computeShader(parameters as never).computeKernel(WORKGROUP_SIZE);
     const node = kernel as unknown as { computeNode: { parameters: { output: { value: unknown }; dim: { value: number } } } };
     const timestamps = renderer.hasFeature('timestamp-query') && (renderer as unknown as { backend: { trackTimestamp: boolean } }).backend.trackTimestamp;
     const backend = (renderer as unknown as { backend: { device: GPUDevice; get(object: object): { texture?: GPUTexture } } }).backend;
     let compiled = false;
     return {
-        id: 'tmbvh',
-        name: 'three-mesh-bvh/webgpu (its webgpu_sdfGeneration kernel, SAH)',
+        id: part === 'both' ? 'tmbvh' : `tmbvh-${part}`,
+        name: part === 'both' ? 'three-mesh-bvh/webgpu (its webgpu_sdfGeneration kernel, SAH)' : `three-mesh-bvh/webgpu breakdown: ${part === 'closest' ? 'closest point only' : '1 first-hit ray along +Z only'}`,
         timing: timestamps ? 'timestamps' : 'wall clock',
-        async generate(next) {
+        async generate(next, repeat = 1) {
             if (next !== dim) {
                 texture.dispose();
                 texture = makeTexture(next);
@@ -239,16 +492,18 @@ export async function createTmbvhSdf(renderer: WebGPURenderer, mesh: { positions
                 await backend.device.queue.onSubmittedWorkDone();
                 compiled = true;
             }
+            // 'repeat' dispatches back to back; three sums their timestamps.
+            const passes = Math.max(1, Math.floor(repeat));
             if (timestamps) {
-                renderer.compute(kernel, dispatchSize);
+                for (let pass = 0; pass < passes; pass++) renderer.compute(kernel, dispatchSize);
                 const ms = await renderer.resolveTimestampsAsync('compute');
                 if (typeof ms !== 'number') throw new Error('three returned no compute timestamp');
-                return ms;
+                return ms / passes;
             }
             const start = performance.now();
-            renderer.compute(kernel, dispatchSize);
+            for (let pass = 0; pass < passes; pass++) renderer.compute(kernel, dispatchSize);
             await backend.device.queue.onSubmittedWorkDone();
-            return performance.now() - start;
+            return (performance.now() - start) / passes;
         },
         read() {
             const gpuTexture = backend.get(texture).texture;

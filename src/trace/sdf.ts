@@ -3,8 +3,8 @@
  *
  * A grid of voxels over a world-space box; each voxel gets the distance from
  * its centre to the nearest triangle of the scene (`bvhClosestPoint`),
- * negative inside (`bvhInsideVotes`: three rays, a majority vote by parity or
- * by winding). The kernel is the trace module with `queries: true` and a small
+ * negative inside (`bvhIsInsideByRule`: a majority of three rays by parity or
+ * by winding; or, opt-in, the side the first hit of one ray is on). The kernel is the trace module with `queries: true` and a small
  * entry point, so it reads every node and triangle format, instanced and
  * merged scenes, `SceneTrees`' buffers and uploads alike, with no copy of the
  * scene.
@@ -13,7 +13,8 @@
  *   texture ({@link createSdfTexture}) or an `f32` buffer (x fastest, then y,
  *   then z), whole or a slab of z slices at a time.
  * - {@link generateSdfCpu}: the CPU reference over `CpuMeshBvh` trees (or
- *   anything with `closestPointToPoint` and `rayCrossings`), voxel for voxel
+ *   anything with `closestPointToPoint` and `rayCrossings`, and `intersectRay` for
+ *   `'first-hit'`), voxel for voxel
  *   the same points.
  *
  * Voxel `(x, y, z)` of a grid of `n` voxels over `[min, max]` samples the
@@ -27,8 +28,12 @@ import { CLOSEST_POINT_MAX_DISTANCE, INSIDE_TEST_DIRECTIONS, INSIDE_TEST_MAJORIT
 import { traceSourceFormats, type TraceSceneBuffers } from './trace-gpu.ts';
 import { traceModuleWgsl } from './wgsl.ts';
 
-/** How a field is signed: by the inside test's rule (`'parity'`, `'winding'`; see `InsideRule`), or not at all. */
-export type SdfSign = InsideRule | 'unsigned';
+/**
+ * How a field is signed: by the inside test's rule (`'parity'`, `'winding'`; see `InsideRule`),
+ * by the side of the first triangle one ray hits (`'first-hit'`, three-mesh-bvh's way: cheaper,
+ * but it needs one closed, consistently wound surface; docs/tracing/sdf.mdx), or not at all.
+ */
+export type SdfSign = InsideRule | 'first-hit' | 'unsigned';
 
 /** A grid of voxels over a world-space box. */
 export interface SdfGrid {
@@ -42,7 +47,14 @@ export interface SdfGrid {
 
 /** What a field holds. */
 export interface SdfOptions {
-    /** Default `'parity'`. `'unsigned'` skips the inside test (an open surface's distance, a quarter of the work). */
+    /**
+     * Default `'parity'`. `'unsigned'` skips the inside test (an open surface's distance, the
+     * closest point alone). `'first-hit'` casts one ray (`INSIDE_TEST_DIRECTIONS[0]`) and signs
+     * by the side of the first triangle it hits (the back is inside), as three-mesh-bvh's SDF
+     * example does: about a fifth faster than the vote on the RTX 3060, but right only for
+     * closed, consistently wound surfaces that don't overlap (a ray through a hole, a flipped
+     * triangle or into a second shell decides the voxel alone).
+     */
     readonly sign?: SdfSign;
     /**
      * Distances are clamped to this (and to -this inside): the closest-point walk
@@ -61,7 +73,7 @@ export const SDF_WORKGROUP_SIZE = 4;
 export const SDF_PARAMS_BYTES = 64;
 
 /** The kernel's `sign` codes. */
-const SIGN_CODE: Record<SdfSign, number> = { unsigned: 0, parity: 1, winding: 2 };
+const SIGN_CODE: Record<SdfSign, number> = { unsigned: 0, parity: 1, winding: 2, 'first-hit': 3 };
 
 /** The voxel counts of a grid, checked (positive integers). */
 export function sdfResolution(grid: SdfGrid): [number, number, number] {
@@ -98,16 +110,32 @@ function clampedMaxDistance(maxDistance: number | undefined): number {
 
 function signOf(options: SdfOptions): SdfSign {
     const sign = options.sign ?? 'parity';
-    if (!(sign in SIGN_CODE)) throw new RangeError(`SDF: sign must be 'parity', 'winding' or 'unsigned', got ${String(sign)}`);
+    if (!(sign in SIGN_CODE)) throw new RangeError(`SDF: sign must be 'parity', 'winding', 'first-hit' or 'unsigned', got ${String(sign)}`);
     return sign;
 }
 
 // ---- The CPU reference ----------------------------------------------------------------
 
-/** What {@link generateSdfCpu} needs of a tree: `CpuMeshBvh` has both, in world space. */
+/** What {@link generateSdfCpu} needs of a tree: `CpuMeshBvh` has all three, in world space (`intersectRay` only for `'first-hit'`). */
 export interface SdfCpuSource {
     closestPointToPoint(point: readonly [number, number, number], target?: object, minThreshold?: number, maxThreshold?: number): { readonly distance: number } | null;
     rayCrossings(origin: readonly [number, number, number], direction: readonly [number, number, number]): { readonly count: number; readonly winding: number };
+    intersectRay?(origin: readonly [number, number, number], direction: readonly [number, number, number], tMin: number, tMax: number, firstHitOnly: boolean): readonly { readonly t: number; readonly frontFace: boolean }[];
+}
+
+/** Whether the first triangle the ray along `INSIDE_TEST_DIRECTIONS[0]` hits, over every source, is hit on its back. */
+function firstHitInside(sources: readonly SdfCpuSource[], point: readonly [number, number, number]): boolean {
+    let nearest = Infinity;
+    let inside = false;
+    for (const source of sources) {
+        if (!source.intersectRay) throw new TypeError("generateSdfCpu: sign 'first-hit' needs sources with intersectRay (CpuMeshBvh has it)");
+        const [hit] = source.intersectRay(point, INSIDE_TEST_DIRECTIONS[0], 0, Infinity, true);
+        if (hit && hit.t < nearest) {
+            nearest = hit.t;
+            inside = !hit.frontFace;
+        }
+    }
+    return inside;
 }
 
 /** One voxel's value over several trees: the nearest distance, signed by their crossings added up. */
@@ -120,8 +148,12 @@ export function sdfValueCpu(sources: readonly SdfCpuSource[], point: readonly [n
         if (hit && hit.distance < distance) distance = hit.distance;
     }
     if (sign === 'unsigned') return distance;
+    if (sign === 'first-hit') return firstHitInside(sources, point) ? -distance : distance;
     let votes = 0;
-    for (const direction of INSIDE_TEST_DIRECTIONS) {
+    for (let ray = 0; ray < INSIDE_TEST_DIRECTIONS.length; ray++) {
+        // As the kernel: the third ray only when the first two split (the same majority).
+        if (ray === 2 && votes !== 1) break;
+        const direction = INSIDE_TEST_DIRECTIONS[ray];
         let count = 0;
         let winding = 0;
         for (const source of sources) {
@@ -139,7 +171,7 @@ export function sdfValueCpu(sources: readonly SdfCpuSource[], point: readonly [n
  * y, then z): the reference the GPU is checked against, and a field where
  * there is no GPU. `sources` are world-space trees (a `CpuMeshBvh` per mesh,
  * its instances' positions moved to world space); they count as one scene.
- * Slow for big grids: one closest point and three all-hit rays per voxel per tree.
+ * Slow for big grids: one closest point and two or three all-hit rays per voxel per tree.
  */
 export function generateSdfCpu(sources: SdfCpuSource | readonly SdfCpuSource[], grid: SdfGrid, options: SdfOptions = {}): Float32Array {
     const list = Array.isArray(sources) ? (sources as readonly SdfCpuSource[]) : [sources as SdfCpuSource];
@@ -189,7 +221,7 @@ struct BvhSdfParams {
     boxMin: vec3f,
     maxDistance: f32,     // clamped to BVH_CLOSEST_MAX_DISTANCE on the CPU
     voxelSize: vec3f,
-    sign: u32,            // 0 unsigned, 1 parity, 2 winding
+    sign: u32,            // 0 unsigned, 1 parity, 2 winding, 3 first hit
     resolution: vec3u,
     mask: u32,
     zOffset: u32,         // the first z slice of this dispatch
@@ -197,19 +229,25 @@ struct BvhSdfParams {
 
 const BVH_SDF_UNSIGNED: u32 = 0u;
 const BVH_SDF_WINDING: u32 = 2u;
+const BVH_SDF_FIRST_HIT: u32 = 3u;
+// The first-hit ray's reach: as far as an f32 goes.
+const BVH_SDF_RAY_FAR: f32 = 3.0e38;
 
 @group(1) @binding(0) var<uniform> bvhSdfParams: BvhSdfParams;
 @group(1) @binding(1) var${output === 'texture' ? ' bvhSdfOutput: texture_storage_3d<r32float, write>' : '<storage, read_write> bvhSdfOutput: array<f32>'};
 
 // The signed distance at 'point': to the nearest triangle (maxDistance when none is nearer),
-// negative when the inside test's vote says inside.
+// negative when the inside test's vote says inside (or, by sign 3, the first hit's back).
 fn bvhSdfValue(point: vec3f) -> f32 {
     let params = bvhSdfParams;
     let hit = ${masked('bvhClosestPoint', 'point, params.maxDistance')};
     var distance = select(params.maxDistance, hit.distance, hit.distance >= 0.0);
-    if (params.sign != BVH_SDF_UNSIGNED) {
-        let votes = ${masked('bvhInsideVotes', 'point')};
-        let inside = select(votes.x, votes.y, params.sign == BVH_SDF_WINDING) >= BVH_INSIDE_MAJORITY;
+    if (params.sign == BVH_SDF_FIRST_HIT) {
+        let first = ${masked('bvhTraceClosest', 'BvhRay(point, 0.0, BVH_INSIDE_DIRECTION_0, BVH_SDF_RAY_FAR)')};
+        distance = select(distance, -distance, first.t >= 0.0 && !first.frontFace);
+    } else if (params.sign != BVH_SDF_UNSIGNED) {
+        // Two of three rays, the third only when the first two split (bvhIsInsideByRule).
+        let inside = ${masked('bvhIsInsideByRule', 'point, params.sign == BVH_SDF_WINDING')};
         distance = select(distance, -distance, inside);
     }
     return distance;
@@ -298,8 +336,8 @@ export function createSdfTexture(device: GPUDevice, grid: Pick<SdfGrid, 'resolut
 
 /**
  * Fills a grid with the signed distance to a scene's triangles on the GPU: one
- * closest-point walk and, for a signed field, three all-hit ray walks per voxel
- * (docs/tracing/sdf.mdx). One generator serves any number of scenes of its
+ * closest-point walk and, for a signed field, two or three all-hit ray walks per
+ * voxel (one first-hit ray with `sign: 'first-hit'`; docs/tracing/sdf.mdx). One generator serves any number of scenes of its
  * formats. Group 0 is the scene (as `TraceBatchKernel`'s), group 1 the field's
  * parameters and output.
  */

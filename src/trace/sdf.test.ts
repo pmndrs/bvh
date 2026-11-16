@@ -8,9 +8,10 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createFakeGpu, type FakeBuffer, type FakeEncoder } from '../../tests/support/fake-gpu.ts';
 import { closedBox, merge } from '../../tests/support/solids.ts';
-import { CpuMeshBvh } from '../query/cpu-mesh-bvh.ts';
+import { CpuMeshBvh, insideVotesOf } from '../query/cpu-mesh-bvh.ts';
 import { createTinyBvhBuilder, type TinyBvhBuilder } from '../tinybvh.ts';
 import { buildMeshBvhWithTinyBvh } from './mesh-bvh-topology.ts';
+import { createRandom, randomTriangleSoup } from './oracle-fixtures.ts';
 import { INSIDE_TEST_DIRECTIONS } from './query-wgsl.ts';
 import { assembleTraceScene } from './scene-assembly.ts';
 import { createSdfTexture, generateSdfCpu, SDF_PARAMS_BYTES, SdfGenerator, sdfKernelWgsl, sdfResolution, sdfValueCpu, sdfVoxelCenter, type SdfGrid } from './sdf.ts';
@@ -65,6 +66,41 @@ describe('the CPU reference (generateSdfCpu)', () => {
         }
     });
 
+    it('signs by the majority of all three rays, though the third is cast only on a split', () => {
+        // An open box and a random soup over two trees: the rays often split.
+        const box = closedBox([-1, -1, -1], [1, 1, 1]);
+        const sources = [CpuMeshBvh.build(merge({ positions: box.positions, indices: box.indices.filter((_, i) => Math.floor(i / 6) !== 1) }), tiny), CpuMeshBvh.build(randomTriangleSoup(createRandom(8), 150, 1.4, 0.6), tiny)];
+        const random = createRandom(31);
+        for (let i = 0; i < 300; i++) {
+            const point = [(random() - 0.5) * 4, (random() - 0.5) * 4, (random() - 0.5) * 4] as [number, number, number];
+            const votes = insideVotesOf(point, (origin, direction) => {
+                const [x, y] = sources.map((source) => source.rayCrossings(origin, direction));
+                return { count: x.count + y.count, winding: x.winding + y.winding };
+            });
+            const distance = Math.abs(sdfValueCpu(sources, point, { sign: 'unsigned' }));
+            expect(sdfValueCpu(sources, point)).toBe(votes.parity >= 2 ? -distance : distance);
+            expect(sdfValueCpu(sources, point, { sign: 'winding' })).toBe(votes.winding >= 2 ? -distance : distance);
+        }
+    });
+
+    it("'first-hit' signs by the side the first hit is on: right for one closed surface, not where shells overlap", () => {
+        const bvh = CpuMeshBvh.build(merge(closedBox([-1, -0.5, -0.75], [1, 0.5, 0.75])), tiny);
+        const grid: SdfGrid = { min: [-2, -1.5, -1.75], max: [2, 1.5, 1.75], resolution: [10, 7, 9] };
+        // Equal everywhere (voxels on the surface may be +0 or -0).
+        const plusZero = (field: Float32Array) => Array.from(field, (v) => v + 0);
+        expect(plusZero(generateSdfCpu(bvh, grid, { sign: 'first-hit' }))).toEqual(plusZero(generateSdfCpu(bvh, grid)));
+        // In box a only, the ray runs on into box b and hits b's front first: outside, though the union is solid there.
+        const a = merge(closedBox([-1, -1, -1], [1, 1, 1]));
+        const b = merge(closedBox([0, -0.5, -0.5], [2, 0.5, 0.5]));
+        const separate = [CpuMeshBvh.build(a, tiny), CpuMeshBvh.build(b, tiny)];
+        const inA = [-0.5, -0.2, -0.3] as const;
+        expect(sdfValueCpu(separate, inA, { sign: 'winding' })).toBeLessThan(0);
+        expect(sdfValueCpu(separate, inA, { sign: 'first-hit' })).toBeGreaterThan(0);
+        // Inside both, the first hit is a back face: inside.
+        expect(sdfValueCpu(separate, [0.5, 0, 0], { sign: 'first-hit' })).toBeLessThan(0);
+        expect(() => generateSdfCpu([{ closestPointToPoint: () => null, rayCrossings: () => ({ count: 0, winding: 0 }) }], grid, { sign: 'first-hit' })).toThrow(/needs sources with intersectRay/);
+    });
+
     it('samples voxel centres, so a texture lookup at (p - min) / (max - min) returns the value at p', () => {
         const grid: SdfGrid = { min: [-1, 0, 2], max: [1, 4, 3], resolution: [4, 2, 1] };
         expect(sdfVoxelCenter(grid, 0, 0, 0)).toEqual([-0.75, 1, 2.5]);
@@ -88,6 +124,8 @@ describe('the kernel (sdfKernelWgsl) and the inside test in the queries module',
             'fn bvhInsideVotesMasked(point: vec3f, mask: u32) -> vec2u',
             'fn bvhIsInside(point: vec3f) -> bool',
             'fn bvhIsInsideMasked(point: vec3f, mask: u32) -> bool',
+            'fn bvhIsInsideByRule(point: vec3f, winding: bool) -> bool',
+            'fn bvhIsInsideByRuleMasked(point: vec3f, winding: bool, mask: u32) -> bool',
         ]) {
             expect(masked).toContain(signature);
         }
@@ -107,7 +145,10 @@ describe('the kernel (sdfKernelWgsl) and the inside test in the queries module',
         expect(texture).toContain('@group(1) @binding(1) var bvhSdfOutput: texture_storage_3d<r32float, write>;');
         expect(texture).toContain('textureStore(bvhSdfOutput, voxel,');
         expect(texture).toContain('bvhClosestPointMasked(point, params.maxDistance, params.mask)');
-        expect(texture).toContain('bvhInsideVotesMasked(point, params.mask)');
+        // The sign: the early-out majority by the call's rule (the third ray only on a split).
+        expect(texture).toContain('bvhIsInsideByRuleMasked(point, params.sign == BVH_SDF_WINDING, params.mask)');
+        // 'first-hit': one closest-hit ray along the inside test's first direction.
+        expect(texture).toContain('bvhTraceClosestMasked(BvhRay(point, 0.0, BVH_INSIDE_DIRECTION_0, BVH_SDF_RAY_FAR), params.mask)');
         expect(texture).toContain('@compute @workgroup_size(4, 4, 4)\nfn bvhSdfGenerate(');
         const buffer = sdfKernelWgsl({ output: 'buffer', rayMasks: false, nodeFormat: 'f32', triangleLeaves: 'indexed' });
         expect(buffer).toContain('@group(1) @binding(1) var<storage, read_write> bvhSdfOutput: array<f32>;');
@@ -149,8 +190,10 @@ describe('SdfGenerator', () => {
         expect(slab[12]).toBe(4); // zOffset
         expect(new Float32Array(all[1].bytes.buffer)[3]).toBe(Math.fround(1e18)); // no maxDistance: the closest-point limit
         expect(slab[7]).toBe(1); // parity by default
+        generator.encode(encoder, buffers, { texture: fakeTexture(9, 5, 13) }, grid, { sign: 'first-hit' });
+        expect(gpu.buffers.filter((b) => b.label === 'sdf params')[2].words[7]).toBe(3);
         generator.destroy();
-        expect(all.every((b) => b.destroyed)).toBe(true);
+        expect(gpu.buffers.filter((b) => b.label === 'sdf params').every((b) => b.destroyed)).toBe(true);
     });
 
     it('refuses a scene, texture or buffer it cannot write, and slices outside the grid', async () => {
