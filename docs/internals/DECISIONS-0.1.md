@@ -1,6 +1,6 @@
 # Decisions before 0.1.0 (2026-11-15)
 
-Seven open choices from HANDOFF.md ("For Dennis to decide", and the two provisional walk defaults). Each block says what
+Seven open choices (and an eighth added 2026-11-17) from HANDOFF.md ("For Dennis to decide", and the two provisional walk defaults). Each block says what
 the choice is, what to pick, what it costs, and how hard it is to undo in 0.2. "Before 0.1.0" means it touches a file
 format or a public type that people will build on; defaults and additive options can change in 0.2 with a changelog line.
 
@@ -13,6 +13,7 @@ format or a public type that people will build on; defaults and additive options
 | 5. Points and lines CPU-only, own builder and file | Keep; bump the `BVHP` version by hand if node words change | No |
 | 6. Adopt and quantized emit; `positionsBuffer` turns weld and merge off | Keep both | No |
 | 7. `triangleLeaves: 'records'`, `quantizedDecode: 'exact'` | Ship them; both are safe to flip in 0.2 | No |
+| 8. Closest-hit tie rule (added 2026-11-17) | Take it: ties beyond `tMin` go right | No, but taking it now lets the M5 pass check it |
 
 **Decided by Dennis, 2026-11-16:** every recommendation below is taken, with three notes.
 
@@ -397,3 +398,42 @@ have no GPU walk.
 library's own kernels, and needs a changelog note for hand-written WGSL.
 
 **Decide before 0.1.0?** No. Ship, and settle both after the M5 run.
+
+---
+
+## 8. The closest-hit walk's tie rule (added 2026-11-17)
+
+**The question.** When a ray enters both children of a node at exactly the same distance, the closest-hit walk enters the
+left one first (tinybvh's rule, DIVERGENCES K2). On `compare/gpu`'s furnished room, rays from outside, that rule is why
+ours was 0.51x three-mesh-bvh/webgpu with quantized nodes (runbook section 14). The root's two children share their outer
+planes; quantized boxes round both to the same grid plane, so the entries tie and the walk goes into the half behind
+the wall first. On `f32` boxes the same planes differ by 1-4 ulp, which happened to pick the better child. It is not
+the grid: the room's step is 0.12 mm and its decoded SAH grows 0.17%, the least of the four scenes measured.
+
+**Recommendation.** **Take it: a tie further along the ray than `tMin` goes to the right child; a tie at `tMin` still
+goes left.** One comparison: `leftEntry < rightEntry || leftEntry == ray.tMin` in place of `leftEntry <= rightEntry`,
+in the WGSL walk and the CPU walk. To take it: `git revert e372387` (the experiment is `7d6fda5`).
+
+| Option | Pros | Cons |
+| --- | --- | --- |
+| Ties left (now, tinybvh's) | Same as tinybvh; no change | Room from outside 0.51x three-mesh-bvh (quantized), 0.95x (`f32`) |
+| Ties beyond `tMin` right | Room from outside 4.4x faster quantized, 2.5x `f32` (2.3-2.5x three-mesh-bvh); Sponza from outside 1.06x; every other set level | A departure from tinybvh (DIVERGENCES K2 changes); a hit can name the other of two triangles at exactly the same `t`; M5 not run |
+| Every tie right | As good from outside | Inside and surface rays visit 1-3% more nodes; Sponza inside 0.96x |
+| Larger child on a tie | As good from outside | Worse inside; the knot 0.97-0.99x |
+| `nodeFormat: 'f32'` for such scenes | 1.8x on these rays | Half the tie rule's gain, twice the node bytes |
+
+**Performance / quality.** RTX 3060, `compare/gpu` full, two runs each (runbook section 14): room outside quantized
+101 to 445-449 Mrays/s, `f32` 183 to 464-471; room inside, Sponza inside and the knot level. The surface-ray benches,
+paired in the same page: every ratio 0.996-1.003 on Sponza and 0.998-1.004 on Bistro interior, every `t` the same; the
+other triangle at the same `t` on up to 19 of about 230,000 surface rays per set (209 air-grid rays on Bistro).
+Quantized nodes and merged groups already allow that kind of difference. Gated: `trace-oracle`, `trace-inline`,
+`query-oracle`, `sdf-oracle` and `three-trace` on the RTX and the Intel UHD (full profile), the seven CI pages on
+SwiftShader, `pnpm test`.
+
+**What others do.** tinybvh enters the left child on ties (ours today). three-mesh-bvh's GPU walk was ahead on this
+ray set with 64-byte `f32` boxes; its counted walk tests fewer boxes there (19.9 against our 28.8) and more triangles.
+
+**Cost to change later.** None in data: no buffer, file or option changes, only the walk's order. Any time is fine.
+
+**Decide before 0.1.0?** No. But taking it now means the M5's pre-release pass checks it with everything else.
+
