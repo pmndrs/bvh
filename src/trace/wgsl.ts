@@ -678,12 +678,17 @@ fn bvhFoldedEntry(nearSides: vec3f, farSides: vec3f, tMin: f32, tMax: f32) -> f3
 function walkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrder: AnyHitOrder = 'far', folded = false): string {
     const closest = kind === 'closest';
     // Which child a walk enters first when both are hit (the other is pushed).
-    const leftFirst =
-        closest || anyHitOrder === 'near'
-            ? 'leftEntry <= rightEntry'
-            : anyHitOrder === 'larger'
-              ? 'bvhBoxHalfArea(node.leftMin, node.leftMax) >= bvhBoxHalfArea(node.rightMin, node.rightMax)'
-              : 'leftEntry > rightEntry';
+    // Closest-hit: the nearer; an exact tie at tMin (the ray starts inside both boxes) goes left, and a
+    // tie beyond it (both boxes entered through one shared plane) goes right. EXPERIMENT 2026-11-17,
+    // WINDOWS-RUNBOOK section 14: tinybvh's rule sends every tie left, and on rays from outside a closed
+    // room that entered the wrong child of the root (compare/gpu, the furnished room: 4.4x).
+    const leftFirst = closest
+        ? 'leftEntry < rightEntry || leftEntry == ray.tMin'
+        : anyHitOrder === 'near'
+          ? 'leftEntry <= rightEntry'
+          : anyHitOrder === 'larger'
+            ? 'bvhBoxHalfArea(node.leftMin, node.leftMax) >= bvhBoxHalfArea(node.rightMin, node.rightMax)'
+            : 'leftEntry > rightEntry';
     // With masks compiled out the walk has no mask parameter, no mask test, and
     // hands the filter all ones; it is otherwise the same code.
     const maskParameter = rayMasks ? ', rayMask: u32' : '';
