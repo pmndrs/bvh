@@ -12,7 +12,7 @@ effects all read one. `SdfGenerator` fills one on the GPU from the same scene bu
 of the scene.
 
 Per voxel it takes two answers from the [spatial queries](/tracing/gpu-queries): the distance to the nearest triangle
-(`bvhClosestPoint`) and whether the voxel's centre is inside (`bvhInsideVotes`, below).
+(`bvhClosestPoint`) and whether the voxel's centre is inside (the inside test, below).
 
 ## Fill a texture
 
@@ -54,7 +54,8 @@ the GPU is done. `readSdf(device, { texture }, grid)` reads a field back to the 
 
 Each `encode` or `generate` takes:
 
-- **`sign`**: `'parity'` (the default), `'winding'` or `'unsigned'` (the closest point alone, about a quarter of the work).
+- **`sign`**: `'parity'` (the default), `'winding'`, `'first-hit'` (one ray, the side of the first triangle it hits:
+  cheaper, for closed meshes only; see below) or `'unsigned'` (the closest point alone).
 - **`maxDistance`**: values are clamped to it, and to minus it inside. The closest-point walk skips boxes farther away,
   so a narrow band is cheaper. Default: none.
 - **`mask`**: only instances whose mask shares a bit with it count.
@@ -78,6 +79,7 @@ struct BvhRayCrossings { count: u32, winding: i32 }
 fn bvhRayCrossings(origin: vec3f, direction: vec3f) -> BvhRayCrossings
 fn bvhInsideVotes(point: vec3f) -> vec2u
 fn bvhIsInside(point: vec3f) -> bool
+fn bvhIsInsideByRule(point: vec3f, winding: bool) -> bool
 ```
 
 with `*Masked` forms (a last `mask: u32`) unless `rayMasks: false`.
@@ -88,7 +90,9 @@ with `*Masked` forms (a last `mask: u32`) unless `rayMasks: false`.
 - `bvhInsideVotes` casts three fixed rays (`INSIDE_TEST_DIRECTIONS`: along no axis or diagonal, into three different
   octants) and counts how many vote inside: `.x` by **parity** (an odd number of crossings), `.y` by **winding** (a
   signed sum other than 0). Two or three votes is inside.
-- `bvhIsInside` is the parity vote.
+- `bvhIsInside` is the parity vote, and `bvhIsInsideByRule` the vote by either rule. Both cast the third ray only when
+  the first two disagree, so most points cost two walks; the answer is the same as all three rays'. The SDF kernel signs
+  with `bvhIsInsideByRule`. Use `bvhInsideVotes` when you want the counts.
 
 {/* snippet: sdf-inside-wgsl */}
 ```ts
@@ -113,15 +117,17 @@ cast walks the tree we already have, with the walk's watertight test, so on a cl
 triangles that share an edge, and the answer is exact away from the surface. A ray exactly through an edge counts both
 triangles (the walk's rule); casting three rays in different directions and taking the majority outvotes that ray.
 
-Parity and winding differ where shells overlap or nest:
+Parity and winding differ where shells overlap or nest. `'first-hit'` is three-mesh-bvh's way: one ray, inside when the
+first triangle it hits faces away from it. It reads one triangle, so it has no vote to fall back on:
 
-| Geometry | `'parity'` | `'winding'` |
-| --- | --- | --- |
-| One closed mesh, either winding | right | right |
-| Two closed meshes that overlap | the overlap is outside (two crossings) | right (winding 2) |
-| A hollow: an outer shell and an inner one wound inward | right | right |
-| Triangles wound inconsistently | right | wrong where the signs cancel |
-| A mesh with a hole or a missing face | each ray that leaves through the hole votes outside; the vote decides | the same |
+| Geometry | `'parity'` | `'winding'` | `'first-hit'` |
+| --- | --- | --- | --- |
+| One closed mesh, wound outward | right | right | right |
+| One closed mesh, wound inward | right | right | inverted |
+| Two closed meshes that overlap | the overlap is outside (two crossings) | right (winding 2) | wrong where the ray runs from one into the other |
+| A hollow: an outer shell and an inner one wound inward | right | right | right |
+| Triangles wound inconsistently | right | wrong where the signs cancel | wrong wherever the ray hits a flipped one first |
+| A mesh with a hole or a missing face | each ray that leaves through the hole votes outside; the vote decides | the same | outside wherever its one ray leaves through the hole |
 
 ### Meshes that aren't watertight
 
@@ -133,11 +139,31 @@ repeat their vertices along UV seams, and two copies that round apart leave a cr
 (`mergeVertices` from three's `BufferGeometryUtils`, after deleting the other attributes), as the `three/sdf` example
 does.
 
-### Cost
+### Speed
 
-A signed voxel walks the tree four times: once for the closest point, which prunes by distance, and three times along
-rays that can't stop early (every crossing counts). An unsigned voxel walks it once. Points far from everything are
-cheap with `maxDistance`; the rays are not limited by it.
+Every voxel costs one closest-point walk, which prunes by distance. Then the sign:
+
+| `sign` | Walks per voxel | On the RTX 3060 (100k-triangle knot, 128³) |
+| --- | --- | --- |
+| `'unsigned'` | the closest point only | 1 |
+| `'first-hit'` | + one ray that stops at its first hit | about 1.1 |
+| `'parity'`, `'winding'` | + two rays that visit every crossing, a third when they disagree | about 1.4 |
+
+The rays of the vote can't stop at the first triangle: every crossing counts. One such ray costs about two and a half
+times a first-hit ray, and most voxels need two of them. `maxDistance` makes the closest point cheaper; it doesn't limit
+the rays. Before 2026-11-16 every voxel cast all three rays (about 1.5 on the same scale); the answer is the same bit
+for bit.
+
+Against three-mesh-bvh's `webgpu_sdfGeneration` kernel on the RTX 3060 (`compare/sdf`, 100k- and 1M-triangle torus
+knots, 32³ to 128³, paired rounds):
+
+- The closest point costs about the same in both (ours a little faster on the 1M knot).
+- Its sign is one first-hit ray along +Z. With the default vote, its field is 1.2-1.3x faster than ours on the 100k knot
+  (1.3-1.5x before the third ray became conditional) and level on the 1M knot. Not 2x: the 1.7-2.8x seen before was on
+  SwiftShader, which runs the kernels on the CPU.
+- `sign: 'first-hit'` is its way on our walk: as fast as theirs on the 100k knot, up to 1.2x faster on the 1M one. Use
+  it only on closed, outward-wound meshes that don't overlap (the table above).
+- Unsigned, ours is 1.0-1.2x faster than its signed field.
 
 ## On the CPU
 
