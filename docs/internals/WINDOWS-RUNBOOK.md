@@ -293,3 +293,58 @@ Reading it:
 - Items share code: run together in one profile (`pass 1` of an all-items run), later items are partly warm (the mesh refit after the refit 31 ms, the top level 41, a second closest-hit kernel 3-11), so the table times each alone.
 
 Not covered: the Apple M5 (the page runs there as is), a cold start across a browser restart with the disk cache kept, `three-skinned`'s pose pass.
+
+## 14. The furnished room's closest hits from outside: the child order on ties, not the grid. RTX 3060 Laptop, 2026-11-17
+
+The 2026-11-16 re-run (`compare/RESULTS.md`) found ours 0.51x three-mesh-bvh/webgpu on `compare/gpu`'s furnished room, closest hits from outside, with quantized nodes and 0.96x with `?nodeFormat=f32`. The guess was the 16-bit grid of one 270k-triangle mesh. It is not. The GPU was idle at the start (48 °C, P8, nothing in `nvidia-smi`'s compute list but the desktop Chrome and Camera Hub; no other headless suite); the runs below waited for 55 °C or less before each page and peaked at 82 °C (the surface-ray pages). Files in the session's scratch folder, not kept.
+
+**The grid is fine.** `compare/node/closest-ties.ts` (Node, no GPU) prints each scene's frame and decoded SAH:
+
+| Scene (one merged mesh) | Step (m) | Steps across | SAH quantized / `f32` |
+| --- | --- | --- | --- |
+| Furnished room, 269,764 triangles | 1.2e-4 / 6.1e-5 / 1.2e-4 | 33,375 / 54,879 / 41,595 | 1.0017 |
+| Torus knot, 100k | 6.1e-5 / 6.1e-5 / 3.1e-5 | 53,768 / 56,165 / 52,428 | 1.0014 |
+| Sponza, 5.74M | 9.8e-4 / 4.9e-4 / 4.9e-4 | 37,117 / 40,731 / 48,673 | 1.0066 |
+| Bistro interior, 1.04M | 2.4e-4 / 1.2e-4 / 4.9e-4 | 63,999 / 59,673 / 39,757 | 1.0011 |
+
+`checkGpuLayout` finds nothing on the room's quantized tree (every decoded box holds its triangles, outward by the margin), and its frame is `nodeFrameOf` of the exact root box. No flat or zero-size box misbehaves; the room is near the origin (bounds -2.04..2.04, -0.11..3.24, -2.54..2.54). The room's SAH grows the least of the four scenes, so no SAH threshold could have singled it out.
+
+**The cause: exact ties in the child order.** Closest-hit enters the child with the nearer entry distance first; on an exact tie it takes the left one (tinybvh's rule, DIVERGENCES K2). The room tree's root has two children that share five of their six planes, up to the last bits of an `f32`: left spans z -2.54..0.07, right the whole room. A ray from outside enters both through the same outer plane. On `f32` boxes the right child's entry came out 1-4 ulp nearer (5.385883 against 5.385885, say), so the walk entered it first; quantized boxes round both planes to the same grid plane, the entries tie exactly, and the walk goes left, into geometry behind the wall it hasn't reached yet, before it comes back for the right child. Of 8,192 outside rays, 978 decided the root the other way, every one a quantized tie going left; 707 tested leaves the `f32` walk never touched. Ties at inner nodes over those rays: 7,016 on `f32`, 9,917 quantized. The `f32` walk loses to ties too: outside rays meet shared outer planes all the time.
+
+Work per ray (compare's seeded rays; closest hit; nodes / triangles / the slowest ray of each 32, what a SIMD group waits for):
+
+| Rays | `f32`, ties left (now) | quantized, ties left (now) | `f32`, face ties right | quantized, face ties right |
+| --- | --- | --- | --- | --- |
+| Room, outside (CPU model, 8,192) | 11.06 / 6.87 / 43.2 | 13.40 / 9.97 / 60.7 | 9.14 / 5.37 / 20.9 | 9.74 / 5.44 / 21.1 |
+| Room, outside (GPU counted walk, 1M; box tests / triangles / slowest box tests) | 24.45 / 6.89 / 89.5 | 28.83 / 10.36 / 124.4 | 20.73 / 5.42 / 43.6 | 21.53 / 5.45 / 43.9 |
+| Room, inside (GPU, 1M) | 27.27 / 6.49 / 101.2 | 27.30 / 6.52 / 101.4 | the same | the same |
+| Sponza, outside (CPU) | 22.15 / 4.32 / 68.4 | 22.38 / 4.36 / 68.8 | 20.38 / 4.01 / 67.4 | 20.72 / 4.03 / 67.7 |
+| Sponza, inside / secondary (CPU) | 30.42 / 3.63, 39.16 / 4.89 | 30.54 / 3.69, 39.40 / 5.04 | 30.45 / 3.68, 39.14 / 4.90 | 30.57 / 3.74, 39.37 / 5.05 |
+| Knot, Bistro interior (CPU, every set) | | | within 1% of now | within 1% of now |
+
+(three-mesh-bvh's counted walk on the room from outside: 19.92 box tests, 13.13 triangles, 68.7 on the slowest of 32. Before this pass `?counts` counted ours wrongly on quantized scenes, 4 box tests and no hits: its counted walk was compiled for `f32` nodes; fixed, `compare/gpu/gpu-counts.ts`.)
+
+**The lever: ties beyond `tMin` go right.** `leftEntry < rightEntry || leftEntry == ray.tMin` in place of `leftEntry <= rightEntry` (closest hit only; any-hit's orders unchanged): a tie at `tMin` (the ray starts inside both boxes, the usual case for rays from surfaces and inside rooms) still goes left, so those walks are unchanged; a tie further on (both boxes entered through one shared plane) goes right. Built as commit `7d6fda5` in the WGSL walk and the CPU walk, undone by `e372387`. `compare/gpu`, `full` (1,048,576 rays, 7 paired rounds), two runs each, Mrays/s and ours over three-mesh-bvh:
+
+| Scene, rays | Now (ties left) | Face ties right |
+| --- | --- | --- |
+| Room, outside, quantized | 101.3 / 101.4 (0.518, 0.518) | **444.8 / 449.3 (2.33, 2.35)** |
+| Room, outside, `f32` | 183.0 / 183.1 (0.946, 0.951) | **470.8 / 464.2 (2.47, 2.45)** |
+| Room, inside, quantized | 144.5 / 143.5 (0.868, 0.846) | 143.5 / 143.7 (0.850, 0.849) |
+| Room, inside, `f32` | 151.5 / 151.0 (0.909, 0.915) | 149.4 / 149.9 (0.891, 0.905) |
+| Sponza, outside, quantized | 159.9 / 160.6 (1.09, 1.10) | 170.0 / 170.0 (1.19, 1.15) |
+| Sponza, inside, quantized | 137.2 / 138.3 (1.38, 1.37) | 137.8 / 137.4 (1.36, 1.37) |
+| Knot, outside / inside, quantized | 141.5, 142.3 / 143.8, 144.2 | 141.2, 138.9 / 143.2, 143.3 |
+
+The surface-ray benches, with a paired section that timed the rule against today's in the same page (5 rounds, closest hit, `f32` and quantized, instanced and merged, `surface` and `air-grid`; a scratch section, not committed): every ratio 0.996-1.003 on Sponza and 0.998-1.004 on Bistro interior, work per ray the same to two decimals, every `t` the same; another triangle at the same `t` on 0-19 of about 230,000 surface rays per set and up to 209 air-grid rays (Bistro). With the rule, quantized over `f32` on the room from outside is 0.96, the decode's usual cost (the room's inside rays: 0.95-0.96).
+
+Other rules, measured and not recommended: every tie right (the same on outside rays, but ties at `tMin` going right cost inside and surface rays 1-3% more nodes and 2-4% more triangles on the CPU, and Sponza inside 0.96x on the GPU, one run); the larger child on a tie (as good on outside rays, worse inside, a half-area per tie; the knot 0.97-0.99x); from inside both boxes the nearer exit, else the larger (the fewest nodes on the CPU, 1.5-3% fewer on inside and surface rays, but 0.95x on Sponza's inside rays and 0.98x on the knot on the GPU: recomputing the exits costs more than it saves).
+
+**Correctness of `7d6fda5`:** `trace-oracle`, `trace-inline`, `query-oracle`, `sdf-oracle` and `three-trace` on the RTX and the Intel UHD (full profile), and the CI job's seven pages on SwiftShader (`profile=ci`): all passed (RTX: `trace-oracle` 405 s, every `mismatches` 0, no shared-edge slip beyond the f32 counts the page allows; Intel UHD `trace-oracle` 420 s; SwiftShader 280 s for the seven). `pnpm test` 873 passed with it.
+
+**Decision left to Dennis:** the default walk is unchanged. Options, with what each costs:
+- **Face ties right** (`7d6fda5`; `git revert e372387` takes it): one comparison more per inner node with two children hit; the room from outside 4.4x on quantized nodes and 2.5x on `f32`, Sponza from outside 1.06x, every other measured set level; a closest hit can name the other of two triangles at exactly the same `t` (as `mergeStaticInstances` and quantized nodes already can). A departure from tinybvh's tie rule (DIVERGENCES K2); the M5 has not run it.
+- **`nodeFormat: 'f32'` for such scenes:** 1.8x on these rays (183 against 101 Mrays/s), half of what the tie rule gives, for 2x the node bytes. Not needed if the tie rule goes in.
+- **A finer or per-subtree frame, or `f32` for meshes whose decoded SAH grows past a threshold:** would not help. The planes that tie differ by about 1e-6 m against a 1.2e-4 m step: no 16-bit grid keeps that, and the room's SAH growth (0.17%) is the smallest of the four scenes.
+
+To reproduce: `node --experimental-transform-types --no-warnings --import ./compare/node/register.mjs compare/node/closest-ties.ts furnished-room torus-knot sponza bistro-interior --rules left,face-right,right,larger,hybrid` (CPU), and `BVH_PAGE_QUERY='scene=furnished-room&full&counts' pnpm examples:smoke --filter compare-gpu --gpu nvidia` with and without `&nodeFormat=f32` (GPU).

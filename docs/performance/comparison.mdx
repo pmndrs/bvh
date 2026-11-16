@@ -42,10 +42,12 @@ What the 2026-11-15 defaults could change, measured again (the full tables are i
 
 **Where others still win, on these machines:**
 
-- **The furnished room on the GPU.** three-mesh-bvh's closest hits from outside are twice ours (0.51× ours). It is our
-  quantized nodes, the default: on `f32` nodes ours is 0.96× there. The suite traces each scene as one merged mesh, so
-  the room is one 270k-triangle mesh on one quantization grid; the instanced and merged scenes of our surface-ray
-  benches did not show this. Its any hit from outside is 2.8× our default order, and 0.83× ours with `'larger'`.
+- **The furnished room on the GPU.** three-mesh-bvh's closest hits from outside are twice ours (0.51× ours; 0.96× with
+  `f32` nodes). The cause is not the quantization grid. When a ray enters two boxes at exactly the same distance, our
+  walk takes the left one first; from outside the room that is often the half behind the wall. Quantized boxes make
+  such ties more common. Taking the other box on these ties made ours 2.3× theirs on this set, with every other set
+  level; it is measured, not shipped yet. Its any hit from outside is 2.8× our default order, and 0.83× ours with
+  `'larger'`.
 - **CPU refit:** three-mesh-bvh is 2.2–2.5× faster than our records tree on every scene, and 1.6–1.9× faster than
   `corners: 'positions'`. Our tree has 3.6× the boxes (leaves of about 2 triangles against 7).
 - **Memory:** on Sponza ours holds 5.5× three-mesh-bvh's bytes with `corners: 'positions'` and 8.9× with records.
