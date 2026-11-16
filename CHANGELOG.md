@@ -31,6 +31,9 @@ shared GPU layout, and a WGSL walk and its CPU port trace it.
   and the walk in a `ComputeShader`.
 - **Defaults:** quantized nodes, merged static instances, triangle records in the leaves, and a 256 MiB cap on the GPU
   build's peak memory. The memory levers that measured as wins are on.
+- **Startup:** each walk pipeline takes about 0.15-0.25 s to compile the first time on Windows (the SDF kernel 0.7 s,
+  the GPU builder 0.3-1.4 s), and about 10 ms once Chrome has cached it. Create kernels early and with the async calls
+  (Builds and tracing, "Shader compile time").
 - **Checked on:** an RTX 3060 and an Intel UHD on Windows, an Apple M5, and SwiftShader in CI. Every GPU result is
   checked against the CPU walk.
 

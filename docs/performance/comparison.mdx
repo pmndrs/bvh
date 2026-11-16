@@ -30,7 +30,7 @@ gets no ratio on it: a faster wrong answer is not faster.** The full tables, the
 ## Re-run on the Windows laptop, 2026-11-16
 
 What the 2026-11-15 defaults could change, measured again (the full tables are in
-[`compare/RESULTS.md`](https://github.com/pmndrs/bvh/blob/main/compare/RESULTS.md)). Ratios are theirs over ours.
+[`compare/RESULTS.md`](https://github.com/pmndrs/bvh/blob/main/compare/RESULTS.md)). Each row says which way its ratio goes.
 
 | What | Result |
 | --- | --- |
@@ -42,10 +42,11 @@ What the 2026-11-15 defaults could change, measured again (the full tables are i
 
 **Where others still win, on these machines:**
 
-- **The furnished room on the GPU.** three-mesh-bvh's closest hits from outside are twice ours (0.51× ours). It is our
-  quantized nodes, the default: on `f32` nodes ours is 0.96× there. The suite traces each scene as one merged mesh, so
-  the room is one 270k-triangle mesh on one quantization grid; the instanced and merged scenes of our surface-ray
-  benches did not show this. Its any hit from outside is 2.8× our default order, and 0.83× ours with `'larger'`.
+- **The furnished room on the GPU.** From outside, three-mesh-bvh traces about twice as many closest-hit rays per
+  second as ours (ours 0.51× theirs). It is our quantized nodes, the default: on `f32` nodes ours is 0.96× there. The
+  suite traces each scene as one merged mesh, so the room is one 270k-triangle mesh on one quantization grid; the
+  instanced and merged scenes of our surface-ray benches did not show this. From outside, its any hit is 2.8× our
+  default order's rate, and 0.83× ours with `'larger'`.
 - **CPU refit:** three-mesh-bvh is 2.2–2.5× faster than our records tree on every scene, and 1.6–1.9× faster than
   `corners: 'positions'`. Our tree has 3.6× the boxes (leaves of about 2 triangles against 7).
 - **Memory:** on Sponza ours holds 5.5× three-mesh-bvh's bytes with `corners: 'positions'` and 8.9× with records.
