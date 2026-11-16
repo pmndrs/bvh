@@ -74,16 +74,33 @@ export {
     meshGeometryHash,
     readSerializedHeader,
     SERIALIZED_FORMAT_VERSION,
+    SERIALIZED_MOVABLE_SCENE_FORMAT_VERSION,
     SERIALIZED_SCENE_FORMAT_VERSION,
     serializedLayoutBytes,
     serializeLayout,
     type DeserializeLayoutOptions,
     type SerializedHeader,
+    type SerializedMovableSceneHeader,
     type SerializedSceneHeader,
     type SerializedTreeHeader,
     type SerializeLayoutOptions,
 } from './serialize.ts';
 export { deserializeTraceScene, serializeTraceScene } from './serialize-scene.ts';
+// Movable scene files: mesh trees and instances, loaded into SceneTrees (the top level built at load, instances free to move).
+export {
+    assembleMovableScene,
+    buildMovableScene,
+    deserializeMovableScene,
+    placeMovableScene,
+    serializeMovableScene,
+    type AssembleMovableSceneOptions,
+    type DeserializeMovableSceneOptions,
+    type MovableSceneBuildOptions,
+    type MovableSceneData,
+    type MovableSceneMesh,
+    type PlacedMovableScene,
+    type SerializeMovableSceneOptions,
+} from './serialize-movable-scene.ts';
 
 // A tree's shape alone, before it is written in the GPU layout.
 export { singleLeafTopology, TOPOLOGY_EMPTY_CHILD, TOPOLOGY_WORDS_PER_NODE, type MeshTreeTopology } from './topology.ts';
@@ -281,6 +298,7 @@ export {
     type SceneInstanceDescriptor,
     type SceneBuildEvent,
     type SceneInstanceStatus,
+    type SceneMergedTree,
     type SceneMeshOptions,
     type SceneMeshStatus,
     type SceneTreeCounts,
