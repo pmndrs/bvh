@@ -76,7 +76,9 @@ export async function countOurs(device: GPUDevice, scene: TraceSceneBuffers, mod
     const pipeline = await device.createComputePipelineAsync({
         label: `compare counted ${mode}`,
         layout: 'auto',
-        compute: { module: device.createShaderModule({ code: countedKernelWgsl(mode, { anyHitOrder }) }), entryPoint: 'benchCounted' },
+        // The scene's own node format: a counted walk compiled for f32 nodes reads quantized ones as garbage
+        // (4 box tests and no hits per ray, the 2026-11-16 re-run's `?counts` for ours).
+        compute: { module: device.createShaderModule({ code: countedKernelWgsl(mode, { anyHitOrder, nodeFormat: scene.nodeFormat }) }), entryPoint: 'benchCounted' },
     });
     const rays = device.createBuffer({ size: packed.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(rays, 0, packed as Float32Array<ArrayBuffer>);
