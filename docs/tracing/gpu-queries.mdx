@@ -196,8 +196,15 @@ instance, in `f32` and quantized nodes, records and indexed leaves, instanced an
 per-triangle materials, and compares with `CpuMeshBvh` built over each instance in world space. A tie (another triangle
 at the same distance, within the tolerance) agrees; a shape within the tolerance of touching is not counted. It also
 checks nesting (a shapecast hook tracing `bvhTraceAny` per triangle, against the CPU walk) and the box padding (every
-corner as the walk moves it, queried at radius 0, must be found with culling as without). On the Apple M5 every query
-agrees. The `three-trace` page checks that `closestPoint` gives exactly the batch kernel's records.
+corner as the walk moves it, queried at radius 0, must be found with culling as without). On the Apple M5, the RTX
+3060 and the Intel UHD every query agrees. The `three-trace` page checks that `closestPoint` gives exactly the batch
+kernel's records.
+
+## Speed
+
+The queries stay in world space, so inside an instance every box and triangle corner they visit goes through the
+instance's transform, even when that transform is the identity. A merged static instance (`static: true`) is already
+in world space: on the RTX 3060 its closest point was about 17% faster than the same mesh as an instance.
 
 ## Not here
 

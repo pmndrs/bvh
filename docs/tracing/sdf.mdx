@@ -164,6 +164,8 @@ knots, 32³ to 128³, paired rounds):
 - `sign: 'first-hit'` is its way on our walk: as fast as theirs on the 100k knot, up to 1.2x faster on the 1M one. Use
   it only on closed, outward-wound meshes that don't overlap (the table above).
 - Unsigned, ours is 1.0-1.2x faster than its signed field.
+- Inside an instance the queries move every box through the instance's transform. A mesh merged as a static instance
+  (`static: true`) has none to move: its closest point was about 17% faster on the RTX 3060.
 
 ## On the CPU
 

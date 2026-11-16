@@ -228,3 +228,25 @@ Reading it: the closest point costs the same in both; the gap is the sign. An al
 Correctness: `sdf-oracle` passed on the RTX (full profile, with the new first-hit runs) and on SwiftShader (`profile=ci`); `three-sdf` and `compare-sdf` smoke passed on the RTX; `pnpm test` 854 passed.
 
 Not done: the M5; an exact-identity fast path in the shapecast walk (an instance whose transform is the identity could skip the per-box transform as merged trees do: the measured 17% on the closest point), which touches every query and wants the query oracles on both GPUs first.
+
+## 12. The identity fast path in the shapecast walk: measured, not built. RTX 3060 Laptop and Intel UHD, 2026-11-16
+
+The open item of section 11: an instance whose transform is exactly the identity could skip the per-box and per-corner matrix of the query walk. Two forms were built (commit `95614a4`, undone by the next commit) and timed with `compare/sdf ?breakdown&only=...` (100k knot, `full&repeat=4&dims=64,128`, 5 paired rounds per run, 3 runs; `docs/internals/design/trace.md`, "Spatial queries"). Files in `bench/runs/2026-11-16-identity/` (local).
+
+**The GPU was not idle.** Another project's GPU suite (the downsampler's `test/run.js`, six headless Chromes on the RTX) ran from about 22:20 to past 23:30, through every run here; it was not stopped. The RTX averaged 85 °C over each run, with Windows' thermal slowdown flag on 84 of 93 two-second samples of the second run (mean SM clock 1,052 MHz). Only the paired ratios (both kernels in every round, the order reversed every other round) are reported; the milliseconds are not comparable with section 11's.
+
+**Paired ratio, the old path's time over each form's** (above 1: the form is faster; each run's median of rounds):
+
+| Form | 64³ (runs 1-3) | 128³ (runs 1-3) | Bit for bit with the old path |
+| --- | --- | --- | --- |
+| Bit for bit: the padded box without the matrix, zeros, subnormals and inf/NaN through it | 0.86 / 0.96 / 0.93 | 0.86 / 0.87 / 0.91 | yes (checked, below) |
+| The same on boxes only, corners through the matrix | 0.87 / 0.94 / 0.94 | 0.87 / 0.90 / 0.90 | yes |
+| The identity instance read as merged (exact boxes, corners as stored) | 1.09 / 1.18 / 1.20 | 1.16 / 1.18 / 1.20 | no (ties, touching, `-0`) |
+| The same mesh merged (`static: true`, its own tree) | 0.97 / 1.25 / 1.08 | 1.07 / 1.04 / 1.04 | no (another tree) |
+| Signed field (closest point and the early-out vote), bit-for-bit form | 1.05 / 0.91 / 0.96 | 0.94 / 0.96 / 0.99 | yes |
+
+An earlier run while the other suite was busiest gave the bit-for-bit box form without its guard 1.02-1.03 and with corners as stored 1.04-1.11: the guard alone turns a small gain into a loss.
+
+**Correctness of the bit-for-bit form, full profile:** `query-oracle`, `sdf-oracle`, `trace-oracle`, `trace-inline`, `three-shapecast` and `three-trace` passed on the RTX and the Intel UHD, and the CI job's seven pages on SwiftShader (`profile=ci`). `query-oracle` ran every query a second time with the form taken out and compared every answer word plus a hash of every box and corner the shapecast hook is handed: 234,000 queries per GPU (13 cases, 9 variants, 2,000 points), 0 differ on either GPU (23,400 on SwiftShader). Its new case, a floor at `y = 0` with `+0`, `-0` and exact zeros and some subnormal corners, showed why the guard is needed: without it the Intel UHD gave `-0` normals where the matrix gives `+0` (`normal.z` 0x80000000 against 0) and other box and corner hashes. On SwiftShader `query-oracle` with the second dispatch took 197 s (compiles 73 s) under the same load.
+
+**Decision left to Dennis:** nothing changed in the walk. The bit-for-bit form is slower, so it is not a lever. The form that is faster (about 18%) changes which of two equally near triangles a closest point names, so it would need an opt-in option on every module that compiles queries (`traceModuleWgsl`, `closestPointKernelWgsl` / `ClosestPointBatchKernel`, `sdfKernelWgsl` / `SdfGenerator`, `BvhTraceNodes`). `static: true` (merged) already gets that path. Kept: the `zeros-and-subnormals` case in `query-oracle` (after the undo `query-oracle` passed again: RTX and Intel UHD full profile, SwiftShader `profile=ci`; `compare-sdf` smoke passed on the RTX), and `compare/sdf`'s `closest-identity-as-merged` breakdown kernel (a text patch, not the library) with `?only=`.

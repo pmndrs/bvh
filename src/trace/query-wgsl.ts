@@ -250,46 +250,6 @@ fn ${name}(${rayMasks ? 'mask: u32' : ''}) -> bool {
 `;
 }
 
-/**
- * The identity fast path's test (a lever, 2026-11-16). An instance whose
- * world-to-object rows equal the identity (`-0` counts as 0) has the identity
- * as its object-to-world map too: the adjugate of the identity is the
- * identity and `1 / 1` is 1. The shapecast walk then builds its padded world
- * boxes (`bvhQueryWorldBounds`) and moves triangle corners
- * (`bvhQueryToWorld`) without the matrix, and gets the general path's bits:
- * every term it leaves out is a product with an exact 0 or an exact 1, which
- * changes no normal finite value whatever the order or fusing of the sum.
- * Values where it could change a bit (a zero, whose sign the zeros' signs
- * decide; a subnormal, which a multiply may flush; inf or NaN) still go
- * through the matrix (`bvhQueryIdentityExact`). So boxes, corners and every
- * answer are the same bits as before; query-oracle checks that on each GPU.
- * It does not drop the box padding: an identity instance's boxes stay padded
- * (a merged instance's are exact), because exact boxes could change the walk
- * order and so which of two triangles at the same distance a closest point
- * names.
- *
- * Measured on the RTX 3060 (docs/internals/WINDOWS-RUNBOOK.md, section 12;
- * `docs/internals/design/trace.md`, "Spatial queries"). To undo it, make
- * this function return `false` ({@link withoutQueryIdentityFastPath}:
- * query-oracle's identity check and compare/sdf's `-general` kernels do that
- * to check and time it).
- */
-export const QUERY_IDENTITY_CHECK_WGSL = /* wgsl */ `fn bvhQueryIsIdentity(instance: BvhInstance) -> bool {
-    return all(instance.worldToObjectRow0 == vec4f(1.0, 0.0, 0.0, 0.0))
-        && all(instance.worldToObjectRow1 == vec4f(0.0, 1.0, 0.0, 0.0))
-        && all(instance.worldToObjectRow2 == vec4f(0.0, 0.0, 1.0, 0.0));
-}`;
-
-/**
- * A trace module's text with the identity fast path off ({@link QUERY_IDENTITY_CHECK_WGSL}
- * answering false): every instance takes the general path, as before 2026-11-16.
- * For the pages that check and time the lever; throws if the module has no queries.
- */
-export function withoutQueryIdentityFastPath(module: string): string {
-    if (!module.includes(QUERY_IDENTITY_CHECK_WGSL)) throw new Error('withoutQueryIdentityFastPath: the module has no query identity check');
-    return module.replace(QUERY_IDENTITY_CHECK_WGSL, 'fn bvhQueryIsIdentity(instance: BvhInstance) -> bool {\n    return false;\n}');
-}
-
 /** The shapecast's structs and the world-space placement of an instance, shared by every stamped walk. */
 const SHAPECAST_COMMON_WGSL = /* wgsl */ `
 // ---- Spatial queries: the shapecast walk's types (query-wgsl.ts) --------------
@@ -319,21 +279,15 @@ struct BvhQueryPlacement {
     absolute: mat3x3f,    // its entries' absolute values, for box half sizes
     translation: vec3f,
     transformed: bool,    // false for a merged mesh, already in world space
-    identity: bool,       // the map is exactly the identity: boxes and corners may skip the matrix
     mirrored: bool,       // the map's determinant is negative
 }
 
 const BVH_QUERY_BOX_PADDING: f32 = ${QUERY_BOX_PADDING};
-const BVH_QUERY_F32_MAX: f32 = 3.4e38;            // below the largest f32 (a bound, not the exact value)
-const BVH_QUERY_F32_MIN_NORMAL: f32 = 1.2e-38;    // above the smallest normal f32
 
 fn bvhQueryIdentity() -> BvhQueryPlacement {
     let identity = mat3x3f(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0));
-    return BvhQueryPlacement(identity, identity, vec3f(0.0), false, false, false);
+    return BvhQueryPlacement(identity, identity, vec3f(0.0), false, false);
 }
-
-// Whether an instance's world-to-object rows are exactly the identity (then so is its object-to-world map).
-${QUERY_IDENTITY_CHECK_WGSL}
 
 // The inverse of the instance's world-to-object rows, by the adjugate: column i of the
 // inverse of a matrix with rows r0, r1, r2 is the cross of the other two rows over the determinant.
@@ -352,22 +306,11 @@ fn bvhQueryPlacement(instance: BvhInstance) -> BvhQueryPlacement {
     let linear = mat3x3f(c0 * inverseDeterminant, c1 * inverseDeterminant, c2 * inverseDeterminant);
     let absolute = mat3x3f(abs(linear[0]), abs(linear[1]), abs(linear[2]));
     let translation = -(linear * vec3f(r0.w, r1.w, r2.w));
-    return BvhQueryPlacement(linear, absolute, translation, true, bvhQueryIsIdentity(instance), determinant < 0.0);
-}
-
-// The identity fast path's guard: true when leaving the matrix out gives its bits. Under the
-// exact identity a moved value is 1 * x + 0 * y + 0 * z + 0, which is x for any normal finite
-// x, whatever the zeros' signs and however the sum is ordered or fused. A zero (the zeros' signs
-// decide its sign), a subnormal (1 * x may flush it to 0) or a non-finite value (0 * inf is NaN)
-// goes through the matrix; 'size' (a half size, multiplied by the absolute map) may also be 0.
-fn bvhQueryIdentityExact(value: vec3f, size: vec3f) -> bool {
-    let normal = (abs(value) >= vec3f(BVH_QUERY_F32_MIN_NORMAL)) & (abs(value) <= vec3f(BVH_QUERY_F32_MAX));
-    let sized = ((abs(size) >= vec3f(BVH_QUERY_F32_MIN_NORMAL)) & (abs(size) <= vec3f(BVH_QUERY_F32_MAX))) | (size == vec3f(0.0));
-    return all(normal & sized);
+    return BvhQueryPlacement(linear, absolute, translation, true, determinant < 0.0);
 }
 
 fn bvhQueryToWorld(placement: BvhQueryPlacement, point: vec3f) -> vec3f {
-    if (!placement.transformed || (placement.identity && bvhQueryIdentityExact(point, vec3f(0.0)))) {
+    if (!placement.transformed) {
         return point;
     }
     return placement.linear * point + placement.translation;
@@ -378,13 +321,6 @@ fn bvhQueryWorldBounds(placement: BvhQueryPlacement, boxMin: vec3f, boxMax: vec3
         return BvhShapecastBounds(boxMin, boxMax);
     }
     let local = (boxMin + boxMax) * 0.5;
-    let localHalf = (boxMax - boxMin) * 0.5;
-    if (placement.identity && bvhQueryIdentityExact(local, localHalf)) {
-        // The lines below with the identity's exact 1s and 0s taken out: the centre is 'local',
-        // the absolute map leaves sizes as they are, the translation is 0. The same padded box.
-        let grown = localHalf + (abs(local) + localHalf) * BVH_QUERY_BOX_PADDING;
-        return BvhShapecastBounds(local - grown, local + grown);
-    }
     let center = placement.linear * local + placement.translation;
     let half = placement.absolute * ((boxMax - boxMin) * 0.5);
     // Padded by the terms' sizes, not the result's: far-off terms that cancel round as large numbers.

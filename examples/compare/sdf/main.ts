@@ -18,7 +18,8 @@
  * back per timing, their mean: the GPU at its loaded clock; default 1, one
  * waited-for dispatch), `?breakdown` (each part of either kernel on its own, and
  * other ways to sign, `OURS_BREAKDOWN` in compare/gpu/gpu-sdf.ts; the kernels
- * that must give a library field bit for bit are checked).
+ * that must give a library field bit for bit are checked; `?only=closest,closest-merged`
+ * runs just those breakdown kernels).
  */
 
 import { BufferAttribute, BufferGeometry, DoubleSide, Group, Mesh, MeshStandardMaterial, PlaneGeometry, Vector3 } from 'three';
@@ -59,11 +60,10 @@ const generators: GpuSdf[] = [
     await createTmbvhSdf(app.renderer, mesh, box),
 ];
 if (breakdown) {
-    // ?only=closest,closest-general: just those breakdown kernels (by OURS_BREAKDOWN key), for a focused paired run.
+    // ?only=closest,closest-merged: just those breakdown kernels (OURS_BREAKDOWN's keys), for a focused paired run.
     const only = query.get('only')?.split(',');
-    const wanted = (variant: OursBreakdown) => !only || only.includes(variant);
     if (!only) generators.push(await createOursSdf(app.device, mesh, box, 'winding'));
-    for (const variant of Object.keys(OURS_BREAKDOWN) as OursBreakdown[]) if (wanted(variant)) generators.push(await createOursBreakdownSdf(app.device, mesh, box, variant));
+    for (const variant of Object.keys(OURS_BREAKDOWN) as OursBreakdown[]) if (!only || only.includes(variant)) generators.push(await createOursBreakdownSdf(app.device, mesh, box, variant));
     if (!only) {
         generators.push(await createOursBreakdownSdf(app.device, mesh, box, 'votes-all', 'winding'), await createOursBreakdownSdf(app.device, mesh, box, 'votes-early', 'winding'));
         generators.push(await createTmbvhSdf(app.renderer, mesh, box, 'closest'), await createTmbvhSdf(app.renderer, mesh, box, 'ray'));
@@ -81,21 +81,12 @@ const identical: readonly (readonly [string, string])[] = breakdown
           ['ours-first-hit-bounded', 'ours-first-hit'],
           ['ours-votes-all-winding', 'ours-winding'],
           ['ours-votes-early-winding', 'ours-winding'],
-          // The identity fast path is the same field bit for bit (query-wgsl.ts, QUERY_IDENTITY_CHECK_WGSL).
-          ['ours-closest-general', 'ours-unsigned'],
-          ['ours-votes-early-general', 'ours'],
-          ['ours-closest-exact', 'ours-unsigned'],
-          ['ours-closest-boxes-only', 'ours-unsigned'],
       ] as const).filter(([kernel]) => generators.some((generator) => generator.id === kernel))
     : [];
-/** Paired speed-ups logged in breakdown runs: [before, after], before's time over after's per round. */
+/** Paired speed-ups logged in breakdown runs: [before, after], before's time over after's within each round. */
 const SPEEDUPS: readonly (readonly [string, string])[] = [
-    ['ours-closest-general', 'ours-closest'],
-    ['ours-votes-early-general', 'ours-votes-early'],
-    ['ours-closest-general', 'ours-closest-merged'],
     ['ours-closest', 'ours-closest-merged'],
-    ['ours-closest-general', 'ours-closest-exact'],
-    ['ours-closest-general', 'ours-closest-boxes-only'],
+    ['ours-closest', 'ours-closest-identity-as-merged'],
 ];
 /** Kernels whose field is not an SDF to compare with ours (the parts alone). */
 const partsOnly = new Set(['ours-rays3', 'ours-rays-early', 'ours-ray1', 'ours-first-hit-only', 'tmbvh-ray']);
@@ -170,7 +161,6 @@ for (const dim of resolutions) {
         all.push({ page: 'sdf', scene: sceneName, library: `${id}-over-tmbvh`, metric: `build/${dim}/ratio`, value: median(ratios), unit: 'ratio', method: `three-mesh-bvh's time over ${id} within each round (above 1: ours faster), median of ${rounds} rounds (min ${Math.min(...ratios).toFixed(2)}, max ${Math.max(...ratios).toFixed(2)})`, ranked: true });
         if (breakdown) log(`ratio tmbvh/${id} ${dim}³: ${median(ratios).toFixed(3)} (min ${Math.min(...ratios).toFixed(2)}, max ${Math.max(...ratios).toFixed(2)})`);
     }
-    // The identity fast path's before over after, within each round (above 1: the fast path is faster).
     for (const [before, after] of SPEEDUPS) {
         const a = times.get(before);
         const b = times.get(after);

@@ -223,13 +223,11 @@ export const OURS_BREAKDOWN = {
     'first-hit-bounded': '1 first-hit ray, then the closest point within its hit distance',
     'closest-merged': 'closest point only, merged scene (no per-box transform)',
     'votes-early-merged': 'closest point + 2 or 3 rays, merged scene',
-    /** The identity fast path off: the instance's boxes through the matrix, as before 2026-11-16 (the lever's "before"). */
-    'closest-general': 'closest point only, identity fast path off',
-    'votes-early-general': 'closest point + 2 or 3 rays, identity fast path off',
-    /** TEMP: the identity instance read as a merged one (exact boxes, corners as stored). */
-    'closest-exact': 'TEMP closest point only, identity read as merged',
-    /** TEMP: the fast path's boxes and the corners as stored. */
-    'closest-boxes-only': 'TEMP closest point only, fast path on boxes only (corners through the matrix)',
+    /**
+     * The one-instance scene with its identity instance read as a merged one (exact boxes, corners as stored, no
+     * matrix): the identity fast path that was measured and not built (WINDOWS-RUNBOOK section 12). Not the library.
+     */
+    'closest-identity-as-merged': 'closest point only, the identity instance read as merged (not the library)',
 } as const;
 export type OursBreakdown = keyof typeof OURS_BREAKDOWN;
 
@@ -272,21 +270,13 @@ const BREAKDOWN_BODIES: Record<OursBreakdown, string> = {
     return select(distance, -distance, firstHit.t >= 0.0 && !firstHit.frontFace);`,
     'closest-merged': `${CLOSEST_WGSL}\n    return distance;`,
     'votes-early-merged': `${CLOSEST_WGSL}\n    ${VOTES_EARLY_WGSL}\n    return select(distance, -distance, votes >= BVH_INSIDE_MAJORITY);`,
-    'closest-general': `${CLOSEST_WGSL}\n    return distance;`,
-    'votes-early-general': `${CLOSEST_WGSL}\n    ${VOTES_EARLY_WGSL}\n    return select(distance, -distance, votes >= BVH_INSIDE_MAJORITY);`,
-    'closest-exact': `${CLOSEST_WGSL}\n    return distance;`,
-    'closest-boxes-only': `${CLOSEST_WGSL}\n    return distance;`,
+    'closest-identity-as-merged': `${CLOSEST_WGSL}\n    return distance;`,
 };
 
-/** The shapecast walk's identity test (query-wgsl.ts, QUERY_IDENTITY_CHECK_WGSL): the `-general` kernels make it false. */
-const IDENTITY_CHECK_WGSL = 'fn bvhQueryIsIdentity(instance: BvhInstance) -> bool {\n    return all(';
-const TEMP_EXACT_WGSL = 'true, bvhQueryIsIdentity(instance), determinant < 0.0)';
-const TEMP_BOXES_ONLY_WGSL = 'if (!placement.transformed || (placement.identity && bvhQueryIdentityExact(point, vec3f(0.0)))) {';
-
-function patched(module: string, from: string, to: string, what: string): string {
-    if (!module.includes(from)) throw new Error(`compare sdf: the query walk has changed; update ${what}`);
-    return module.replace(from, to);
-}
+/** The query walk's placement of an instance (query-wgsl.ts): `closest-identity-as-merged` marks an identity one untransformed. */
+const PLACEMENT_RETURN_WGSL = 'return BvhQueryPlacement(linear, absolute, translation, true, determinant < 0.0);';
+const IDENTITY_AS_MERGED_WGSL =
+    'let identity = all(r0 == vec4f(1.0, 0.0, 0.0, 0.0)) && all(r1 == vec4f(0.0, 1.0, 0.0, 0.0)) && all(r2 == vec4f(0.0, 0.0, 1.0, 0.0));\n    return BvhQueryPlacement(linear, absolute, translation, !identity, determinant < 0.0);';
 
 const WINDING_SUM_WGSL = 'bvhCrossingWinding += select(1, -1, hit.frontFacing != triangle.mirrored);';
 
@@ -296,9 +286,10 @@ function breakdownWgsl(variant: OursBreakdown): string {
         if (!module.includes(WINDING_SUM_WGSL)) throw new Error('compare sdf: the crossing walk has changed; update no-winding');
         module = module.replace(WINDING_SUM_WGSL, '');
     }
-    if (variant.endsWith('-general')) module = patched(module, IDENTITY_CHECK_WGSL, 'fn bvhQueryIsIdentity(instance: BvhInstance) -> bool {\n    return false && all(', 'the -general kernels');
-    if (variant === 'closest-exact') module = patched(module, TEMP_EXACT_WGSL, '!bvhQueryIsIdentity(instance), false, determinant < 0.0)', 'closest-exact');
-    if (variant === 'closest-boxes-only') module = patched(module, TEMP_BOXES_ONLY_WGSL, 'if (!placement.transformed) {', 'closest-boxes-only');
+    if (variant === 'closest-identity-as-merged') {
+        if (!module.includes(PLACEMENT_RETURN_WGSL)) throw new Error('compare sdf: the query placement has changed; update closest-identity-as-merged');
+        module = module.replace(PLACEMENT_RETURN_WGSL, IDENTITY_AS_MERGED_WGSL);
+    }
     return `${module}
 struct CmpSdfParams {
     boxMin: vec3f,
