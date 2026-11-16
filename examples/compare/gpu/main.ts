@@ -5,7 +5,8 @@
  * outside, in paired rounds (compare/gpu/gpu-suite.ts). The hits of either
  * library are drawn as points (live toggle).
  * What else: a tree built on the GPU (H-PLOC, `SceneTrees`) traced by the same
- * kernel, its answers checked against the tinybvh tree's.
+ * kernel, its answers checked against the tinybvh tree's. `?nodeFormat=f32` runs ours on
+ * `f32` nodes (the default before 2026-11-13; quantized now).
  */
 
 import { BufferAttribute, BufferGeometry, Group, Points, PointsMaterial } from 'three';
@@ -32,7 +33,9 @@ const anyLength = (set: string) => (set === 'outside' ? scale * 2 : scale * 0.25
 // Ours twice: the library's default kernel, and with anyHitOrder 'larger' (the any-hit order for rays that
 // start away from surfaces; closest hit is the same kernel). ?counts: the walks' work per ray as well.
 const params = new URLSearchParams(location.search);
-const tracers: GpuTracer[] = [await createOursGpu(app.device, geometry), await createOursGpu(app.device, geometry, { anyHitOrder: 'larger' }), await createTmbvhGpu(app.renderer, geometry)];
+// ?nodeFormat=f32: ours on f32 nodes (the default before 2026-11-13; quantized now).
+const nodeFormat = params.get('nodeFormat') === 'f32' ? ('f32' as const) : undefined;
+const tracers: GpuTracer[] = [await createOursGpu(app.device, geometry, { nodeFormat }), await createOursGpu(app.device, geometry, { anyHitOrder: 'larger', nodeFormat }), await createTmbvhGpu(app.renderer, geometry)];
 const workPerRay: ({ set: string; mode: string; library: string } & WorkPerRay)[] = [];
 const all: Measurement[] = [];
 const packedBySet = new Map<string, Float32Array>();

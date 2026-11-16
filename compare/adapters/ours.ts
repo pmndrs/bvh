@@ -30,7 +30,10 @@ export function oursQuality(tree: CpuMeshBvh): TreeQuality {
     };
 }
 
-function wrap(tree: CpuMeshBvh, geometry: CompareGeometry): BuiltMesh {
+const RECORDS_MEMORY = 'CpuMeshBvh.estimateMemoryInBytes: exact byteLength of the nodes, triangle records (which copy the corners), parents, bounds and the one-instance top level';
+const POSITIONS_MEMORY = "CpuMeshBvh.estimateMemoryInBytes with corners: 'positions': exact byteLength of the nodes, 16-byte indexed triangles (the corners are the app's positions, not counted), parents, bounds and the one-instance top level";
+
+function wrap(tree: CpuMeshBvh, geometry: CompareGeometry, memoryMethod = RECORDS_MEMORY): BuiltMesh {
     let current = { positions: geometry.positions, indices: geometry.indices };
     return {
         raycastFirst(ray) {
@@ -58,7 +61,7 @@ function wrap(tree: CpuMeshBvh, geometry: CompareGeometry): BuiltMesh {
         memory() {
             return {
                 bytes: tree.estimateMemoryInBytes(),
-                method: 'CpuMeshBvh.estimateMemoryInBytes: exact byteLength of the nodes, triangle records (which copy the corners), parents, bounds and the one-instance top level',
+                method: memoryMethod,
             };
         },
         quality: () => oursQuality(tree),
@@ -92,6 +95,23 @@ export const oursAdapter: MeshAdapter = {
         if (!tinyBvh) throw new Error('oursAdapter.prepare() first');
         const tree = CpuMeshBvh.build({ positions: geometry.positions, indices: geometry.indices }, tinyBvh);
         return wrap(tree, geometry);
+    },
+};
+
+/**
+ * The same tree with `corners: 'positions'`: 16-byte indexed triangles that read the app's
+ * positions in place, no records copy (what `/three`'s `BvhBoundsTree` builds for indexed
+ * geometry since 2026-11-15). Every answer is the records tree's bit for bit.
+ */
+export const oursPositionsAdapter: MeshAdapter = {
+    ...oursAdapter,
+    id: 'ours-positions',
+    name: "@pmndrs/bvh (tinybvh, corners: 'positions')",
+    buildMethod: "CpuMeshBvh.build with corners: 'positions': tinybvh's SAH builder writing indexed triangles, the corners read from the app's positions (no records copy), on this thread",
+    build(geometry) {
+        if (!tinyBvh) throw new Error('oursPositionsAdapter.prepare() first');
+        const tree = CpuMeshBvh.build({ positions: geometry.positions, indices: geometry.indices }, tinyBvh, { corners: 'positions' });
+        return wrap(tree, geometry, POSITIONS_MEMORY);
     },
 };
 

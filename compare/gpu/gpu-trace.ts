@@ -27,6 +27,7 @@ import {
     TraceBatchKernel,
     uploadTraceScene,
     type AnyHitOrder,
+    type NodeFormat,
     type TraceSceneBuffers,
 } from '@pmndrs/bvh';
 import { BufferAttribute, BufferGeometry, Mesh, MeshBasicMaterial } from 'three';
@@ -71,15 +72,17 @@ const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 export interface OursGpuOptions {
     /** The kernel's any-hit child order (`TraceBatchKernelOptions.anyHitOrder`). Default: the library's (`'far'`). */
     readonly anyHitOrder?: AnyHitOrder;
+    /** The scene's and the kernel's node format. Default: the library's (quantized since 2026-11-13). */
+    readonly nodeFormat?: NodeFormat;
 }
 
 export async function createOursGpu(device: GPUDevice, geometry: CompareGeometry, options: OursGpuOptions = {}): Promise<GpuTracer> {
-    const { anyHitOrder } = options;
+    const { anyHitOrder, nodeFormat } = options;
     const tinyBvh = await oursTinyBvh();
     const tree = buildMeshBvhWithTinyBvh({ positions: geometry.positions, indices: geometry.indices }, tinyBvh);
-    const scene = assembleTraceScene([tree], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY }]);
+    const scene = assembleTraceScene([tree], [{ meshIndex: 0, instanceIndex: 0, objectToWorld: IDENTITY }], {}, nodeFormat ? { nodeFormat } : {});
     const buffers: TraceSceneBuffers = uploadTraceScene(device, scene, 'compare ours');
-    const kernel = await TraceBatchKernel.create(device, { label: 'compare ours', rayMasks: false, hitNormal: false, anyHitOrder });
+    const kernel = await TraceBatchKernel.create(device, { label: 'compare ours', rayMasks: false, hitNormal: false, anyHitOrder, nodeFormat });
     const timestamps = device.features.has('timestamp-query');
     const querySet = timestamps ? device.createQuerySet({ type: 'timestamp', count: 2 }) : null;
     const resolve = timestamps ? device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }) : null;
@@ -87,7 +90,7 @@ export async function createOursGpu(device: GPUDevice, geometry: CompareGeometry
     const sets = new Map<GpuMode, { rays: GPUBuffer; results: GPUBuffer; read: GPUBuffer; count: number; bytes: number; packed: Float32Array }>();
     return {
         id: anyHitOrder === 'larger' ? 'ours-larger' : 'ours',
-        name: `@pmndrs/bvh (TraceBatchKernel${anyHitOrder ? `, anyHitOrder '${anyHitOrder}'` : ''})`,
+        name: `@pmndrs/bvh (TraceBatchKernel${anyHitOrder ? `, anyHitOrder '${anyHitOrder}'` : ''}${nodeFormat ? `, ${nodeFormat} nodes` : ''})`,
         bytes: buffers.byteLength,
         bytesMethod: 'TraceSceneBuffers.byteLength: nodes, triangle records and the one-instance top level',
         timing: timestamps ? 'timestamps' : 'wall clock',

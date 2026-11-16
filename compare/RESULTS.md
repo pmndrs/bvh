@@ -1,13 +1,55 @@
 # Comparison suite: results (BX.10)
 
-How @pmndrs/bvh compares with the other JavaScript BVH and picking libraries, measured by `compare/` (the plan's "Comparison suite", `docs/internals/design/bvh-package-split.md`). **Every number here is from one Apple M5 (Node 22 and headless Chrome), and is indicative**, not a promise for other machines.
+How @pmndrs/bvh compares with the other JavaScript BVH and picking libraries, measured by `compare/` (the plan's "Comparison suite", `docs/internals/design/bvh-package-split.md`). Two machines, each number labelled with its own: **the Windows laptop re-run of 2026-11-16** (next section: the RTX 3060 Laptop for the GPU, an Intel Core i9-11900H with Node 24 for the CPU), on the defaults of 2026-11-15, and **the Apple M5 tables of 2026-11-12 and 2026-11-13** (Node 22 and headless Chrome) below it, kept as they were. All indicative, not a promise for other machines.
 
 ```
 BVH_ASSETS_DIR=... BVH_MANIFESTS_DIR=... pnpm compare:node            # CPU, headless: bench/results/compare.csv (+ compare.md)
 pnpm compare:node --scenes torus-knot --quick --no-memory              # a minute
 pnpm examples:dev   # then /compare/raycast/, /compare/build/, ... (?scene=furnished-room or sponza)
 BVH_PAGE_QUERY='scene=sponza&full' pnpm examples:smoke --filter compare-gpu --json out.json   # a page's full run; out.json carries its CSV rows
+BVH_PAGE_QUERY='scene=sponza&full&nodeFormat=f32' pnpm examples:smoke --filter compare-gpu --gpu nvidia   # ours on f32 nodes (the default before 2026-11-13)
 ```
+
+## The Windows laptop re-run, 2026-11-16 (the 2026-11-15 defaults)
+
+HANDOFF asked for the rows the new defaults could change to be measured again: GPU trace (quantized nodes are the default since 2026-11-13), memory and refit (`/three`'s `BvhBoundsTree` reads the app's positions for indexed geometry since 2026-11-15, `corners: 'positions'`; the suite now has that as a second "ours" row), and the scene build. The CPU side is one full `pnpm compare:node` (`bench/results/compare-windows.csv` and `.md`, 1,186 rows; the suite's method: median of 5 interleaved runs, builds median of 3) on an **Intel Core i9-11900H, Windows 11, Node 24.13.1**, with nothing else running. It also re-ran the rows the defaults can't change: they are reported here as measured, not folded into the M5 tables. The GPU side is `compare/gpu` on the **RTX 3060 Laptop**, headless Chrome 157 on D3D12, `full` (1,048,576 rays per set, 7 paired rounds), two runs per scene, started cool (48-52 °C) on an idle GPU; ours with the library's defaults (quantized nodes), and once more with `?nodeFormat=f32`.
+
+**GPU rays, ours against three-mesh-bvh/webgpu** (ours' rate over theirs, paired, two runs; Mrays/s ours / theirs):
+
+| Scene | Closest, outside | Closest, inside | Any, outside: default / `'larger'` | Any, inside: default / `'larger'` | GPU MiB, ours / theirs |
+| --- | --- | --- | --- | --- | --- |
+| Knot (100k) | 1.29-1.30x (140 / 108), 3 of their rays disagree | 1.31-1.33x (144 / 109) | 1.43x / 1.27-1.29x (184, 163 / 129) | 1.37-1.43x / 1.30-1.31x | 6.2 / 3.6 |
+| Furnished room (270k) | **0.51-0.52x** (100 / 194) | **0.84-0.86x** (144 / 168) | **0.35-0.36x** / 1.21x (305, 1,044 / 862) | **0.87x** / **0.96x** (358, 390 / 413) | 16.0 / 10.1 |
+| Sponza (5.74M) | 1.09-1.10x (160 / 146), 6 disagree | 1.39-1.41x (136 / 98), 3 disagree | 1.18-1.20x / 1.43-1.44x (294, 349 / 244) | 1.28-1.31x / 1.40-1.43x, 1 disagrees | 355.5 / 214.3 |
+
+**The room's closest hit from outside is the quantized nodes.** With `?nodeFormat=f32` ours is 0.96x theirs there (182-186 Mrays/s, two runs), against 0.51-0.52x (100-101) quantized: quantized nodes cost 46% on that set, where the surface-ray benches found them 0.99-1.21x on Sponza and Bistro (WINDOWS-RUNBOOK section 9). The suite gives each scene to the walk as one merged mesh, so the room is one 270k-triangle mesh on one quantization grid; that is the likely cause, not checked. Elsewhere, `f32` (one run each, the room's two): the knot 1.19x closest from outside (quantized 1.29-1.30x), Sponza 1.12x (quantized 1.09-1.10x), the room from inside 0.90-0.91x (quantized 0.84-0.86x). Any hit from outside the room stays a loss with the default far-first order (0.25-0.26x on `f32`) and a win with `'larger'` (1.17-1.21x).
+
+**Memory, refit and build on the CPU** (i9-11900H; in brackets their time over ours, below 1 is faster than ours; memory beyond the app's geometry):
+
+| Library | Knot: build / refit / memory | Room | Sponza |
+| --- | --- | --- | --- |
+| @pmndrs/bvh (records, the `CpuMeshBvh` default) | 45.6 ms / 8.32 ms / 8.0 MiB | 133 ms / 23.2 ms / 20.1 MiB | 3,161 ms / 595 ms / 459.7 MiB |
+| @pmndrs/bvh, `corners: 'positions'` (what `/three` builds) | 47.2 / 6.13 (0.74) / 4.9 MiB | 122 / 18.4 (0.79) / 11.8 MiB | 3,036 / 441 (0.74) / 284.4 MiB |
+| three-mesh-bvh, CENTER | 24.5 (0.54) / 3.84 (0.46) / 0.85 MiB | 79.4 (0.60) / 10.7 (0.46) / 2.4 MiB | 2,045 (0.65) / 239 (0.40) / 51.5 MiB |
+| three-mesh-bvh, SAH | 118 (2.59) / 4.05 (0.49) / 0.85 MiB | 353 (2.65) / 10.8 (0.46) / 2.3 MiB | 8,599 (2.72) / 231 (0.39) / 50.6 MiB |
+| Rapier | 48.0 (1.05) / rebuilt / 20.3 MiB heap | 156 (1.17) / rebuilt / 54.5 MiB | 3,695 (1.17) / rebuilt / 1,141 MiB |
+| bvh-tree | 102 (2.24) / n/a / 12.2 MiB | 424 (3.18) / n/a / 32.9 MiB | 15,461 (4.89) / n/a / 701 MiB |
+
+Every refit agreed with ours on 512 rays (Babylon: 1 ray on Sponza, its test isn't watertight). `corners: 'positions'` answered every query as the records tree does (bit for bit by design; the suite saw no disagreement), at 0.91-1.06x its query and ray rates.
+
+**Scene-level trees** (10,000 / 100,000 objects): build ours 36.7 / 414 ms, bvh.js 9.6 / 150 ms (0.26x / 0.36x our time), `ObjectBVH` 39.4 / 479 ms; update ours 32.6 / 412 ms, `ObjectBVH` 14.1 / 173 ms (0.43x / 0.42x), bvh.js 34.2 / 992 ms. Box culling at 10,000: bvh.js 1.49x our rate (0.50x at 100,000); frustum: bvh.js disagrees on 1 and 14 frusta, unranked.
+
+**The rows the defaults can't change, on this CPU** (for the record; the M5 tables below are unchanged): CPU closest-hit rays, three-mesh-bvh SAH 1.37-1.39x our rate on the knot, 1.14-1.18x on the room, 0.99-1.18x on Sponza (CENTER 1.30-1.34x, 0.77-0.86x, 0.80-0.93x); Rapier 1.17-1.18x, 1.10-1.25x, 1.13-1.14x. All hits: three-mesh-bvh SAH 1.36-1.47x, 1.23-1.26x, 1.12-1.19x. Box, sphere and closest-point queries are still ours: three-mesh-bvh 0.27-0.91x our rate, except sphere queries on the knot (CENTER 1.02x, SAH 1.09x); Rapier 0.21-0.78x, its closest point on the knot a tie (1.01x). On the M5 our CPU rays led every library on Sponza and all but Rapier on the room; on this x86 laptop under Node 24, three-mesh-bvh's and Rapier's walks are ahead. One run, not repeated, not explained.
+
+**Where others still win, 2026-11-16** (this section's numbers):
+
+- **three-mesh-bvh, GPU:** the furnished room's closest hits, 0.51-0.52x ours from outside (0.96x with `f32` nodes: the quantized default is the cost) and 0.84-0.86x from inside; its any hit from inside the room 0.87x (0.96x with `'larger'`), and from outside 0.35x with the default order (1.21x with `'larger'`).
+- **three-mesh-bvh, CPU refit:** 2.2-2.5x faster (CENTER) than our default records tree on every scene (knot 3.84 against 8.32 ms, Sponza 239 against 595 ms) and 1.6-1.9x faster than `corners: 'positions'` (Sponza 441 ms). The M5's "level on the knot and the room" did not hold on this CPU.
+- **Memory:** three-mesh-bvh holds 51.5 MiB beyond Sponza's geometry; ours 459.7 MiB with records (8.9x), 284.4 MiB with `corners: 'positions'` (5.5x). On the GPU, 355.5 MiB against 214.3 (1.7x).
+- **Rapier:** CPU closest-hit rays 1.10-1.25x our rate on all three scenes (on the M5: the knot from inside and the room); closest point on the knot a tie.
+- **three-mesh-bvh, CPU rays, on this machine:** SAH 1.14-1.47x our rate on the knot and the room, up to 1.19x on Sponza (above).
+- **bvh.js:** scene builds 2.8-3.8x faster (0.26-0.36x our time) and box culling 1.49x at 10,000 objects. **`ObjectBVH`** updates 2.3x faster than our CPU top-level rebuild.
+
 
 ## The libraries
 
@@ -92,7 +134,7 @@ Agreement: three-mesh-bvh, bvh-tree and three agree with ours on every ray of ev
 | Furnished room (270k) | **0.85-0.91x** (229 / 253) | **0.86-0.88x**, 1 disagrees | **0.32x / 1.73x** (304, 1,547 / 982) | 1.05x / 1.13x | 20.6 / 10.6 MB |
 | Sponza (5.74M) | **0.96x**, 7 disagree | 1.12x, 2 disagree | 1.28x / 1.48x (353, 406 / 276) | 1.28x / 1.39x | 470 / 225 MB |
 
-These rows were taken with `f32` nodes, the default before 2026-11-13; quantized nodes are the default now (`scene-trees-sponza` on the M5 settles at 360.8 MiB with them against 458.6 with `f32`, both under the default cap), and this page has not been re-run with them. The ratio is ours over theirs. Where three-mesh-bvh disagrees on a ray (another distance; once a hit at t = 0) the ratio is shown but not ranked. GPU bytes are what each walk reads: ours, nodes, 48-byte triangle records and the top level; theirs, nodes, index, its vec4 copy of the positions and transforms. Absolute rates move by up to 30% between runs with the M5's heat and load; the paired ratios moved by under 0.05.
+These rows (Apple M5, 2026-11-12) were taken with `f32` nodes, the default before 2026-11-13. For quantized nodes, the default now, see the RTX 3060 re-run of 2026-11-16 above: the room's closest hit from outside fell to 0.51x there (0.96x on `f32`). The ratio is ours over theirs. Where three-mesh-bvh disagrees on a ray (another distance; once a hit at t = 0) the ratio is shown but not ranked. GPU bytes are what each walk reads: ours, nodes, 48-byte triangle records and the top level; theirs, nodes, index, its vec4 copy of the positions and transforms. Absolute rates move by up to 30% between runs with the M5's heat and load; the paired ratios moved by under 0.05.
 
 **The room's any hit from outside (0.31x before).** Not a harness artefact: both walks get the same packed rays and `tMax`, both stop at the first triangle hit in the interval (three-mesh-bvh's `bvh_RaycastAnyHit` returns `STOP_TRAVERSAL` from its range callback; its order is fixed, right child first), every ray is blocked in both, and ours is the leanest kernel. The counted walks (`?counts` on the page, `compare/gpu/gpu-counts.ts`: a counted copy of each library's own loop, same rays) found the cause. Mean work was close (ours 19.1 box tests and 3.9 triangles per ray, theirs 11.9 and 3.9), but the slowest ray of each 32 consecutive rays (one SIMD group) needed **78.5 box tests in ours against 24.3 in theirs**, which is the 3.2x. Our default any-hit order goes to the farther child first (chosen for shadow rays that start on a surface, T1.3); a ray from outside the room then descends into the far side's furniture before it meets the shell it already crossed. Near-first helped a little (0.41x; slowest of 32: 66.5). Entering the child with the larger box first (`anyHitOrder: 'larger'`: the likelier blocker, by the SAH's own area argument) cut the slowest of 32 to 23.0 and gave 1.73x. It is a setting, not the default: on the surface-ray bench it is 1.15-1.42x far-first on instanced trees but 0.78x on merged surface rays (`docs/internals/design/trace.md`, "Any-hit child order"). Workgroup size (64 both), the triangle test and the top level were not the cause: closest-hit, which shares them, was within 0.85-1.12x.
 
@@ -167,7 +209,7 @@ Objects sharing one 1k-triangle mesh, seeded placement in a 200-unit cube; 1,024
 
 After the motion, three-mesh-bvh agrees on every query (boundary ties only); bvh.js misses or adds an object on 2 (10k) and 8 (100k) frusta, past the boundary tolerance, so its frustum rate is not ranked. Ours is the CPU path here; on the page the same instances also sit in `SceneTrees`, whose top level is refitted on the GPU every frame.
 
-## Where another library wins
+## Where another library wins (Apple M5, 2026-11-13; the newer list is in the 2026-11-16 re-run above)
 
 - **Rapier**: closest-hit rays on the knot (inside, 1.28x) and the room (1.02x outside, 1.16x inside); within 5% of ours on Sponza. Closest point on the knot is a tie (0.99-1.04x ours); box queries (2.3 to 2.7 times our rate) and closest point (1.7 to 2.4 times) were its lead until the CPU query pass (2026-11-13), and are now 0.56-0.88x and 0.64-0.77x ours elsewhere. It gives no triangle id, and holds 2.5 times our tree's memory (below).
 - **three-mesh-bvh**: CPU refit on Sponza 1.3 to 1.5 times faster (6 to 7 before the first refit fix, 1.6 to 2 before the CPU query pass; a tie on the knot and the room now, 0.93-1.06; 32-byte one-box nodes over the app's positions, where ours rewrites 48-byte records and two-box nodes); sphere queries a little faster than ours with SAH on the knot (1.05-1.13) and Sponza (0.95-1.24; CENTER 0.94-1.03 and 0.74-1.01); its box queries (1.2 to 1.4 times ours before) and closest point (up to 1.5 times) are 0.23-0.54x ours now; CENTER builds as fast as tinybvh; `ObjectBVH` updates twice as fast as our CPU top-level rebuild. On the GPU its `/webgpu` walk beats ours on the furnished room's closest hits (0.85 to 0.91x) and on Sponza's closest from outside (0.96x, though 7 of its rays disagree). Its any hit from outside the room was 3.2 times our default kernel's (982 against 304 Mrays/s); with `anyHitOrder: 'larger'` ours is 1.73 times theirs there (above). Its worker build stalls frames a little less than ours.
@@ -212,5 +254,5 @@ What we have and they don't: GPU builds (H-PLOC, LBVH), GPU refits of mesh trees
 
 - The pages' CPU numbers in Chrome are not tabled here; Node's are (the same suites). The compare/build page can't finish Sponza within the runner's DevTools timeout.
 - The plan's `compare/skinned`, `compare/pathtracer`, `compare/sdf` and the `shapecast`/`distancecast`/`characterMovement` ports are not here (BX.18).
-- Measured on the M5 only; the plan's RTX 3060 runs belong to BX.15.
+- The CPU suites ran once on the RTX laptop's i9-11900H (2026-11-16, above); the M5 has not run `corners: 'positions'` or the quantized GPU rows.
 - Rapier gives no triangle ids, so its agreement is by distance only.
