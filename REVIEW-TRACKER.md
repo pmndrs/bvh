@@ -1,6 +1,6 @@
 # BVH and downsampler review tracker
 
-November 17, 2026. Both repositories have a local branch named `codex/web-performance-review`. DS1, BVH1, DS2 and BVH2 have implementation results below. Six follow-ups remain open. Each review contains the code locations, baseline and proposed verification.
+November 17, 2026. The downsampler Windows review is ready on `codex/web-performance-review`, including `windows-3` at `0210cd1`. DS1, DS2, DS3 and DS5 are implemented. DS4 is closed with paired Windows data and two M5 runs. Capped halo stays opt-in. BVH1 and BVH2 are implemented. BVH3, BVH4 and BVH5 remain open.
 
 | Library | Reviewed revision | Review page | Local review |
 | --- | --- | --- | --- |
@@ -16,11 +16,11 @@ November 17, 2026. Both repositories have a local branch named `codex/web-perfor
 | DS2 | Implemented `db4c381` | Reuse bindings and texture views across moving dirty rectangles | In the original 64-stroke test, buffer creations fell from 64 to 2 and bind groups from 256 to 8. Moving-stroke CPU p95 fell from 70 to 20 µs on NVIDIA and from 75 to 20–25 µs on Intel. |
 | BVH2 | Implemented `35451af` | Avoid full mesh scans on settled frames | At 4,096 meshes on NVIDIA, settled CPU time inside `SceneTrees.update()` fell from 150 µs to roughly 5 µs (one timer tick). Posing one mesh with changed bounds fell from 245 to 45 µs. |
 | BVH3 | Open | Accumulate CPU SDF crossings during traversal | Compare signed counts and higher-level results. Profile CPU time and allocations on closed and overlapping meshes. |
-| DS3 | Experiment | Warm up the requested compute or render pipeline asynchronously | Compare cold and warm frame gaps, pending-request deduplication and compile events across adapters. |
+| DS3 | Implemented `5702f5b`, `a7f3060` | Warm actual encode pipelines asynchronously | Fresh RTX storage submit-to-completion fell from 128.0 to 3.2 ms after 70.5 ms of prior warmup. |
 | BVH4 | Experiment | Share the quantization frame during H-PLOC emit | Compare full build and emit times on small and large meshes. Verify output words against the existing quantize pass. |
-| DS4 | Awaiting measurement | Revisit capped halo defaults after the M5 result | Pair the same odd and even sizes, formats and policies with existing Windows results. |
+| DS4 | Closed `221aa42`, `95f13a8` | Measure capped halo across GPUs | The M5 missed the 5% rule and regressed at 1024² RGBA8. Halo stays opt-in. |
 | BVH5 | Open | Extend Fast first and shorten the README routes | Show time to trace, time to refine, steady trace cost and peak memory for one repeatable workload. |
-| DS5 | Open | Extend the brush and Hi-Z examples and reconcile install guidance | Reproduce a brush replay without timing the reference readback. Show actual occlusion decisions at odd sizes. |
+| DS5 | Implemented `f80f5a9` | Demonstrate moving-brush performance and conservative occlusion | Paired replay, timing fallback and odd-size Hi-Z decisions have automated example checks. Setup starts from a checkout. |
 
 ## Verification on Windows
 
@@ -80,6 +80,22 @@ The new storage regression recorded 514 updates across two layers using both `en
 $baselineDist = 'C:\path\to\baseline\dist'
 node results/probes/ds2-region.mjs "--baseline=$baselineDist" --candidate=dist --power=high
 ```
+
+### Downsampler Mac handoff · DS3, DS4 and DS5
+
+The transfer branch includes `windows-3` and the Apple M5 Pro size rule from `srgb-store` at `1ff808b`. The final runtime is `ff785d9`. [Downsampler review](../downsampler-web-review/WEB-PERFORMANCE-REVIEW.md) · [Mac checkout and acceptance](../downsampler-web-review/docs/M5-HANDOFF-SRGB.md)
+
+| Fresh Chrome 157 profile, storage | First submit-to-done, sync → warmed | Prior warmup |
+| --- | ---: | ---: |
+| RTX 3060 Laptop | 128.0 → 3.2 ms | 70.5 ms |
+| Intel UHD | 128.1 → 4.1 ms | 73.7 ms |
+| SwiftShader | 414.8 → 19.2 ms | 365.4 ms |
+
+The A/B used one build. All 972 mip readbacks matched over 108 page runs. The first warmed encode created zero pipelines. See the [storage, buffer, sRGB render and reload measurements](../downsampler-web-review/results/windows/ds3/summary.md).
+
+The M5 exact-policy halo/plain median was 0.98–0.99, with a reproducible 3–4% loss at 1024² RGBA8. Capped halo stays opt-in. The brush example replays 40 strokes and checks the resulting chain outside the timed region. Hi-Z checks five candidates against full-resolution depth, including thin occluders.
+
+The combined branch passed typecheck, 161 core tests, 21 targeted cases on each hardware adapter, eight on SwiftShader and seven in RTX compatibility mode. The full RTX and cross-adapter quick suites are queued or in progress.
 
 ### BVH2 · Settled frames and sparse CPU poses
 
