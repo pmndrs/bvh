@@ -14,10 +14,12 @@ shared GPU layout, and a WGSL walk and its CPU port trace it.
   a worker pool. The top level is built on the GPU, and meshes and instances can come and go. GPU refits handle moving
   instances and skinned or morphed meshes. Big meshes can be cut into clusters.
 - **Tracing and queries:** the WGSL walk handles closest and any hits, with masks and a triangle filter, and ray
-  batches. GPU closest point, sphere and box tests and your own shapecast. Signed distance fields filled on the GPU;
-  the default sign is a ray vote that is right for any closed mesh, and `sign: 'first-hit'` is three-mesh-bvh's faster
-  one-ray sign for closed, outward-wound meshes. On the RTX 3060 our SDF is 1.2-1.3x three-mesh-bvh's time on a 100k
-  mesh with the vote and the same with first-hit.
+  batches. When a ray reaches two boxes at exactly the same distance, the closest-hit walk takes the right one first
+  unless the ray starts inside both (tinybvh always takes the left): rays from outside a closed model were up to 4.4x
+  faster on the RTX 3060, the rest level. GPU closest point, sphere and box tests and your own shapecast. Signed
+  distance fields filled on the GPU; the default sign is a ray vote that is right for any closed mesh, and
+  `sign: 'first-hit'` is three-mesh-bvh's faster one-ray sign for closed, outward-wound meshes. On the RTX 3060 our SDF
+  is 1.2-1.3x three-mesh-bvh's time on a 100k mesh with the vote and the same with first-hit.
 - **CPU queries:** raycast, shapecast, `bvhcast`, closest point and frustum culling, with three-mesh-bvh's contracts,
   and trees over points and lines.
 - **Serialization and baking:** build trees or whole scenes once, in Node or at build time, and load them later with

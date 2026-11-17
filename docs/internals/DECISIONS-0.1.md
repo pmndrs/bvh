@@ -13,7 +13,7 @@ format or a public type that people will build on; defaults and additive options
 | 5. Points and lines CPU-only, own builder and file | Keep; bump the `BVHP` version by hand if node words change | No |
 | 6. Adopt and quantized emit; `positionsBuffer` turns weld and merge off | Keep both | No |
 | 7. `triangleLeaves: 'records'`, `quantizedDecode: 'exact'` | Ship them; both are safe to flip in 0.2 | No |
-| 8. Closest-hit tie rule (added 2026-11-17) | Take it: ties beyond `tMin` go right | No, but taking it now lets the M5 pass check it |
+| 8. Closest-hit tie rule (added 2026-11-17) | Take it: ties beyond `tMin` go right | Taken 2026-11-17 |
 
 **Decided by Dennis, 2026-11-16:** every recommendation below is taken, with three notes.
 
@@ -412,7 +412,8 @@ the grid: the room's step is 0.12 mm and its decoded SAH grows 0.17%, the least 
 
 **Recommendation.** **Take it: a tie further along the ray than `tMin` goes to the right child; a tie at `tMin` still
 goes left.** One comparison: `leftEntry < rightEntry || leftEntry == ray.tMin` in place of `leftEntry <= rightEntry`,
-in the WGSL walk and the CPU walk. To take it: `git revert e372387` (the experiment is `7d6fda5`).
+in the WGSL walk and the CPU walk. **Taken by Dennis, 2026-11-17** (the revert of `e372387` on `main`; the code is
+`7d6fda5`'s, which passed the gates below).
 
 | Option | Pros | Cons |
 | --- | --- | --- |

@@ -45,8 +45,8 @@ What the 2026-11-15 defaults could change, measured again (the full tables are i
 - **The furnished room on the GPU.** From outside, three-mesh-bvh traces about twice as many closest-hit rays per
   second as ours (ours 0.51× theirs; 0.96× with `f32` nodes). The cause is not the quantization grid. When a ray enters
   two boxes at exactly the same distance, our walk takes the left one first; from outside the room that is often the
-  half behind the wall. Quantized boxes make such ties more common. Taking the other box on these ties made ours 2.3×
-  theirs on this set, with every other set level; it is measured, not shipped yet. From outside, its any hit is 2.8×
+  half behind the wall. Quantized boxes make such ties more common. Since 2026-11-17 the walk takes the other box on
+  these ties: ours is 2.3× theirs on this set, with every other set level. From outside, its any hit is 2.8×
   our default order's rate, and 0.83× ours with `'larger'`.
 - **CPU refit:** three-mesh-bvh is 2.2–2.5× faster than our records tree on every scene, and 1.6–1.9× faster than
   `corners: 'positions'`. Our tree has 3.6× the boxes (leaves of about 2 triangles against 7).

@@ -357,13 +357,16 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
                 const hitRight = rightEntry < BOX_MISS;
 
                 if (hitLeft && hitRight) {
-                    // As in the WGSL: closest-hit takes the nearer child first; any-hit the farther one
+                    // As in the WGSL: closest-hit takes the nearer child first (an exact tie at tMin goes left,
+                    // one beyond it right; WINDOWS-RUNBOOK section 14); any-hit the farther one
                     // (anyHitOrder 'far'), the nearer ('near') or the larger ('larger').
-                    const leftFirst = !stopAtFirstHit || anyHitOrder === 'near'
-                        ? leftEntry <= rightEntry
-                        : anyHitOrder === 'larger'
-                          ? halfArea(floats, nodeWord + NODE_WORD.leftMin, nodeWord + NODE_WORD.leftMax) >= halfArea(floats, nodeWord + NODE_WORD.rightMin, nodeWord + NODE_WORD.rightMax)
-                          : leftEntry > rightEntry;
+                    const leftFirst = !stopAtFirstHit
+                        ? leftEntry < rightEntry || leftEntry === ray.tMin
+                        : anyHitOrder === 'near'
+                          ? leftEntry <= rightEntry
+                          : anyHitOrder === 'larger'
+                            ? halfArea(floats, nodeWord + NODE_WORD.leftMin, nodeWord + NODE_WORD.leftMax) >= halfArea(floats, nodeWord + NODE_WORD.rightMin, nodeWord + NODE_WORD.rightMax)
+                            : leftEntry > rightEntry;
                     if (leftFirst) {
                         stack.push(rightReference);
                         current = leftReference;
