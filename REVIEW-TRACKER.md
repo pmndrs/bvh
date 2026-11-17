@@ -1,6 +1,6 @@
 # BVH and downsampler review tracker
 
-November 17, 2026. Both repositories have a local branch named `codex/web-performance-review`. DS1, BVH1 and DS2 have implementation results below. The other seven follow-ups remain open. Each review contains the code locations, baseline and proposed verification.
+November 17, 2026. Both repositories have a local branch named `codex/web-performance-review`. DS1, BVH1, DS2 and BVH2 have implementation results below. Six follow-ups remain open. Each review contains the code locations, baseline and proposed verification.
 
 | Library | Reviewed revision | Review page | Local review |
 | --- | --- | --- | --- |
@@ -14,7 +14,7 @@ November 17, 2026. Both repositories have a local branch named `codex/web-perfor
 | DS1 | Implemented `5c59385` | Preserve full and partial plans on failed replacement | Full retry went from one validation error and six stale mips to zero errors and six correct mips. Both caches retain the original plan on failure. |
 | BVH1 | Implemented `94a7220` | Upload dirty mesh slots and changed gather parameters | One edit at 4,096-slot capacity went from 131,088 bytes in two writes to 32 bytes in one. Idle frames went from one write to zero. |
 | DS2 | Implemented `db4c381` | Reuse bindings and texture views across moving dirty rectangles | In the original 64-stroke test, buffer creations fell from 64 to 2 and bind groups from 256 to 8. Moving-stroke CPU p95 fell from 70 to 20 µs on NVIDIA and from 75 to 20–25 µs on Intel. |
-| BVH2 | Measured | Avoid full mesh scans on settled frames | Compare 256 and 4,096 settled meshes, then sparse CPU poses and many instances. Preserve waiter, pose and stack-limit behavior. |
+| BVH2 | Implemented `35451af` | Avoid full mesh scans on settled frames | At 4,096 meshes on NVIDIA, settled CPU time inside `SceneTrees.update()` fell from 150 µs to roughly 5 µs (one timer tick). Posing one mesh with changed bounds fell from 245 to 45 µs. |
 | BVH3 | Open | Accumulate CPU SDF crossings during traversal | Compare signed counts and higher-level results. Profile CPU time and allocations on closed and overlapping meshes. |
 | DS3 | Experiment | Warm up the requested compute or render pipeline asynchronously | Compare cold and warm frame gaps, pending-request deduplication and compile events across adapters. |
 | BVH4 | Experiment | Share the quantization frame during H-PLOC emit | Compare full build and emit times on small and large meshes. Verify output words against the existing quantize pass. |
@@ -79,4 +79,48 @@ The new storage regression recorded 514 updates across two layers using both `en
 ```powershell
 $baselineDist = 'C:\path\to\baseline\dist'
 node results/probes/ds2-region.mjs "--baseline=$baselineDist" --candidate=dist --power=high
+```
+
+### BVH2 · Settled frames and sparse CPU poses
+
+Compared `f9e240f` (includes BVH1) with `35451af`. In a settled scene, `update()` skips the first-tree readiness scan when nobody is waiting, visits only queued CPU poses, and reuses the maximum reachable mesh depth for the GPU stack check. Placing or removing a tree, or adding its first or removing its last user, invalidates that depth. A changed mesh box updates the shared mesh record once. An unchanged box still allows the new triangle or vertex data to reach the GPU.
+
+**Chrome 157 · Windows · NVIDIA Ampere · GPU top level.** Each registered mesh had its own app-supplied one-triangle tree and one instance. In the sparse case, one mesh alternated between two Z positions, changing its root box on every frame. Each row includes 1,500 `SceneTrees.update(encoder)` calls after 300 warm-ups. The browser drained the queue between frames. `setPoseCpu`, encoder creation, queue submission and GPU execution were outside the clock. Values below are **µs per call** across five blocks of 300, rounded to the browser’s 5 µs timer resolution.
+
+| Meshes | Frame | CPU p50 before → after | CPU p95 before → after |
+| ---: | --- | ---: | ---: |
+| 256 | Settled | 15 → ~5 | 25 → 10 |
+| 4,096 | Settled | 150 → ~5 | 190 → 10 |
+| 256 | One changed mesh box | 80 → 50 | 260 → 110 |
+| 4,096 | One changed mesh box | 245 → 45 | 410 → 85 |
+
+The optimized settled median reached one timer tick at both sizes. A GPU ray hit instance 0 at distance 2 in the settled fixture and 1.5 after posing it. Readback confirmed all 256 or 4,096 instances remained present. The runner measured the baseline first, then the candidate.
+
+**CPU top-level fallback · Node 24.13.1 · repository fake device.** The fixture used one app-supplied triangle and one instance per mesh. The sparse cases posed one mesh every update. Each revision ran twice, with the run order reversed the second time. Each cell gives the range of the two run medians in **µs per update**. After 30 warm-ups, each median used 11 block means (100 frames per settled block, five per pose block). This clock includes the public `setPoseCpu()` call when applicable, encoder creation, update and fake submission.
+
+| Meshes | Frame | Baseline p50 | BVH2 p50 |
+| ---: | --- | ---: | ---: |
+| 256 | Settled | 4.80–5.59 | 2.13–2.50 |
+| 4,096 | Settled | 49.10–51.42 | 2.32–2.53 |
+| 256 | One pose, same root box | 421–444 | 10.8–11.4 |
+| 4,096 | One pose, same root box | 6,157–6,179 | 11.6–12.2 |
+| 256 | One pose, translated root box | 405–429 | 408–417 |
+| 4,096 | One pose, translated root box | 6,203–6,222 | 6,145–6,721 |
+
+Every pose run verified 55 writes during the timed blocks. Moving a vertex inside the existing root box kept the CPU top-level bytes identical while the mesh refit ran. Translating the box changed those bytes and still required rebuilding the CPU top level. At 4,096 meshes, the translated-box p95 of the block means increased from 6.69–6.84 ms to 7.18–7.77 ms. This fallback showed no consistent median improvement for a translated box.
+
+**Correctness.** All 879 unit tests, lint, type checks, build and package verification passed. Five new regressions cover settled map scans, unchanged bounds on both top-level paths, depth changes and slot reuse, and sparse/dense CPU poses. The CPU top level traced two instances at their new positions after a changed box. The GPU path issued a mesh-table write and zero instance-table writes for that change. An interior-vertex change updated ray hits through both instances with no top-level upload. The existing waiter and deferred-layout tests also passed.
+
+Three NVIDIA browser checks passed with zero ray disagreements in `bvh-top-level-gpu` (400 instances), `scene-trees-runtime` (eight mutation rounds), and `scene-trees-deforming` (GPU/CPU pose switches across six record/indexed configurations, including replacement trees and trims). The GPU refit still runs over its top-level records when a box moves. On devices supporting GPU deformation, polling and refit scheduling still visit the registered deforming meshes.
+
+**Reproduce.** Use the same benchmark files in both source checkouts. Run the [CPU fixture](bench/bvh2-bookkeeping.ts) from each root with Node 24. For the [browser fixture](bench/bvh2-browser.js), serve the root with Vite and the isolation headers below. Open `/README.md` on the local server and run the JavaScript snippet in Chrome DevTools. The browser fixture returns pooled and per-block statistics in milliseconds.
+
+```powershell
+node --experimental-transform-types --no-warnings bench/bvh2-bookkeeping.ts
+node --input-type=module -e "import {createServer} from 'vite'; const server = await createServer({server:{headers:{'Cross-Origin-Opener-Policy':'same-origin','Cross-Origin-Embedder-Policy':'require-corp'}}}); await server.listen(); server.printUrls()"
+```
+
+```js
+const { runBvh2BrowserBenchmark } = await import('/bench/bvh2-browser.js');
+await runBvh2BrowserBenchmark();
 ```
