@@ -354,7 +354,13 @@ export class GpuTopLevel {
     private primitiveBoxes: GPUBuffer;
     private meshTable: GPUBuffer;
     private meshMirror: Uint32Array<ArrayBuffer>;
-    private meshTableDirty = true;
+    /** Inclusive range of mesh slots changed since the last table upload. */
+    private meshDirtyLow = Infinity;
+    private meshDirtyHigh = -1;
+    /** True until the current mirror has been fully copied to its GPU buffer. */
+    private meshTableGrown = true;
+    /** Gather params are uploaded only when one of their values changes. */
+    private gatherParamsDirty = true;
     private instanceTable: GPUBuffer;
     private instanceWords: Uint32Array<ArrayBuffer>;
     private instanceFloats: Float32Array<ArrayBuffer>;
@@ -500,6 +506,8 @@ export class GpuTopLevel {
             // Destroyed at the next update, after the frames that used it were submitted.
             this.retired.push(this.meshTable);
             this.meshTable = this.createStorage('top level mesh table', grown.byteLength);
+            this.meshTableGrown = true;
+            this.gatherParamsDirty = true;
         }
         const base = meshSlot * TOP_LEVEL_MESH_ENTRY_WORDS;
         if (tree === null) {
@@ -511,7 +519,8 @@ export class GpuTopLevel {
             this.meshMirror[base + 3] = tree.nodeOffset;
             this.meshMirror[base + 7] = tree.triangleOffset;
         }
-        this.meshTableDirty = true;
+        this.meshDirtyLow = Math.min(this.meshDirtyLow, meshSlot);
+        this.meshDirtyHigh = Math.max(this.meshDirtyHigh, meshSlot);
     }
 
     /**
@@ -595,23 +604,31 @@ export class GpuTopLevel {
         this.refit.pollStats();
         this.collectDiagnostics();
         const setChanged = this.instanceSetChanged;
-        const moved = this.instancesChanged || this.meshTableDirty || setChanged;
+        const meshChanged = this.meshDirtyHigh >= 0 || this.meshTableGrown;
+        const moved = this.instancesChanged || meshChanged || setChanged;
         this.instanceSetChanged = false;
         this.instancesChanged = false;
-        if (setChanged || this.meshTableDirty) this.qualityRebuildsPaused = false;
+        if (setChanged || meshChanged) this.qualityRebuildsPaused = false;
         const checkDue = performance.now() - this.lastRequestTime >= this.qualityCheckIntervalMs;
         if (setChanged) this.request('build');
         else if (moved && checkDue && this.current.recordCount > 0 && !this.qualityRebuildsPaused) this.request('check');
 
         // The tables go first, so even a frame that throws below leaves no record pointing at a released tree.
         let changed = moved;
-        if (this.meshTableDirty) {
-            this.device.queue.writeBuffer(this.meshTable, 0, this.meshMirror);
-            this.meshTableDirty = false;
+        if (meshChanged) {
+            if (this.meshTableGrown) {
+                this.device.queue.writeBuffer(this.meshTable, 0, this.meshMirror);
+                this.meshTableGrown = false;
+            } else {
+                const first = this.meshDirtyLow * TOP_LEVEL_MESH_ENTRY_WORDS;
+                const count = (this.meshDirtyHigh + 1 - this.meshDirtyLow) * TOP_LEVEL_MESH_ENTRY_WORDS;
+                this.device.queue.writeBuffer(this.meshTable, first * 4, this.meshMirror, first, count);
+            }
+            this.meshDirtyLow = Infinity;
+            this.meshDirtyHigh = -1;
             changed = true;
         }
         this.writeInstanceTable();
-        this.writeGatherParams();
         let failure: unknown = this.buildFailure;
         this.buildFailure = null;
         if (this.arrived) {
@@ -627,6 +644,7 @@ export class GpuTopLevel {
                 this.qualityRebuildsPaused = true;
             }
         }
+        this.writeGatherParams();
         try {
             this.checkStack(this.current.maxDepth, frame.deepestMesh);
         } catch (error) {
@@ -671,6 +689,7 @@ export class GpuTopLevel {
         this.retired.push(this.instanceTable);
         this.instanceTable = this.createStorage('top level instances', words.byteLength);
         this.instanceTableGrown = true;
+        this.gatherParamsDirty = true;
     }
 
     /** Writes the dirty slots' entries (or the whole table after it grew) before this frame's commands run. */
@@ -811,8 +830,9 @@ export class GpuTopLevel {
         }
 
         this.refit.setShape({ nodeWordOffset: nodeByteOffset / 4, nodeCount, parentSlots: shape.parentSlots, leafSlots: shape.leafSlots, generation });
+        const recordCountChanged = recordCount !== this.current.recordCount;
         this.current = { recordCount, nodeCount, maxDepth: shape.maxDepth, generation };
-        this.writeGatherParams();
+        if (recordCountChanged) this.gatherParamsDirty = true;
         this.counters.shapesBuilt++;
     }
 
@@ -862,11 +882,13 @@ export class GpuTopLevel {
     }
 
     private writeGatherParams(): void {
+        if (!this.gatherParamsDirty) return;
         this.device.queue.writeBuffer(
             this.gatherParams,
             0,
             new Uint32Array([this.current.recordCount, this.meshMirror.length / TOP_LEVEL_MESH_ENTRY_WORDS, this.instanceWords.length / TOP_LEVEL_INSTANCE_ENTRY_WORDS, 0]),
         );
+        this.gatherParamsDirty = false;
     }
 
     // -----------------------------------------------------------------------

@@ -6,7 +6,7 @@
  * the real gather are checked on GPUs (tests/gpu/pages/scene-trees).
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createFakeGpu, type FakeBuffer } from '../../tests/support/fake-gpu.ts';
 import { gatherStandIn } from '../../tests/support/top-level-gather.ts';
 import { INSTANCE_FLAG, INSTANCE_MASK_SHIFT, MATERIAL_SHIFT, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS } from '../gpu-layout.ts';
@@ -39,6 +39,49 @@ function setUp(options: { kernels?: boolean } = {}) {
 const translation = (x: number) => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, 0, 0, 1];
 
 describe('the GPU top level', () => {
+    it('uploads the initialized mirror once, then sparse mesh records, and keeps gather params idle', async () => {
+        const { gpu, top, frame } = setUp();
+        const writes: { table: 'mesh' | 'gather'; offset: number; bytes: number }[] = [];
+        vi.spyOn(gpu.device.queue, 'writeBuffer').mockImplementation((buffer, offset, data, dataOffset = 0, size) => {
+            const label = (buffer as unknown as FakeBuffer).label;
+            if (label.includes('top level mesh table') || label.includes('top level gather params')) {
+                writes.push({
+                    table: label.includes('top level mesh table') ? 'mesh' : 'gather',
+                    offset,
+                    bytes: size === undefined ? data.byteLength - dataOffset * 4 : size * 4,
+                });
+            }
+        });
+        const expectWrites = (expected: { table: 'mesh' | 'gather'; offset: number; bytes: number }[]) => {
+            expect(writes).toEqual(expected);
+            writes.length = 0;
+        };
+        await top.prepare();
+        top.setMeshTree(3, { nodeOffset: 10, triangleOffset: 20, bounds: BOUNDS });
+        frame();
+        expectWrites([{ table: 'mesh', offset: 0, bytes: 16 * 8 * 4 }, { table: 'gather', offset: 0, bytes: 16 }]);
+
+        top.setMeshTree(100, { nodeOffset: 10, triangleOffset: 20, bounds: BOUNDS });
+        frame();
+        expectWrites([{ table: 'mesh', offset: 0, bytes: 128 * 8 * 4 }, { table: 'gather', offset: 0, bytes: 16 }]);
+
+        top.setMeshTree(4095, { nodeOffset: 10, triangleOffset: 20, bounds: BOUNDS });
+        frame();
+        expectWrites([{ table: 'mesh', offset: 0, bytes: 4096 * 8 * 4 }, { table: 'gather', offset: 0, bytes: 16 }]);
+
+        top.setMeshTree(2048, { nodeOffset: 11, triangleOffset: 21, bounds: BOUNDS });
+        frame();
+        expectWrites([{ table: 'mesh', offset: 2048 * 8 * 4, bytes: 8 * 4 }]);
+
+        top.setMeshTree(2048, null);
+        frame();
+        expectWrites([{ table: 'mesh', offset: 2048 * 8 * 4, bytes: 8 * 4 }]);
+
+        frame();
+        expectWrites([]);
+        top.dispose();
+    });
+
     it('packs world-to-object rows and flags with the bits the CPU top level writes', () => {
         const random = createRandom(7);
         const floats = new Float32Array(TOP_LEVEL_INSTANCE_ENTRY_WORDS);
