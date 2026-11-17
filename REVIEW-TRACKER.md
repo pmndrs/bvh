@@ -83,7 +83,7 @@ node results/probes/ds2-region.mjs "--baseline=$baselineDist" --candidate=dist -
 
 ### Downsampler Mac handoff · DS3, DS4 and DS5
 
-The transfer branch includes `windows-3` and the Apple M5 Pro size rule from `srgb-store` at `1ff808b`. The final runtime is `ff785d9`. [Downsampler review](../downsampler-web-review/WEB-PERFORMANCE-REVIEW.md) · [Mac checkout and acceptance](../downsampler-web-review/docs/M5-HANDOFF-SRGB.md)
+The completed review branch is `c9b90f7`. It includes the Apple M5 Pro size rule and both Windows verification runs, through `srgb-store` at `b6e97c5`. The final runtime is `ff785d9`. [Downsampler review](../downsampler-web-review/WEB-PERFORMANCE-REVIEW.md) · [Mac checkout and acceptance](../downsampler-web-review/docs/M5-HANDOFF-SRGB.md)
 
 | Fresh Chrome 157 profile, storage | First submit-to-done, sync → warmed | Prior warmup |
 | --- | ---: | ---: |
@@ -95,7 +95,7 @@ The A/B used one build. All 972 mip readbacks matched over 108 page runs. The fi
 
 The M5 exact-policy halo/plain median was 0.98–0.99, with a reproducible 3–4% loss at 1024² RGBA8. Capped halo stays opt-in. The brush example replays 40 strokes and checks the resulting chain outside the timed region. Hi-Z checks five candidates against full-resolution depth, including thin occluders.
 
-The combined branch passed typecheck, 161 core tests, 21 targeted cases on each hardware adapter, eight on SwiftShader and seven in RTX compatibility mode. The full RTX and cross-adapter quick suites are queued or in progress.
+The combined runtime at `ff785d9` passed typecheck, 161 core tests, 21 targeted cases per hardware adapter, eight on SwiftShader and seven in RTX compatibility mode. The full RTX suite ran 35,840 cases across 3,239 groups. Intel quick ran 21,791 cases across 1,864 groups. Only the two historical FSR f16 fixtures failed (five sizes on RTX, two on Intel). All 21,074 RTX compatibility cases passed. All 24 example pages and presets passed on both hardware adapters. A clean bundle clone produced a 56-file installable tarball, and all five export paths passed fresh consumer checks. [Windows matrix and package results](../downsampler-web-review/WEB-PERFORMANCE-REVIEW.md#windows-verification)
 
 ### BVH2 · Settled frames and sparse CPU poses
 
