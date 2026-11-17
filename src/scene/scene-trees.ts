@@ -638,8 +638,6 @@ interface CpuPose {
     layout: GpuLayoutMeshBvh | PoseLayout | null;
     /** The latest CPU pose, or null. */
     positions: Float32Array | null;
-    /** The pose still has to be written into the placed tree. */
-    due: boolean;
     /** A CPU pose moved the mesh's top-level box off its deform box. */
     moved: boolean;
 }
@@ -877,6 +875,10 @@ export class SceneTrees {
     private cpuPoseLayoutWarned = false;
     /** CPU poses written ({@link setPoseCpu}). */
     private cpuPoses = 0;
+    /** Meshes whose latest CPU pose still needs a placed tree and layout. */
+    private readonly pendingCpuPoses = new Set<number>();
+    private deepestMeshStale = true;
+    private deepestMesh = 0;
     /** Staging buffers of CPU poses copied in the last update's encoder, freed at the next update. */
     private retiredStaging: GPUBuffer[] = [];
 
@@ -1175,7 +1177,7 @@ export class SceneTrees {
         // The latest pose wins: a CPU pose given before is not written again, and the top level gets the deform box back.
         if (state.cpuPose) {
             state.cpuPose.positions = null;
-            state.cpuPose.due = false;
+            this.pendingCpuPoses.delete(mesh);
             if (state.cpuPose.moved) {
                 state.cpuPose.moved = false;
                 const box = this.deforming.deformBox(mesh);
@@ -1210,7 +1212,7 @@ export class SceneTrees {
             throw new RangeError(`SceneTrees.setPoseCpu: mesh ${mesh} has ${state.cpuPose.vertexCount} vertices, the pose ${positions.length / 3}`);
         }
         state.cpuPose.positions = positions;
-        state.cpuPose.due = true;
+        this.pendingCpuPoses.add(mesh);
         // The latest pose wins: a GPU pose given before is not refit again.
         this.deforming?.unposed(mesh);
     }
@@ -1233,14 +1235,7 @@ export class SceneTrees {
             if (!(bounds[k] <= bounds[k + 3])) throw new RangeError(`SceneTrees.setDeformBounds: [${Array.from(bounds).join(', ')}] is not a box`);
         }
         if (!this.deforming?.setDeformBox(mesh, bounds)) return;
-        const placed = this.placed.get(mesh);
-        if (placed) {
-            const moved: PlacedTree = { ...placed, bounds: Array.from({ length: 6 }, (_, k) => bounds[k]) };
-            this.placed.set(mesh, moved);
-            this.gpuTopLevel?.setMeshTree(mesh, moved);
-        }
-        for (const [slot, instance] of this.instances) if (instance.mesh === mesh) this.dirtyInstances.add(slot);
-        this.cpuTopLevelStale = true;
+        this.moveTopLevelBox(mesh, bounds);
     }
 
     /** Deforming meshes' refits, drift rebuilds, poses skipped without subgroups, and CPU poses written ({@link setPoseCpu}). */
@@ -1267,7 +1262,7 @@ export class SceneTrees {
             triangleCount,
             bounds: geometryBounds(geometry.positions),
             materialCodes: this.triangleLeaves === 'indexed' ? materialCodes : null,
-            cpuPose: deforming ? { indices: geometry.indices ? geometry.indices.slice() : null, vertexCount: geometry.positions.length / 3, layout: null, positions: null, due: false, moved: false } : null,
+            cpuPose: deforming ? { indices: geometry.indices ? geometry.indices.slice() : null, vertexCount: geometry.positions.length / 3, layout: null, positions: null, moved: false } : null,
             gpu: 'none',
             tinybvh: 'none',
             fallbackReason: null,
@@ -1297,6 +1292,7 @@ export class SceneTrees {
         }
         if (state.vertices && this.positions) this.releasePositionsAtUpdate.push(state.vertices);
         this.deforming?.meshRemoved(mesh);
+        this.pendingCpuPoses.delete(mesh);
         this.meshes.delete(mesh);
         this.newMeshes = this.newMeshes.filter((slot) => slot !== mesh);
         this.retiredGenerations.set(mesh, state.generation);
@@ -1333,6 +1329,7 @@ export class SceneTrees {
             merged: -1,
         });
         mesh.users++;
+        if (mesh.users === 1) this.deepestMeshStale = true;
         this.dirtyInstances.add(slot);
         this.cpuTopLevelStale = true;
         return slot;
@@ -1379,7 +1376,10 @@ export class SceneTrees {
         }
         this.instances.delete(instance);
         const mesh = this.meshes.get(state.mesh);
-        if (mesh) mesh.users--;
+        if (mesh) {
+            mesh.users--;
+            if (mesh.users === 0) this.deepestMeshStale = true;
+        }
         this.dirtyInstances.add(instance);
         this.cpuTopLevelStale = true;
         this.notifyWaiters();
@@ -2299,7 +2299,7 @@ export class SceneTrees {
     }
 
     private notifyWaiters(): void {
-        if (this.meshesWaitingForFirstTree() === 0 && this.newMeshes.length === 0) for (const resolve of this.builtWaiters.splice(0)) resolve();
+        if (this.builtWaiters.length > 0 && this.newMeshes.length === 0 && this.meshesWaitingForFirstTree() === 0) for (const resolve of this.builtWaiters.splice(0)) resolve();
         if (this.pendingTinybvh === 0 && this.newMeshes.length === 0) for (const resolve of this.refinedWaiters.splice(0)) resolve();
     }
 
@@ -2382,6 +2382,7 @@ export class SceneTrees {
     /** Everything of {@link releaseTree} but freeing the ranges. */
     private forgetTree(slot: number): void {
         this.placed.delete(slot);
+        this.deepestMeshStale = true;
         this.gpuTopLevel?.setMeshTree(slot, null);
         this.deforming?.treeReleased(slot);
     }
@@ -2931,9 +2932,10 @@ export class SceneTrees {
      * box becomes the posed root box.
      */
     private writeCpuPoses(encoder: GPUCommandEncoder): void {
-        for (const state of this.meshes.values()) {
-            const pose = state.cpuPose;
-            if (!pose?.due || !pose.positions) continue;
+        for (const slot of this.pendingCpuPoses) {
+            const state = this.meshes.get(slot)!;
+            const pose = state.cpuPose!;
+            if (!pose.positions) continue;
             const placed = this.placed.get(state.slot);
             if (!placed) continue;
             if (!pose.layout) {
@@ -2971,7 +2973,7 @@ export class SceneTrees {
             }
             this.moveTopLevelBox(state.slot, posed.bounds);
             this.encoderWritesStorage = true;
-            pose.due = false;
+            this.pendingCpuPoses.delete(state.slot);
             pose.moved = true;
             this.cpuPoses++;
         }
@@ -3006,10 +3008,10 @@ export class SceneTrees {
     private moveTopLevelBox(mesh: number, box: ArrayLike<number>): void {
         const placed = this.placed.get(mesh);
         if (!placed) return;
+        if (placed.bounds.every((value, k) => value === box[k])) return;
         const moved: PlacedTree = { ...placed, bounds: Array.from({ length: 6 }, (_, k) => box[k]) };
         this.placed.set(mesh, moved);
         this.gpuTopLevel?.setMeshTree(mesh, moved);
-        for (const [slot, instance] of this.instances) if (instance.mesh === mesh) this.dirtyInstances.add(slot);
         this.cpuTopLevelStale = true;
     }
 
@@ -3040,6 +3042,7 @@ export class SceneTrees {
             generation: tree.generation,
         };
         this.placed.set(tree.slot, placed);
+        this.deepestMeshStale = true;
         this.gpuTopLevel?.setMeshTree(tree.slot, placed);
         if (this.deforming?.has(tree.slot)) {
             const layout: GpuLayoutMeshBvh | null = tree.source === 'tinybvh' ? tree.bvh : tree.built.layout;
@@ -3050,7 +3053,7 @@ export class SceneTrees {
             const layout = tree.source === 'tinybvh' ? tree.bvh : tree.built.layout;
             state.cpuPose.layout = layout && this.compactPoseLayouts ? compactPoseLayout(layout) : layout;
             state.cpuPose.moved = false;
-            state.cpuPose.due = state.cpuPose.positions !== null;
+            if (state.cpuPose.positions !== null) this.pendingCpuPoses.add(tree.slot);
         }
         if (replaced === 'gpu' && tree.source === 'tinybvh' && !placed.app) this.swaps++;
         // GPU-only: the mesh's geometry kept for a fallback is let go once a tree from either builder is in.
@@ -3110,12 +3113,14 @@ export class SceneTrees {
 
     /** The deepest placed tree that rays can reach: a mesh with instances, or a merged group. */
     private deepestPlacedMesh(): number {
+        if (!this.deepestMeshStale) return this.deepestMesh;
         let deepest = 0;
         for (const [slot, tree] of this.placed) {
             const state = this.meshes.get(slot);
             if (state && (state.group >= 0 || state.users > 0)) deepest = Math.max(deepest, tree.maxDepth);
         }
-        return deepest;
+        this.deepestMeshStale = false;
+        return (this.deepestMesh = deepest);
     }
 
     private updateTopLevel(encoder: GPUCommandEncoder): void {

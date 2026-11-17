@@ -13,7 +13,7 @@
  * H-PLOC and the identity kernel are checked on GPUs (tests/gpu/pages/scene-trees-*).
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createFakeGpu, type FakeBuffer, type FakeGpu } from '../../tests/support/fake-gpu.ts';
 import { createCpuTracer, type CpuHit } from '../trace/cpu-traversal.ts';
 import { INSTANCE_FLAG, INSTANCE_RECORD_WORDS, INSTANCE_WORD, TOP_HEADER_WORD, TOP_LEVEL_HEADER_WORDS } from '../gpu-layout.ts';
@@ -1618,6 +1618,143 @@ describe('SceneTrees.setPoseCpu', () => {
         expect(scene.deformingCounts.cpuPoses).toBe(1);
         // The top level has the deform box back (the fake GPU runs no refit, so the tree still holds the CPU pose, outside it).
         expect(createCpuTracer(readScene(scene)).closest(down(5.1, 0.2))).toBeNull();
+        scene.dispose();
+    });
+});
+
+
+describe('SceneTrees change-driven bookkeeping', () => {
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+    it('settled GPU updates do not enumerate meshes, placements or instances', async () => {
+        const gpu = createFakeGpu({}, { features: ['subgroups'], kernels: { bvhTopLevelGather: gatherStandIn } });
+        const scene = await SceneTrees.create(gpu.device, { gpuFirstTrees: false, mergeStaticInstances: false, refine: false });
+        const geometry = tessellatedQuad(1, 1);
+        const layout = await buildMeshBvhAsync(geometry);
+        for (let i = 0; i < 32; i++) {
+            const mesh = scene.addMesh(geometry);
+            scene.placeTree(mesh, layout);
+            scene.addInstance({ mesh, objectToWorld: identity });
+        }
+        const frame = () => { const encoder = gpu.createEncoder(); scene.update(encoder); gpu.submit(encoder); };
+        frame();
+        await scene.whenBuilt();
+        frame();
+        const state = scene as unknown as { meshes: Map<number, unknown>; placed: Map<number, unknown>; instances: Map<number, unknown> };
+        const scans = [vi.spyOn(state.meshes, 'values'), vi.spyOn(state.placed, Symbol.iterator), vi.spyOn(state.instances, Symbol.iterator)];
+        try {
+            frame();
+            frame();
+            for (const scan of scans) expect(scan).not.toHaveBeenCalled();
+        } finally {
+            for (const scan of scans) scan.mockRestore();
+            scene.dispose();
+        }
+    });
+
+    for (const topLevel of ['cpu', 'gpu'] as const) {
+        it(`${topLevel}: unchanged pose bounds preserve the top level while updating the mesh`, async () => {
+            const gpu = createFakeGpu({}, { features: ['subgroups'], kernels: { bvhTopLevelGather: gatherStandIn } });
+            const scene = await SceneTrees.create(gpu.device, { gpuFirstTrees: false, topLevel: topLevel === 'gpu' ? 'auto' : 'cpu', mergeStaticInstances: false, refine: false });
+            const geometry = { positions: new Float32Array([-1, -1, 0, 1, -1, 0, 1, 1, 1, -1, 1, 1, 0, 0, 0.2]), indices: new Uint32Array([0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4]) };
+            const mesh = scene.addMesh(geometry, { deforming: true });
+            scene.placeTree(mesh, await buildMeshBvhAsync(geometry));
+            scene.addInstance({ mesh, objectToWorld: identity });
+            const translated = [...identity]; translated[12] = 10;
+            scene.addInstance({ mesh, objectToWorld: translated });
+            const frame = () => { const encoder = gpu.createEncoder(); scene.update(encoder); gpu.submit(encoder); };
+            frame(); await scene.whenBuilt(); frame();
+            const writes = vi.spyOn(gpu.device.queue, 'writeBuffer');
+            const ray = (x: number): TraceRay => ({ origin: [x, 0, 3], direction: [0, 0, -1], tMin: 0, tMax: 10 });
+            try {
+                for (const z of [0.6, 0.8]) {
+                    const pose = geometry.positions.slice(); pose[14] = z;
+                    scene.setPoseCpu(mesh, pose);
+                    frame();
+                    expect(writes.mock.calls.filter(([buffer]) => buffer.label.includes('top level'))).toHaveLength(0);
+                    const tracer = createCpuTracer(readScene(scene));
+                    for (const x of [0, 10]) expect(tracer.closest(ray(x))?.t).toBeCloseTo(3 - z, 4);
+                }
+                // Changed root boxes update the shared mesh record, without uploading either user's transform.
+                const shifted = geometry.positions.map((v, i) => i % 3 === 0 ? v + 5 : v);
+                scene.setPoseCpu(mesh, shifted);
+                frame();
+                if (topLevel === 'gpu') {
+                    expect(writes.mock.calls.some(([buffer]) => buffer.label.includes('top level mesh table'))).toBe(true);
+                    expect(writes.mock.calls.some(([buffer]) => buffer.label.includes('top level instances'))).toBe(false);
+                } else {
+                    const tracer = createCpuTracer(readScene(scene));
+                    for (const x of [5, 15]) expect(tracer.closest(ray(x))?.t).toBeCloseTo(2.8, 4);
+                }
+            } finally {
+                writes.mockRestore();
+                scene.dispose();
+            }
+        });
+    }
+
+    it('GPU stack depth follows replacement, first and last users, removal and slot reuse', async () => {
+        const gpu = createFakeGpu({}, { features: ['subgroups'], kernels: { bvhTopLevelGather: gatherStandIn } });
+        const scene = await SceneTrees.create(gpu.device, { gpuFirstTrees: false, mergeStaticInstances: false, refine: false, gpuMaxDepth: 63 });
+        const geometry = tessellatedQuad(1, 1);
+        const layout = await buildMeshBvhAsync(geometry);
+        const shallow = scene.addMesh(geometry);
+        scene.placeTree(shallow, layout);
+        scene.addInstance({ mesh: shallow, objectToWorld: identity });
+        const deep = scene.addMesh(geometry);
+        scene.placeTree(deep, { ...layout, maxDepth: 63 });
+        const frame = () => { const encoder = gpu.createEncoder(); scene.update(encoder); gpu.submit(encoder); };
+        frame(); await scene.whenBuilt(); frame();
+        // Unused trees do not make a live top level exceed its stack.
+        expect(frame).not.toThrow();
+        const user = scene.addInstance({ mesh: deep, objectToWorld: identity });
+        expect(frame).toThrow(/trace stack holds/);
+        scene.removeInstance(user);
+        expect(frame).not.toThrow();
+        // A deeper replacement of a reachable tree must be checked even without a shape change.
+        scene.placeTree(shallow, { ...layout, maxDepth: 63 });
+        expect(frame).toThrow(/trace stack holds/);
+        scene.placeTree(shallow, layout);
+        expect(frame).not.toThrow();
+        scene.removeMesh(deep);
+        const reused = scene.addMesh(geometry);
+        expect(reused).toBe(deep);
+        scene.placeTree(reused, layout);
+        scene.addInstance({ mesh: reused, objectToWorld: identity });
+        expect(frame).not.toThrow();
+        scene.dispose();
+    });
+
+    it('sparse and dense CPU poses touch only their deforming users, including shared geometry and reused slots', async () => {
+        const { scene, frame } = await setUp({ stand: false, mergeStaticInstances: false, topLevel: 'cpu' });
+        const geometry = tessellatedQuad(1, 1);
+        const meshes = Array.from({ length: 12 }, () => scene.addMesh(geometry, { deforming: true }));
+        const handles = meshes.map((mesh) => scene.addInstance({ mesh, objectToWorld: identity }));
+        const extra = scene.addInstance({ mesh: meshes[0], objectToWorld: identity });
+        frame(); await scene.whenRefined(); frame();
+        const shift = (x: number) => geometry.positions.map((v, i) => i % 3 === 0 ? v + x : v);
+        const state = scene as unknown as { instances: Map<number, unknown> };
+        const scan = vi.spyOn(state.instances, Symbol.iterator);
+        scene.setPoseCpu(meshes[0], shift(5));
+        frame();
+        expect(scene.deformingCounts.cpuPoses).toBe(1);
+        expect(scan).not.toHaveBeenCalled();
+        expect(createCpuTracer(readScene(scene)).closest({ origin: [5.1, 0.2, 2], direction: [0, 0, -1], tMin: 0, tMax: 10 })).not.toBeNull();
+        frame();
+        expect(scene.deformingCounts.cpuPoses).toBe(1);
+        for (const mesh of meshes) scene.setPoseCpu(mesh, shift(6));
+        frame();
+        expect(scene.deformingCounts.cpuPoses).toBe(13);
+        // A queued pose must not leak into a mesh reusing its handle or an instance reusing its slot.
+        scene.setPoseCpu(meshes[0], shift(9));
+        scene.removeInstance(handles[0]); scene.removeInstance(extra); scene.removeMesh(meshes[0]);
+        frame();
+        const replacement = scene.addMesh(geometry, { deforming: true });
+        expect(replacement).toBe(meshes[0]);
+        scene.addInstance({ mesh: replacement, objectToWorld: identity });
+        frame(); await scene.whenRefined(); frame();
+        expect(scene.deformingCounts.cpuPoses).toBe(13);
+        scan.mockRestore();
         scene.dispose();
     });
 });
