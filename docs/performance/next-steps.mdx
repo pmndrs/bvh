@@ -1,0 +1,44 @@
+---
+title: Runtime performance next steps after 0.1
+description: Settings to adopt in downstream libraries, frame costs to address, and a plan for comparing Jolt in the browser.
+nav: 93
+sourcecode: compare/RESULTS.md
+---
+
+Use 0.1 in downstream libraries to find which BVH operations consume frame time in real scenes. The first engineering target from the November 18 measurements is **GPU pose and refit for animated geometry**. The quickest gains available to consumers are choosing an occlusion traversal order per pass, omitting unused closest-hit fields, and identifying geometry that stays fixed. The full comparison records the scene, device, winner, time difference and quality tradeoff for each measured workload. [Comparison tables](/performance/comparison)
+
+## Settings consumers can use in 0.1
+
+| Workload | Setting | Measured effect and quality |
+| --- | --- | --- |
+| GPU visibility rays | Choose `anyHitOrder` per pass. Prefer `'larger'` for the measured instanced Sponza and Bistro passes and for rays entering the furnished room. Keep `'far'` for merged surface shadows. | On the RTX 3060 Laptop, larger-first raised room exterior throughput from 305 to 1,044 million rays/s, about 2.32 ms saved per million rays. On merged Sponza and Bistro surface shadows, it reduced throughput by 13–20%. The paired order checks returned identical visibility. |
+| Closest-hit batches that only consume distance, IDs or barycentrics | Set `hitNormal: false` when both normal and material fields are unused. | The result shrinks from 40 to 24 bytes. The RTX passes saved 6–12% of their time. Consumers that shade from those fields still need them. |
+| Fixed geometry | Mark fixed instances `static: true` so the default merge can combine them. | RTX closest-hit throughput improved 1.44–1.67× on Sponza and 1.19–1.20× on Bistro. Visibility agreed. Nearly coincident surfaces can return a different triangle or instance at the same distance to rounding. |
+| Repeated distance-field generation | Use `sign: 'first-hit'` for closed, consistently outward-wound, non-overlapping meshes. Use unsigned distance when the consumer only needs magnitude. | On the 100k-triangle knot at 128³, first-hit signing reduced one RTX generation from 103.5 to 81.3 ms. General signed fields retain the parity default for meshes where the first face orientation can give the wrong sign. |
+
+The room labels describe a ray generator. Exterior rays start on a sphere and aim into the scene bounds. Interior rays start at random points in the bounds and travel in random directions. An indoor renderer may cast camera rays, surface bounces and surface-to-light segments in the same frame. Choose the order from the cost of that pass and its tree layout. Keep the shipped **closest-hit** tie rule, which raised exterior performance from 101 to 445–449 million rays/s on RTX and left interior visit counts unchanged. [Ray measurements and methods](/performance/comparison) · [Layout and traversal settings](/performance/builds-and-tracing)
+
+## Engineering priorities
+
+| Priority | Evidence | Proposed change and acceptance criterion |
+| --- | --- | --- |
+| 1. Animated GPU pose and refit | Nine characters at 25,536 triangles each used 0.60 ms CPU and **8.65 ms GPU per frame**, over half a 60 Hz frame budget. The 129.6 ms difference is CPU time we already save against three-mesh-bvh. | Split pose, triangle preparation and tree update timings. If intermediate bounds traffic dominates, prototype computing leaf bounds directly from triangle records. Adopt it if pose, refit and subsequent tracing together get faster on identical animations and the hit checks still pass. The saving is unknown. |
+| 2. GPU closest hits on interior rays | Three-mesh-bvh/webgpu leads by about 1.05 ms per million random room-interior rays on RTX. Our two-bounce tracer already ran at 1.26–1.27× its rate on the separate path-tracer scene with refined tinybvh trees. | Reassess using camera and bounce rays captured from a downstream frame. If the gap matters there, compare child visits and triangle tests to locate the extra work. No implementation has closed the interior gap yet. A shared traversal change must also preserve hit agreement and the measured exterior and whole-tracer gains. |
+| 3. Transform updates for synchronous CPU queries | Moving 100k objects cost us about 239 ms more per update than three-mesh-bvh ObjectBVH on the i9. Our CPU top level rebuilds even when only transforms change. | Refit the affected leaves and ancestors while membership stays stable. Rebuild when tree quality degrades. Compare update plus subsequent query time across sparse and dense changes. GPU consumers already have a top-level refit. |
+
+Keep startup and memory visible alongside those results. The extra 1,116.4 ms for our one-time CPU Sponza build is paid again only when that build repeats. For a more expensive build, divide its extra cost on the critical path by the steady-state milliseconds saved per frame to find the payback in frames. Surface area heuristic (SAH) scores estimate traversal work. Use observed query time to choose a builder. On RTX Sponza, indexed leaves reduced our GPU layout from 355.5 to 225.5 MiB, while measured RTX closest-hit throughput with quantized nodes and indexed positions was 5–17% lower across the surface-ray benchmarks. Keep records where they fit and give faster frames. [Builder choices](/builders/choosing-a-builder) · [Memory tradeoffs](/performance/memory)
+
+## Add Jolt to the browser comparison
+
+Jolt is a candidate for CPU picking, collision queries and batches of independent rays. Its browser distribution includes multithreaded WASM with SIMD. The public ray binding takes one ray per call. Two pieces of work would establish how much the bindings and parallel execution each contribute. The estimates below are engineering time. Jolt has no measured ranking in this suite yet. [Jolt browser distributions](https://github.com/jrouwe/JoltPhysics.js) · [Jolt query bindings](https://github.com/jrouwe/JoltPhysics.js/blob/main/JoltJS.idl)
+
+1. **Add a comparison-only CPU adapter, estimated 1–2 days.** Build a mesh shape from the suite's indexed triangles and preserve source triangle IDs as per-triangle user data. Enable backface hits, bound each ray beyond the scene, and convert hit fractions to scene distances. Check closest and all hits on the existing seeded rays. Report warm single-pick latency, sustained rate, and build time separately.
+2. **Add parallel batches, estimated 3–5 additional days.** Pass packed rays into WASM once, dispatch jobs over one read-only tree and write disjoint output ranges. Serve the browser harness with cross-origin isolation. Compare one worker with several, hold SIMD fixed, and give our CPU path the same worker budget. Report warm latency to usable results, throughput, worker count and main-thread time over a range of batch sizes. [Browser pthread requirements](https://emscripten.org/docs/porting/pthreads.html)
+
+For comparisons with WebGPU, time the path the consumer would actually use. CPU picking needs GPU submission and result readback when it uses our GPU tracer. GPU lighting needs ray readback and result upload when it uses Jolt. Report where the faster implementation changes with batch size, if the measurements show a crossover.
+
+## Reassess with downstream libraries
+
+For each adopting library, record the BVH version, browser, GPU, scene size, moving geometry, tree layout, ray types and rays per frame. Capture a representative camera or animation sequence on the shipping settings first. Repeat the same sequence with one relevant option changed at a time.
+
+Report **whole-frame time and BVH milliseconds per frame** alongside the result checks. Use median and slow-frame timings, separate CPU recording from GPU work, and report startup and peak or resident memory independently. Count a rebuild or transfer in frame time whenever the consumer incurs it during use. Rank the next changes by milliseconds recoverable on those frames. A quality-sensitive shortcut belongs behind an explicit option with its input assumptions documented. [Comparison and correctness criteria](/performance/comparison) · [Existing performance review tracker](https://github.com/pmndrs/bvh/blob/main/docs/internals/REVIEW-TRACKER.md)

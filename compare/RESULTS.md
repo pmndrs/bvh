@@ -10,6 +10,49 @@ BVH_PAGE_QUERY='scene=sponza&full' pnpm examples:smoke --filter compare-gpu --js
 BVH_PAGE_QUERY='scene=sponza&full&nodeFormat=f32' pnpm examples:smoke --filter compare-gpu --gpu nvidia   # ours on f32 nodes (the default before 2026-11-13)
 ```
 
+## Browser workloads on the RTX 3060 Laptop, 2026-11-18
+
+Revision `f6517f8`, Windows, Chrome 157, Intel i9-11900H and NVIDIA Ampere. All three example pages used their full workloads.
+
+**Chrome CPU raycasts.** The 100k-triangle torus knot, thousands of rays per second, median of five interleaved runs. All checked answers agreed within the suite's tolerances. Rapier agrees by distance. Brute force ran the subset that fit the timing budget.
+
+| Adapter | First outside | First inside | All outside | All inside |
+| --- | ---: | ---: | ---: | ---: |
+| Ours, records | 207.9 | 195.0 | 119.4 | 124.1 |
+| Ours, positions | 210.1 | 187.0 | 118.0 | 138.4 |
+| three-mesh-bvh CENTER | 322.5 | 292.6 | 160.0 | 211.1 |
+| three-mesh-bvh SAH | 347.1 | 312.7 | 172.1 | 226.3 |
+| bvh-tree | 139.8 | 205.8 | 149.5 | 160.0 |
+| Babylon octree | 6.44 | 8.67 | — | — |
+| Babylon brute force | 0.42 | 0.42 | — | — |
+| Rapier | 305.7 | 280.5 | — | — |
+| three Mesh.raycast | 0.27 | 0.26 | 0.27 | 0.25 |
+
+On the same page the RTX batch of 262,144 inside rays measured 1.265× for closest and 1.437× for any (ours over three-mesh-bvh/webgpu, paired, zero disagreements). To reproduce in PowerShell, set `$env:BVH_PAGE_QUERY = 'scene=torus-knot&full'` and run `node tests/gpu/run.ts --examples --filter compare-raycast --gpu nvidia --json knot.json`.
+
+**Path tracer.** Five meshes, 80,784 triangles, 1258 × 566, two diffuse bounces and one shadow ray per hit. Each entry is our rate divided by three-mesh-bvh/webgpu's within each round, then the median of seven rounds (five dispatches per kernel per round, GPU timestamps). The order reversed every other round. “Closest” is the tracer with shadows compiled out. “Shadow” is the shadow-ray count divided by the additional time of the full tracer. Every run agreed on all 712,028 primary distances of the checked frame. The comparison does not test the final shaded image.
+
+| Trees and workload | Run 1 | Run 2 | Run 3 |
+| --- | ---: | ---: | ---: |
+| tinybvh, full path | 1.259 | 1.267 | 1.267 |
+| tinybvh, closest | 1.244 | 1.272 | 1.260 |
+| tinybvh, shadow (derived) | 1.294 | 1.298 | 1.294 |
+| H-PLOC, full path | 1.358 | 1.389 | 1.391 |
+| H-PLOC, closest | 1.379 | 1.399 | 1.393 |
+| H-PLOC, shadow (derived) | 1.329 | 1.372 | 1.342 |
+
+In the first run the full tracer on tinybvh reached 461 Mrays/s and three-mesh-bvh reached 366 Mrays/s. Wall time to our refined tinybvh trees was 121 / 454 / 468 ms, against 153 / 162 / 137 ms for their CPU build and repack. Our H-PLOC-only scene became traceable in 31 / 43 / 29 ms. The page creates that scene second, on a device that has already built our first scene, so the numbers describe that setup order. The traversal ratios above measure warmed dispatches.
+
+**Skinned meshes.** Nine characters of 25,536 triangles each, on the same poses in alternating order. Medians from the timed section of one full run. The GPU trees agreed with the CPU reference on 1,205 frozen-pose rays away from silhouettes, including 91 hits.
+
+| Per-frame operation | CPU ms | GPU ms | Sample |
+| --- | ---: | ---: | --- |
+| Our pose dispatches, scene update and refit | 0.60 | 8.65 | 120 frames, CPU recording and GPU timestamps |
+| three-mesh-bvh CPU skinning and refit | 130.20 | — | 120 frames, CPU-resident trees |
+| Their additional repack for GPU traversal | 25.75 | — | 10 frames, excluding the upload on the next dispatch |
+
+To reproduce on Windows, set `$env:BVH_PAGE_QUERY = 'full'` in PowerShell and run `node tests/gpu/run.ts --examples --filter compare-skinned,compare-pathtracer --gpu nvidia --json out.json`. Read the medians from each page's `data.csv`. The skinned page also reports live overlay values sampled after the timed section.
+
 ## The Windows laptop re-run, 2026-11-16 (the 2026-11-15 defaults)
 
 HANDOFF asked for the rows the new defaults could change to be measured again: GPU trace (quantized nodes are the default since 2026-11-13), memory and refit (`/three`'s `BvhBoundsTree` reads the app's positions for indexed geometry since 2026-11-15, `corners: 'positions'`; the suite now has that as a second "ours" row), and the scene build. The CPU side is one full `pnpm compare:node` (`bench/results/compare-windows.csv` and `.md`, 1,186 rows; the suite's method: median of 5 interleaved runs, builds median of 3) on an **Intel Core i9-11900H, Windows 11, Node 24.13.1**, with nothing else running. It also re-ran the rows the defaults can't change: they are reported here as measured, not folded into the M5 tables. The GPU side is `compare/gpu` on the **RTX 3060 Laptop**, headless Chrome 157 on D3D12, `full` (1,048,576 rays per set, 7 paired rounds), two runs per scene, started cool (48-52 °C) on an idle GPU; ours with the library's defaults (quantized nodes), and once more with `?nodeFormat=f32`.
@@ -254,7 +297,7 @@ What we have and they don't: GPU builds (H-PLOC, LBVH), GPU refits of mesh trees
 
 ## What the suite doesn't cover yet
 
-- The pages' CPU numbers in Chrome are not tabled here; Node's are (the same suites). The compare/build page can't finish Sponza within the runner's DevTools timeout.
-- The plan's `compare/skinned`, `compare/pathtracer`, `compare/sdf` and the `shapecast`/`distancecast`/`characterMovement` ports are not here (BX.18).
+- Chrome CPU raycasts on the knot are tabled for the Windows laptop. The remaining CPU ray tables use Node. The compare/build page couldn't finish Sponza within the runner's DevTools timeout.
+- The skinned and path-tracer pages have full RTX measurements above. The RTX SDF results are in [the SDF speed measurements](../docs/tracing/sdf.mdx#speed). The M5 still needs all three. The example ports are correctness demonstrations.
 - The CPU suites ran once on the RTX laptop's i9-11900H (2026-11-16, above); the M5 has not run `corners: 'positions'` or the quantized GPU rows.
 - Rapier gives no triangle ids, so its agreement is by distance only.

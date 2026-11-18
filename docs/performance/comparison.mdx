@@ -5,18 +5,399 @@ nav: 92
 sourcecode: compare/RESULTS.md
 ---
 
-The comparison suite in `compare/` runs the same geometry and the same seeded rays, boxes, spheres and points through
-every library it covers. Each answer is checked against ours. **A library that disagrees with ours on a measurement
-gets no ratio on it: a faster wrong answer is not faster.** The full tables, the method and every caveat are in
-[`compare/RESULTS.md`](https://github.com/pmndrs/bvh/blob/main/compare/RESULTS.md), and the raw rows are in
-`bench/results/compare.csv`.
+## GPU performance first
 
-> [!NOTE]
-> Two machines, both **indicative**. The [2026-11-16 re-run](#re-run-on-the-windows-laptop-2026-11-16) used the
-> defaults of 2026-11-15: the GPU on the RTX 3060 Laptop, the CPU on its Intel Core i9-11900H (Node 24). The rest of
-> this page is the Apple M5 Pro (Node 22, headless Chrome) of 2026-11-12 and 2026-11-13, with `f32` GPU nodes (the
-> default then). The M5's box, closest-point and refit numbers were measured while other projects loaded the machine
-> (load average 8–10).
+For the work planned after the 0.1 release, including settings for downstream libraries and the proposed Jolt comparison, see [Runtime performance next steps](/performance/next-steps).
+
+For a renderer, rank changes by **milliseconds on the frame's critical path**. A longer initial build can pay for itself across thousands of frames. A larger tree can also be worth keeping if it fits the device and reduces trace time. A build, upload or refit that repeats during play belongs in the frame budget.
+
+| Workload | What the measurements mean |
+| --- | --- |
+| Skinning and refitting nine characters | Our pipeline used **0.60 ms CPU and 8.65 ms GPU per frame**. Three-mesh-bvh used **130.2 ms CPU** for refit. The **129.6 ms** is CPU time we **save** each frame. |
+| Building Sponza once | On the i9, treating 5.74M triangles as one mesh took **3,161 ms** with our CPU tinybvh builder versus **2,045 ms** with three-mesh-bvh CENTER. The **1,116.4 ms** is extra one-time CPU build time. In a separate RTX benchmark of Sponza's 132 meshes, our H-PLOC GPU build took **46.6 ms**. End-to-end cold startup also includes preparing inputs, compiling pipelines and making the tree available to the tracer. |
+| Tracing after the build | Our two-bounce tracer ran at **1.26–1.27×** three-mesh-bvh/webgpu's rate with refined tinybvh trees on the RTX test scene. The furnished room from inside is a GPU loss: **0.85×** on closest hits. No measured change closes that gap yet. |
+
+### Runtime priorities
+
+| Priority | Recurring cost or opportunity | Recommendation |
+| --- | --- | --- |
+| Use today · GPU occlusion | In the RTX furnished-room test, switching from far-first to larger-first raised exterior any-hit throughput from **305 to 1,044 million rays/s** with identical visibility. That saves about **2.32 ms per million rays** at those rates. | Choose child order when creating the ray pass. See the surface-shadow and instancing results below. |
+| Use today · GPU closest-hit batches | On Sponza and Bistro, the 40-byte result achieved 0.88–0.94× the compact result's RTX throughput. | Set `hitNormal: false` for consumers that never read the normal or material. This saves **6–12% of that pass's time** at the measured rates. Use the full record when shading needs those fields. |
+| Use today · static geometry | Merging static instances raised RTX closest-hit throughput **1.44–1.67× on Sponza** and **1.19–1.20× on Bistro**. | Mark genuinely fixed instances `static: true` to use the existing default merge. Visibility agreed. Nearly coincident hits can select a different triangle or instance. |
+| First engineering target · animated scenes | The nine-character pose and refit used **8.65 ms of GPU time per frame**, about **52%** of a 60 Hz frame and more than an entire 120 Hz frame. The published timing combines posing and tree updates. | Time those stages separately. If preparing leaf bounds dominates, one candidate is to have the leaf refit compute bounds from triangle records directly, eliminating the intermediate per-triangle bounds write and read. Compare total pose, refit **and subsequent trace** time on the same poses before adopting it. |
+| Next traversal target · closest hits from within the room bounds | On RTX, three-mesh-bvh/webgpu saves **1.05 ms per million** on these random rays, or about **0.10 ms at 100k**. The shipped tie change saved no node visits on this set. | Prioritize this gap when surface bounces or camera rays in a target renderer show a corresponding frame cost. The cause is still open. Keep the measured two-bounce lead as a check on shared traversal changes. |
+
+Two other measurements matter when their work repeats. **Moving objects queried on the CPU** cost us 239 ms more per 100k-object update than ObjectBVH on the i9. Our CPU tree rebuilds on transform edits. Refitting bounds while object membership stays stable is the first CPU change I would prioritize for that workload. **Regenerating an SDF** on the RTX 100k-triangle knot at 128³ took 103.5 ms with default signing and 81.3 ms with `sign: 'first-hit'` in the breakdown run. That option saves 22.2 ms per regeneration for a closed, consistently outward-wound, non-overlapping mesh. An SDF baked once incurs that cost only once.
+
+**How to choose an occlusion order.** “Inside” and “outside” describe the *generated rays*. One set starts uniformly in the inner 80% of the scene bounds and points in random directions. The other starts on a surrounding sphere and aims at random points in the bounds. Neither distribution represents a camera frame or surface-to-light shadow segments. A camera inside a room can issue several different ray passes in one frame.
+
+| Any-hit pass | Measured choice | Where it applies |
+| --- | --- | --- |
+| Rays entering the furnished room from the surrounding sphere | `anyHitOrder: 'larger'` | On RTX it reached 1.21× three-mesh-bvh/webgpu. On rays from random interior points it also improved our rate, from 358 to 390 million rays/s, with the competitor still ahead at 413. |
+| Surface shadows through merged static geometry | Keep the default `'far'` | Larger-first delivered only 0.80–0.87× far-first's throughput on RTX Sponza and Bistro. M5 also favoured far-first on merged surface rays. |
+| Surface or air rays through instanced geometry | Prefer `'larger'` for passes like the measured ones | Larger-first delivered 1.11–1.48× far-first's throughput on the RTX Sponza and Bistro runs. Even with the same scene and ray origins, merging can change the best order. |
+
+These settings change which child an **any-hit** query visits first. Every tested order returned the same visibility in the paired order checks. **Closest-hit** uses a separate traversal rule. Its shipped tie break helped the RTX exterior case from 101 to 445–449 million rays/s and left interior visit counts unchanged. Keep it. For a mixed renderer, choose defaults using GPU time for the actual mix of primary, bounce and shadow passes. A camera crossing a room boundary needs no mode switch. [Ray generator](https://github.com/pmndrs/bvh/blob/main/compare/core/rays.ts) · [Paired traversal results](/performance/builds-and-tracing)
+
+**Why bvh.js starts faster.** On the i9, the CPU scene build took **150 ms** for bvh.js versus **414 ms** for ours at 100k objects. Both compute world boxes. Its `HybridBuilder` splits at the midpoint of the widest range of object centres, partitions the objects in place, and stores an object ID at each leaf. Our timed path builds the shared triangle tree once, inverts and packs each instance transform, and searches 16 SAH bins per axis for top-level splits. Its result can identify candidate objects. Ours can return the actual triangle hit. The benchmark times the entire build, so it does not assign the 264 ms difference to any one step. In the same 100k scene, our box queries ran at **38.4k/s** versus **19.3k/s** for bvh.js. [Scene adapters](https://github.com/pmndrs/bvh/blob/main/compare/adapters/scene.ts) · [CPU scene tables](https://github.com/pmndrs/bvh/blob/main/bench/results/compare-windows.md)
+
+### What the extra memory buys
+
+| Sponza, beyond the app's geometry | Our layout | three-mesh-bvh | Tradeoff |
+| --- | ---: | ---: | --- |
+| CPU mesh tree | 459.7 MiB with records, 284.4 MiB with shared positions | 50.6 MiB with SAH | We keep original triangle IDs and copy corners in records mode. They reuse positions and reorder the index. Our roughly two triangles per leaf versus their seven also mean more boxes to store and refit. |
+| GPU trace buffers, default layouts in the RTX comparison | 355.5 MiB | 214.3 MiB | Our GPU footprint is **66% larger** here. The competitor's GPU walk also needs its index and a GPU copy of positions. |
+| Our GPU layout with indexed leaves | 225.5 MiB in the Sponza layout accounting | 214.3 MiB in the GPU comparison above | Indexing saves about **130 MiB**. The measured RTX closest-hit rate on quantized nodes was **5–17% lower** with indexed `vec4` positions on the surface-ray benchmarks. Indexed and record layouts agreed on the tested hits. |
+
+Of our default Sponza GPU layout, **263 MiB (74%) is triangle records**. Each 48-byte record carries its corners together, so a ray can test a triangle without fetching three shared vertices by index. About **92.6 MiB** is quantized nodes. The main choice here is memory versus access speed. Indexed leaves retain the geometry's precision. A faster build heuristic or larger leaves can change the amount of traversal work while preserving the geometric hit test. An SDF sign shortcut can change the actual answer for some meshes. [Memory accounting and options](/performance/memory) · [GPU build and trace measurements](/performance/builds-and-tracing)
+
+## Where other libraries win
+
+**three-mesh-bvh wins CPU raycasts on the Chrome knot, CPU mesh refits, and GPU rays starting inside the furnished room on the RTX 3060. Rapier wins some CPU closest-hit workloads. bvh.js builds the fastest object tree in the scene suite.** The table gives representative losses. The [wins for @pmndrs/bvh](#where-pmndrsbvh-wins) and [tables for each scene and device](#winners-by-scene-and-device) follow.
+
+**How to read a row.** Start with the situation and winner. The two difference columns say how much the winner saves against the slower library. For example, on an i9 Sponza refit, our default takes 595 ms and three-mesh-bvh SAH takes 231 ms. Its saving is **364 ms**, or **61% less time**. Ray and query rows convert throughput to time for the stated number of queries. Percentages for memory and tree quality instead mean fewer bytes or lower SAH cost, so milliseconds are **N/A**.
+
+Unless a setting is named, the comparison uses our measured default against the fastest eligible external library in that test. An **unranked** result failed an agreement check. Small leads are measured margins on the named device. **Effort** is an engineering estimate for the proposed action. **Config** means a shipped option, **Low** a focused measurement or small change, **Medium** a query or builder change, and **High** a layout or update algorithm affecting several paths.
+
+**How we could beat it** names a shipped setting, a proposed implementation change, or an open gap. A proposed change has an unmeasured gain unless the row gives a before/after result. For example, CPU closest-hit already finds one hit. Its wrapper puts the hit in an array, maps that array to public hit objects and reads element zero. Returning the same public hit directly could save allocations while preserving the triangle, point and distance. Profiling in the recommendation column would establish how much of the measured deficit those allocations explain.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| Chrome CPU · knot, closest hit from outside, 1k rays | three-mesh-bvh SAH | 40.1% | 1.93 | Checked answers agree. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Chrome CPU · knot, all hits from inside, 1k rays | three-mesh-bvh SAH | 45.2% | 3.64 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Write hits into a reusable buffer and sort its occupied entries once. | Time traversal and sorting separately. | Medium |
+| i9 Node · Sponza, closest hit from inside, 1k rays | Rapier | 11.5% | 0.66 | Distance agrees. Triangle ID unavailable. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile CPU traversal and hit construction. | Medium |
+| RTX GPU · room, outside occlusion, default order, 1M rays | three-mesh-bvh/webgpu | 64.8% | 2.14 | Same blocker boolean. | Far-first can descend behind the first wall. | Use larger-first. | Use larger-first for passes like this ray set. | Config |
+| RTX GPU · room, inside closest hit, 1M rays | three-mesh-bvh/webgpu | 15% | 1.05 | Checked closest hits agree. | Inside-ray gap is undiagnosed. The tie fix saved no visits here. | No established fix for inside rays. | Profile slow lanes on inside rays. | Medium |
+| i9 Node · Sponza, one full CPU refit | three-mesh-bvh SAH | 61.1% | 363.6 | 512 post-refit rays agree. | Our tree writes more boxes and copies corners. | Share positions (441 ms). For full refits, larger leaves would reduce box writes. | Offer a refit-oriented leaf policy. Check the cost on later rays. | Config / High |
+| i9 Node · Sponza, one triangle-index build | three-mesh-bvh CENTER | 35.3% | 1,116.4 | Ours has lower SAH than CENTER. | CENTER uses a cheaper split. | Offer a midpoint split along the widest centroid axis to reduce build work. | Time build plus expected queries. | Medium |
+| i9 Node · 100k objects, one scene build | bvh.js | 63.8% | 264 | bvh.js indexes object boxes only. | bvh.js splits at one midpoint. Ours scores SAH splits and packs instance transforms. | Lower the top-level bin count, or offer midpoint splitting to skip the search. | Measure both build and culling. | Low |
+| i9 Node · 100k moving objects, one update | three-mesh-bvh ObjectBVH | 58% | 239.3 | Updated ObjectBVH passes the scene checks. | ObjectBVH refits. Ours rebuilds. | Update moved bounds and refit ancestors while object membership is stable. | Prototype CPU refit with drift-triggered rebuild. | High |
+| i9 Node · 10k objects, 1k box queries | bvh.js | 33% | 1.36 | Checked answers agree. | Size crossover unprofiled. | No established fix for the 10k box-query gap. | Profile at both object counts. | Low |
+| i9 Node · knot, 1k sphere overlaps | three-mesh-bvh SAH | 8.6% | 0.17 | Checked answers agree. | Sphere still uses shapecast callbacks. Gap unprofiled. | Walk typed-array bounds directly and skip shapecast callbacks. Keep the exact sphere test. | Compare exact overlap on tangencies. | Medium |
+| RTX GPU · signed field, 1M knot, 128³ grid | three-mesh-bvh/webgpu | 14.2% | 110.4 | Parity tolerates inconsistent winding. | Two or three parity rays vs one first hit. | Use first-hit for suitable inputs. | Use first-hit only on closed, outward-wound, non-overlapping meshes. | Config |
+| CPU · Sponza mesh-tree bytes | three-mesh-bvh SAH | 89% | N/A | Same geometry and checked hits. | They reuse positions and store fewer boxes (50.6 vs 459.7 MiB). | Share positions (284.4 MiB). Larger leaves could reduce the remaining node bytes. | Offer a memory-oriented leaf policy if the tracing cost is acceptable. | Config / High |
+
+## Where @pmndrs/bvh wins
+
+Both room rows below compare to three-mesh-bvh/webgpu. From outside, our default closest-hit walk finds the wall early. For occlusion, selecting larger-first changes the winner on the same rays. The two-bounce result also compares to three-mesh-bvh/webgpu.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| RTX GPU · room, outside closest hit, 1M rays | **@pmndrs/bvh** | 57.1% | 2.99 | Tied triangles can exchange IDs. | Entry ties skip furniture behind the wall. | Lead measured. | Keep the shipped tie rule. | None |
+| RTX GPU · room, outside occlusion, larger-first, 1M rays | **@pmndrs/bvh** | 17.4% | 0.2 | Same blocker boolean. | Larger-first reaches the blocking wall earlier. | Lead with this option. | Use larger-first for passes like this ray set. | Config |
+| RTX GPU · one two-bounce frame at 1258 × 566 | **@pmndrs/bvh** | 20.6% | 0.99 | All 712,028 primary hit distances agree. | Different tree layouts and walks. Individual costs unprofiled. | Already leads with the full shader. | Keep the shaded benchmark. | None |
+| RTX laptop · skinned pose and refit, CPU time per frame | **@pmndrs/bvh** vs three-mesh-bvh | 99.5% | 129.6 | 1,205 frozen-pose rays agree. | Ours poses and refits on the GPU. | Already leads on main-thread time. | Use GPU-resident trees for GPU tracing. Budget 8.65 ms GPU. | Config |
+| i9 Node · Sponza, 1k triangle–box overlaps | **@pmndrs/bvh** vs Rapier | 21.7% | 0.48 | Both return the same overlap boolean. | Flat box walk avoids callback and object overhead. | Lead measured. | Keep the flat walk. | None |
+| i9 Node · Sponza, 1k closest points | **@pmndrs/bvh** vs Rapier | 32.7% | 2.1 | Distance agrees. Triangle ID unavailable. | Nearest-first walk prunes distant boxes. | Lead measured. | Keep sliver protection by default. | None |
+| i9 Node · 100k objects, 1k first-hit rays | **@pmndrs/bvh** vs three-mesh-bvh ObjectBVH | 43.8% | 10.4 | bvh.js offers box hits only. | Ours walks both levels directly. | Lead measured. | Keep triangle-hit checks. | None |
+
+## Winners by scene and device
+
+Open the workload you run. **CPU queries are per 1,000, GPU ray batches per 1,000,000**, and builds, refits and updates are per operation. The mesh CPU baseline is our tinybvh records tree. The full tables include the competing library when we win. CPU construction rows compare triangle indices, while the final table includes the no-index setup baseline. Tree quality uses the surface-area heuristic (SAH), where lower is better. [Intel CPU results](https://github.com/pmndrs/bvh/blob/main/bench/results/compare-windows.md) · [M5 CPU results](https://github.com/pmndrs/bvh/blob/main/bench/results/compare.md) · [Browser results and methods](https://github.com/pmndrs/bvh/blob/main/compare/RESULTS.md)
+
+<details>
+<summary>Chrome CPU · knot raycasts</summary>
+
+Intel i9, Chrome 157, Nov 18. Time saved per 1,000 rays. Each winner beat our default records tree and every other eligible external adapter.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| Knot · Closest, outside | three-mesh-bvh SAH | 40.1% | 1.93 | Checked answers agree. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Knot · Closest, inside | three-mesh-bvh SAH | 37.6% | 1.93 | Checked answers agree. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Knot · All hits, outside | three-mesh-bvh SAH | 30.6% | 2.56 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Write hits into a reusable buffer and sort its occupied entries once. | Time traversal and sorting separately. | Medium |
+| Knot · All hits, inside | three-mesh-bvh SAH | 45.2% | 3.64 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Write hits into a reusable buffer and sort its occupied entries once. | Time traversal and sorting separately. | Medium |
+
+</details>
+
+<details>
+<summary>Intel i9, Node 24 · mesh rays and spatial queries</summary>
+
+Intel i9, Node 24, Nov 16. Time saved per 1,000 queries. Rapier agrees on distance only. Sub-3% margins, especially closest point on the knot, are near parity.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| Knot · Triangle–box overlap | **@pmndrs/bvh** vs Rapier | 26.4% | 0.54 | Both return the same overlap boolean. | Flat box walk avoids callback and object overhead. | Lead measured. | Keep the flat walk. | None |
+| Knot · Sphere overlap | three-mesh-bvh SAH | 8.6% | 0.17 | Checked answers agree. | Sphere still uses shapecast callbacks. Gap unprofiled. | Walk typed-array bounds directly and skip shapecast callbacks. Keep the exact sphere test. | Compare exact overlap on tangencies. | Medium |
+| Knot · Closest point | Rapier | 0.8% | 0.067 | Distance agrees. Triangle ID unavailable. | Nearest-first walk prunes distant boxes. | No change justified by this margin. | Treat as near parity. | Low |
+| Knot · Closest, outside | three-mesh-bvh SAH | 28% | 1.18 | Checked answers agree. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Knot · Closest, inside | three-mesh-bvh SAH | 27.3% | 1.21 | Checked answers agree. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Knot · All hits, outside | three-mesh-bvh SAH | 26.6% | 2.21 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Write hits into a reusable buffer and sort its occupied entries once. | Time traversal and sorting separately. | Medium |
+| Knot · All hits, inside | three-mesh-bvh SAH | 32.1% | 2.01 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Write hits into a reusable buffer and sort its occupied entries once. | Time traversal and sorting separately. | Medium |
+| Room · Triangle–box overlap | **@pmndrs/bvh** vs Rapier | 38.3% | 0.65 | Both return the same overlap boolean. | Flat box walk avoids callback and object overhead. | Lead measured. | Keep the flat walk. | None |
+| Room · Sphere overlap | **@pmndrs/bvh** vs three-mesh-bvh SAH | 30.2% | 0.44 | Checked answers agree. | Sphere still uses shapecast callbacks. Gap unprofiled. | Lead measured. | Preserve tangent cases. | None |
+| Room · Closest point | **@pmndrs/bvh** vs Rapier | 27.1% | 0.86 | Distance agrees. Triangle ID unavailable. | Nearest-first walk prunes distant boxes. | Lead measured. | Keep sliver protection by default. | None |
+| Room · Closest, outside | Rapier | 19.8% | 0.56 | Distance agrees. Triangle ID unavailable. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Room · Closest, inside | three-mesh-bvh SAH | 15.4% | 0.42 | Checked answers agree. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Room · All hits, outside | three-mesh-bvh SAH | 18.7% | 0.87 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Write hits into a reusable buffer and sort its occupied entries once. | Time traversal and sorting separately. | Medium |
+| Room · All hits, inside | three-mesh-bvh SAH | 20.6% | 0.66 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Write hits into a reusable buffer and sort its occupied entries once. | Time traversal and sorting separately. | Medium |
+| Sponza · Triangle–box overlap | **@pmndrs/bvh** vs Rapier | 21.7% | 0.48 | Both return the same overlap boolean. | Flat box walk avoids callback and object overhead. | Lead measured. | Keep the flat walk. | None |
+| Sponza · Sphere overlap | **@pmndrs/bvh** vs three-mesh-bvh SAH | 8.9% | 0.19 | Checked answers agree. | Sphere still uses shapecast callbacks. Gap unprofiled. | Lead measured. | Preserve tangent cases. | None |
+| Sponza · Closest point | **@pmndrs/bvh** vs Rapier | 32.7% | 2.1 | Distance agrees. Triangle ID unavailable. | Nearest-first walk prunes distant boxes. | Lead measured. | Keep sliver protection by default. | None |
+| Sponza · Closest, outside | three-mesh-bvh SAH | 15.1% | 0.71 | Checked answers agree. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Sponza · Closest, inside | Rapier | 11.5% | 0.66 | Distance agrees. Triangle ID unavailable. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Sponza · All hits, outside | three-mesh-bvh SAH | 11% | 1.62 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Write hits into a reusable buffer and sort its occupied entries once. | Time traversal and sorting separately. | Medium |
+| Sponza · All hits, inside | three-mesh-bvh SAH | 15.7% | 1.66 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Write hits into a reusable buffer and sort its occupied entries once. | Time traversal and sorting separately. | Medium |
+
+</details>
+
+<details>
+<summary>Intel i9, Node 24 · mesh builds, refits, memory and tree quality</summary>
+
+Intel i9, Node 24, Nov 16. One mesh build or full refit. Tree bytes exclude application geometry. SAH is a model of traversal cost. Both use the same lower-is-better percentage, with no time delta. Build and refit compare triangle indices. Plain three builds no tree. Babylon updates mesh bounds and optionally a submesh octree.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| Knot · Triangle-index build | three-mesh-bvh CENTER | 46.2% | 21.07 | Ours has lower SAH than CENTER. | CENTER uses a cheaper split. | Offer a midpoint split along the widest centroid axis to reduce build work. | Time build plus expected queries. | Medium |
+| Knot · Triangle-tree refit | three-mesh-bvh CENTER | 53.8% | 4.48 | Checked post-refit rays agree. | Fewer boxes, no copied corner records. | Share positions. Refit only changed leaves and their ancestors for local edits. | Measure query cost after updating. | Config / High |
+| Knot · Mesh tree bytes | three-mesh-bvh SAH | 89.3% | N/A | Our records copy corners and preserve the source index. | They share geometry and use fewer boxes. | Share positions and pack more triangles per leaf to reduce node bytes. | Use shared positions for tight budgets. | Config / High |
+| Knot · Tree quality (SAH cost) | **@pmndrs/bvh** vs three-mesh-bvh SAH | 23.1% | N/A | Lower modelled traversal cost. | Binned SAH favours smaller leaves. | Lead on external trees. | Time actual queries too. | None |
+| Room · Triangle-index build | three-mesh-bvh CENTER | 40.4% | 53.73 | Ours has lower SAH than CENTER. | CENTER uses a cheaper split. | Offer a midpoint split along the widest centroid axis to reduce build work. | Time build plus expected queries. | Medium |
+| Room · Triangle-tree refit | three-mesh-bvh CENTER | 53.8% | 12.49 | Checked post-refit rays agree. | Fewer boxes, no copied corner records. | Share positions. Refit only changed leaves and their ancestors for local edits. | Measure query cost after updating. | Config / High |
+| Room · Mesh tree bytes | three-mesh-bvh SAH | 88.6% | N/A | Our records copy corners and preserve the source index. | They share geometry and use fewer boxes. | Share positions and pack more triangles per leaf to reduce node bytes. | Use shared positions for tight budgets. | Config / High |
+| Room · Tree quality (SAH cost) | **@pmndrs/bvh** vs three-mesh-bvh SAH | 23% | N/A | Lower modelled traversal cost. | Binned SAH favours smaller leaves. | Lead on external trees. | Time actual queries too. | None |
+| Sponza · Triangle-index build | three-mesh-bvh CENTER | 35.3% | 1,116.4 | Ours has lower SAH than CENTER. | CENTER uses a cheaper split. | Offer a midpoint split along the widest centroid axis to reduce build work. | Time build plus expected queries. | Medium |
+| Sponza · Triangle-tree refit | three-mesh-bvh SAH | 61.1% | 363.6 | Checked post-refit rays agree. | Fewer boxes, no copied corner records. | Share positions. Refit only changed leaves and their ancestors for local edits. | Measure query cost after updating. | Config / High |
+| Sponza · Mesh tree bytes | three-mesh-bvh SAH | 89% | N/A | Our records copy corners and preserve the source index. | They share geometry and use fewer boxes. | Share positions and pack more triangles per leaf to reduce node bytes. | Use shared positions for tight budgets. | Config / High |
+| Sponza · Tree quality (SAH cost) | **@pmndrs/bvh** vs three-mesh-bvh SAH | 25.8% | N/A | Lower modelled traversal cost. | Binned SAH favours smaller leaves. | Lead on external trees. | Time actual queries too. | None |
+
+</details>
+
+<details>
+<summary>Intel i9, Node 24 · scene builds, moving objects and culling</summary>
+
+Intel i9, Node 24, Nov 16. One build or update of the named scene, or 1,000 queries. Scene memory covers the counted tree buffers. The harness checks moved objects separately.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| 10k objects · Scene build | bvh.js | 74% | 27.2 | bvh.js indexes object boxes only. | bvh.js splits at one midpoint. Ours scores SAH splits and packs instance transforms. | Lower the top-level bin count, or offer midpoint splitting to skip the search. | Measure both build and culling. | Low |
+| 10k objects · All transforms move | three-mesh-bvh ObjectBVH | 56.7% | 18.49 | Updated ObjectBVH passes the scene checks. | ObjectBVH refits. Ours rebuilds. | Update moved bounds and refit ancestors while object membership is stable. | Prototype CPU refit with drift-triggered rebuild. | High |
+| 10k objects · Object box culling | bvh.js | 33% | 1.36 | Checked answers agree. | Size crossover unprofiled. | No established fix for the 10k box-query gap. | Profile at both object counts. | Low |
+| 10k objects · Frustum culling | **@pmndrs/bvh** vs three-mesh-bvh ObjectBVH | 22.8% | 36.06 | bvh.js excluded for disagreements. | Dedicated culling vs ObjectBVH shapecast. | Lead measured. | Retain boundary checks. | None |
+| 10k objects · First triangle hit | **@pmndrs/bvh** vs three-mesh-bvh ObjectBVH | 40.2% | 4.86 | bvh.js offers box hits only. | Ours walks both levels directly. | Lead measured. | Keep triangle-hit checks. | None |
+| 10k objects · Scene tree bytes | three-mesh-bvh ObjectBVH | 49.6% | N/A | Counted tree buffers only. | Different instance records and top-level layout. | Pack repeated instance fields once. Savings depend on how much instance data is shared. | Account for instance data too. | High |
+| 100k objects · Scene build | bvh.js | 63.8% | 264 | bvh.js indexes object boxes only. | bvh.js splits at one midpoint. Ours scores SAH splits and packs instance transforms. | Lower the top-level bin count, or offer midpoint splitting to skip the search. | Measure both build and culling. | Low |
+| 100k objects · All transforms move | three-mesh-bvh ObjectBVH | 58% | 239.3 | Updated ObjectBVH passes the scene checks. | ObjectBVH refits. Ours rebuilds. | Update moved bounds and refit ancestors while object membership is stable. | Prototype CPU refit with drift-triggered rebuild. | High |
+| 100k objects · Object box culling | **@pmndrs/bvh** vs bvh.js | 49.6% | 25.63 | Checked answers agree. | Size crossover unprofiled. | Lead measured. | Keep large-scene coverage. | None |
+| 100k objects · Frustum culling | **@pmndrs/bvh** vs three-mesh-bvh ObjectBVH | 70.2% | 2,243.2 | bvh.js excluded for disagreements. | Dedicated culling vs ObjectBVH shapecast. | Lead measured. | Retain boundary checks. | None |
+| 100k objects · First triangle hit | **@pmndrs/bvh** vs three-mesh-bvh ObjectBVH | 43.8% | 10.4 | bvh.js offers box hits only. | Ours walks both levels directly. | Lead measured. | Keep triangle-hit checks. | None |
+| 100k objects · Scene tree bytes | three-mesh-bvh ObjectBVH | 47.2% | N/A | Counted tree buffers only. | Different instance records and top-level layout. | Pack repeated instance fields once. Savings depend on how much instance data is shared. | Account for instance data too. | High |
+
+</details>
+
+<details>
+<summary>Apple M5 Pro, Node 22 · mesh rays and spatial queries</summary>
+
+Apple M5 Pro, Node 22, Nov 13. Time saved per 1,000 queries. Rapier agrees on distance only. Sub-3% margins, especially closest point on the knot, are near parity. This run had other CPU load.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| Knot · Triangle–box overlap | **@pmndrs/bvh** vs Rapier | 17.1% | 0.19 | Both return the same overlap boolean. | Flat box walk avoids callback and object overhead. | Lead measured. | Keep the flat walk. | None |
+| Knot · Sphere overlap | three-mesh-bvh SAH | 5.2% | 0.062 | Checked answers agree. | Sphere still uses shapecast callbacks. Gap unprofiled. | Walk typed-array bounds directly and skip shapecast callbacks. Keep the exact sphere test. | Compare exact overlap on tangencies. | Medium |
+| Knot · Closest point | **@pmndrs/bvh** vs Rapier | 0.9% | 0.053 | Distance agrees. Triangle ID unavailable. | Nearest-first walk prunes distant boxes. | No change justified by this margin. | Treat as near parity. | Low |
+| Knot · Closest, outside | Rapier | 0.7% | 0.018 | Distance agrees. Triangle ID unavailable. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Knot · Closest, inside | Rapier | 18.8% | 0.52 | Distance agrees. Triangle ID unavailable. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Knot · All hits, outside | **@pmndrs/bvh** vs three-mesh-bvh SAH | 21.7% | 1.38 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Lead measured. | Retain sorted output. | None |
+| Knot · All hits, inside | **@pmndrs/bvh** vs three-mesh-bvh SAH | 9% | 0.33 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Lead measured. | Retain sorted output. | None |
+| Room · Triangle–box overlap | **@pmndrs/bvh** vs Rapier | 33% | 0.46 | Both return the same overlap boolean. | Flat box walk avoids callback and object overhead. | Lead measured. | Keep the flat walk. | None |
+| Room · Sphere overlap | **@pmndrs/bvh** vs three-mesh-bvh SAH | 34.8% | 0.49 | Checked answers agree. | Sphere still uses shapecast callbacks. Gap unprofiled. | Lead measured. | Preserve tangent cases. | None |
+| Room · Closest point | **@pmndrs/bvh** vs Rapier | 30.2% | 0.72 | Distance agrees. Triangle ID unavailable. | Nearest-first walk prunes distant boxes. | Lead measured. | Keep sliver protection by default. | None |
+| Room · Closest, outside | Rapier | 19.1% | 0.27 | Distance agrees. Triangle ID unavailable. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Room · Closest, inside | Rapier | 11.6% | 0.23 | Distance agrees. Triangle ID unavailable. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Room · All hits, outside | **@pmndrs/bvh** vs three-mesh-bvh SAH | 11.6% | 0.34 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Lead measured. | Retain sorted output. | None |
+| Room · All hits, inside | three-mesh-bvh SAH | 9.1% | 0.23 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Write hits into a reusable buffer and sort its occupied entries once. | Time traversal and sorting separately. | Medium |
+| Sponza · Triangle–box overlap | **@pmndrs/bvh** vs Rapier | 43.7% | 1.06 | Both return the same overlap boolean. | Flat box walk avoids callback and object overhead. | Lead measured. | Keep the flat walk. | None |
+| Sponza · Sphere overlap | three-mesh-bvh SAH | 19.4% | 0.43 | Checked answers agree. | Sphere still uses shapecast callbacks. Gap unprofiled. | Walk typed-array bounds directly and skip shapecast callbacks. Keep the exact sphere test. | Compare exact overlap on tangencies. | Medium |
+| Sponza · Closest point | **@pmndrs/bvh** vs Rapier | 36.3% | 1.83 | Distance agrees. Triangle ID unavailable. | Nearest-first walk prunes distant boxes. | Lead measured. | Keep sliver protection by default. | None |
+| Sponza · Closest, outside | Rapier | 17.7% | 0.48 | Distance agrees. Triangle ID unavailable. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Sponza · Closest, inside | Rapier | 36.3% | 2.8 | Distance agrees. Triangle ID unavailable. | Walk vs hit construction unprofiled. | Return the nearest hit directly. Eliminate the two temporary result arrays. | Profile the walk and result allocation. | Medium |
+| Sponza · All hits, outside | **@pmndrs/bvh** vs three-mesh-bvh SAH | 12.7% | 1.67 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Lead measured. | Retain sorted output. | None |
+| Sponza · All hits, inside | three-mesh-bvh SAH | 27.2% | 5.19 | Checked answers agree. | Collection, sorting and allocation costs unseparated. | Write hits into a reusable buffer and sort its occupied entries once. | Time traversal and sorting separately. | Medium |
+
+</details>
+
+<details>
+<summary>Apple M5 Pro, Node 22 · mesh builds, refits, memory and tree quality</summary>
+
+Apple M5 Pro, Node 22, Nov 13. One mesh build or full refit. Tree bytes exclude application geometry. SAH is a model of traversal cost. Both use the same lower-is-better percentage, with no time delta. Build and refit compare triangle indices. Plain three builds no tree. Babylon updates mesh bounds and optionally a submesh octree. This run had other CPU load.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| Knot · Triangle-index build | three-mesh-bvh CENTER | 29.5% | 9.3 | Ours has lower SAH than CENTER. | CENTER uses a cheaper split. | Offer a midpoint split along the widest centroid axis to reduce build work. | Time build plus expected queries. | Medium |
+| Knot · Triangle-tree refit | three-mesh-bvh SAH | 3.9% | 0.13 | Checked post-refit rays agree. | Fewer boxes, no copied corner records. | Share positions. Refit only changed leaves and their ancestors for local edits. | Measure query cost after updating. | Config / High |
+| Knot · Mesh tree bytes | three-mesh-bvh SAH | 89.3% | N/A | Our records copy corners and preserve the source index. | They share geometry and use fewer boxes. | Share positions and pack more triangles per leaf to reduce node bytes. | Use shared positions for tight budgets. | Config / High |
+| Knot · Tree quality (SAH cost) | **@pmndrs/bvh** vs three-mesh-bvh SAH | 23.1% | N/A | Lower modelled traversal cost. | Binned SAH favours smaller leaves. | Lead on external trees. | Time actual queries too. | None |
+| Room · Triangle-index build | three-mesh-bvh CENTER | 12.5% | 8.63 | Ours has lower SAH than CENTER. | CENTER uses a cheaper split. | Offer a midpoint split along the widest centroid axis to reduce build work. | Time build plus expected queries. | Medium |
+| Room · Triangle-tree refit | three-mesh-bvh SAH | 11% | 1.27 | Checked post-refit rays agree. | Fewer boxes, no copied corner records. | Share positions. Refit only changed leaves and their ancestors for local edits. | Measure query cost after updating. | Config / High |
+| Room · Mesh tree bytes | three-mesh-bvh SAH | 88.6% | N/A | Our records copy corners and preserve the source index. | They share geometry and use fewer boxes. | Share positions and pack more triangles per leaf to reduce node bytes. | Use shared positions for tight budgets. | Config / High |
+| Room · Tree quality (SAH cost) | **@pmndrs/bvh** vs three-mesh-bvh SAH | 23% | N/A | Lower modelled traversal cost. | Binned SAH favours smaller leaves. | Lead on external trees. | Time actual queries too. | None |
+| Sponza · Triangle-index build | Rapier | 7% | 133.8 | Collider supports distance queries. | Different collider builder. Cost split unprofiled. | Offer a midpoint split along the widest centroid axis to reduce build work. | Time build plus expected queries. | Medium |
+| Sponza · Triangle-tree refit | three-mesh-bvh SAH | 33.6% | 122.1 | Checked post-refit rays agree. | Fewer boxes, no copied corner records. | Share positions. Refit only changed leaves and their ancestors for local edits. | Measure query cost after updating. | Config / High |
+| Sponza · Mesh tree bytes | three-mesh-bvh SAH | 89% | N/A | Our records copy corners and preserve the source index. | They share geometry and use fewer boxes. | Share positions and pack more triangles per leaf to reduce node bytes. | Use shared positions for tight budgets. | Config / High |
+| Sponza · Tree quality (SAH cost) | **@pmndrs/bvh** vs three-mesh-bvh SAH | 25.8% | N/A | Lower modelled traversal cost. | Binned SAH favours smaller leaves. | Lead on external trees. | Time actual queries too. | None |
+
+</details>
+
+<details>
+<summary>Apple M5 Pro, Node 22 · scene builds, moving objects and culling</summary>
+
+Apple M5 Pro, Node 22, Nov 13. One build or update of the named scene, or 1,000 queries. Scene memory covers the counted tree buffers. The harness checks moved objects separately. This run had other CPU load.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| 10k objects · Scene build | bvh.js | 43.7% | 13.97 | bvh.js indexes object boxes only. | bvh.js splits at one midpoint. Ours scores SAH splits and packs instance transforms. | Lower the top-level bin count, or offer midpoint splitting to skip the search. | Measure both build and culling. | Low |
+| 10k objects · All transforms move | three-mesh-bvh ObjectBVH | 60.3% | 15.75 | Updated ObjectBVH passes the scene checks. | ObjectBVH refits. Ours rebuilds. | Update moved bounds and refit ancestors while object membership is stable. | Prototype CPU refit with drift-triggered rebuild. | High |
+| 10k objects · Object box culling | bvh.js | 15.1% | 0.5 | Checked answers agree. | Size crossover unprofiled. | No established fix for the 10k box-query gap. | Profile at both object counts. | Low |
+| 10k objects · Frustum culling | **@pmndrs/bvh** vs three-mesh-bvh ObjectBVH | 45.8% | 78.73 | bvh.js excluded for disagreements. | Dedicated culling vs ObjectBVH shapecast. | Lead measured. | Retain boundary checks. | None |
+| 10k objects · First triangle hit | **@pmndrs/bvh** vs three-mesh-bvh ObjectBVH | 64.8% | 6.44 | bvh.js offers box hits only. | Ours walks both levels directly. | Lead measured. | Keep triangle-hit checks. | None |
+| 10k objects · Scene tree bytes | three-mesh-bvh ObjectBVH | 49.6% | N/A | Counted tree buffers only. | Different instance records and top-level layout. | Pack repeated instance fields once. Savings depend on how much instance data is shared. | Account for instance data too. | High |
+| 100k objects · Scene build | bvh.js | 70.2% | 230.2 | bvh.js indexes object boxes only. | bvh.js splits at one midpoint. Ours scores SAH splits and packs instance transforms. | Lower the top-level bin count, or offer midpoint splitting to skip the search. | Measure both build and culling. | Low |
+| 100k objects · All transforms move | three-mesh-bvh ObjectBVH | 61.7% | 186.4 | Updated ObjectBVH passes the scene checks. | ObjectBVH refits. Ours rebuilds. | Update moved bounds and refit ancestors while object membership is stable. | Prototype CPU refit with drift-triggered rebuild. | High |
+| 100k objects · Object box culling | **@pmndrs/bvh** vs bvh.js | 31.5% | 10.83 | Checked answers agree. | Size crossover unprofiled. | Lead measured. | Keep large-scene coverage. | None |
+| 100k objects · Frustum culling | **@pmndrs/bvh** vs three-mesh-bvh ObjectBVH | 78.3% | 2,640.8 | bvh.js excluded for disagreements. | Dedicated culling vs ObjectBVH shapecast. | Lead measured. | Retain boundary checks. | None |
+| 100k objects · First triangle hit | **@pmndrs/bvh** vs three-mesh-bvh ObjectBVH | 64.9% | 14.69 | bvh.js offers box hits only. | Ours walks both levels directly. | Lead measured. | Keep triangle-hit checks. | None |
+| 100k objects · Scene tree bytes | three-mesh-bvh ObjectBVH | 47.2% | N/A | Counted tree buffers only. | Different instance records and top-level layout. | Pack repeated instance fields once. Savings depend on how much instance data is shared. | Account for instance data too. | High |
+
+</details>
+
+<details>
+<summary>RTX GPU · every closest-hit and occlusion batch</summary>
+
+Time saved per 1M rays, normalized from reported median rates. All GPU ray rows compare to three-mesh-bvh/webgpu. Default quantized nodes, first full Nov 16 run per scene. The room closest-hit rows use the Nov 17 retest and reconstruct rival time from its published paired ratio, so those milliseconds are approximate.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| Room · Closest, outside | **@pmndrs/bvh** | 57.1% | 2.99 | Tied triangles can exchange IDs. | Entry ties skip furniture behind the wall. | Lead measured. | Keep the shipped tie rule. | None |
+| Room · Closest, inside | three-mesh-bvh/webgpu | 15% | 1.05 | Checked closest hits agree. | Inside-ray gap is undiagnosed. The tie fix saved no visits here. | No established fix for inside rays. | Profile slow lanes on inside rays. | Medium |
+| Room · Any, far-first, outside | three-mesh-bvh/webgpu | 64.8% | 2.14 | Same blocker boolean. | Far-first can descend behind the first wall. | Use larger-first. | Use larger-first for passes like this ray set. | Config |
+| Room · Any, far-first, inside | three-mesh-bvh/webgpu | 13% | 0.36 | Same blocker boolean. | Remaining gap after reordering is unprofiled. | Use larger-first. | Prefer larger-first on this ray set. | Config |
+| Room · Any, larger-first, outside | **@pmndrs/bvh** | 17.4% | 0.2 | Same blocker boolean. | Larger-first reaches the blocking wall earlier. | Lead with this option. | Use larger-first for passes like this ray set. | Config |
+| Room · Any, larger-first, inside | three-mesh-bvh/webgpu | 5% | 0.13 | Same blocker boolean. | Remaining gap after reordering is unprofiled. | No established improvement beyond larger-first for these rays. | Keep larger-first for this pass. The residual gap has no established fix. | Medium |
+| Knot · Closest, outside | Unranked | — | — | 3 differing answers. | Agreement check failed. | No qualified speed target until the answers agree. | Recheck both walks. | Low to diagnose |
+| Knot · Closest, inside | **@pmndrs/bvh** | 23.8% | 2.17 | Checked closest hits agree. | Traversal cost by scene. Cause unprofiled. | Lead measured. | Use measured order. | None |
+| Knot · Any, far-first, outside | **@pmndrs/bvh** | 30.1% | 2.34 | Same blocker boolean. | Traversal cost by scene. Cause unprofiled. | Lead measured. | Use measured order. | None |
+| Knot · Any, far-first, inside | **@pmndrs/bvh** | 27.4% | 1.91 | Same blocker boolean. | Traversal cost by scene. Cause unprofiled. | Lead measured. | Use measured order. | None |
+| Knot · Any, larger-first, outside | **@pmndrs/bvh** | 21.5% | 1.67 | Same blocker boolean. | Traversal cost by scene. Cause unprofiled. | Lead measured. | Use measured order. | None |
+| Knot · Any, larger-first, inside | **@pmndrs/bvh** | 22.7% | 1.58 | Same blocker boolean. | Traversal cost by scene. Cause unprofiled. | Lead measured. | Use measured order. | None |
+| Sponza · Closest, outside | Unranked | — | — | 6 differing answers. | Agreement check failed. | No qualified speed target until the answers agree. | Recheck both walks. | Low to diagnose |
+| Sponza · Closest, inside | Unranked | — | — | 3 differing answers. | Agreement check failed. | No qualified speed target until the answers agree. | Recheck both walks. | Low to diagnose |
+| Sponza · Any, far-first, outside | **@pmndrs/bvh** | 15.6% | 0.63 | Same blocker boolean. | Traversal cost by scene. Cause unprofiled. | Lead measured. | Use measured order. | None |
+| Sponza · Any, far-first, inside | Unranked | — | — | 1 differing answers. | Agreement check failed. | No qualified speed target until the answers agree. | Recheck both walks. | Low to diagnose |
+| Sponza · Any, larger-first, outside | **@pmndrs/bvh** | 29.3% | 1.19 | Same blocker boolean. | Traversal cost by scene. Cause unprofiled. | Lead measured. | Use measured order. | None |
+| Sponza · Any, larger-first, inside | Unranked | — | — | 1 differing answers. | Agreement check failed. | No qualified speed target until the answers agree. | Recheck both walks. | Low to diagnose |
+
+</details>
+
+<details>
+<summary>Apple M5 GPU · every closest-hit and occlusion batch</summary>
+
+Earlier f32 nodes and tie rule, Nov 12. Time saved per 1M rays where both rates were published. Else the percent comes from the paired throughput ratio and the millisecond gap is unreported. The clock varied across rounds.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| Knot · Closest, outside | Unranked | — | — | 2 differing answers. | Agreement check failed. | No qualified speed target until the answers agree. | Retest current defaults. | Low to diagnose |
+| Knot · Closest, inside | **@pmndrs/bvh** | 7.3% | 0.57 | Checked distances agree. | Earlier f32 walk. Cause unprofiled on M5. | Lead on this set. | Retest current defaults on M5. | Low |
+| Knot · Any, far-first, outside | **@pmndrs/bvh** | 20.1% | 1.18 | Same blocker boolean. | Earlier f32 walk. Cause unprofiled on M5. | Lead on this set. | Retest current defaults on M5. | Low |
+| Knot · Any, larger-first, outside | **@pmndrs/bvh** | 13.6% | 0.8 | Same blocker boolean. | Earlier f32 walk. Cause unprofiled on M5. | Lead on this set. | Retest current defaults on M5. | Low |
+| Knot · Any, far-first, inside | **@pmndrs/bvh** | 20% | Unreported | Same blocker boolean. | Earlier f32 walk. Cause unprofiled on M5. | Lead on this set. | Retest current defaults on M5. | Low |
+| Knot · Any, larger-first, inside | **@pmndrs/bvh** | 16.7% | Unreported | Same blocker boolean. | Earlier f32 walk. Cause unprofiled on M5. | Lead on this set. | Retest current defaults on M5. | Low |
+| Room · Closest, outside | three-mesh-bvh/webgpu | 9.5% | 0.41 | Checked distances agree. | Earlier f32 walk. Cause unprofiled on M5. | Use the shipped right-first rule on equal entry distances beyond `tMin`. M5 gain unknown. | Retest current defaults on M5. | Low |
+| Room · Closest, inside | Unranked | — | — | 1 differing answers. | Agreement check failed. | No qualified speed target until the answers agree. | Retest current defaults. | Low to diagnose |
+| Room · Any, far-first, outside | three-mesh-bvh/webgpu | 69% | 2.27 | Same blocker boolean. | Larger-first reaches the shell earlier. | Select larger-first. | Retest current defaults on M5. | Config |
+| Room · Any, larger-first, outside | **@pmndrs/bvh** | 36.5% | 0.37 | Same blocker boolean. | Larger-first reaches the shell earlier. | Lead on this set. | Retest current defaults on M5. | Low |
+| Room · Any, far-first, inside | **@pmndrs/bvh** | 4.8% | Unreported | Same blocker boolean. | Earlier f32 walk. Cause unprofiled on M5. | Lead on this set. | Retest current defaults on M5. | Low |
+| Room · Any, larger-first, inside | **@pmndrs/bvh** | 11.5% | Unreported | Same blocker boolean. | Earlier f32 walk. Cause unprofiled on M5. | Lead on this set. | Retest current defaults on M5. | Low |
+| Sponza · Closest, outside | Unranked | — | — | 7 differing answers. | Agreement check failed. | No qualified speed target until the answers agree. | Retest current defaults. | Low to diagnose |
+| Sponza · Closest, inside | Unranked | — | — | 2 differing answers. | Agreement check failed. | No qualified speed target until the answers agree. | Retest current defaults. | Low to diagnose |
+| Sponza · Any, far-first, outside | **@pmndrs/bvh** | 21.8% | 0.79 | Same blocker boolean. | Earlier f32 walk. Cause unprofiled on M5. | Lead on this set. | Retest current defaults on M5. | Low |
+| Sponza · Any, larger-first, outside | **@pmndrs/bvh** | 32% | 1.16 | Same blocker boolean. | Earlier f32 walk. Cause unprofiled on M5. | Lead on this set. | Retest current defaults on M5. | Low |
+| Sponza · Any, far-first, inside | **@pmndrs/bvh** | 21.9% | Unreported | Same blocker boolean. | Earlier f32 walk. Cause unprofiled on M5. | Lead on this set. | Retest current defaults on M5. | Low |
+| Sponza · Any, larger-first, inside | **@pmndrs/bvh** | 28.1% | Unreported | Same blocker boolean. | Earlier f32 walk. Cause unprofiled on M5. | Lead on this set. | Retest current defaults on M5. | Low |
+
+</details>
+
+<details>
+<summary>RTX GPU · signed distance fields</summary>
+
+One whole field. Figures use the first full Nov 16 run for each knot. Paired ratios across all runs are in the evidence below. At 100k and 128³ a separate breakdown timed our parity at 103.5 ms, ours first-hit at 81.3 ms and theirs at 79.2 ms. Their 238 differing distances preclude a winner.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| 1M knot · 32³, parity | **@pmndrs/bvh** | 0.5% | 0.063 | Parity tolerates inconsistent winding. | Two or three parity rays vs one first hit. | Lead in this run. | Use first-hit only on closed, outward-wound, non-overlapping meshes. | Config |
+| 1M knot · 32³, first-hit | **@pmndrs/bvh** | 8.2% | 1.02 | Both use one hit for sign. | Same sign workload. Bottleneck unprofiled. | Lead in this run. | Use first-hit only on closed, outward-wound, non-overlapping meshes. | Config |
+| 1M knot · 64³, parity | three-mesh-bvh/webgpu | 12.5% | 17.92 | Parity tolerates inconsistent winding. | Two or three parity rays vs one first hit. | Use first-hit for suitable inputs. | Use first-hit only on closed, outward-wound, non-overlapping meshes. | Config |
+| 1M knot · 64³, first-hit | **@pmndrs/bvh** | 20.4% | 25.55 | Both use one hit for sign. | Same sign workload. Bottleneck unprofiled. | Lead in this run. | Use first-hit only on closed, outward-wound, non-overlapping meshes. | Config |
+| 1M knot · 128³, parity | three-mesh-bvh/webgpu | 14.2% | 110.4 | Parity tolerates inconsistent winding. | Two or three parity rays vs one first hit. | Use first-hit for suitable inputs. | Use first-hit only on closed, outward-wound, non-overlapping meshes. | Config |
+| 1M knot · 128³, first-hit | **@pmndrs/bvh** | 5.7% | 38.28 | Both use one hit for sign. | Same sign workload. Bottleneck unprofiled. | Lead in this run. | Use first-hit only on closed, outward-wound, non-overlapping meshes. | Config |
+| 100k knot · 32³, signed | Unranked | — | — | 6 distance mismatches. | One-hit signing costs less than parity. | No qualified speed target until the voxel distances agree. | Keep raw times as diagnostics. | Low to diagnose |
+| 100k knot · 64³, signed | Unranked | — | — | 27 distance mismatches. | One-hit signing costs less than parity. | No qualified speed target until the voxel distances agree. | Keep raw times as diagnostics. | Low to diagnose |
+| 100k knot · 128³, signed | Unranked | — | — | 238 distance mismatches. | One-hit signing costs less than parity. | No qualified speed target until the voxel distances agree. | Keep raw times as diagnostics. | Low to diagnose |
+| Unsigned vs their signed field | Different outputs | — | — | Unsigned omits inside/outside. | Our unsigned field skips sign rays. | Different outputs. No comparable speed target. | Use unsigned for distance alone. | Config |
+
+</details>
+
+<details>
+<summary>RTX GPU · path tracing and skinning</summary>
+
+First full Nov 18 run. Path rows show time saved per 1M rays of the named pass using median rates. The whole-frame example above scales by the actual ray count. Shadow throughput is derived by subtraction. The skinned row measures main-thread time for nine characters of 25,536 triangles each.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| tinybvh · whole tracer | **@pmndrs/bvh** | 20.6% | 0.56 | 712,028 primary distances agree. | Same shading, different trees and walks. | Lead measured. | Benchmark the full shaded pass. | None |
+| tinybvh · closest-only | **@pmndrs/bvh** | 19.6% | 0.53 | 712,028 primary distances agree. | Same shading, different trees and walks. | Lead measured. | Benchmark the full shaded pass. | None |
+| tinybvh · derived shadow | **@pmndrs/bvh** | 21.9% | 0.62 | 712,028 primary distances agree. | Same shading, different trees and walks. | Lead measured. | Benchmark the full shaded pass. | None |
+| H-PLOC · whole tracer | **@pmndrs/bvh** | 16.5% | 0.45 | 712,028 primary distances agree. | Same shading, different trees and walks. | Lead measured. | Benchmark the full shaded pass. | None |
+| H-PLOC · closest-only | **@pmndrs/bvh** | 16.8% | 0.45 | 712,028 primary distances agree. | Same shading, different trees and walks. | Lead measured. | Benchmark the full shaded pass. | None |
+| H-PLOC · derived shadow | **@pmndrs/bvh** | 16% | 0.45 | 712,028 primary distances agree. | Same shading, different trees and walks. | Lead measured. | Benchmark the full shaded pass. | None |
+| RTX laptop · skinned pose and refit, CPU time per frame | **@pmndrs/bvh** vs three-mesh-bvh | 99.5% | 129.6 | 1,205 frozen-pose rays agree. | Ours poses and refits on the GPU. | Already leads on main-thread time. | Use GPU-resident trees for GPU tracing. Budget 8.65 ms GPU. | Config |
+
+</details>
+
+<details>
+<summary>M5 Chrome · build stalls in the furnished room</summary>
+
+Wall time for one build and the longest gap between animation frames during that build.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| Main thread · build and longest frame gap | three-mesh-bvh CENTER | 10.7% | 6 | Same mesh, different tree shape. | CENTER builds a cheaper split. | Offer a midpoint split that skips the SAH candidate search. | Use a worker for interactive rendering. | Medium |
+| Worker · build wall time | three-mesh-bvh CENTER | 10.7% | 6 | Same mesh, different tree shape. | Worker moves the build off the main thread. Relative cost unprofiled. | Offer a midpoint split to reduce worker build time. Gain unknown. | Measure first usable tree. | Low |
+| Worker · longest frame gap | three-mesh-bvh CENTER | 22.7% | 5 | Same mesh, different tree shape. | Residual main-thread stall unprofiled. | No established fix for this frame gap. | Target a gap below 17 ms. | Low |
+
+</details>
+
+<details>
+<summary>GPU memory and mesh setup without a triangle index</summary>
+
+GPU memory is the RTX trace layout in MiB beyond application geometry. Setup is wall time for one mesh. Babylon’s mesh bounds and optional octree also take less time to set up than our triangle tree. The per-library tables below retain those timings.
+
+| Situation | Winner | % difference | Difference in ms | Quality difference | Why it wins | How we could beat it | Recommendation | Effort |
+| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |
+| Knot · resident GPU buffers | three-mesh-bvh/webgpu | 41.9% | N/A | Same mesh. 6.2 vs 3.6 MiB. | Our records copy triangle corners. | Index shared vertices. Larger leaves could further reduce node bytes. | Choose indexed leaves when memory is limiting. | Config / High |
+| Room · resident GPU buffers | three-mesh-bvh/webgpu | 36.9% | N/A | Same mesh. 16 vs 10.1 MiB. | Our records copy triangle corners. | Index shared vertices. Larger leaves could further reduce node bytes. | Choose indexed leaves when memory is limiting. | Config / High |
+| Sponza · resident GPU buffers | three-mesh-bvh/webgpu | 39.7% | N/A | Same mesh. 355.5 vs 214.3 MiB. | Our records copy triangle corners. | Index shared vertices. Larger leaves could further reduce node bytes. | Choose indexed leaves when memory is limiting. | Config / High |
+| i9 Node · Knot, setup including no-index baseline | three Mesh.raycast | 96.9% | 44.17 | No acceleration structure. | Three skips triangle-index construction. | Bake reusable geometry. | Compare setup plus the expected picks. | Config |
+| i9 Node · Room, setup including no-index baseline | three Mesh.raycast | 97.9% | 130.4 | No acceleration structure. | Three skips triangle-index construction. | Bake reusable geometry. | Compare setup plus the expected picks. | Config |
+| i9 Node · Sponza, setup including no-index baseline | three Mesh.raycast | 98.5% | 3,114.9 | No acceleration structure. | Three skips triangle-index construction. | Bake reusable geometry. | Compare setup plus the expected picks. | Config |
+| M5 Node · Knot, setup including no-index baseline | three Mesh.raycast | 97.4% | 30.74 | No acceleration structure. | Three skips triangle-index construction. | Bake reusable geometry. | Compare setup plus the expected picks. | Config |
+| M5 Node · Room, setup including no-index baseline | three Mesh.raycast | 97.5% | 67.21 | No acceleration structure. | Three skips triangle-index construction. | Bake reusable geometry. | Compare setup plus the expected picks. | Config |
+| M5 Node · Sponza, setup including no-index baseline | three Mesh.raycast | 98.3% | 1,890.1 | No acceleration structure. | Three skips triangle-index construction. | Bake reusable geometry. | Compare setup plus the expected picks. | Config |
+
+</details>
+
+## When to trade accuracy for speed
+
+Keep the robust default when the library cannot know what an application needs. If a faster path gives the same answer for all supported inputs, it can become the default once it measures faster across the target workloads. When it can change an answer, expose the choice at the query or build step where the caller knows which errors are acceptable. A useful option names the guarantee being relaxed and gives the caller a way to estimate the gain.
+
+| Workload | What the default protects | When the faster choice fits | Status and evidence |
+| --- | --- | --- | --- |
+| Signed distance field | Parity voting tolerates inconsistent triangle winding on a closed surface. | With closed, outward-wound, non-overlapping shells, use `sign: 'first-hit'`. Outside those conditions a voxel can get the wrong sign even when its distance magnitude is accurate. | **Available.** On the RTX 100k knot at 128³, the field took 103.5 ms with parity and 81.3 ms with first-hit in the same breakdown run. |
+| CPU nearest-point query | The default searches for the nearest point, even after finding one close to the query. | A proximity trigger only needs a witness inside its activation radius. Pass that radius as `minThreshold` to `closestPointToPoint` to stop on the first qualifying candidate. Its point, distance and triangle can differ from the true nearest. | **Available per query.** Savings depend on how early a candidate qualifies. The comparison suite has no paired timing for this option. |
+| GPU closest point on an identity-transformed instance | The general instance path preserves its box padding and floating-point behaviour at boundaries. | A distance-only consumer may accept either triangle on a tie. Picking or material lookup may care which one wins. The prototype can also change a touching shape test or the sign of zero. | **Measured candidate.** Reading the instance as merged was about 18% faster on the RTX closest-point workload. The knot's distance field was byte-identical. An independent query option for instances would let callers accept those edge cases. |
+| CPU closest point on very thin triangles | The fallback checks triangle edges when the ordinary closest-point calculation loses precision. Without it, the sliver sweep found distances up to 1.7 units too far on a unit triangle. | A mesh pipeline that rules out slivers, including after deformation, could skip the guard. Another caller might explicitly accept that error for approximate queries. | **Candidate.** The protection cost about 2–5% in the recorded CPU query measurements. Benchmark a tree built with this assumption against the robust path on typical meshes and report the error separately on slivers. |
+
+[Signed distance fields](/tracing/sdf) · [Closest-point thresholds](/cpu-queries/closest-point) · [Identity-transform experiment, section 12](https://github.com/pmndrs/bvh/blob/main/docs/internals/WINDOWS-RUNBOOK.md) · [CPU sliver measurements](https://github.com/pmndrs/bvh/blob/main/compare/RESULTS.md)
+
+Some workloads can skip work while preserving every answer they consume. A GPU closest-hit batch can omit unused normal and material fields with `hitNormal: false` (24 bytes per result, down from 40). Any-hit child order preserves visibility and changes how quickly a blocker is found. The batch comparison already disables hit normals and masks, so neither explains its remaining closest-hit deficit. [Batch layout and timings](/tracing/batches-and-the-cpu-walk) · [Traversal orders](/tracing/wgsl-walk)
 
 ## The libraries
 
@@ -27,61 +408,194 @@ gets no ratio on it: a faster wrong answer is not faster.** The full tables, the
 - [bvh.js](https://github.com/agargaro/bvh.js) 0.0.13: a scene-level box BVH (objects, not triangles).
 - [Rapier](https://github.com/dimforge/rapier.js) 0.21: a physics engine's ray, point and shape queries on a trimesh collider.
 
-## Re-run on the Windows laptop, 2026-11-16
+### Adding Jolt Physics
 
-What the 2026-11-15 defaults could change, measured again (the full tables are in
-[`compare/RESULTS.md`](https://github.com/pmndrs/bvh/blob/main/compare/RESULTS.md)). Each row says which way its ratio goes.
+Jolt is an unmeasured candidate for **CPU collision queries and batched rays**. Its browser distribution includes a multithreaded WASM build with SIMD enabled by default. Its public ray binding accepts one ray per call. A loop calling it from JavaScript measures that API's throughput. Demonstrating scaling across cores requires dispatching independent rays to workers. [Jolt browser builds](https://github.com/jrouwe/JoltPhysics.js#readme) · [Jolt query bindings](https://github.com/jrouwe/JoltPhysics.js/blob/main/JoltJS.idl)
 
-| What | Result |
-| --- | --- |
-| GPU closest hits against three-mesh-bvh/webgpu, RTX 3060 | ours 1.29–1.33× theirs on the knot, 1.09–1.41× on Sponza, **0.51–0.86× on the furnished room** |
-| GPU any hits | ours 1.18–1.43× on the knot and Sponza; the room 0.35× from outside (1.21× with `anyHitOrder: 'larger'`) and 0.87× from inside |
-| CPU refit, Sponza | three-mesh-bvh 239 ms, ours 595 ms (441 ms with `corners: 'positions'`, what `/three` builds) |
-| Memory beyond the geometry, Sponza | three-mesh-bvh 51.5 MiB; ours 459.7 MiB, 284.4 MiB with `corners: 'positions'`; on the GPU 355.5 against 214.3 MiB |
-| Scene trees, 10k / 100k objects | bvh.js builds in 0.26× / 0.36× our time; `ObjectBVH` updates in 0.43× / 0.42× |
+| Comparison | Implementation | Effort estimate |
+| --- | --- | --- |
+| Browser CPU picking and all hits | Add Jolt as a comparison-only dependency. Build a mesh shape from the same indexed triangles, store original triangle IDs as per-triangle user data, and enable backface hits. Give each Jolt ray a segment long enough to pass the scene bounds and convert hit fractions back to scene distances. Use the existing seeded rays and agreement checks. Report warm latency and throughput separately from module load and tree build. | 1–2 engineering days |
+| Browser CPU ray batches across cores | Add a batch entry point that passes packed rays into WASM once, partitions them into jobs over one read-only tree and writes disjoint results. Run the same batch implementation with one and several workers, holding SIMD fixed. Serve the threaded page with cross-origin isolation. Report worker count, batch size, elapsed time to usable results, and main-thread occupancy. | About 3–5 additional days for a native binding, browser harness and verification |
 
-**Where others still win, on these machines:**
+For CPU scaling, give both implementations the same worker budget and distinguish a single pick's latency from sustained batch throughput. For GPU comparisons, specify where the rays originate and where the next consumer needs the answers. CPU picking includes GPU submission and readback on our WebGPU path. A GPU lighting pass using Jolt would also need to get its rays to the CPU and upload results. Time the relevant transfers on both paths and report the warm batch size where one overtakes the other, if it does. Jolt has no measured winner or loser rows here yet. [Emscripten browser threading requirements](https://emscripten.org/docs/porting/pthreads.html)
 
-- **The furnished room on the GPU.** From outside, three-mesh-bvh traces about twice as many closest-hit rays per
-  second as ours (ours 0.51× theirs; 0.96× with `f32` nodes). The cause is not the quantization grid. When a ray enters
-  two boxes at exactly the same distance, our walk takes the left one first; from outside the room that is often the
-  half behind the wall. Quantized boxes make such ties more common. Since 2026-11-17 the walk takes the other box on
-  these ties: ours is 2.3× theirs on this set, with every other set level. From outside, its any hit is 2.8×
-  our default order's rate, and 0.83× ours with `'larger'`.
-- **CPU refit:** three-mesh-bvh is 2.2–2.5× faster than our records tree on every scene, and 1.6–1.9× faster than
-  `corners: 'positions'`. Our tree has 3.6× the boxes (leaves of about 2 triangles against 7).
-- **Memory:** on Sponza ours holds 5.5× three-mesh-bvh's bytes with `corners: 'positions'` and 8.9× with records.
-- **CPU rays on this x86 laptop:** Rapier 1.10–1.25× our closest-hit rate on all three scenes, three-mesh-bvh with SAH
-  1.14–1.47× on the knot and the room. On the M5 ours led (below). One run, not explained.
-- **bvh.js** builds a scene tree about 3× faster; three-mesh-bvh's `ObjectBVH` updates 2.3× faster than our CPU top level.
-- Ours still leads every GPU ray set on the knot and Sponza, box and closest-point queries (Rapier's closest point on the
-  knot is a tie), and tree quality.
+## Per-library measurements and explanations
 
-## Headline results (Apple M5, 2026-11-12 and 2026-11-13)
+<details>
+<summary>Show individual competitors, alternate layouts, paired throughput ratios and benchmark history</summary>
 
-| What | Result (ours = 1; above 1 means faster than ours) |
-| --- | --- |
-| CPU closest-hit rays, Sponza (5.74M triangles) | ours 580k rays/s; three-mesh-bvh 0.75 (SAH) and 0.57 (CENTER), Rapier 0.95, bvh-tree 0.12 |
-| Tree quality, Sponza (SAH cost, lower is better) | ours 90; three-mesh-bvh 122 (SAH) and 141 (CENTER); bvh-tree 205 |
-| GPU rays, against three-mesh-bvh/webgpu (paired rounds) | ours 0.96–1.12× theirs closest-hit and 1.25–1.28× any-hit on Sponza and the knot; 0.85–0.91× closest on the furnished room. Any-hit from outside the room: 0.32× with the default order, 1.73× with `anyHitOrder: 'larger'` |
-| Scene-level trees, 10k objects | ours is ahead of three-mesh-bvh's `ObjectBVH` on every query |
+### Browser GPU rays
 
-## Where other libraries win (Apple M5, 2026-11-13)
+Every ratio is **our rate divided by three-mesh-bvh/webgpu's rate**. Above 1 favours ours. “Outside” rays start on a sphere around the model. “Inside” rays start at random points inside its bounding box. Neither set samples bounce origins on surfaces. Each set has 1,048,576 rays, timed in seven paired rounds in headless Chrome. **DQ** means at least one answer disagreed, so that cell has no winner. A few percent in one run is a small margin.
 
-Measured on the same harness. These are open items, not footnotes; the 2026-11-16 list above is newer:
+| Scene and origin | RTX 3060 closest | RTX any, far / larger | M5 closest | M5 any, far / larger |
+| --- | ---: | ---: | ---: | ---: |
+| Knot, outside | DQ | 1.43 / 1.27–1.29 | DQ | 1.26 / 1.17 |
+| Knot, inside | 1.31–1.33 | 1.37–1.43 / 1.30–1.31 | 1.08 | 1.25 / 1.20 |
+| Furnished room, outside | **2.33–2.35** | **0.35–0.36 / 1.21** | 0.85–0.91 | **0.32 / 1.73** |
+| Furnished room, inside | **0.85** | **0.87 / 0.96** | DQ | 1.05 / 1.13 |
+| Sponza, outside | DQ | 1.18–1.20 / 1.43–1.44 | DQ | 1.28 / 1.48 |
+| Sponza, inside | DQ | DQ / DQ | DQ | 1.28 / 1.39 |
 
-- **Rapier** ties our closest point on the torus knot (0.99–1.04×). Until the CPU query pass of 2026-11-13 it answered box queries 2.3–2.7× and closest point 1.7–2.4× faster than ours; ours now leads both everywhere else (Rapier 0.56–0.88× on boxes, 0.64–0.77× on closest point). Both queries became flat walks over the typed arrays with no objects per node or triangle, giving the same answers bit for bit ([`compare/RESULTS.md`](https://github.com/pmndrs/bvh/blob/main/compare/RESULTS.md), "compare/queries").
-- **three-mesh-bvh, CPU:** refits Sponza (5.7M triangles) 1.3–1.5× faster. It was 6–7× faster until our refit stopped sorting and allocating per node, and 1.6–2× until the CPU query pass made it one pass. The knot and the room are now level (0.93–1.06×). We still write 48-byte triangle records and 3 million 64-byte nodes, where three-mesh-bvh writes 1.7 million 32-byte nodes over the app's positions. Its box queries (1.2–1.4× ours before) and closest point are 0.23–0.54× ours now. With SAH its sphere queries are a little faster than ours on the knot (1.05–1.13×) and Sponza (0.95–1.24×).
-- **three-mesh-bvh, GPU:** its closest-hit walk is 1.1–1.2× ours on the furnished room. Its any-hit from outside the room was 3.2× our default kernel's: our any-hit enters the farther child first (right for shadow rays from surfaces), and a few rays per SIMD group of 32 went deep into the far side's furniture. With `anyHitOrder: 'larger'` (enter the larger child first) ours is 1.73× theirs on those rays; it stays a setting because it costs 0.78× on merged surface rays on the M5 and 0.80–0.87× on the RTX 3060 ([trace design](https://github.com/pmndrs/bvh/blob/main/docs/internals/design/trace.md)), and merged trees are the default.
-- **bvh.js** builds its scene tree about 3× faster.
-- **Memory:** our CPU trees (`CpuMeshBvh`, what the suite measures) hold about 9–10× more bytes beyond the app's geometry than three-mesh-bvh, because our triangle records copy the corners. On the GPU the default scene now has quantized nodes: Sponza 355.5 MiB beyond the geometry against three-mesh-bvh's 51.2, about 7×. Indexed leaves take it to 225.5 ([memory page](/performance/memory)). Building one huge mesh with tinybvh grows its WebAssembly memory to about 230 bytes per triangle while the build runs (Sponza as one mesh: 1.3 GiB); the builder now drops that memory afterwards and the worker pool ends such a worker, so the build leaves 391 MiB behind instead of 1.7 GiB ([workers](/workers/workers)).
+The RTX column uses quantized nodes (Nov 16, with the Nov 17 closest-hit retest for the room). The M5 column uses `f32` nodes and the older tie rule (Nov 12). The Nov 16 RTX rows with disagreements include knot/outside closest (3 rays), Sponza closest (6 outside, 3 inside) and Sponza/inside any (1). The later Sponza/outside closest timing reached 1.15–1.19×. The published retest table gives no new competitor agreement count for it. [Paired GPU results](https://github.com/pmndrs/bvh/blob/main/compare/RESULTS.md) · [Tie-rule experiment, section 14](https://github.com/pmndrs/bvh/blob/main/docs/internals/WINDOWS-RUNBOOK.md)
+
+| Scenario | What explains the result | What it takes to get ahead |
+| --- | --- | --- |
+| Room, closest from outside | Both root boxes share an entry plane. Quantization made exact ties frequent. Visiting the left child first explored furniture behind the wall. Sending a tie beyond `tMin` right cut the slowest ray's box tests per group of 32 from 124 to 44. | **Already shipped** on Nov 17. Throughput rose from 101 to 445–449 Mrays/s (4.4× our old rate). Distance is preserved. Either triangle can win an exact-distance tie. The M5 still needs this run. |
+| Room, closest from inside | The two tie rules logged identical work on this set. Starts inside both boxes tie at `tMin`, where the rule stays the same. The remaining bottleneck is unconfirmed. | At 0.85× we need about 18% more throughput. `f32` reached only 0.89–0.91× in the retest and doubles node bytes. Compare box visits, triangles and slowest lanes on competing trees before changing the layout. |
+| Room, any from outside vs surface shadows | Far-first can send a few rays deep into furniture. On M5 the slowest of 32 needed 78.5 box tests with far-first, 23.0 with larger-first and 24.3 in three-mesh-bvh. | **Already configurable.** Larger-first wins from outside on both devices. On RTX it ran at 0.80–0.87× far-first for merged **surface** rays in Sponza and Bistro. Choose per ray pass. |
+| Room, any from inside | Larger-first closes most of the RTX gap, from 0.87× to 0.96×. The M5 already led. The outside-ray diagnosis has only been demonstrated for outside rays. | A further 4–5% over larger-first would cross the measured RTX rate. Repeat paired rounds with actual bounce-to-light segments and compare the slowest lanes before adding another order. |
+| Knot and Sponza | On agreeing sets the faster order varies by scene. Larger-first helps Sponza's outside occlusion, while far-first leads on the knot. No profile attributes the closest-hit margin to one feature. | Keep the faster measured order per workload. Resolve differing distances or visibility before claiming a lead on the DQ sets. For fixed geometry, also test merged static meshes on actual secondary rays. |
+
+### CPU comparisons by scene
+
+Each cell below reads **Intel i9 / Apple M5**. Above 1 always favours our default records tree. For queries the value is our throughput divided by theirs. For time, bytes and surface-area heuristic (SAH) cost it is theirs divided by ours. For example, 0.40 on refit means the rival took 40% of our time. To tie at a throughput ratio of 0.80 requires 25% more throughput. A dash marks an unavailable measurement. Rows for unsupported operations are omitted.
+
+These are the complete CPU runs of Nov 16 (i9-11900H, Node 24) and Nov 13 (M5 Pro, Node 22). They measure one thread in Node. The knot also has a Chrome run below. Browser CPU timings for the room and Sponza are still open. The M5 was under load on Nov 13. In an earlier low-load M5 run, our Sponza outside closest hit reached 580k rays/s against Rapier's 550k. In the Nov 13 file the same rates were 368k and 447k. Use the run and its paired inputs together. [Intel measurements](https://github.com/pmndrs/bvh/blob/main/bench/results/compare-windows.md) · [M5 measurements](https://github.com/pmndrs/bvh/blob/main/bench/results/compare.md) · [Earlier M5 run and method](https://github.com/pmndrs/bvh/blob/main/compare/RESULTS.md)
+
+**Browser CPU check.** On Nov 18 the 100k knot reproduced the i9 deficit in Chrome 157. Ours reached 60–69% of three-mesh-bvh SAH's rate across the two first-hit sets and all/outside, and 55% on all/inside. The GPU batch in the same page led at 1.27× closest and 1.44× any on its 262,144 inside rays. The CPU deficit reproduced in Chrome. [Chrome rates for all nine adapters](https://github.com/pmndrs/bvh/blob/main/compare/RESULTS.md#browser-workloads-on-the-rtx-3060-laptop-2026-11-18)
+
+### Mesh rays and spatial queries
+
+| Scenario | What explains the result | What to change or measure |
+| --- | --- | --- |
+| Closest hit | three-mesh-bvh SAH leads on most i9 sets. Rapier leads on all six there, with agreement on distance only. Our lower SAH score predicts work under a cost model. It leaves out result construction, memory traffic and runtime costs. The relative contributions are unknown. | For knot/outside the Chrome target is 347k rays/s from 208k (a 67% gain). The Node target was 329k from 237k. Profile the same rays in both runtimes. Time the walk separately from the hit array, point and distance construction. Try a caller-owned nearest-hit result if allocations matter. Preserve sides, original IDs and edge hits. |
+| All hits | SAH leads all six i9 sets. Even bvh-tree leads on the knot and room there. Our public query collects hits, sorts by distance and constructs a result per hit, then the benchmark adapter projects those down to triangle and distance. | For knot/inside the Chrome target is 226k rays/s from 124k (an 82% gain). Time traversal, sorting and result conversion separately. Test a reusable output buffer. An opt-in unordered visitor also makes sense for callers that can consume hits in traversal order. Benchmark sorted results against sorted results. |
+| three and Babylon picking | three tests triangles without a BVH. Babylon's brute and submesh-octree paths do more triangle work than a triangle BVH on these meshes. bvh-tree and plain three collect all hits even for nearest-hit requests. Babylon's triangle test also disagrees on some edge cases. | Ours leads the agreeing brute-force rows. Keep the watertight test. Rapier and Babylon return at most one hit per collider or mesh here, so neither supplies a triangle all-hits rate. |
+| Box overlap | Ours leads all three competitors on every mesh. A CPU profile showed box and callback construction dominated much of the older shapecast path. A flat typed-array walk improved our own rate by 3.1–3.3× with bit-identical results. | Keep the flat walk and check touching, rotated and degenerate inputs when changing it. |
+| Sphere overlap | Ours leads Rapier throughout. SAH wins on the knot on both CPUs and on Sponza in the loaded M5 run. Our sphere query still uses shapecast callbacks. Their share of this gap is unknown. | Prototype a flat sphere walk with the same exact triangle test and early exit. The largest tabled loss needs about 24% more throughput. Compare tangent and degenerate cases and retain the room's lead. |
+| Closest point | The flat walk prunes children as the best distance shrinks. Profiling and a before/after test found a 2.6–3.3× gain. Ours leads except for a near tie with Rapier on the knot. Rapier checks distance only. | The sliver guard was added after the M5 run. Measure the knot again with the robust default, then test the sliver-free assumption above on validated meshes. |
+
+| Compared with | Ray query | Knot | Room | Sponza |
+| --- | --- | ---: | ---: | ---: |
+| three-mesh-bvh CENTER | First, outside | 0.74 / 1.26 | 1.30 / 1.79 | 1.08 / 1.59 |
+| three-mesh-bvh SAH | First, outside | 0.72 / 1.12 | 0.88 / 1.28 | 0.85 / 1.16 |
+| bvh-tree | First, outside | 1.79 / 3.34 | 1.52 / 2.14 | 5.56 / 8.35 |
+| Rapier | First, outside | 0.85 / 0.99 | 0.80 / 0.81 | 0.88 / 0.82 |
+| three Mesh.raycast | First, outside | 795.3 / 1,505 | 3,721 / 7,215 | 49,524 / 93,371 |
+| Babylon octree | First, outside | 37.8 / 53.2 | DQ / DQ | 361.1 / 544.3 |
+| Babylon brute force | First, outside | 595.2 / 865.1 | DQ / DQ | 39,020 / 59,865 |
+| Ours, positions | First, outside | 1.02 / — | 1.04 / — | 1.03 / — |
+| three-mesh-bvh CENTER | First, inside | 0.77 / 1.27 | 1.16 / 1.56 | 1.24 / 1.12 |
+| three-mesh-bvh SAH | First, inside | 0.73 / 1.26 | 0.85 / 1.17 | 1.01 / 0.93 |
+| bvh-tree | First, inside | 1.19 / 2.03 | 1.04 / 1.39 | 3.08 / 3.16 |
+| Rapier | First, inside | 0.86 / 0.81 | 0.91 / 0.88 | 0.88 / 0.64 |
+| three Mesh.raycast | First, inside | 813.3 / 1,279 | 3,907 / 6,537 | 40,874 / 34,987 |
+| Babylon octree | First, inside | 27.1 / 39.9 | DQ / DQ | DQ / DQ |
+| Babylon brute force | First, inside | 565.8 / 692.2 | 2,884 / 3,715 | 32,447 / 22,486 |
+| Ours, positions | First, inside | 1.01 / — | 1.04 / — | 1.03 / — |
+| three-mesh-bvh CENTER | All, outside | 0.78 / 1.30 | 0.97 / 1.31 | 1.02 / 1.38 |
+| three-mesh-bvh SAH | All, outside | 0.73 / 1.28 | 0.81 / 1.13 | 0.89 / 1.15 |
+| bvh-tree | All, outside | 0.92 / 1.57 | 0.92 / 1.21 | 1.68 / 2.01 |
+| three Mesh.raycast | All, outside | 402.3 / 643.6 | 2,277 / 3,638 | 15,822 / 23,375 |
+| Ours, positions | All, outside | 0.95 / — | 1.08 / — | 1.00 / — |
+| three-mesh-bvh CENTER | All, inside | 0.71 / 1.17 | 0.97 / 1.20 | 0.96 / 0.81 |
+| three-mesh-bvh SAH | All, inside | 0.68 / 1.10 | 0.79 / 0.91 | 0.84 / 0.73 |
+| bvh-tree | All, inside | 0.85 / 1.36 | 0.86 / 1.15 | 1.56 / 1.32 |
+| three Mesh.raycast | All, inside | 565.6 / 924.0 | 3,301 / 5,124 | 21,669 / 14,724 |
+| Ours, positions | All, inside | 0.98 / — | 1.02 / — | 1.01 / — |
+
+| Compared with | Shape query | Knot | Room | Sponza |
+| --- | --- | ---: | ---: | ---: |
+| three-mesh-bvh CENTER | box | 2.44 / 2.46 | 3.66 / 3.77 | 2.79 / 3.00 |
+| three-mesh-bvh SAH | box | 2.24 / 2.38 | 2.85 / 2.78 | 2.43 / 2.42 |
+| Rapier | box | 1.36 / 1.21 | 1.62 / 1.49 | 1.28 / 1.78 |
+| Ours, positions | box | 0.96 / — | 0.97 / — | 1.01 / — |
+| three-mesh-bvh CENTER | sphere | 0.98 / 1.06 | 1.84 / 2.09 | 1.39 / 0.99 |
+| three-mesh-bvh SAH | sphere | 0.91 / 0.95 | 1.43 / 1.53 | 1.10 / 0.81 |
+| Rapier | sphere | 4.77 / 5.56 | 4.16 / 3.06 | 3.97 / 2.68 |
+| Ours, positions | sphere | 1.02 / — | 1.04 / — | 1.08 / — |
+| three-mesh-bvh CENTER | closest-point | 1.73 / 1.96 | 3.29 / 4.32 | 2.56 / 3.60 |
+| three-mesh-bvh SAH | closest-point | 1.69 / 1.87 | 1.79 / 2.38 | 1.88 / 2.72 |
+| Rapier | closest-point | 0.99 / 1.01 | 1.37 / 1.43 | 1.49 / 1.57 |
+| Ours, positions | closest-point | 1.00 / — | 1.10 / — | 1.00 / — |
+
+### Mesh construction, refit and memory
+
+| Scenario | What explains the result | What to change or measure |
+| --- | --- | --- |
+| CPU build and tree quality | tinybvh's binned SAH builds a lower-cost tree than three-mesh-bvh CENTER or SAH and bvh-tree on all three meshes. CENTER often builds faster. SAH and bvh-tree take longer. Rapier's build ranking flips by CPU. The CPU twins are reference implementations of our GPU builders. | For static assets, bake once. For a fast first browser frame, GPU H-PLOC made the room traceable in 14.6 ms. For CPU-only builds, test a cheaper split heuristic against CENTER and measure the resulting ray rate. The `/three` compatibility `strategy` option currently maps all values to tinybvh SAH. |
+| Startup against plain three or Babylon | Their fast setup buys a different structure. Plain three adds zero tree bytes. Babylon refreshes mesh bounds and optionally rebuilds a submesh octree. The triangle work comes later during picking. | For a one-off pick, compare setup plus queries. A full triangle index cannot beat zero index allocation on bytes. For repeated queries, compare build time plus the number of queries times mean query time. |
+| CPU mesh refit | On i9 Sponza we take 595 ms with records or 441 ms with shared positions, against 239 ms CENTER and 231 ms SAH. Our 48-byte records copy corners. Even with shared positions the tree touches about 3.6× as many boxes, roughly two triangles per leaf against seven. | Use `corners: 'positions'` when source positions can stay alive and stable between refits. For dense motion, test a tinybvh leaf-cost setting that favours larger leaves. Its existing size cap of eight is already well above the observed average. For localized edits, prototype dirty-leaf and ancestor refit. Measure subsequent query rate as well as update time. |
+| CPU resident and peak memory | On Sponza our 459.7 MiB falls to 284.4 MiB with positions. CENTER uses 51.5 MiB, sharing geometry and reordering the index. bvh-tree and Rapier have larger measured heaps than ours. A single-mesh tinybvh build also peaks around 1.3 GiB of WASM memory. | Shared positions preserve the hits. To approach CENTER's footprint requires fewer boxes or more compact CPU nodes as well. The builder already releases oversized heaps after a build. Reducing the single-mesh peak calls for smaller native build and export allocations. |
+| GPU resident memory | On RTX, the knot, room and Sponza use 6.2 / 16.0 / 355.5 MiB against the competitor walk's 3.6 / 10.1 / 214.3 MiB. The competitor's GPU walk also binds positions and indices. The 51.5 MiB CPU number describes a different allocation. | Quantized nodes are the default. `triangleLeaves: 'indexed'` cuts Sponza to about 225.5 MiB in the layout accounting. Extra vertex fetches reduced RTX closest throughput to 0.83–0.95× quantized records with `vec4` positions. Choose by memory budget. |
+| Main-thread stalls during build | M5 Chrome, furnished room, wall time / longest frame gap in ms. Ours 56 / 56 on the main thread, 56 / 22 in a worker. CENTER 50 / 50 and 50 / 17. The worker reduced the stall for both. The residual 5 ms gap difference was not profiled. | Use the worker pool for interactive CPU builds. Time input preparation, transfers and result installation to find what would bring the longest frame gap below 17 ms on this workload. |
+
+| Compared with | Metric | Knot | Room | Sponza |
+| --- | --- | ---: | ---: | ---: |
+| three-mesh-bvh CENTER | Build time | 0.54 / 0.71 | 0.60 / 0.87 | 0.65 / 0.97 |
+| three-mesh-bvh SAH | Build time | 2.59 / 3.47 | 2.65 / 3.78 | 2.72 / 3.87 |
+| bvh-tree | Build time | 2.24 / 2.84 | 3.18 / 3.72 | 4.89 / 8.12 |
+| Rapier | Build time | 1.05 / 0.79 | 1.17 / 0.94 | 1.17 / 0.93 |
+| three Mesh.raycast | Build time | 0.03 / 0.03 | 0.02 / 0.02 | 0.01 / 0.02 |
+| Babylon octree | Build time | 0.14 / 0.28 | 0.11 / 0.24 | 0.20 / 0.32 |
+| Babylon brute force | Build time | 0.11 / 0.18 | 0.11 / 0.19 | 0.20 / 0.34 |
+| Ours, positions | Build time | 1.04 / — | 0.92 / — | 0.96 / — |
+| Ours, H-PLOC CPU twin | Build time | 5.63 / 6.13 | 5.69 / 9.94 | 5.56 / 8.07 |
+| Ours, LBVH CPU twin | Build time | 3.68 / 3.02 | 3.24 / 4.00 | 4.75 / 6.78 |
+| three-mesh-bvh CENTER | Refit time | 0.46 / 0.98 | 0.46 / 0.99 | 0.40 / 0.68 |
+| three-mesh-bvh SAH | Refit time | 0.49 / 0.96 | 0.46 / 0.89 | 0.39 / 0.66 |
+| Babylon octree | Refit time | 0.24 / 0.45 | 0.18 / 0.34 | DQ / DQ |
+| Babylon brute force | Refit time | 0.04 / 0.06 | 0.03 / 0.04 | DQ / DQ |
+| Ours, positions | Refit time | 0.74 / — | 0.79 / — | 0.74 / — |
+| three-mesh-bvh CENTER | Tree bytes | 0.11 / 0.11 | 0.12 / 0.12 | 0.11 / 0.11 |
+| three-mesh-bvh SAH | Tree bytes | 0.11 / 0.11 | 0.11 / 0.11 | 0.11 / 0.11 |
+| bvh-tree | Tree bytes | 1.53 / 1.53 | 1.64 / 1.64 | 1.53 / 1.53 |
+| three Mesh.raycast | Tree bytes | 0 / 0 | 0 / 0 | 0 / 0 |
+| Ours, positions | Tree bytes | 0.62 / — | 0.59 / — | 0.62 / — |
+| Ours, H-PLOC CPU twin | Tree bytes | 0.99 / 0.99 | 1.00 / 1.00 | 1.00 / 1.00 |
+| Ours, LBVH CPU twin | Tree bytes | 1.03 / 1.03 | 1.04 / 1.04 | 1.08 / 1.08 |
+| three-mesh-bvh CENTER | SAH cost | 1.42 / 1.42 | 1.55 / 1.55 | 1.56 / 1.56 |
+| three-mesh-bvh SAH | SAH cost | 1.30 / 1.30 | 1.30 / 1.30 | 1.35 / 1.35 |
+| bvh-tree | SAH cost | 1.43 / 1.43 | 1.60 / 1.60 | 2.27 / 2.27 |
+| Ours, positions | SAH cost | 1.00 / — | 1.00 / — | 1.00 / — |
+| Ours, H-PLOC CPU twin | SAH cost | 1.01 / 1.01 | 0.98 / 0.98 | 0.98 / 0.98 |
+| Ours, LBVH CPU twin | SAH cost | 1.10 / 1.10 | 1.20 / 1.20 | 1.25 / 1.25 |
+
+“Tree bytes” counts buffers beyond the app's geometry. bvh-tree's own count omits its node objects. Rapier exposes WASM heap growth and Babylon exposes no exact tree count. On i9 Sponza, fresh-process heap growth was 396 MiB for ours, 51 MiB for CENTER, 363 MiB for Babylon octree, and about 1.1 GiB each for bvh-tree and Rapier. GPU bytes and CPU peak scratch are separate budgets. [Memory accounting](/performance/memory) · [Build and trace tradeoffs](/performance/builds-and-tracing)
+
+### Scene trees over moving objects
+
+Every object shares a 1k-triangle mesh and every transform changes for 20 frames. A ray must return a triangle hit. bvh.js intersects object boxes, so its ray query has no comparable row.
+
+| Compared with | Scene metric | 10,000 objects | 100,000 objects |
+| --- | --- | ---: | ---: |
+| bvh.js | Build time | 0.26 / 0.56 | 0.36 / 0.30 |
+| ObjectBVH | Build time | 1.07 / 1.07 | 1.16 / 0.94 |
+| bvh.js | Update time | 1.05 / 1.29 | 2.40 / 2.58 |
+| ObjectBVH | Update time | 0.43 / 0.40 | 0.42 / 0.38 |
+| bvh.js | Frustum | DQ / DQ | DQ / DQ |
+| ObjectBVH | Frustum | 1.30 / 1.85 | 3.36 / 4.60 |
+| bvh.js | Box | 0.67 / 0.85 | 1.98 / 1.46 |
+| ObjectBVH | Box | 1.86 / 3.11 | 5.38 / 6.37 |
+| ObjectBVH | First ray | 1.67 / 2.85 | 1.78 / 2.85 |
+| ObjectBVH | Tree bytes | 0.50 / 0.50 | 0.53 / 0.53 |
+
+| Scenario | What explains the result | What to change or measure |
+| --- | --- | --- |
+| Scene build and bytes | bvh.js builds a box hierarchy over object IDs. Our timed build also constructs the shared mesh tree, packs instance records and builds a SAH top level. ObjectBVH's counted buffers use about half our bytes. | Time world-box generation, instance packing and splitting independently. Try fewer SAH bins via `CpuSceneBvh`'s top-level `binCount` option. Check culling and ray rates before adopting a faster split. The i9 build targets are 9.55 ms at 10k and 150 ms at 100k. |
+| Transform updates | Our CPU `setInstances` rebuilds the top level. ObjectBVH refits the existing topology. bvh.js moves individual leaves, which cost more than our rebuild when every object moved at 100k. | Prototype a CPU transform-only refit for stable instance membership with a rebuild when overlap grows. Beat 14.1 / 173 ms on i9 at 10k / 100k while checking post-motion queries. GPU consumers already have a top-level refit in `SceneTrees`. |
+| Box, frustum and ray queries | Ours leads ObjectBVH's shapecast-based culling and its scene raycast. bvh.js wins box culling at 10k and loses at 100k. Its frustum results differ on 1 / 14 queries before motion and 2 / 8 afterwards. The box crossover has no measured cause. | At 10k, compare nodes visited and the cost of emitting object IDs for box queries. The i9 target is 364k queries/s from 244k. Frustum speed only counts once both return equivalent object sets. |
+
+### Distance fields, skinned meshes and whole path tracers
+
+| Browser workload | Measured result against three-mesh-bvh | Reason and available choice |
+| --- | --- | --- |
+| Signed distance field, RTX knot, 32³ / 64³ / 128³ voxels | Default parity at 100k triangles: 0.83 / 0.76 / 0.77×. At 1M: 1.05 / 0.94 / 0.89×. | Closest-point cost was similar. Our sign counts all crossings along two rays and casts a third if they disagree. Their sign uses the side of one first hit. The extra work supports meshes with inconsistent winding. |
+| SDF with a simpler sign contract, same grids | `sign: 'first-hit'` at 100k: 0.95 / 0.98 / 0.99×. At 1M: 1.13 / 1.17 / 1.04×. Unsigned: 1.02–1.15× across the six medians, against their signed field. | Use first-hit for closed, outward-wound, non-overlapping meshes. Use unsigned for distances alone. For general signed fields, keep the vote and optimize closest point. A merged static mesh saved 17% of the closest-point time in the 100k breakdown. |
+| Skinned pose and refit, nine characters of 25,536 triangles | Over 120 frames ours used **0.60 ms CPU and 8.65 ms GPU** per frame. Three-mesh-bvh used **130.2 ms CPU** for refit. Its separate repack for GPU use took another 25.75 ms CPU, excluding upload. | Our pose and refit stay on the GPU. Their refit skins each vertex on the CPU, and repacking reads the posed vertices again. Use the GPU path when the next consumer is a GPU tracer. CPU picking would also have to account for getting the result back. All 1,205 frozen-pose check rays agreed. |
+| Two-bounce path tracer, refined tinybvh trees | Full path **1.26–1.27×**, closest-only **1.24–1.27×**, derived shadow rate **1.29–1.30×**. | Same shading and sun shadows. Our walk traverses a merged static mesh with quantized nodes. Theirs traverses clustered per-geometry SAH trees. The test measures their combined cost. It does not isolate which layout feature produced the lead. |
+| Same tracer, GPU-built H-PLOC trees | Full path **1.36–1.39×**, closest-only **1.38–1.40×**, derived shadow rate **1.33–1.37×**. | The first GPU-built tree can run the whole tracer with `holdRefinements: true`. First trees took 29–43 ms in the page's second scene setup. Refinement pays off only if subsequent frames recover its cost. Compare the two tree types head to head for that decision. |
+
+The SDF ratios are their time divided by ours. At 100k and 128³, the default took 103.5 ms, first-hit took 81.3 ms and theirs took 79.2 ms in one breakdown run. [SDF sign rules and measurements](/tracing/sdf) · [Hardware breakdown, section 11](https://github.com/pmndrs/bvh/blob/main/docs/internals/WINDOWS-RUNBOOK.md)
+
+The path ratios are from three full RTX 3060 Laptop runs on Nov 18, Chrome 157, 1258 × 566 pixels and 80,784 triangles. Each run took the median of seven paired rounds using GPU timestamps. All 712,028 primary-hit distances agreed on the checked frame in each run. The shadow-only rate comes from subtracting the closest-only time from the full path time. Secondary hits are included in throughput. The correctness check covers the primary hits. [Per-run measurements and reproduction](https://github.com/pmndrs/bvh/blob/main/compare/RESULTS.md#browser-workloads-on-the-rtx-3060-laptop-2026-11-18)
+
+</details>
 
 ## The compare pages
 
-The suite also runs live in the [examples site](/examples/examples) (`examples/compare/`): each page puts the same
-geometry through both libraries, checks every answer against ours, shows the tables and the CSV rows, and has a "what
-else you can do" box with one thing only our pipeline does. Smoke runs use small scenes and short timings; the numbers
-for this page come from full runs on the RTX 3060 and the M5, which are still to be taken for the two newest pages.
+The [examples site](/examples/examples) runs the comparisons live. Each page shows the workload, its agreement checks, timings and CSV rows. Smoke runs use smaller scenes and shorter timings. The full skinned and path-tracer comparisons have been run on the RTX laptop. The M5 results for those workloads are still open.
 
 | Page | What it compares | What else (live) |
 | --- | --- | --- |
