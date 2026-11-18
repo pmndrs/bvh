@@ -26,18 +26,23 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
   - Check every consumer request against this rule. Per-triangle materials passed because the material is only a number.
   - `examples/three/pathtracer` is a demo of the walk. It and its pending compare page may move to the new repo.
 
-## Hand-back to the Mac (2026-11-18). Do these first.
+## State: done enough for 0.1.0 (2026-11-18)
 
-Everything Windows could do for 0.1.0 is on `main` and pushed. That includes the web performance review's two fixes (BVH1 and BVH2 below), merged 2026-11-18. Left for the M5, in order:
+Dennis called it: the phases are done enough to publish and to move the other packages onto it. Everything is on `main` and pushed: P0-P2 and P4-P9 done, the web performance review's BVH1 and BVH2, and the wide-node experiment (`nodeFormat: 'bvh4' | 'cwbvh8'`, off by default, merged 2026-11-18; its RTX 3060 correctness pages pass, its speed there is not measured). Checked on Windows: lint, types, 906 unit tests, docs, the build, and the RTX pages listed in the merge commit.
 
-1. **Pre-release checks:** every correctness page on the M5 at the full profile (`trace-oracle`, `trace-inline`, `query-oracle`, `sdf-oracle` with the new first-hit runs, `trace-clustered`, `three-trace`, `three-skinned`, `three-shapecast`, the `scene-trees-*` pages and the `bvh-*` pages other than the profiles), then `pnpm examples:build` and the examples smoke. `bvh-top-level-gpu`, `scene-trees-runtime` and `scene-trees-deforming` are the ones that check BVH1 and BVH2 on Metal.
-2. **Surface-ray sections 8 and 9** (`?skip=hit-record,leaves,any-order`, 3 runs each on Sponza and Bistro interior). They check the `triangleLeaves: 'records'` and `quantizedDecode: 'exact'` defaults that ship in 0.1.0 (Dennis's 7a/7b); a clear win for the other choice goes to 0.2, not 0.1.0.
-3. **`bvh-hploc-profile`** for the quantized emit.
-4. **pmndrs/bvh#1:** `wgsl-f32-arithmetic`, `trace-cpu-agreement`, and `trace-oracle` once.
-5. **Pages new since 2026-11-15:** `compare/sdf` (with `?breakdown`), the node-bake movable smoke (`pnpm examples:bake --scene --movable`, then load it), `compile-times` (the M5's numbers for runbook 13 and the performance page).
-6. **The closest-hit tie rule** (DECISIONS-0.1 item 8, on `main` since 2026-11-17; step 1 checks it): also run `compare/gpu ?scene=furnished-room&full` with and without `&nodeFormat=f32` on the M5.
-7. **Remove** the old worktree `~/Developer/bvh-worktrees/reflections-integration`.
-8. **Release 0.1.0** (Dennis): re-add the npm trusted publisher (it was added 2026-11-15 and npm drops it after two days unused, so it has most likely lapsed); check the `CHANGELOG.md` 0.1.0 section; run "Release to npm" with `0.1.0` and `latest` (`docs/internals/RELEASING.md`).
+**To publish (Dennis):**
+1. Re-add the npm trusted publisher (added 2026-11-15; npm drops it after two days unused, so it has most likely lapsed).
+2. Run "Release to npm" on `main` with `0.1.0` and `latest` (`docs/internals/RELEASING.md`). The `CHANGELOG.md` 0.1.0 section becomes the release notes.
+3. Run the docs workflow by hand so the site matches the release.
+
+**Then:** P3, ddgi and the other packages move onto the published package (`docs/internals/MIGRATING-FROM-DDGI.md`).
+
+**Follow-ups, none blocking (later, in no order):**
+- The M5 pass that was planned before the release, now after it: the correctness pages at the full profile, surface-ray sections 8 and 9 (the `triangleLeaves` and `quantizedDecode` defaults; a clear win for the other choice goes to 0.2), `bvh-hploc-profile`, `wgsl-f32-arithmetic`, `trace-cpu-agreement`, `compare/sdf`, `compile-times`, the movable-scene bake smoke, and `compare/gpu ?scene=furnished-room&full` for the tie rule.
+- Wide nodes: the RTX 3060 speed runs (runbook section 2d); the gate is 1.3x on both machines.
+- The review's BVH3-BVH5 (below).
+- The docs domain `bvh.docs.pmnd.rs`; the old Mac worktree `~/Developer/bvh-worktrees/reflections-integration`.
+- Open questions for Dennis: the homefig capsule test in `bench/query-parity.ts`, the `LICENSE` holder, an identity fast path for shapecasts and a `createWorker` option (0.2).
 
 **Web performance review (2026-11-17, Windows; `docs/internals/WEB-PERFORMANCE-REVIEW.md`, results in `docs/internals/REVIEW-TRACKER.md`).** The review covers `main` at `23af802`.
 - **BVH1, built:** the GPU top level uploads only the mesh records that changed, and writes its gather parameters only when they change. At 4,096 mesh slots, editing one mesh went from 131,088 bytes to 32, and an idle frame writes nothing.

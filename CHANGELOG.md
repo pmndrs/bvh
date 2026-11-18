@@ -34,6 +34,9 @@ shared GPU layout, and a WGSL walk and its CPU port trace it.
   and the walk in a `ComputeShader`.
 - **Defaults:** quantized nodes, merged static instances, triangle records in the leaves, and a 256 MiB cap on the GPU
   build's peak memory. The memory levers that measured as wins are on.
+- **Experimental, off by default:** wide nodes for scenes (`nodeFormat: 'bvh4'` or `'cwbvh8'`), with the same hits as
+  the binary walk. On the M5 they are up to 1.4x faster on some merged scenes and slower on instanced ones; not yet
+  timed on the RTX 3060 (`docs/internals/design/wide-nodes.md`).
 - **Startup:** each walk pipeline takes about 0.15-0.25 s to compile the first time on Windows (the SDF kernel 0.7 s,
   the GPU builder 0.3-1.4 s), and about 10 ms once Chrome has cached it. Create kernels early and with the async calls
   (Builds and tracing, "Shader compile time").
