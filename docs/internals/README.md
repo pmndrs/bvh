@@ -19,6 +19,7 @@ These are the internal design notes, kept beside the docs site but not part of i
 | `three.md` | `@pmndrs/bvh/three` in full detail (the user pages are `docs/three/*.mdx`) |
 | `babylon.md` | `@pmndrs/bvh/babylon`: the P6 spike's findings (device, buffer binding, what went wrong), the decisions, the API gaps (the user page is `docs/engines/babylon.mdx`) |
 | `WINDOWS-RUNBOOK.md` | The next pass on the RTX 3060 and the Intel UHD |
+| `WEB-PERFORMANCE-REVIEW.md`, `REVIEW-TRACKER.md` | The 2026-11-17 performance review (BVH1-BVH5) and what was built from it, with the downsampler's |
 | `MIGRATING-FROM-DDGI.md`, `MIGRATING-FROM-REFLECTIONS-BRANCH.md` | Switching the known consumers to this package |
 
 ## Scope: the package ends at the hit

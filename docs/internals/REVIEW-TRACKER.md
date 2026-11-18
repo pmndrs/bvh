@@ -5,7 +5,7 @@ November 17, 2026. The downsampler Windows review is ready on `codex/web-perform
 | Library | Reviewed revision | Review page | Local review |
 | --- | --- | --- | --- |
 | BVH | `main` at `23af802` | [BVH performance and code review](https://chatgpt.com/space/page_1353ece616bc81919a4ea527a0f00dd9) | [BVH Markdown](WEB-PERFORMANCE-REVIEW.md) |
-| Downsampler | `windows-3` at `d8368d0` | [Downsampler performance and code review](https://chatgpt.com/space/page_31c5c354d25c81918908d3903f124634) | [Downsampler Markdown](../downsampler-web-review/WEB-PERFORMANCE-REVIEW.md) |
+| Downsampler | `windows-3` at `d8368d0` | [Downsampler performance and code review](https://chatgpt.com/space/page_31c5c354d25c81918908d3903f124634) | [Downsampler Markdown](https://github.com/pmndrs/downsampler/blob/web-performance-review/WEB-PERFORMANCE-REVIEW.md) |
 
 ## Implementation queue
 
@@ -83,7 +83,7 @@ node results/probes/ds2-region.mjs "--baseline=$baselineDist" --candidate=dist -
 
 ### Downsampler Mac handoff · DS3, DS4 and DS5
 
-The completed review branch is `c9b90f7`. It includes the Apple M5 Pro size rule and both Windows verification runs, through `srgb-store` at `b6e97c5`. The final runtime is `ff785d9`. [Downsampler review](../downsampler-web-review/WEB-PERFORMANCE-REVIEW.md) · [Mac checkout and acceptance](../downsampler-web-review/docs/M5-HANDOFF-SRGB.md)
+The completed review branch is `c9b90f7`. It includes the Apple M5 Pro size rule and both Windows verification runs, through `srgb-store` at `b6e97c5`. The final runtime is `ff785d9`. [Downsampler review](https://github.com/pmndrs/downsampler/blob/web-performance-review/WEB-PERFORMANCE-REVIEW.md) · [Mac checkout and acceptance](https://github.com/pmndrs/downsampler/blob/web-performance-review/docs/M5-HANDOFF-SRGB.md)
 
 | Fresh Chrome 157 profile, storage | First submit-to-done, sync → warmed | Prior warmup |
 | --- | ---: | ---: |
@@ -91,11 +91,11 @@ The completed review branch is `c9b90f7`. It includes the Apple M5 Pro size rule
 | Intel UHD | 128.1 → 4.1 ms | 73.7 ms |
 | SwiftShader | 414.8 → 19.2 ms | 365.4 ms |
 
-The A/B used one build. All 972 mip readbacks matched over 108 page runs. The first warmed encode created zero pipelines. See the [storage, buffer, sRGB render and reload measurements](../downsampler-web-review/results/windows/ds3/summary.md).
+The A/B used one build. All 972 mip readbacks matched over 108 page runs. The first warmed encode created zero pipelines. See the [storage, buffer, sRGB render and reload measurements](https://github.com/pmndrs/downsampler/blob/web-performance-review/results/windows/ds3/summary.md).
 
 The M5 exact-policy halo/plain median was 0.98–0.99, with a reproducible 3–4% loss at 1024² RGBA8. Capped halo stays opt-in. The brush example replays 40 strokes and checks the resulting chain outside the timed region. Hi-Z checks five candidates against full-resolution depth, including thin occluders.
 
-The combined runtime at `ff785d9` passed typecheck, 161 core tests, 21 targeted cases per hardware adapter, eight on SwiftShader and seven in RTX compatibility mode. The full RTX suite ran 35,840 cases across 3,239 groups. Intel quick ran 21,791 cases across 1,864 groups. Only the two historical FSR f16 fixtures failed (five sizes on RTX, two on Intel). All 21,074 RTX compatibility cases passed. All 24 example pages and presets passed on both hardware adapters. A clean bundle clone produced a 56-file installable tarball, and all five export paths passed fresh consumer checks. [Windows matrix and package results](../downsampler-web-review/WEB-PERFORMANCE-REVIEW.md#windows-verification)
+The combined runtime at `ff785d9` passed typecheck, 161 core tests, 21 targeted cases per hardware adapter, eight on SwiftShader and seven in RTX compatibility mode. The full RTX suite ran 35,840 cases across 3,239 groups. Intel quick ran 21,791 cases across 1,864 groups. Only the two historical FSR f16 fixtures failed (five sizes on RTX, two on Intel). All 21,074 RTX compatibility cases passed. All 24 example pages and presets passed on both hardware adapters. A clean bundle clone produced a 56-file installable tarball, and all five export paths passed fresh consumer checks. [Windows matrix and package results](https://github.com/pmndrs/downsampler/blob/web-performance-review/WEB-PERFORMANCE-REVIEW.md#windows-verification)
 
 ### BVH2 · Settled frames and sparse CPU poses
 
@@ -129,7 +129,7 @@ Every pose run verified 55 writes during the timed blocks. Moving a vertex insid
 
 Three NVIDIA browser checks passed with zero ray disagreements in `bvh-top-level-gpu` (400 instances), `scene-trees-runtime` (eight mutation rounds), and `scene-trees-deforming` (GPU/CPU pose switches across six record/indexed configurations, including replacement trees and trims). The GPU refit still runs over its top-level records when a box moves. On devices supporting GPU deformation, polling and refit scheduling still visit the registered deforming meshes.
 
-**Reproduce.** Use the same benchmark files in both source checkouts. Run the [CPU fixture](bench/bvh2-bookkeeping.ts) from each root with Node 24. For the [browser fixture](bench/bvh2-browser.js), serve the root with Vite and the isolation headers below. Open `/README.md` on the local server and run the JavaScript snippet in Chrome DevTools. The browser fixture returns pooled and per-block statistics in milliseconds.
+**Reproduce.** Use the same benchmark files in both source checkouts. Run the [CPU fixture](../../bench/bvh2-bookkeeping.ts) from each root with Node 24. For the [browser fixture](../../bench/bvh2-browser.js), serve the root with Vite and the isolation headers below. Open `/README.md` on the local server and run the JavaScript snippet in Chrome DevTools. The browser fixture returns pooled and per-block statistics in milliseconds.
 
 ```powershell
 node --experimental-transform-types --no-warnings bench/bvh2-bookkeeping.ts

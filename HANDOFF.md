@@ -39,7 +39,7 @@ Everything Windows could do for 0.1.0 is on `main` and pushed. That includes the
 7. **Remove** the old worktree `~/Developer/bvh-worktrees/reflections-integration`.
 8. **Release 0.1.0** (Dennis): re-add the npm trusted publisher (it was added 2026-11-15 and npm drops it after two days unused, so it has most likely lapsed); check the `CHANGELOG.md` 0.1.0 section; run "Release to npm" with `0.1.0` and `latest` (`docs/internals/RELEASING.md`).
 
-**Web performance review (2026-11-17, Windows; `WEB-PERFORMANCE-REVIEW.md`, results in `REVIEW-TRACKER.md`).** The review covers `main` at `23af802`.
+**Web performance review (2026-11-17, Windows; `docs/internals/WEB-PERFORMANCE-REVIEW.md`, results in `docs/internals/REVIEW-TRACKER.md`).** The review covers `main` at `23af802`.
 - **BVH1, built:** the GPU top level uploads only the mesh records that changed, and writes its gather parameters only when they change. At 4,096 mesh slots, editing one mesh went from 131,088 bytes to 32, and an idle frame writes nothing.
 - **BVH2, built:** `SceneTrees.update` no longer scans every mesh on a settled frame. It keeps a set of pending CPU poses and caches the deepest reachable tree. A changed mesh box rewrites only the mesh record, not every instance of that mesh. At 4,096 meshes on the RTX, a settled update went from 150 µs to about 5 on the CPU.
 - **Checked on Windows:** 879 unit tests, lint, types, docs and the build. On the RTX, `bvh-top-level-gpu`, the `scene-trees-*` pages, `trace-inline` and `three-skinned` passed with no ray disagreements. The benchmark fixtures are `bench/bvh2-bookkeeping.ts` (Node) and `bench/bvh2-browser.js`.
