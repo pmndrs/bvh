@@ -12,7 +12,8 @@ shared GPU layout, and a WGSL walk and its CPU port trace it.
   and says why. Without the `subgroups` feature, tinybvh builds every tree.
 - **Scenes:** `SceneTrees` keeps a whole scene on one device. GPU trees come first and tinybvh's are swapped in from
   a worker pool. The top level is built on the GPU, and meshes and instances can come and go. GPU refits handle moving
-  instances and skinned or morphed meshes. Big meshes can be cut into clusters.
+  instances and skinned or morphed meshes. Big meshes can be cut into clusters. An update with nothing changed costs a
+  few microseconds on the CPU, and a changed mesh uploads only its own record.
 - **Tracing and queries:** the WGSL walk handles closest and any hits, with masks and a triangle filter, and ray
   batches. When a ray reaches two boxes at exactly the same distance, the closest-hit walk takes the right one first
   unless the ray starts inside both (tinybvh always takes the left): rays from outside a closed model were up to 4.4x

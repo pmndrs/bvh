@@ -26,18 +26,27 @@ This repo was split out of `DennisSmolek/webgpu-ddgi`, where the code lived in `
   - Check every consumer request against this rule. Per-triangle materials passed because the material is only a number.
   - `examples/three/pathtracer` is a demo of the walk. It and its pending compare page may move to the new repo.
 
-## Hand-back to the Mac (2026-11-17). Do these first.
+## Hand-back to the Mac (2026-11-18). Do these first.
 
-Everything Windows could do for 0.1.0 is on `main` and pushed. Left for the M5, in order:
+Everything Windows could do for 0.1.0 is on `main` and pushed. That includes the web performance review's two fixes (BVH1 and BVH2 below), merged 2026-11-18. Left for the M5, in order:
 
-1. **Pre-release checks:** every correctness page on the M5 at the full profile (`trace-oracle`, `trace-inline`, `query-oracle`, `sdf-oracle` with the new first-hit runs, `trace-clustered`, `three-trace`, `three-skinned`, `three-shapecast`, the `scene-trees-*` pages and the `bvh-*` pages other than the profiles), then `pnpm examples:build` and the examples smoke.
+1. **Pre-release checks:** every correctness page on the M5 at the full profile (`trace-oracle`, `trace-inline`, `query-oracle`, `sdf-oracle` with the new first-hit runs, `trace-clustered`, `three-trace`, `three-skinned`, `three-shapecast`, the `scene-trees-*` pages and the `bvh-*` pages other than the profiles), then `pnpm examples:build` and the examples smoke. `bvh-top-level-gpu`, `scene-trees-runtime` and `scene-trees-deforming` are the ones that check BVH1 and BVH2 on Metal.
 2. **Surface-ray sections 8 and 9** (`?skip=hit-record,leaves,any-order`, 3 runs each on Sponza and Bistro interior). They check the `triangleLeaves: 'records'` and `quantizedDecode: 'exact'` defaults that ship in 0.1.0 (Dennis's 7a/7b); a clear win for the other choice goes to 0.2, not 0.1.0.
 3. **`bvh-hploc-profile`** for the quantized emit.
 4. **pmndrs/bvh#1:** `wgsl-f32-arithmetic`, `trace-cpu-agreement`, and `trace-oracle` once.
 5. **Pages new since 2026-11-15:** `compare/sdf` (with `?breakdown`), the node-bake movable smoke (`pnpm examples:bake --scene --movable`, then load it), `compile-times` (the M5's numbers for runbook 13 and the performance page).
 6. **The closest-hit tie rule** (DECISIONS-0.1 item 8, on `main` since 2026-11-17; step 1 checks it): also run `compare/gpu ?scene=furnished-room&full` with and without `&nodeFormat=f32` on the M5.
 7. **Remove** the old worktree `~/Developer/bvh-worktrees/reflections-integration`.
-8. **Release 0.1.0** (Dennis): re-add the npm trusted publisher if it lapsed (it was added 2026-11-15 and npm drops it after two days unused); check the `CHANGELOG.md` 0.1.0 section; run "Release to npm" with `0.1.0` and `latest` (`docs/internals/RELEASING.md`).
+8. **Release 0.1.0** (Dennis): re-add the npm trusted publisher (it was added 2026-11-15 and npm drops it after two days unused, so it has most likely lapsed); check the `CHANGELOG.md` 0.1.0 section; run "Release to npm" with `0.1.0` and `latest` (`docs/internals/RELEASING.md`).
+
+**Web performance review (2026-11-17, Windows; `WEB-PERFORMANCE-REVIEW.md`, results in `REVIEW-TRACKER.md`).** The review covers `main` at `23af802`.
+- **BVH1, built:** the GPU top level uploads only the mesh records that changed, and writes its gather parameters only when they change. At 4,096 mesh slots, editing one mesh went from 131,088 bytes to 32, and an idle frame writes nothing.
+- **BVH2, built:** `SceneTrees.update` no longer scans every mesh on a settled frame. It keeps a set of pending CPU poses and caches the deepest reachable tree. A changed mesh box rewrites only the mesh record, not every instance of that mesh. At 4,096 meshes on the RTX, a settled update went from 150 µs to about 5 on the CPU.
+- **Checked on Windows:** 879 unit tests, lint, types, docs and the build. On the RTX, `bvh-top-level-gpu`, the `scene-trees-*` pages, `trace-inline` and `three-skinned` passed with no ray disagreements. The benchmark fixtures are `bench/bvh2-bookkeeping.ts` (Node) and `bench/bvh2-browser.js`.
+- **Open, after 0.1.0:**
+  - BVH3: count CPU ray crossings without building the hit list (CPU SDF and inside tests).
+  - BVH4: share the quantization frame in H-PLOC's emit, measured against the 35.1 ms Sponza build. Step 3's `bvh-hploc-profile` gives the M5's baseline.
+  - BVH5: a first-frame to steady-state readout in `vanilla/fast-first`, and shorter README routes.
 
 ## The build-out (2026-11-14, Windows laptop).
 
