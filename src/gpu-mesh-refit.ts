@@ -35,6 +35,15 @@
  * into the target's frame slot and nodes. The frame follows the pose. Cost:
  * 64 bytes per node of the mesh, for deforming meshes only.
  *
+ * **Wide nodes** (docs/internals/design/wide-nodes.md, section 2): the same
+ * `f32` copy, of the binary tree the wide one was collapsed from, refit
+ * unchanged; then the wide pack (gpu-wide-refit.ts) writes every wide node's
+ * corner, exponents and planes from the boxes its refit map
+ * ({@link WideRefitMap}) points at. CWBVH keeps its triangles in its leaves'
+ * order, so the triangle step writes record `k`'s box where the binary tree
+ * has that triangle (the map's `triangleOrder`). Cost: 64 bytes per binary
+ * node, 16 or 32 per wide node, and 4 per triangle (CWBVH).
+ *
  * A refit tree slowly gets worse as triangles move away from where it was
  * built. The refit's quality signal (`latestStats.relativeCost`, with
  * `diagnostics: true`) is the same as the top level's, so a caller can rebuild
@@ -49,6 +58,8 @@ import { leafSlotsOf, parentSlotsOf, PRIMITIVE_BOX_FLOATS } from './refit-cpu.ts
 import { dispatchWorkgroups2d, WORKGROUP_INDEX_WGSL } from './gpu-workgroup-scan.ts';
 import { nodeQuantizerFor, type QuantizeJob } from './gpu-quantize.ts';
 import { dequantizeNodes } from './quantized-nodes.ts';
+import { GpuWideRefitKernels, WIDE_REFIT_PARAMS_BYTES, WIDE_REFIT_WORKGROUP } from './gpu-wide-refit.ts';
+import { isWideNodeFormat, wideNodeBytes, wideRefitSlots, type WideNodeFormat, type WideRefitMap } from './wide-nodes.ts';
 
 const WORKGROUP_SIZE = 64;
 const PARAM_WORDS = 8;
@@ -66,7 +77,7 @@ struct MeshRefitParams {
     positionOffset: u32,       // float index of vertex 0's x
     indexFormat: u32,          // 0: a plain triangle list, 16 or 32: index bits
     indexOffset: u32,          // in indices, not bytes
-    unused: u32,
+    boxOrdered: u32,           // 1: slot k's box goes to refitBoxOrder[k] (a CWBVH tree's leaf order), 0: to k
 }
 
 @group(0) @binding(0) var<storage, read_write> refitTriangles: array<u32>;
@@ -75,6 +86,8 @@ struct MeshRefitParams {
 // Two per triangle slot, in tree order: (min.xyz, 0), (max.xyz, 0). The refit reads them.
 @group(0) @binding(3) var<storage, read_write> refitBoxes: array<vec4f>;
 @group(0) @binding(4) var<uniform> refitParams: MeshRefitParams;
+// The binary tree's slot of each record (wide trees whose records are in another order); a dummy when boxOrdered is 0.
+@group(0) @binding(8) var<storage, read> refitBoxOrder: array<u32>;
 
 const REFIT_WORKGROUP_SIZE: u32 = ${WORKGROUP_SIZE}u;
 const REFIT_TRIANGLE_WORDS: u32 = ${GPU_LAYOUT_TRIANGLE_BYTES / 4}u;
@@ -83,6 +96,14 @@ const REFIT_ORIGINAL_INDEX: u32 = ${triangle.originalIndex}u;
 const REFIT_INDEX_UINT16: u32 = ${LBVH_INDEX_FORMAT.uint16}u;
 const REFIT_INDEX_UINT32: u32 = ${LBVH_INDEX_FORMAT.uint32}u;
 ${WORKGROUP_INDEX_WGSL}
+
+// Where record 'slot''s box goes: the binary tree's slot of that triangle.
+fn refitBoxSlot(slot: u32) -> u32 {
+    if (refitParams.boxOrdered != 0u) {
+        return refitBoxOrder[slot];
+    }
+    return slot;
+}
 
 fn refitVertexOf(original: u32, corner: u32) -> u32 {
     let entry = refitParams.indexOffset + original * 3u + corner;
@@ -120,8 +141,9 @@ fn meshRefitTriangles(
         lower = min(lower, position);
         upper = max(upper, position);
     }
-    refitBoxes[slot * 2u] = vec4f(lower, 0.0);
-    refitBoxes[slot * 2u + 1u] = vec4f(upper, 0.0);
+    let boxSlot = refitBoxSlot(slot);
+    refitBoxes[boxSlot * 2u] = vec4f(lower, 0.0);
+    refitBoxes[boxSlot * 2u + 1u] = vec4f(upper, 0.0);
 }
 ${INDEXED_REFIT_WGSL}`;
 }
@@ -184,8 +206,9 @@ fn meshRefitIndexedBoxes(
         lower = min(lower, position);
         upper = max(upper, position);
     }
-    refitBoxes[slot * 2u] = vec4f(lower, 0.0);
-    refitBoxes[slot * 2u + 1u] = vec4f(upper, 0.0);
+    let boxSlot = refitBoxSlot(slot);
+    refitBoxes[boxSlot * 2u] = vec4f(lower, 0.0);
+    refitBoxes[boxSlot * 2u + 1u] = vec4f(upper, 0.0);
 }
 `;
 
@@ -232,6 +255,8 @@ export type GpuMeshRefitPlacement = {
     vertexCount?: number;
     /** Indexed trees: the positions buffer's layout. Default `'vec4'`. */
     positionLayout?: 'vec4' | 'packed';
+    /** Wide targets (`nodeFormat` `'bvh4'` or `'cwbvh8'`), required there: the tree's refit map (`wideRefitMap`, or the GPU collapse's). */
+    wide?: WideRefitMap;
 } & (
     | {
           /** The tree in its own buffers (word 0; with quantized nodes, its root after the frame slot). */
@@ -253,6 +278,17 @@ export type GpuMeshRefitPlacement = {
           /** The target's node format, required here. */
           nodeFormat: 'f32' | 'quantized';
       }
+    | {
+          /** The wide root's first word in the target node buffer (default 0). */
+          nodeWordOffset?: number;
+          /**
+           * Experimental (docs/internals/design/wide-nodes.md): `layout` is the
+           * binary tree the wide one was collapsed from, and `wide` is
+           * required; the refit runs on an `f32` copy, then the wide pack
+           * writes the target's nodes.
+           */
+          nodeFormat: WideNodeFormat;
+      }
 );
 
 /**
@@ -265,6 +301,8 @@ export type GpuMeshRefitPlacement = {
  */
 export class GpuMeshRefitKernels {
     readonly refit: GpuBvhRefitKernels;
+    /** The wide pack, for trees placed with this wide format; null without one. */
+    readonly wide: GpuWideRefitKernels | null;
     private readonly device: GPUDevice;
     private readonly label: string;
     private trianglePipeline: GPUComputePipeline | null = null;
@@ -272,17 +310,19 @@ export class GpuMeshRefitKernels {
     private indexedBoxPipeline: GPUComputePipeline | null = null;
     private compiling: Promise<void> | null = null;
 
-    constructor(device: GPUDevice, label = 'mesh refit') {
+    /** `wideFormat`: also compile the wide pack, for meshes whose trees sit in a scene of that format. */
+    constructor(device: GPUDevice, label = 'mesh refit', wideFormat: WideNodeFormat | null = null) {
         this.device = device;
         this.label = label;
         this.refit = new GpuBvhRefitKernels(device, label);
+        this.wide = wideFormat ? new GpuWideRefitKernels(device, wideFormat, `${label} wide`) : null;
     }
 
     prepare(): Promise<void> {
         this.compiling ??= (async () => {
             const module = this.device.createShaderModule({ label: this.label, code: meshRefitTrianglesWgsl() });
             const entry = (entryPoint: string) => this.device.createComputePipelineAsync({ label: `${this.label} ${entryPoint}`, layout: 'auto', compute: { module, entryPoint } });
-            const [pipeline, copy, indexedBoxes] = await Promise.all([entry('meshRefitTriangles'), entry('meshRefitCopyVertices'), entry('meshRefitIndexedBoxes'), this.refit.prepare()]);
+            const [pipeline, copy, indexedBoxes] = await Promise.all([entry('meshRefitTriangles'), entry('meshRefitCopyVertices'), entry('meshRefitIndexedBoxes'), this.refit.prepare(), this.wide?.prepare()]);
             this.trianglePipeline = pipeline;
             this.copyPipeline = copy;
             this.indexedBoxPipeline = indexedBoxes;
@@ -291,7 +331,7 @@ export class GpuMeshRefitKernels {
     }
 
     get ready(): boolean {
-        return this.trianglePipeline !== null && this.refit.ready;
+        return this.trianglePipeline !== null && this.refit.ready && (!this.wide || this.wide.pipeline !== null);
     }
 
     /** The triangle step's pipeline, or null before `prepare` has finished. */
@@ -370,6 +410,8 @@ export interface GpuMeshRefitOptions extends Omit<GpuBvhRefitOptions, 'kernels'>
      * sized for its mesh.
      */
     readonly boxes?: GpuRefitBoxPool;
+    /** Without shared kernels: the wide format the trees will be placed in (its pack is compiled too). */
+    readonly wideFormat?: WideNodeFormat;
 }
 
 /** Refits one mesh's tree from moved vertices, every frame if need be. Needs `subgroups` (for the refit). */
@@ -395,16 +437,22 @@ export class GpuMeshRefit {
     private indexedGroups: { copy: GPUBindGroup; boxes: GPUBindGroup; key: readonly unknown[] } | null = null;
     /** A quantized target: the f32 copy the refit runs on, the target's root slot, and the quantize job for the current target buffer. */
     private quantized: { shadow: GPUBuffer; rootSlot: number; nodeCount: number; job: QuantizeJob | null; jobTarget: GPUBuffer | null } | null = null;
+    /** A wide target: the f32 copy of the binary tree, the refit map's slots, the pack's params, and its bind group for the current target buffer. */
+    private wide: { format: WideNodeFormat; shadow: GPUBuffer; slots: GPUBuffer; params: GPUBuffer; nodeCount: number; group: GPUBindGroup | null; groupTarget: GPUBuffer | null } | null = null;
+    /** The binary slot of each record (a CWBVH tree's), or a 16-byte dummy. */
+    private order: GPUBuffer;
+    private ordered = false;
 
     constructor(device: GPUDevice, options: GpuMeshRefitOptions = {}) {
         this.device = device;
         this.label = options.label ?? 'mesh refit';
-        this.kernels = options.kernels ?? new GpuMeshRefitKernels(device, this.label);
+        this.kernels = options.kernels ?? new GpuMeshRefitKernels(device, this.label, options.wideFormat ?? null);
         this.refit = new GpuBvhRefit(device, { label: this.label, diagnostics: options.diagnostics, kernels: this.kernels.refit });
         this.params = device.createBuffer({ label: `${this.label} params`, size: PARAM_WORDS * 4, usage: USAGE.UNIFORM | USAGE.COPY_DST });
         this.boxPool = options.boxes ?? null;
         this.ownBoxes = this.boxPool ? null : device.createBuffer({ label: `${this.label} boxes`, size: 64, usage: USAGE.STORAGE });
         this.indexedParams = device.createBuffer({ label: `${this.label} indexed params`, size: 16, usage: USAGE.UNIFORM | USAGE.COPY_DST });
+        this.order = device.createBuffer({ label: `${this.label} box order`, size: 16, usage: USAGE.STORAGE | USAGE.COPY_DST });
     }
 
     /** Compiles the kernels, or waits for the shared ones. */
@@ -434,7 +482,12 @@ export class GpuMeshRefit {
         layout: GpuLayoutMeshBvh,
         placement: GpuMeshRefitPlacement = {},
     ): void {
-        if (placement.nodeWordOffset !== undefined && placement.nodeFormat !== 'f32' && placement.nodeFormat !== 'quantized') {
+        const wideFormat = isWideNodeFormat(placement.nodeFormat) ? placement.nodeFormat : null;
+        if (wideFormat) {
+            if (!placement.wide || placement.wide.nodeFormat !== wideFormat) throw new RangeError(`GpuMeshRefit.setTree: a ${wideFormat} target needs its refit map (placement.wide, from wideRefitMap or the GPU collapse)`);
+            if (this.kernels.wide?.format !== wideFormat) throw new RangeError(`GpuMeshRefit.setTree: the kernels were made for ${this.kernels.wide?.format ?? 'no'} wide format, the target is ${wideFormat} (GpuMeshRefitKernels' wideFormat)`);
+            if (placement.wide.triangleOrder && placement.wide.triangleOrder.length !== layout.triangleCount) throw new RangeError("GpuMeshRefit.setTree: the refit map's triangle order is not the layout's triangle count");
+        } else if (placement.nodeWordOffset !== undefined && placement.nodeFormat !== 'f32' && placement.nodeFormat !== 'quantized') {
             throw new RangeError(
                 `GpuMeshRefit.setTree: a tree placed at nodeWordOffset ${placement.nodeWordOffset} needs placement.nodeFormat, the target's ('f32' or 'quantized'; scenes are quantized by default). meshRefitPlacement(scene, mesh) gives it`,
             );
@@ -447,7 +500,7 @@ export class GpuMeshRefit {
                 ? { vertexBase: placement.vertexBase!, vertexCount: placement.vertexCount ?? null, sceneStride: placement.positionLayout === 'packed' ? 3 : 4 }
                 : null;
         if (this.indexed) this.device.queue.writeBuffer(this.indexedParams, 0, new Uint32Array([this.indexed.vertexBase, this.indexed.sceneStride, 0, 0]));
-        const quantized = (placement.nodeFormat ?? layout.nodeFormat ?? 'f32') === 'quantized';
+        const quantized = !wideFormat && (placement.nodeFormat ?? layout.nodeFormat ?? 'f32') === 'quantized';
         // The shape (child indices and counts) from f32 nodes; a quantized layout is decoded for it.
         const f32Nodes = dequantizeNodes(layout).nodes;
         const words = new Uint32Array(f32Nodes, 0, layout.nodeCount * 16);
@@ -470,6 +523,8 @@ export class GpuMeshRefit {
             this.quantized.shadow.destroy();
             this.quantized = null;
         }
+        this.setWide(layout, wideFormat ? placement.wide! : null, f32Nodes, placement.nodeWordOffset ?? 0);
+        if (wideFormat) nodeWordOffset = 0;
         this.refit.setShape({
             nodeWordOffset,
             nodeCount: layout.nodeCount,
@@ -501,6 +556,10 @@ export class GpuMeshRefit {
             this.quantized.job?.destroy();
             this.quantized.job = null;
             this.quantized.jobTarget = null;
+        } else if (this.wide) {
+            // The refit runs on the f32 copy at word 0; only the pack's target root moves.
+            if (nodeWordOffset % (wideNodeBytes(this.wide.format) / 4) !== 0) throw new RangeError(`GpuMeshRefit.moveTree: a ${this.wide.format} target's nodeWordOffset (${nodeWordOffset}) must be a node's first word`);
+            this.device.queue.writeBuffer(this.wide.params, 0, new Uint32Array([this.wide.nodeCount, nodeWordOffset, 0, 0]));
         } else {
             this.refit.setNodeWordOffset(nodeWordOffset);
         }
@@ -524,7 +583,7 @@ export class GpuMeshRefit {
                 vertices.positionOffsetFloats ?? 0, // positionOffset
                 indexFormat, // indexFormat
                 vertices.indexOffset ?? 0, // indexOffset
-                0, // unused
+                this.ordered ? 1 : 0, // boxOrdered
             ]),
         );
         const maxGroups = this.device.limits.maxComputeWorkgroupsPerDimension;
@@ -551,9 +610,93 @@ export class GpuMeshRefit {
             // Refit the f32 copy, then pack it into the target's frame slot and nodes (ordered after it in the pass).
             this.refit.encode(pass, this.quantized.shadow, this.boxes);
             this.quantizeJob(target.nodes).dispatch(pass);
+        } else if (this.wide) {
+            // Refit the binary f32 copy, then pack every wide node from it (ordered after it in the pass).
+            this.refit.encode(pass, this.wide.shadow, this.boxes);
+            this.encodeWidePack(pass, target.nodes);
         } else {
             this.refit.encode(pass, target.nodes, this.boxes);
         }
+    }
+
+    /**
+     * Wide targets: packs the wide nodes from binary `f32` nodes refit on the
+     * CPU (`refitLayoutToPose`; a CPU pose of a tree whose wide nodes exist
+     * only on the GPU, as the GPU collapse's), without the triangle step or
+     * the GPU refit. The nodes go into the `f32` copy with a queue write, so
+     * record this pass in an encoder submitted after this call.
+     */
+    encodePackFrom(pass: GPUComputePassEncoder, target: Pick<MeshRefitTarget, 'nodes'>, binaryNodes: ArrayBuffer): void {
+        if (!this.wide) throw new Error('GpuMeshRefit.encodePackFrom: the tree was not placed with a wide nodeFormat');
+        this.device.queue.writeBuffer(this.wide.shadow, 0, binaryNodes, 0, Math.min(binaryNodes.byteLength, this.wide.shadow.size));
+        this.encodeWidePack(pass, target.nodes);
+    }
+
+    private setWide(layout: GpuLayoutMeshBvh, map: WideRefitMap | null, f32Nodes: ArrayBuffer, wideWordOffset: number): void {
+        const wide = this.wide;
+        if (!map) {
+            if (wide) {
+                wide.shadow.destroy();
+                wide.slots.destroy();
+                wide.params.destroy();
+                this.wide = null;
+            }
+            this.setOrder(null);
+            return;
+        }
+        const M = wideRefitSlots(map.nodeFormat);
+        if (wideWordOffset % (wideNodeBytes(map.nodeFormat) / 4) !== 0) throw new RangeError(`GpuMeshRefit.setTree: a ${map.nodeFormat} target's nodeWordOffset (${wideWordOffset}) must be a node's first word`);
+        const shadowBytes = Math.max(64, layout.nodeCount * 64);
+        const slotBytes = Math.max(16, map.nodeCount * M * 4);
+        const grown = (buffer: GPUBuffer | undefined, size: number, name: string, usage: number): GPUBuffer => {
+            if (buffer && buffer.size >= size) return buffer;
+            buffer?.destroy();
+            return this.device.createBuffer({ label: `${this.label} ${name}`, size, usage });
+        };
+        const shadow = grown(wide?.shadow, shadowBytes, 'binary f32 nodes', USAGE.STORAGE | USAGE.COPY_DST);
+        const slots = grown(wide?.slots, slotBytes, 'refit map', USAGE.STORAGE | USAGE.COPY_DST);
+        const params = wide?.params ?? this.device.createBuffer({ label: `${this.label} wide params`, size: WIDE_REFIT_PARAMS_BYTES, usage: USAGE.UNIFORM | USAGE.COPY_DST });
+        // The refit rewrites every box; only the indices and counts must be right.
+        this.device.queue.writeBuffer(shadow, 0, f32Nodes, 0, layout.nodeCount * 64);
+        this.device.queue.writeBuffer(slots, 0, map.slots.buffer, map.slots.byteOffset, map.nodeCount * M * 4);
+        this.device.queue.writeBuffer(params, 0, new Uint32Array([map.nodeCount, wideWordOffset, 0, 0]));
+        this.wide = { format: map.nodeFormat, shadow, slots, params, nodeCount: map.nodeCount, group: null, groupTarget: null };
+        this.setOrder(map.triangleOrder);
+    }
+
+    private setOrder(order: Uint32Array | null): void {
+        this.ordered = order !== null;
+        if (!order) return;
+        const bytes = Math.max(16, order.byteLength);
+        if (this.order.size < bytes) {
+            this.order.destroy();
+            this.order = this.device.createBuffer({ label: `${this.label} box order`, size: bytes, usage: USAGE.STORAGE | USAGE.COPY_DST });
+            this.group = null;
+            this.indexedGroups = null;
+        }
+        this.device.queue.writeBuffer(this.order, 0, order.buffer, order.byteOffset, order.byteLength);
+    }
+
+    private encodeWidePack(pass: GPUComputePassEncoder, nodes: GPUBuffer): void {
+        const wide = this.wide!;
+        const pipeline = this.kernels.wide?.pipeline;
+        if (!pipeline) throw new Error('@pmndrs/bvh: call prepare() before encode()');
+        if (!wide.group || wide.groupTarget !== nodes) {
+            wide.group = this.device.createBindGroup({
+                label: `${this.label} wide pack`,
+                layout: pipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: wide.shadow } },
+                    { binding: 1, resource: { buffer: wide.slots } },
+                    { binding: 2, resource: { buffer: nodes } },
+                    { binding: 3, resource: { buffer: wide.params } },
+                ],
+            });
+            wide.groupTarget = nodes;
+        }
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, wide.group);
+        dispatchWorkgroups2d(pass, Math.ceil(wide.nodeCount / WIDE_REFIT_WORKGROUP), this.device.limits.maxComputeWorkgroupsPerDimension);
     }
 
     private quantizeJob(nodes: GPUBuffer): QuantizeJob {
@@ -568,7 +711,8 @@ export class GpuMeshRefit {
 
     /** GPU bytes of this refit's own buffers (the tree belongs to the caller, a shared box buffer to its pool). */
     get memoryBytes(): number {
-        return this.refit.memoryBytes + this.params.size + (this.ownBoxes?.size ?? 0) + (this.quantized?.shadow.size ?? 0);
+        const wide = this.wide ? this.wide.shadow.size + this.wide.slots.size + this.wide.params.size : 0;
+        return this.refit.memoryBytes + this.params.size + (this.ownBoxes?.size ?? 0) + this.order.size + (this.quantized?.shadow.size ?? 0) + wide;
     }
 
     /** Stats readback (diagnostics only), as for the top-level refit: poll at a frame's start, copy after the submit's encode. */
@@ -588,6 +732,13 @@ export class GpuMeshRefit {
         this.quantized?.job?.destroy();
         this.quantized?.shadow.destroy();
         this.quantized = null;
+        this.order.destroy();
+        if (this.wide) {
+            this.wide.shadow.destroy();
+            this.wide.slots.destroy();
+            this.wide.params.destroy();
+            this.wide = null;
+        }
     }
 
     private indexedBindGroups(
@@ -596,7 +747,7 @@ export class GpuMeshRefit {
         scenePositions: GPUBuffer,
         posed: GPUBuffer,
     ): { copy: GPUBindGroup; boxes: GPUBindGroup } {
-        const key = [triangles, scenePositions, posed, this.boxes];
+        const key = [triangles, scenePositions, posed, this.boxes, this.order];
         if (this.indexedGroups && this.indexedGroups.key.every((entry, index) => entry === key[index])) return this.indexedGroups;
         const copy = this.device.createBindGroup({
             label: `${this.label} copy vertices`,
@@ -617,6 +768,7 @@ export class GpuMeshRefit {
                 { binding: 5, resource: { buffer: scenePositions } },
                 { binding: 6, resource: { buffer: this.indexedParams } },
                 { binding: 7, resource: { buffer: triangles } },
+                { binding: 8, resource: { buffer: this.order } },
             ],
         });
         this.indexedGroups = { copy, boxes, key };
@@ -624,7 +776,7 @@ export class GpuMeshRefit {
     }
 
     private bindGroup(pipeline: GPUComputePipeline, triangles: GPUBuffer, positions: GPUBuffer, indices: GPUBuffer): GPUBindGroup {
-        const key = [triangles, positions, indices, this.boxes];
+        const key = [triangles, positions, indices, this.boxes, this.order];
         if (this.group && this.group.key.every((entry, index) => entry === key[index])) return this.group.group;
         const group = this.device.createBindGroup({
             label: this.label,
@@ -635,6 +787,7 @@ export class GpuMeshRefit {
                 { binding: 2, resource: { buffer: indices } },
                 { binding: 3, resource: { buffer: this.boxes } },
                 { binding: 4, resource: { buffer: this.params } },
+                { binding: 8, resource: { buffer: this.order } },
             ],
         });
         this.group = { group, key };

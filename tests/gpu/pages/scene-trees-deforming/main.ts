@@ -23,13 +23,20 @@
  * taking its instance's), so every check compares materials too, through the
  * refits and the drift rebuild (whose flags come from a buffer of their own).
  *
- * The `levers` variants (records, quantized and `f32`) turn on the P9 memory
+ * The `levers` variants (records, quantized and `f32`, BVH4 and CWBVH) turn on the P9 memory
  * levers of BX.20 that touch the GPU side (docs/internals/design/memory.md):
  * {@link LEVERS}. They add a second deforming mesh, half the cloth's triangles
  * with vertices of its own, posed through the first six poses, so two refits
  * take turns with one shared box buffer in each update's pass, and the node
  * buffer is trimmed whenever the scene is quiet (the refits follow the moved
  * trees).
+ *
+ * Each runs with records and indexed leaves, in `f32`, quantized, BVH4 and
+ * CWBVH nodes. Wide (docs/internals/design/wide-nodes.md, section 2): the
+ * cloth's GPU trees are collapsed on the GPU with their refit maps, tinybvh's
+ * in the workers (their maps made on arrival), and each refit packs the wide
+ * nodes from the refit binary tree; the CPU poses on the rebuilt GPU tree go
+ * through the same pack.
  */
 
 import { SceneTrees, type SceneTreesOptions } from '../../../../src/scene/scene-trees.ts';
@@ -92,8 +99,14 @@ await runGpuTest(
             ['indexed', 'quantized', false],
             ['records', 'quantized', true],
             ['records', 'f32', true],
+            ['records', 'bvh4', false],
+            ['indexed', 'bvh4', false],
+            ['records', 'cwbvh8', false],
+            ['indexed', 'cwbvh8', false],
+            ['records', 'bvh4', true],
+            ['records', 'cwbvh8', true],
         ] as const) {
-            const label = `${nodeFormat === 'quantized' ? `quantized ${triangleLeaves}` : triangleLeaves}${levers ? ' levers' : ''}`;
+            const label = `${nodeFormat === 'f32' ? triangleLeaves : `${nodeFormat} ${triangleLeaves}`}${levers ? ' levers' : ''}`;
             const kernel = await TraceBatchKernel.create(device, { triangleLeaves, nodeFormat });
             const rest = cloth();
             const rock: MeshGeometry = { positions: new Float32Array([-1, -1, -1, 1, -1, -1, 0, 1, -1, 0, 0, 1]), indices: new Uint32Array([0, 1, 2, 0, 1, 3, 1, 2, 3, 0, 2, 3]) };

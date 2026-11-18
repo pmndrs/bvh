@@ -66,6 +66,13 @@
  *
  * URL options: `?sharedRays=100000` shrinks the seam cases; `?variants=a,b` runs only those
  * variants (`?variants=levers` every `-levers` one).
+ * The `wide-*` variants run with `nodeFormat: 'bvh4'` or `'cwbvh8'`
+ * (docs/internals/design/wide-nodes.md): H-PLOC's first trees collapsed on
+ * the GPU (gpu-wide-collapse.ts; CWBVH's built with leaves of at most 3),
+ * then tinybvh's, collapsed in the workers, swapped in as for the others;
+ * merged groups and indexed leaves around them.
+ *
+ * URL option: `?sharedRays=100000` shrinks the seam cases.
  */
 
 import { SceneTrees } from '../../../../src/scene/scene-trees.ts';
@@ -97,6 +104,8 @@ interface Variant {
     readonly quantizeOnEmit?: boolean;
     /** Indexed: the walk binds an app positions buffer (`positionsBuffer`) instead of the scene's copy. */
     readonly appPositions?: boolean;
+    /** Wide nodes (docs/internals/design/wide-nodes.md); absent: f32. */
+    readonly wide?: 'bvh4' | 'cwbvh8';
 }
 
 /** Smaller than any one-mesh batch (its uniforms alone are 2.8 kB), so every mesh is a batch of its own. */
@@ -138,6 +147,12 @@ const VARIANTS: readonly Variant[] = [
     // Both sets together: adoption in every format with the trim, batched quantize passes and no parents; the emit with the levers, capped.
     { name: 'quantized-indexed-adopt-merged-levers', gpuTreeOutputs: 'adopt', merged: true, indexed: 'packed', quantized: true, levers: true },
     { name: 'quantized-emit-copy-capped-levers', gpuTreeOutputs: 'copy', merged: false, maxBatchBytes: SMALL_CAP, quantized: true, quantizeOnEmit: true, levers: true },
+    // Wide nodes: H-PLOC's trees collapsed on the GPU, tinybvh's in the workers; the last with the trim lever (wide trees moved in the node buffer).
+    { name: 'wide-bvh4', gpuTreeOutputs: 'copy', merged: false, wide: 'bvh4' },
+    { name: 'wide-bvh4-merged', gpuTreeOutputs: 'copy', merged: true, wide: 'bvh4' },
+    { name: 'wide-cwbvh8', gpuTreeOutputs: 'copy', merged: false, wide: 'cwbvh8' },
+    { name: 'wide-cwbvh8-indexed-merged', gpuTreeOutputs: 'copy', merged: true, indexed: 'packed', wide: 'cwbvh8' },
+    { name: 'wide-cwbvh8-capped-levers', gpuTreeOutputs: 'copy', merged: false, maxBatchBytes: SMALL_CAP, wide: 'cwbvh8', levers: true },
 ];
 
 /** An app's positions buffer for `meshes`: two spare vertices, then each mesh's vertices in `layout`'s stride; and each mesh's base. */
@@ -182,10 +197,16 @@ await runGpuTest(
             'quantized-records': await TraceBatchKernel.create(device, { nodeFormat: 'quantized' }),
             'quantized-vec4': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'vec4', nodeFormat: 'quantized' }),
             'quantized-packed': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'quantized' }),
+            'bvh4-records': await TraceBatchKernel.create(device, { nodeFormat: 'bvh4' }),
+            'cwbvh8-records': await TraceBatchKernel.create(device, { nodeFormat: 'cwbvh8' }),
+            'cwbvh8-packed': await TraceBatchKernel.create(device, { triangleLeaves: 'indexed', positionLayout: 'packed', nodeFormat: 'cwbvh8', wideStack: 'workgroup' }),
         };
         const firstTrees = new GpuFirstTrees(device, { label: 'mid-swap' });
         const indexedFirstTrees = new GpuFirstTrees(device, { label: 'mid-swap indexed', triangleLeaves: 'indexed' });
-        await Promise.all([firstTrees.prepare(), indexedFirstTrees.prepare()]);
+        // CWBVH's GPU collapse needs leaves of at most 3 (SceneTrees asks its own builder for that; these are shared).
+        const cwbvhFirstTrees = new GpuFirstTrees(device, { label: 'mid-swap cwbvh', maxLeafPrimitives: 3 });
+        const cwbvhIndexedFirstTrees = new GpuFirstTrees(device, { label: 'mid-swap cwbvh indexed', triangleLeaves: 'indexed', maxLeafPrimitives: 3 });
+        await Promise.all([firstTrees.prepare(), indexedFirstTrees.prepare(), cwbvhFirstTrees.prepare(), cwbvhIndexedFirstTrees.prepare()]);
         const pool = createBvhWorkerPool({ size: 4 });
         assert(pool.usesWorkers, 'the worker pool fell back to building inline in a browser');
         const failures: string[] = [];
@@ -212,14 +233,14 @@ await runGpuTest(
                     gpuMaxBatchBytes: variant.maxBatchBytes,
                     mergeStaticInstances: variant.merged,
                     workers: pool,
-                    firstTreeBuilder: variant.indexed ? indexedFirstTrees : firstTrees,
+                    firstTreeBuilder: variant.wide === 'cwbvh8' ? (variant.indexed ? cwbvhIndexedFirstTrees : cwbvhFirstTrees) : variant.indexed ? indexedFirstTrees : firstTrees,
                     ...(variant.indexed ? { triangleLeaves: 'indexed' as const, positionLayout: variant.indexed } : {}),
-                    nodeFormat: variant.quantized ? 'quantized' : 'f32',
+                    nodeFormat: variant.wide ?? (variant.quantized ? 'quantized' : 'f32'),
                     ...(variant.levers ? { trimWhenRefined: true, quantizeJobs: 'batched' as const, parents: 'refit' as const } : {}),
                     ...(variant.quantizeOnEmit ? { gpuQuantizeOnEmit: true } : {}),
                     ...(app ? { positionsBuffer: app.buffer } : {}),
                 });
-                const kernel = kernels[`${variant.quantized ? 'quantized-' : ''}${variant.indexed ?? 'records'}` as keyof typeof kernels];
+                const kernel = kernels[`${variant.quantized ? 'quantized-' : variant.wide ? `${variant.wide}-` : ''}${variant.indexed ?? 'records'}` as keyof typeof kernels];
                 const handles = meshes.map((mesh, index) => scene.addMesh(mesh, app ? { vertexBase: app.bases[index] } : {}));
                 for (const instance of instances) scene.addInstance({ ...instance, mesh: handles[instance.meshIndex] });
                 const frame = () => {

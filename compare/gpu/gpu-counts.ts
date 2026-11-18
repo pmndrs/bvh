@@ -73,12 +73,14 @@ async function readBuffer(device: GPUDevice, buffer: GPUBuffer, bytes: number): 
 /** Our counted walk over `packed` rays: work per ray. */
 export async function countOurs(device: GPUDevice, scene: TraceSceneBuffers, mode: GpuMode, packed: Float32Array, anyHitOrder?: AnyHitOrder): Promise<WorkPerRay> {
     const count = packed.length / RAY_FLOATS;
+    const nodeFormat = scene.nodeFormat;
+    if (nodeFormat === 'bvh4' || nodeFormat === 'cwbvh8') throw new RangeError(`countOurs: the counted walk has no ${nodeFormat} version`);
     const pipeline = await device.createComputePipelineAsync({
         label: `compare counted ${mode}`,
         layout: 'auto',
         // The scene's own node format: a counted walk compiled for f32 nodes reads quantized ones as garbage
         // (4 box tests and no hits per ray, the 2026-11-16 re-run's `?counts` for ours).
-        compute: { module: device.createShaderModule({ code: countedKernelWgsl(mode, { anyHitOrder, nodeFormat: scene.nodeFormat }) }), entryPoint: 'benchCounted' },
+        compute: { module: device.createShaderModule({ code: countedKernelWgsl(mode, { anyHitOrder, nodeFormat }) }), entryPoint: 'benchCounted' },
     });
     const rays = device.createBuffer({ size: packed.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(rays, 0, packed as Float32Array<ArrayBuffer>);

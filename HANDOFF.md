@@ -168,6 +168,89 @@ Everything below was on `main` and pushed to origin on 2026-11-13. No release, t
 - **CPU finding (for the `src/query` owner):** `CpuMeshBvh.closestPointToPoint` (three's region algorithm, in doubles) picks a wrong region on slivers degenerate only up to rounding (a collinear triangle under a general transform): in the oracle's first try it gave 2.2e-3 for a point lying on such a sliver (the GPU: 1.2e-7) and a distance 0.3% too long in another case. The GPU treats slivers as edges; the oracle keeps its degenerate triangles exact to stay comparable.
 - **Not done:** an SDF (8.10, unblocked, needs an inside test); shapecast hooks as TSL callbacks (`getShapecastFn`'s form); `intersectsRange` / `contained` in the GPU shapecast; GPU closest point between meshes; Windows and Intel runs of `query-oracle`; no timing of the queries yet.
 
+**Wide-node experiment** (built on the Mac on branch `claude/wide-bvh-684631`, merged into main 2026-11-18 on Windows; `docs/internals/design/wide-nodes.md`)
+- **What:** `nodeFormat: 'bvh4' | 'cwbvh8'`, experimental, scenes only, off by default.
+  - tinybvh's collapse (Ylitie 2017 §4.2), `BVH4_GPU` and `BVH8_CWBVH` layouts and walks, ported to TypeScript and WGSL (`src/wide-nodes.ts`, `src/trace/wgsl-wide.ts`).
+  - Each `f32` tree is collapsed when a scene is assembled or a `SceneTrees` tree arrives.
+  - Planes are decoded exactly, so hits equal the binary walk's (ties apart).
+  - `wideStack: 'private' | 'workgroup'` for CWBVH.
+- **Works with:** `SceneTrees`, merged groups, indexed leaves, GPU and CPU poses, `/three`, and the CPU walk.
+  - In `SceneTrees`, H-PLOC's first trees are collapsed on the GPU (`src/gpu-wide-collapse.ts`) and tinybvh's in the workers.
+  - Deforming meshes are refit on the GPU (`setPose`, drift rebuilds included): the binary tree's `f32` copy is refit, then every wide node is packed again (`src/gpu-wide-refit.ts`). The pack follows a refit map from each wide slot to its box in the binary tree; the GPU collapse writes it for deforming meshes, and `wideRefitMap` makes it for tinybvh's trees.
+  - CPU poses (`setPoseCpu`) repack tinybvh's trees on the CPU (`refitWide`) and GPU-collapsed ones with the GPU pack.
+- **Gates on the M5:**
+  - `trace-oracle` full (every wide variant, the L1 and L7 ones included: 0 of 2M shared-edge slips; seams at most records').
+  - `trace-wide-compile` (largest kernel 43.9 KB).
+  - `scene-trees-mid-swap` (132 wide states with GPU-collapsed first trees, 0 disagreements).
+  - `bvh-wide-collapse` (the GPU collapse: hits equal f32's).
+  - `bvh-wide-refit` (the GPU refit's nodes and records equal the CPU's word for word, for CPU- and GPU-collapsed trees).
+  - `scene-trees-deforming` with BVH4 and CWBVH, records and indexed (GPU poses, the swap, a drift rebuild and CPU poses: 0 disagreements).
+- **Planes:** every plane is the tightest the `f32` decode allows, searched both ways, on the CPU and the GPU alike (2026-11-14; before, the GPU could land one step tighter than the CPU, both valid).
+- **Memory, Sponza:** nodes 185.1 → 74.5 MiB (BVH4) → 40.5 MiB (CWBVH).
+- **Collapse time, Sponza, one core:** 1.35 s (BVH4), 1.83 s (CWBVH).
+- **Speed, M5 quiet pass** (2026-11-14 at `11d19f6`, every app closed, load 1.2-2.2; three runs per scene; design note section 8; rows in `bench/results/trace.csv`). Closest hit on incoherent rays (surface and air grid), wide over f32:
+  - merged trees, Sponza: BVH4 1.27-1.34x, BVH4 folded 1.34-1.43x; CWBVH 0.98-1.02x, folded 1.06-1.11x;
+  - merged trees, Bistro interior: CWBVH 1.39-1.41x, folded 1.45-1.46x, workgroup stack 1.36-1.38x; BVH4 1.03-1.25x, folded 1.05-1.28x;
+  - instanced trees: 0.55-0.92x nested, 0.88-0.97x with BVH4's single loop;
+  - every answer equals f32's, ties apart (0 differing of about 33.3M per run).
+- **Levers (timed):** L1 (`wideDecode: 'folded'`) is faster on every row, 1.01-1.08x for BVH4 and 1.03-1.13x for CWBVH. L7 (`wideWalk: 'single'`, BVH4) is 1.06-1.48x the nested walk on incoherent instanced rays but still below f32 there, and slower on primary rays and merged trees (0.66-0.96x).
+- **The gate** (≥1.3x on both the M5 and the RTX 3060) is met on the M5 only per scene, on merged trees: CWBVH (any variant) on Bistro interior, BVH4 folded on Sponza. No format meets it on both scenes. Choosing a format is Dennis's call; no default has changed.
+- **Precision timing:** the "Quiet pass" section below; the RTX 3060 runs are in runbook section 2d.
+- **Timed pages** now hold the shared GPU lock (`/tmp/rt-gpu.lock`) and record the machine's load (`tests/gpu/README.md`, "Timed pages").
+- **Merged into main (2026-11-18):** the formats sit beside main's newer work. `traceModuleWgsl` refuses `queries`, `shapecast` and `counters` with a wide format (they read binary nodes), and `quantizedDecode` stays for quantized nodes (`wideDecode` is the wide one). `SceneTrees` refuses `placeTree` and `placeMergedTrees` in a wide scene, and `gpuTreeOutputs: 'adopt'`. Wide trees follow `trim` (`GpuMeshRefit.moveTree` moves the pack's target), share the refit box pool, and keep compact pose layouts. New page variants: `scene-trees-deforming` wide `levers`, `scene-trees-mid-swap` `wide-cwbvh8-capped-levers`.
+
+## Quiet pass (precision timing; run with every app closed)
+
+For the session that runs the maintainer's quiet pass (pathtracer `docs/QUIET-PASS.md`). Nothing else may run: no browser, no other agent jobs. The load check can't see an open Chrome window.
+
+**What it measures:** the wide-node experiment (`docs/internals/design/wide-nodes.md`, section 8): `bvh4`, `bvh4-single` (lever L7, the single-loop walk), `bvh4-folded` and `cwbvh8-folded` (lever L1, the folded plane decode), `cwbvh8` and `cwbvh8-workgroup` against `f32`, on primary, surface and air-grid rays, closest and any hit, instanced and merged trees. One page run times all of them, about 4-5 minutes each. The runner takes the shared GPU lock (`/tmp/rt-gpu.lock`) itself and records the load.
+
+**Setup:**
+
+```bash
+cd ~/Developer/bvh
+git checkout main
+pnpm install
+export BVH_ASSETS_DIR=~/Developer/webgpu-ddgi-radiance-cache/assets
+export BVH_MANIFESTS_DIR=~/Developer/webgpu-ddgi-radiance-cache/scenes/manifests
+export BVH_PAGE_QUERY='skip=hit-record,leaves,nodes,any-order'
+mkdir -p ~/quiet-pass/bvh
+```
+
+**Runs:** three per scene, one at a time.
+
+```bash
+for run in 1 2 3; do pnpm test:gpu:page trace-bench-surface-sponza --json ~/quiet-pass/bvh/wide-sponza-$run.json; done
+```
+
+```bash
+for run in 1 2 3; do pnpm test:gpu:page trace-bench-surface-bistro-interior --json ~/quiet-pass/bvh/wide-bistro-$run.json; done
+```
+
+A run that fails with "DevTools call Runtime.evaluate timed out" is a runner hiccup, not a result: run it again under the same name. Any other failure means a wide answer differed from `f32`. Stop and report it.
+
+**Report:**
+
+```bash
+node --experimental-transform-types --no-warnings tools/wide-summary.ts ~/quiet-pass/bvh/wide-sponza-*.json ~/quiet-pass/bvh/wide-bistro-*.json --markdown
+```
+
+It prints, per scene, the load of each run and whether it counted as quiet, answers differing from `f32` (must be 0), and every ratio as min..max of the three runs' medians:
+
+- `wide_<format>_over_f32/<tree>/<set>/<mode>`, where `<format>` is `bvh4`, `bvh4-single`, `bvh4-folded`, `cwbvh8`, `cwbvh8-folded` or `cwbvh8-workgroup`; `<tree>` is `instanced` or `merged`; `<set>` is `primary`, `surface` or `air-grid`; `<mode>` is `closest` or `any`;
+- `l7_bvh4-single_over_bvh4/<tree>/<set>/<mode>`: the L7 A/B, single loop over nested;
+- `l1_bvh4-folded_over_bvh4/...` and `l1_cwbvh8-folded_over_cwbvh8/...`: the L1 A/B, folded over exact decode.
+
+Report those tables, plus which format and tree reach 1.3x closest-hit on `surface` and `air-grid` (the gate) on both scenes. To keep the rows:
+
+```bash
+node --experimental-transform-types --no-warnings tests/gpu/pages/trace-bench/surface-to-csv.ts ~/quiet-pass/bvh/wide-*.json --append
+```
+
+Then commit `bench/results/trace.csv`.
+
+**Done once** (2026-11-14 at `11d19f6`, by the pathtracer's quiet-pass session): the numbers are in design note section 8 and the rows in `bench/results/trace.csv`. Run it again only for a change that could move the walks' speed.
+
 **Consumers** (survey of ~/Developer, 2026-11-11)
 - **ddgi and its rc-\* copies:** on the frozen copy; they switch at P3.
 - **reflections:** now on bvh `main`, reading `dist/` (see the build note above). After the next `pnpm build` it gets quantized scene nodes by default; its `assembleTraceScene` and `traceModuleWgsl` defaults agree, so only code that reads `nodes` with the 64-byte stride needs `nodeFormat: 'f32'` (`docs/internals/MIGRATING-FROM-REFLECTIONS-BRANCH.md`, section 6).
@@ -184,3 +267,4 @@ Everything below was on `main` and pushed to origin on 2026-11-13. No release, t
 - **Not built, by decision:** GPU points and lines (design note); `ClusteredBVH` inside `SceneTrees` and the sync; per-node `refit(nodeIndices)` on `BvhBoundsTree` (the `sculpt` port refits the whole tree); a CPU copy of `SceneTrees`' trees (no SAH per tree in overlays); LBVH skipping its parents output (H-PLOC only); `onProgress` from tinybvh (needs a WASM callback).
 - **Old worktree** `~/Developer/bvh-worktrees/reflections-integration` on the Mac: Dennis removes it.
 - **Where others still win** (2026-11-16, RTX 3060 and i9-11900H, on the 2026-11-15 defaults; `compare/RESULTS.md`): the furnished room's GPU closest hits from outside (0.51x three-mesh-bvh, quantized nodes; 0.96x on `f32`); CPU refit, three-mesh-bvh 2.2-2.5x faster (1.6-1.9x against `corners: 'positions'`); memory 5.5-8.9x theirs on Sponza; CPU rays on x86, Rapier 1.10-1.25x and three-mesh-bvh SAH 1.14-1.47x on the knot and the room (ours led on the M5; one run, not explained); bvh.js builds scene trees about 3x faster; `ObjectBVH` updates 2.3x faster.
+- **Wide nodes (experimental, off by default): the RTX 3060 has not run them.** The gate needs 1.3x closest-hit on incoherent rays on both the M5 and the RTX 3060; runbook section 2d has the commands (`trace-oracle` for the wide variants on NVIDIA, `trace-wide-compile`, then three runs per scene of `trace-bench-surface-sponza` and `-bistro-interior`).

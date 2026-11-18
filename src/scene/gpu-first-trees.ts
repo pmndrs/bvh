@@ -274,8 +274,8 @@ export class GpuFirstTrees implements FirstTreeBuilder {
     private readonly device: GPUDevice;
     private readonly hploc: HplocBatchBuilder;
     private readonly label: string;
-    /** The trees' triangle format, for every batch. */
-    private readonly buildOptions: { readonly triangleLeaves?: 'indexed' };
+    /** The trees' triangle format and leaf limit, for every batch. */
+    private readonly buildOptions: { readonly triangleLeaves?: 'indexed'; readonly maxLeafPrimitives?: number };
     /** Capped batches not started yet, in order (every build's: one batch builds at a time). */
     private readonly queue: QueuedBatch[] = [];
     /** A capped batch is building, or its outputs are not let go yet. */
@@ -287,8 +287,15 @@ export class GpuFirstTrees implements FirstTreeBuilder {
     private current: { readonly owner: object; readonly bytes: () => number } | null = null;
 
     /** `hploc` is for tests: an H-PLOC builder stand-in. */
-    constructor(device: GPUDevice, options: { readonly label?: string; readonly hploc?: HplocBatchBuilder; readonly triangleLeaves?: 'records' | 'indexed' } = {}) {
-        this.buildOptions = options.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' } : {};
+    constructor(
+        device: GPUDevice,
+        options: { readonly label?: string; readonly hploc?: HplocBatchBuilder; readonly triangleLeaves?: 'records' | 'indexed'; readonly maxLeafPrimitives?: number } = {},
+    ) {
+        // maxLeafPrimitives: a wide scene's CWBVH needs leaves of at most 3 (its GPU collapse has no SplitLeafs).
+        this.buildOptions = {
+            ...(options.triangleLeaves === 'indexed' ? { triangleLeaves: 'indexed' as const } : {}),
+            ...(options.maxLeafPrimitives !== undefined ? { maxLeafPrimitives: options.maxLeafPrimitives } : {}),
+        };
         this.device = device;
         this.label = `${options.label ?? 'bvh'} mesh trees`;
         this.hploc = options.hploc ?? new GpuHplocBuilder(device, { label: this.label });

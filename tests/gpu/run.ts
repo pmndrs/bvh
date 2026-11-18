@@ -19,6 +19,9 @@ import { discoverPages, selectPages } from './pages.ts';
 import { BrowserSession, WebGpuUnavailableError, WrongAdapterError, type PageResult } from './session.ts';
 import { SITE_ROOT, startTestSite, type TestSiteServer } from './server.ts';
 import { summarizePage } from './summary.ts';
+import { acquireGpuLock } from './gpu-lock.ts';
+import { describeLoad, isQuiet, machineLoad } from './machine-load.ts';
+import { cpus } from 'node:os';
 import { examplePages, startExamplesSite } from './examples-site.ts';
 
 function describeAdapter(adapter: AdapterSummary): string {
@@ -181,16 +184,36 @@ async function main(): Promise<number> {
         console.log(`pages: ${pages.map((page) => page.name).join(', ')}`);
 
         for (const page of pages) {
-            // A self-test page counts as "expected to fail" only in the full run. Asked for by name,
-            // it is judged like any other page, so `--filter wgsl-error` fails and shows the error.
-            const result = await session.runPage(page, {
-                timeoutMs: options.timeoutMs ?? page.timeoutMs,
-                expectFailure: page.expectFailure && options.filters.length === 0,
-                screenshotDir,
-                gpuLabel,
-            });
+            // Timed (manual) pages hold the machine-wide GPU lock that the other GPU jobs on a shared machine take,
+            // and record how loaded the machine was before and after (tests/gpu/README.md, "Timed pages").
+            let release: (() => void) | null = null;
+            let loadBefore = null;
+            if (page.manual && process.env.BVH_GPU_LOCK !== '0') {
+                release = await acquireGpuLock({ who: `bvh ${page.name}`, onWait: (owner) => console.log(`waiting for the GPU lock (${owner})`) });
+                loadBefore = machineLoad(cpus().length);
+                console.log(`GPU lock held; ${describeLoad(loadBefore)}`);
+            }
+            let result;
+            try {
+                // A self-test page counts as "expected to fail" only in the full run. Asked for by name,
+                // it is judged like any other page, so `--filter wgsl-error` fails and shows the error.
+                result = await session.runPage(page, {
+                    timeoutMs: options.timeoutMs ?? page.timeoutMs,
+                    expectFailure: page.expectFailure && options.filters.length === 0,
+                    screenshotDir,
+                    gpuLabel,
+                });
+            } finally {
+                release?.();
+            }
             printPageResult(result, options.verbose);
-            summary.pages.push(summarizePage(result));
+            const pageSummary = summarizePage(result);
+            if (loadBefore) {
+                const loadAfter = machineLoad(cpus().length);
+                console.log(`after: ${describeLoad(loadAfter)}`);
+                pageSummary.machineLoad = { before: loadBefore, after: loadAfter, quiet: isQuiet(loadBefore) && isQuiet(loadAfter) };
+            }
+            summary.pages.push(pageSummary);
             if (!result.verdict.acceptable) failures++;
         }
 

@@ -11,7 +11,7 @@
  */
 
 import type { TraceSceneData } from './scene-assembly.ts';
-import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl, closestPointKernelWgsl, hitRecordBytes, WALK_COUNTS_BYTES, type AnyHitOrder, type QuantizedDecode } from './wgsl.ts';
+import { BATCH_PARAMS_BYTES, BATCH_PARAMS_WORD, BATCH_WORKGROUP_SIZE, batchKernelWgsl, closestPointKernelWgsl, hitRecordBytes, WALK_COUNTS_BYTES, type AnyHitOrder, type QuantizedDecode, type WideDecode, type WideStack, type WideWalk } from './wgsl.ts';
 import { CLOSEST_POINT_RECORD_BYTES, POINT_QUERY_BYTES } from './query-wgsl.ts';
 import { RAY_MASK_ALL, DEFAULT_NODE_FORMAT, type NodeFormat, type PositionLayout, type TriangleLeaves } from '../gpu-layout.ts';
 import { RAY_BYTES } from './rays.ts';
@@ -51,8 +51,8 @@ export function traceSourceFormats(
     where: string,
 ): { nodeFormat: NodeFormat; triangleLeaves: TriangleLeaves; positionLayout: PositionLayout } {
     const { nodeFormat, triangleLeaves } = source;
-    if (nodeFormat !== 'f32' && nodeFormat !== 'quantized') {
-        throw new RangeError(`${where}: the buffers must name their nodeFormat ('f32' or 'quantized'), got ${String(nodeFormat)}. uploadTraceScene and SceneTrees name it; data is never given a default`);
+    if (nodeFormat !== 'f32' && nodeFormat !== 'quantized' && nodeFormat !== 'bvh4' && nodeFormat !== 'cwbvh8') {
+        throw new RangeError(`${where}: the buffers must name their nodeFormat ('f32', 'quantized', or the experimental 'bvh4' or 'cwbvh8'), got ${String(nodeFormat)}. uploadTraceScene and SceneTrees name it; data is never given a default`);
     }
     if (triangleLeaves !== 'records' && triangleLeaves !== 'indexed') {
         throw new RangeError(`${where}: the buffers must name their triangleLeaves ('records' or 'indexed'), got ${String(triangleLeaves)}`);
@@ -219,6 +219,12 @@ export interface TraceBatchKernelOptions {
      * heat maps and tools; trace with a kernel without it for speed. Default false.
      */
     readonly counters?: boolean;
+    /** `nodeFormat: 'cwbvh8'`: the mesh walk's stack, `'private'` (the default) or `'workgroup'` (`TraceModuleOptions.wideStack`). */
+    readonly wideStack?: WideStack;
+    /** `nodeFormat: 'bvh4'`: the walk's shape, `'nested'` (the default) or `'single'` (`TraceModuleOptions.wideWalk`). */
+    readonly wideWalk?: WideWalk;
+    /** Wide formats: `'exact'` (the default) or `'folded'` plane decode (`TraceModuleOptions.wideDecode`). */
+    readonly wideDecode?: WideDecode;
 }
 
 /**
@@ -248,13 +254,13 @@ export class TraceBatchKernel {
     }
 
     static async create(device: GPUDevice, options: TraceBatchKernelOptions = {}): Promise<TraceBatchKernel> {
-        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = DEFAULT_NODE_FORMAT, anyHitOrder, quantizedDecode, counters = false } = options;
+        const { label = 'trace', triangleFilter, rayMasks = true, hitNormal = true, triangleLeaves = 'records', positionLayout = 'vec4', nodeFormat = DEFAULT_NODE_FORMAT, anyHitOrder, quantizedDecode, counters = false, wideStack, wideWalk, wideDecode } = options;
         const pipelineFor = (mode: 'closest' | 'any') =>
             device.createComputePipelineAsync({
                 label: `${label} batch ${mode}`,
                 layout: 'auto',
                 compute: {
-                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks, hitNormal, triangleLeaves, positionLayout, nodeFormat, anyHitOrder, quantizedDecode, counters }) }),
+                    module: device.createShaderModule({ label: `${label} batch ${mode}`, code: batchKernelWgsl(mode, { triangleFilter, rayMasks, hitNormal, triangleLeaves, positionLayout, nodeFormat, anyHitOrder, quantizedDecode, counters, wideStack, wideWalk, wideDecode }) }),
                     entryPoint: 'bvhBatch',
                 },
             });

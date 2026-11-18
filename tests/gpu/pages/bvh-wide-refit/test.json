@@ -1,0 +1,4 @@
+{
+    "description": "GPU wide refit (gpu-mesh-refit.ts with a wide target, gpu-wide-refit.ts): BVH4 and CWBVH trees, collapsed on the CPU (refit map from wideRefitMap) and on the GPU (refit map from the collapse), refit on the GPU from posed vertices; the wide nodes and triangle records must equal the CPU's (refitWide, repackWide) word for word, pass checkWideTree on the posed triangles, and give the posed f32 tree's hits. The CPU pose's pack (encodePackFrom) must give the same nodes.",
+    "timeoutMs": 300000
+}

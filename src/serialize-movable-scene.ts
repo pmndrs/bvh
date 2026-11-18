@@ -50,7 +50,7 @@
  * refused, not converted, as the others are.
  */
 
-import { DEFAULT_NODE_FORMAT, GPU_LAYOUT_VERSION, type GpuLayoutMeshBvh, type NodeFormat, type TriangleLeaves } from './gpu-layout.ts';
+import { DEFAULT_NODE_FORMAT, GPU_LAYOUT_VERSION, type GpuLayoutMeshBvh, type GpuLayoutNodeFormat, type TriangleLeaves } from './gpu-layout.ts';
 import { checkTriangleLeaves } from './indexed-leaves.ts';
 import { checkNodeFormat, quantizeNodes } from './quantized-nodes.ts';
 import type { SceneMergedTree, SceneTrees } from './scene/scene-trees.ts';
@@ -92,7 +92,7 @@ export interface MovableSceneData {
     /** The scene's triangle format: create the `SceneTrees` with it (indexed: with `weld: false`). */
     readonly triangleLeaves: TriangleLeaves;
     /** The scene's node format: create the `SceneTrees` with it (an `f32` scene refuses quantized trees). */
-    readonly nodeFormat: NodeFormat;
+    readonly nodeFormat: GpuLayoutNodeFormat;
     readonly meshes: readonly MovableSceneMesh[];
     /** Every instance, merged ones too (`static: true`): a `SceneTrees` merges them again at its first update. */
     readonly instances: readonly TraceSceneInstance[];
@@ -107,7 +107,7 @@ export interface MovableSceneBuildOptions {
     /** The scene's triangle format; `build` must return trees in it. Default `'records'`. */
     readonly triangleLeaves?: TriangleLeaves;
     /** The scene's node format. Default `'quantized'`: `f32` trees are quantized here (not the deforming meshes'). */
-    readonly nodeFormat?: NodeFormat;
+    readonly nodeFormat?: GpuLayoutNodeFormat;
     /**
      * Merge the static instances (`static: true`) as `SceneTrees` will at its
      * first update, and store each group's tree, so no group is built at
@@ -127,7 +127,7 @@ function planInstances(meshes: readonly MovableSceneMesh[], instances: readonly 
 }
 
 /** A built tree in the scene's formats: the triangle format checked, `f32` nodes quantized for a quantized scene (not a deforming mesh's). */
-function sceneTree(tree: MeshBvh, geometry: MeshGeometry, leaves: TriangleLeaves, nodeFormat: NodeFormat, deforming: boolean, name: string): GpuLayoutMeshBvh {
+function sceneTree(tree: MeshBvh, geometry: MeshGeometry, leaves: TriangleLeaves, nodeFormat: GpuLayoutNodeFormat, deforming: boolean, name: string): GpuLayoutMeshBvh {
     const where = 'buildMovableScene';
     if ((tree.triangleLeaves ?? 'records') !== leaves) throw new RangeError(`${where}: build returned ${tree.triangleLeaves ?? 'records'} triangles for ${name}, the scene is ${leaves}; build with triangleLeaves: '${leaves}'`);
     if (tree.triangleCount !== countTriangles(geometry)) throw new RangeError(`${where}: build returned ${tree.triangleCount} triangles for ${name}, which has ${countTriangles(geometry)}`);

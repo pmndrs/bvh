@@ -35,6 +35,9 @@ import {
     type GpuLayoutNodeFormat,
 } from '../gpu-layout.ts';
 import { checkNodeFormat, quantizeNodes } from '../quantized-nodes.ts';
+import { convertToWide, isWideNodeFormat, reorderTriangles, wideNodeBytes, type WideMeshTree, type WideNodeFormat } from '../wide-nodes.ts';
+import { WIDE_MESH_STACK_SIZE, WIDE_SINGLE_STACK_SIZE } from './wgsl-wide.ts';
+import type { NodeFormat } from '../gpu-layout.ts';
 import { checkTriangleLeaves, indexedFromRecords, weldExactBits, weldPositions } from '../indexed-leaves.ts';
 import { checkTriangleFlags, triangleMaterialCodes } from '../mesh-input.ts';
 import { countTriangles } from './triangle-packing.ts';
@@ -108,8 +111,8 @@ export interface TraceSceneMeshPlacement {
 export interface TraceSceneData {
     /** Every mesh's nodes, one after another (quantized: each mesh's frame slot, then its nodes). */
     readonly nodes: ArrayBuffer;
-    /** How `nodes` stores them. Assembly always sets it: `'quantized'` by default, `'f32'` when assembled with `nodeFormat: 'f32'`. Absent (a scene written by other code) means `'f32'`. */
-    readonly nodeFormat?: GpuLayoutNodeFormat;
+    /** How `nodes` stores them. Assembly always sets it: `'quantized'` by default, `'f32'` when assembled with `nodeFormat: 'f32'`, or an experimental wide format. Absent (a scene written by other code) means `'f32'`. */
+    readonly nodeFormat?: NodeFormat;
     /**
      * Every mesh's triangles, one after another. Indexed scenes: 16-byte
      * units, and each mesh's region starts with its header (and a merged
@@ -219,8 +222,23 @@ export interface TraceSceneAssemblyOptions {
      * 64-byte nodes, the scene byte for byte what it was before the option
      * existed. The walk must be compiled for the same format. Independent of
      * {@link triangleLeaves}.
+     *
+     * Experimental (docs/internals/design/wide-nodes.md): `'bvh4'` or
+     * `'cwbvh8'` collapse each `f32` tree into wide nodes as it is placed
+     * (`convertToWide`). CWBVH reorders each mesh's triangles in the scene
+     * (hits still name the original triangle). A wide mesh is refit with its
+     * tree's refit map (`meshRefitPlacement`).
      */
-    readonly nodeFormat?: GpuLayoutNodeFormat;
+    readonly nodeFormat?: NodeFormat;
+}
+
+/** Checks a scene's node format: the tree formats, or a wide one. */
+function checkSceneNodeFormat(format: NodeFormat | undefined, where: string): NodeFormat {
+    if (isWideNodeFormat(format)) return format;
+    if (format !== undefined && format !== 'f32' && format !== 'quantized') {
+        throw new RangeError(`${where}: nodeFormat must be 'f32', 'quantized', 'bvh4' or 'cwbvh8', got ${String(format)}`);
+    }
+    return checkNodeFormat(format as GpuLayoutNodeFormat | undefined, where, DEFAULT_NODE_FORMAT);
 }
 
 /**
@@ -272,15 +290,30 @@ export function assembleTraceScene(
         throw new RangeError("assembleTraceScene: geometries, weld and positionLayout are for triangleLeaves: 'indexed'");
     }
 
-    const nodeFormat = checkNodeFormat(options.nodeFormat, 'assembleTraceScene', DEFAULT_NODE_FORMAT);
+    const nodeFormat = checkSceneNodeFormat(options.nodeFormat, 'assembleTraceScene');
     const quantized = nodeFormat === 'quantized';
-    const nodeBytes = gpuLayoutNodeBytes(nodeFormat);
+    const wideFormat = isWideNodeFormat(nodeFormat) ? nodeFormat : null;
+    const nodeBytes = wideFormat ? wideNodeBytes(wideFormat) : gpuLayoutNodeBytes(nodeFormat as GpuLayoutNodeFormat);
+    // Wide: each tree collapsed (docs/internals/design/wide-nodes.md); CWBVH's triangles in its leaves' order.
+    const wideTrees: (WideMeshTree | null)[] = placed.map((mesh, index) => {
+        if (!wideFormat || !mesh) return null;
+        if (mesh.nodeFormat === 'quantized') throw new RangeError(`assembleTraceScene: mesh ${index} has quantized nodes; a ${wideFormat} scene collapses f32 trees`);
+        return convertToWide(mesh, wideFormat);
+    });
+    const treeOf = (index: number): MeshBvh | null => {
+        const mesh = placed[index];
+        const wideTree = wideTrees[index];
+        if (!mesh || !wideTree) return mesh;
+        const unit = mesh.triangleLeaves === 'indexed' ? INDEXED_TRIANGLE_BYTES : TRIANGLE_BYTES;
+        return { ...mesh, nodes: wideTree.nodes, nodeCount: wideTree.nodeCount, triangles: reorderTriangles(mesh.triangles, unit, wideTree.triangleOrder), maxDepth: wideTree.stackNeed };
+    };
+    const placedTrees = wideFormat ? placed.map((_, index) => treeOf(index)) : placed;
     let totalNodes = 0;
     let totalTriangles = 0;
     // Indexed: an unmerged mesh's per-triangle material codes go into a table before its header
     // (the geometry's triangleMaterials, else the tree's records' bits: the same materials a records scene reports).
     const materialCodes = placed.map((mesh, index) => (indexed && mesh && index < meshes.length ? indexedMaterialCodes(mesh, geometryOf(index), index) : null));
-    const allPlacements = placed.map((mesh, index): TraceSceneMeshPlacement => {
+    const allPlacements = placedTrees.map((mesh, index): TraceSceneMeshPlacement => {
         const sources = index >= meshes.length ? merged!.plan.groups[index - meshes.length].sources.length : 0;
         const leading = indexed && mesh ? indexedLeadingUnits(mesh.triangleCount, sources, materialCodes[index] !== null) : 0;
         // A quantized mesh's frame slot comes right before its root.
@@ -299,20 +332,24 @@ export function assembleTraceScene(
 
     const nodes = new ArrayBuffer(Math.max(1, totalNodes) * nodeBytes);
     const triangles = new ArrayBuffer(Math.max(1, totalTriangles) * (indexed ? INDEXED_TRIANGLE_BYTES : TRIANGLE_BYTES));
-    placed.forEach((mesh, index) => {
+    placedTrees.forEach((mesh, index) => {
         if (!mesh) return;
-        if (!quantized && mesh.nodeFormat === 'quantized') throw new RangeError(`assembleTraceScene: mesh ${index} has quantized nodes; assemble with nodeFormat: 'quantized'`);
-        // Quantized: the frame slot and the nodes, from one before the root.
-        const tree = quantized ? quantizeNodes(mesh) : mesh;
-        const slots = gpuLayoutNodeSlots(tree.nodeCount, nodeFormat);
-        new Uint8Array(nodes, (allPlacements[index].nodeOffset - (quantized ? 1 : 0)) * nodeBytes, slots * nodeBytes).set(new Uint8Array(tree.nodes, 0, slots * nodeBytes));
+        if (wideFormat) {
+            new Uint8Array(nodes, allPlacements[index].nodeOffset * nodeBytes, mesh.nodeCount * nodeBytes).set(new Uint8Array(mesh.nodes, 0, mesh.nodeCount * nodeBytes));
+        } else if (!quantized && mesh.nodeFormat === 'quantized') throw new RangeError(`assembleTraceScene: mesh ${index} has quantized nodes; assemble with nodeFormat: 'quantized'`);
+        else {
+            // Quantized: the frame slot and the nodes, from one before the root.
+            const tree = quantized ? quantizeNodes(mesh) : mesh;
+            const slots = gpuLayoutNodeSlots(tree.nodeCount, nodeFormat as GpuLayoutNodeFormat);
+            new Uint8Array(nodes, (allPlacements[index].nodeOffset - (quantized ? 1 : 0)) * nodeBytes, slots * nodeBytes).set(new Uint8Array(tree.nodes, 0, slots * nodeBytes));
+        }
         if (indexed) return;
         if (mesh.triangleLeaves === 'indexed') throw new RangeError(`assembleTraceScene: mesh ${index} is indexed; assemble with triangleLeaves: 'indexed'`);
         new Uint8Array(triangles, allPlacements[index].triangleOffset * TRIANGLE_BYTES, mesh.triangleCount * TRIANGLE_BYTES).set(
             new Uint8Array(mesh.triangles, 0, mesh.triangleCount * TRIANGLE_BYTES),
         );
     });
-    const placedPositions = indexed ? placeIndexedTriangles(placed, allPlacements, geometryOf, triangles, positionLayout, options.weld ?? true, materialCodes) : null;
+    const placedPositions = indexed ? placeIndexedTriangles(placedTrees, allPlacements, geometryOf, triangles, positionLayout, options.weld ?? true, materialCodes) : null;
     if (placedPositions) {
         const welded = options.weld ?? true;
         allPlacements.forEach((placement, index) => {
@@ -324,7 +361,7 @@ export function assembleTraceScene(
     const placeInstance = (instance: TraceSceneInstance): TraceInstance => {
         const mesh = meshes[instance.meshIndex];
         if (!mesh) throw new RangeError(`instance ${instance.instanceIndex} uses mesh ${instance.meshIndex}, which does not exist`);
-        maxMeshDepth = Math.max(maxMeshDepth, mesh.maxDepth);
+        maxMeshDepth = Math.max(maxMeshDepth, placedTrees[instance.meshIndex]!.maxDepth);
         return {
             instanceIndex: instance.instanceIndex,
             nodeOffset: allPlacements[instance.meshIndex].nodeOffset,
@@ -354,7 +391,7 @@ export function assembleTraceScene(
             // The ids go into the scene's copy, so the tree itself stays as its builder wrote it.
             if (indexed) writeMergedIndexedIdentity(new Uint32Array(triangles), group, placement.triangleOffset, tree.triangleCount);
             else writeMergedTriangleIdentity(triangles, group, placement.triangleOffset * TRIANGLE_BYTES, tree.triangleCount);
-            maxMeshDepth = Math.max(maxMeshDepth, tree.maxDepth);
+            maxMeshDepth = Math.max(maxMeshDepth, placedTrees[meshes.length + groupIndex]!.maxDepth);
             traceInstances.push({
                 instanceIndex: MERGED_INSTANCE_INDEX,
                 nodeOffset: placement.nodeOffset,
@@ -382,8 +419,17 @@ export function assembleTraceScene(
         for (let record = 0; record < order.length; record++) order[record] = inputOf[order[record]];
     }
 
-    const requiredStackSize = topLevel.maxDepth + 1 + maxMeshDepth;
-    if (requiredStackSize > TRACE_STACK_SIZE) {
+    if (wideFormat) {
+        // Wide scenes walk each mesh with its own stack (wgsl-wide.ts); maxMeshDepth is the deepest mesh walk's need.
+        if (topLevel.maxDepth > TRACE_STACK_SIZE) throw new RangeError(`the trace stack holds ${TRACE_STACK_SIZE} entries but this scene's top level can need ${topLevel.maxDepth}`);
+        if (maxMeshDepth > WIDE_MESH_STACK_SIZE[wideFormat]) {
+            throw new RangeError(`the ${wideFormat} mesh stack holds ${WIDE_MESH_STACK_SIZE[wideFormat]} entries but a mesh in this scene can need ${maxMeshDepth}`);
+        }
+        // The single-loop BVH4 walk (wideWalk 'single') holds both levels in one stack; it always fits (64 + 1 + 64 <= 136).
+        if (topLevel.maxDepth + 1 + maxMeshDepth > WIDE_SINGLE_STACK_SIZE) throw new RangeError('the single-loop wide walk\'s stack is too small for this scene');
+    }
+    const requiredStackSize = wideFormat ? Math.max(topLevel.maxDepth, maxMeshDepth) : topLevel.maxDepth + 1 + maxMeshDepth;
+    if (!wideFormat && requiredStackSize > TRACE_STACK_SIZE) {
         throw new RangeError(
             `the trace stack holds ${TRACE_STACK_SIZE} entries but this scene can need ${requiredStackSize} ` +
                 `(top level ${topLevel.maxDepth} + marker + deepest mesh ${maxMeshDepth})`,
@@ -566,8 +612,8 @@ export interface TraceSceneBuildOptions extends StaticMergeOptions {
     readonly positionLayout?: PositionLayout;
     /** Indexed scenes: the exact-bit weld at assembly. Default true. */
     readonly weld?: boolean;
-    /** The scene's node format (see `TraceSceneAssemblyOptions.nodeFormat`). Default `'quantized'`; trees are built `f32` and quantized at assembly. */
-    readonly nodeFormat?: GpuLayoutNodeFormat;
+    /** The scene's node format (see `TraceSceneAssemblyOptions.nodeFormat`). Default `'quantized'`; trees are built `f32` and quantized or collapsed at assembly. */
+    readonly nodeFormat?: NodeFormat;
     /**
      * Opt-in: weld each mesh's vertices closer than this on every axis before
      * building (`weldPositions`), in either format. It moves geometry away
@@ -604,7 +650,7 @@ export async function buildTraceScene(
     const tolerance = options.weldTolerance ?? 0;
     const geometries = tolerance > 0 ? inputs.map((geometry) => weldPositions(geometry, { tolerance })) : inputs;
     const indexed = checkTriangleLeaves(options.triangleLeaves, 'buildTraceScene') === 'indexed';
-    const nodeOptions: TraceSceneAssemblyOptions = { nodeFormat: checkNodeFormat(options.nodeFormat, 'buildTraceScene', DEFAULT_NODE_FORMAT) };
+    const nodeOptions: TraceSceneAssemblyOptions = { nodeFormat: checkSceneNodeFormat(options.nodeFormat, 'buildTraceScene') };
     const layoutOptions: TraceSceneAssemblyOptions = indexed
         ? { triangleLeaves: 'indexed', geometries, positionLayout: options.positionLayout, weld: options.weld, ...nodeOptions }
         : nodeOptions;
@@ -637,8 +683,12 @@ export async function buildTraceScene(
 export interface MeshRefitPlacement {
     /** The mesh's root, in words (quantized scenes: its frame slot is the 8 words before). */
     readonly nodeWordOffset: number;
-    /** The scene's node format, always given: `GpuMeshRefit` refits an `f32` copy and packs it into a quantized scene. */
-    readonly nodeFormat: GpuLayoutNodeFormat;
+    /**
+     * The scene's node format, always given: `GpuMeshRefit` refits an `f32`
+     * copy and packs it into a quantized or wide scene (a wide one also needs
+     * the tree's refit map, `wideRefitMap`, as `setTree`'s `wide`).
+     */
+    readonly nodeFormat: GpuLayoutNodeFormat | WideNodeFormat;
     readonly triangleWordOffset: number;
     /** Indexed scenes: the mesh's first vertex in the scene's positions. */
     readonly vertexBase?: number;
@@ -658,7 +708,12 @@ export interface MeshRefitPlacement {
  * are never refit. Throws for a welded mesh of an indexed scene too: the
  * refit copies the app's vertex v to scene vertex `vertexBase + v`, which only
  * holds when the scene kept the app's numbering. Assemble meshes you will
- * refit with `weld: false` (and no `weldTolerance`).
+ * refit with `weld: false` (and no `weldTolerance`). A wide scene's mesh also
+ * needs its tree's refit map for `setTree`'s `wide`: `wideRefitMap(tree,
+ * layout)` of the wide tree the assembly placed (`convertToWide(layout,
+ * nodeFormat)`, which a build's `wideNodes` gives as well) and its binary
+ * layout; both are in `src/wide-nodes.ts`, not exported while the wide
+ * formats are experimental (`SceneTrees` does this itself).
  */
 export function meshRefitPlacement(
     scene: Pick<TraceSceneData, 'meshes'> & Partial<Pick<TraceSceneData, 'triangleLeaves' | 'positionLayout' | 'nodeFormat'>>,
@@ -676,8 +731,9 @@ export function meshRefitPlacement(
         throw new RangeError(`meshRefitPlacement: mesh ${meshIndex} was cut into clusters (clusterTraceScene) and its own tree dropped; a refit would not reach the copies. Leave meshes you refit out of the split (split option)`);
     }
     if (placement.triangleCount === 0) throw new RangeError(`meshRefitPlacement: mesh ${meshIndex} has no tree in this scene`);
-    const nodeWordOffset = placement.nodeOffset * (gpuLayoutNodeBytes(scene.nodeFormat) / 4);
-    const nodes = { nodeFormat: scene.nodeFormat ?? ('f32' as const) }; // scene data with no format is f32
+    const wide = isWideNodeFormat(scene.nodeFormat) ? scene.nodeFormat : null;
+    const nodeWordOffset = placement.nodeOffset * ((wide ? wideNodeBytes(wide) : gpuLayoutNodeBytes(scene.nodeFormat as GpuLayoutNodeFormat | undefined)) / 4);
+    const nodes = { nodeFormat: wide ?? (scene.nodeFormat as GpuLayoutNodeFormat | undefined) ?? ('f32' as const) }; // scene data with no format is f32
     if (scene.triangleLeaves !== 'indexed') return { nodeWordOffset, ...nodes, triangleWordOffset: placement.triangleOffset * TRIANGLE_WORDS };
     if (placement.welded) {
         throw new RangeError(

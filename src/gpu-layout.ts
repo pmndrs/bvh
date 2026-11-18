@@ -18,6 +18,8 @@
  * See docs/internals/design/trace.md for the reasoning.
  */
 
+import type { WideNodeFormat } from './wide-nodes.ts';
+
 /**
  * Version of the GPU layout below. The layout is part of the package's API:
  * a WGSL walk written against it reads every word position here. Any change
@@ -304,8 +306,13 @@ export const TRACER_GPU_LAYOUT_VERSION = 2;
  * per-mesh frame, `GpuLayoutNodeFormat`) or `'f32'` (the 64-byte nodes
  * below, what builders write). The walk is compiled
  * for one (`traceModuleWgsl({ nodeFormat })`); the top level is always `f32`.
+ *
+ * Experimental, scenes only (docs/internals/design/wide-nodes.md): `'bvh4'`
+ * (64-byte 4-wide nodes) and `'cwbvh8'` (80-byte compressed 8-wide nodes),
+ * collapsed from each mesh's binary `f32` tree when the scene is assembled.
+ * Trees themselves are never wide.
  */
-export type NodeFormat = GpuLayoutNodeFormat;
+export type NodeFormat = GpuLayoutNodeFormat | WideNodeFormat;
 /** One quantized node: 32 bytes, two `vec4u` (`GPU_LAYOUT_QUANTIZED_NODE_WORD`). The frame slot before a mesh's root is the same size. */
 export const QUANTIZED_NODE_BYTES = GPU_LAYOUT_QUANTIZED_NODE_BYTES;
 export const QUANTIZED_NODE_WORDS = QUANTIZED_NODE_BYTES / 4;
