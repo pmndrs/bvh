@@ -63,6 +63,7 @@ import {
 } from '../gpu-layout.ts';
 import type { TraceRay } from './rays.ts';
 import { decodeQuantizedNode, readNodeFrame, type NodeFrame } from '../quantized-nodes.ts';
+import { decodeWideNode, isWideNodeFormat } from '../wide-nodes.ts';
 import type { TraceSceneData } from './scene-assembly.ts';
 import type { TrianglePasses } from './triangle-filter.ts';
 import type { AnyHitOrder } from './wgsl.ts';
@@ -224,6 +225,11 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
     const nodeFloats = new Float32Array(scene.nodes);
     const nodeWords = new Uint32Array(scene.nodes);
     const quantized = scene.nodeFormat === 'quantized';
+    // Wide scenes (docs/internals/design/wide-nodes.md): a mesh node's children are decoded as the
+    // WGSL decodes them, and every child the ray enters is pushed, nearest on top (any-hit 'far':
+    // farthest on top); leaves are pushed as references and tested when popped.
+    const wideFormat = isWideNodeFormat(scene.nodeFormat) ? scene.nodeFormat : null;
+    if (wideFormat && anyHitOrder === 'larger') throw new RangeError(`createCpuTracer: anyHitOrder 'larger' has no ${wideFormat} walk`);
     // Quantized: the node being visited, decoded into a 64-byte node, and the instance's frame.
     const decodedNode = new ArrayBuffer(BVH_NODE_WORDS * 4);
     const decodedFloats = new Float32Array(decodedNode);
@@ -301,6 +307,20 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
         return enter <= exit ? enter : BOX_MISS;
     }
 
+    /** {@link boxEntry} on a decoded box `[minX, minY, minZ, maxX, maxY, maxZ]`. */
+    function boxEntryOf(box: readonly number[], setup: RaySetup, tMin: number, tMax: number): number {
+        let enter = tMin;
+        let exit = Infinity;
+        for (let axis = 0; axis < 3; axis++) {
+            const toMin = (box[axis] - setup.origin[axis]) * setup.inverseDirection[axis];
+            const toMax = (box[axis + 3] - setup.origin[axis]) * setup.inverseDirection[axis];
+            enter = Math.max(enter, Math.min(toMin, toMax));
+            exit = Math.min(exit, Math.max(toMin, toMax));
+        }
+        exit = Math.min(exit * BOX_EXIT_PADDING, tMax);
+        return enter <= exit ? enter : BOX_MISS;
+    }
+
     function traverse(ray: TraceRay, stopAtFirstHit: boolean, traceOptions: CpuTraceOptions): CpuHit | null {
         if (topNodeCount === 0) return null;
         const stats = traceOptions.stats;
@@ -335,7 +355,18 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
             const index = referenceIndex(current);
             let descended = false;
 
-            if (count === 0) {
+            if (count === 0 && insideInstance && wideFormat) {
+                if (stats) stats.nodesVisited++;
+                const entered: { entry: number; reference: number }[] = [];
+                for (const child of decodeWideNode(wideFormat, scene.nodes, rootNodeOffset + index)) {
+                    const entry = boxEntryOf(child.box, setup, ray.tMin, closestT);
+                    if (entry < BOX_MISS) entered.push({ entry, reference: child.node >= 0 ? makeReference(child.node, 0) : makeReference(child.firstTriangle, child.triangleCount) });
+                }
+                const farOnTop = stopAtFirstHit && anyHitOrder === 'far';
+                entered.sort((a, b) => (farOnTop ? a.entry - b.entry : b.entry - a.entry));
+                for (const child of entered) stack.push(child.reference);
+                if (stats) stats.maxStackSize = Math.max(stats.maxStackSize, stack.length);
+            } else if (count === 0) {
                 if (stats) stats.nodesVisited++;
                 const decode = insideInstance && quantized;
                 if (decode) decodeQuantizedNode(nodeWords, (rootNodeOffset + index) * QUANTIZED_NODE_WORDS, frame!, decodedFloats, decodedWords, 0);

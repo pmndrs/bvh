@@ -91,8 +91,8 @@ export type BvhTraceBufferSource =
           readonly triangleLeaves: 'records' | 'indexed';
           /** The position layout (read for indexed sources). */
           readonly positionLayout: 'vec4' | 'packed';
-          /** The source's node format (`SceneTrees.nodeFormat`). */
-          readonly nodeFormat: 'f32' | 'quantized';
+          /** The source's node format (`SceneTrees.nodeFormat`). The wide formats are experimental (docs/internals/design/wide-nodes.md). */
+          readonly nodeFormat: 'f32' | 'quantized' | 'bvh4' | 'cwbvh8';
       }
     | {
           /** Uploaded buffers (`uploadTraceScene`), which name their formats. */
@@ -273,12 +273,12 @@ interface BufferSpec {
 
 /**
  * The storage nodes of a format: three, or with indexed leaves four (the
- * triangles read as `vec4u`, then the positions). Quantized nodes are read as `vec4u`.
+ * triangles read as `vec4u`, then the positions). Quantized and wide nodes are read as `vec4u`.
  */
-function buffersOf(triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4' | 'packed', nodeFormat: 'f32' | 'quantized'): readonly BufferSpec[] {
+function buffersOf(triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4' | 'packed', nodeFormat: 'f32' | 'quantized' | 'bvh4' | 'cwbvh8'): readonly BufferSpec[] {
     const indexed = triangleLeaves === 'indexed';
     return [
-        nodeFormat === 'quantized'
+        nodeFormat !== 'f32'
             ? { name: 'bvhTraceNodes', key: 'nodes', type: 'uvec4', itemSize: 4, array: () => new Uint32Array(4) }
             : { name: 'bvhTraceNodes', key: 'nodes', type: 'vec4', itemSize: 4, array: () => new Float32Array(4) },
         indexed
@@ -296,7 +296,7 @@ function buffersOf(triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4'
 }
 
 /** The walk's text without its binding declarations: three declares the storage nodes instead. */
-function moduleWithoutBindings(options: BvhTraceNodesOptions, triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4' | 'packed', nodeFormat: 'f32' | 'quantized'): string {
+function moduleWithoutBindings(options: BvhTraceNodesOptions, triangleLeaves: 'records' | 'indexed', positionLayout: 'vec4' | 'packed', nodeFormat: 'f32' | 'quantized' | 'bvh4' | 'cwbvh8'): string {
     const text = traceModuleWgsl({ triangleFilter: options.triangleFilter, rayMasks: options.rayMasks, anyHitOrder: options.anyHitOrder, queries: options.queries, shapecast: options.shapecast, triangleLeaves, positionLayout, nodeFormat });
     let removed = 0;
     const stripped = text.replace(/^@group\(\d+\) @binding\(\d+\) var<storage, read> bvhTrace(?:Nodes|Triangles|TopLevel|Positions): array<(?:vec4[fu]|f32)>;$/gm, () => {
@@ -507,7 +507,7 @@ export class BvhTraceNodes {
     readonly triangleLeaves: 'records' | 'indexed';
     readonly positionLayout: 'vec4' | 'packed';
     /** The source's node format, compiled into the walk. */
-    readonly nodeFormat: 'f32' | 'quantized';
+    readonly nodeFormat: 'f32' | 'quantized' | 'bvh4' | 'cwbvh8';
     private readonly specs: readonly BufferSpec[];
     /** The walk (`bvhTraceClosest`, `bvhTraceAny`, `BvhRay`, `BvhHit`, ...): include it in a `wgslFn` to call it from WGSL. */
     readonly module: Node;

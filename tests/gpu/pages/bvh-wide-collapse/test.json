@@ -1,0 +1,4 @@
+{
+    "description": "GPU wide collapse (gpu-wide-collapse.ts): binary trees from H-PLOC's CPU twin, the LBVH twin and tinybvh, collapsed into BVH4 and CWBVH on the GPU in one job per format; every wide tree passes checkWideTree (each triangle once, every decoded box around the corners below it, CWBVH's leaf rules), and a scene of each GPU-collapsed tree gives the f32 scene's hits on random rays (ties apart).",
+    "timeoutMs": 300000
+}

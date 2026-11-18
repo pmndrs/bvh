@@ -1,4 +1,4 @@
 {
-    "description": "SceneTrees deforming meshes: a cloth refit on the GPU from interleaved vertices, on its GPU tree and then tinybvh's, and rebuilt on the GPU after a held bend drifts it; the GPU walk must match tinybvh trees built from each pose. The cloth's static instance must not merge; the rock's does.",
-    "timeoutMs": 180000
+    "description": "SceneTrees deforming meshes, with f32, quantized, BVH4 and CWBVH nodes and both leaf formats: a cloth refit on the GPU from interleaved vertices, on its GPU tree and then tinybvh's, and rebuilt on the GPU after a held bend drifts it; the GPU walk must match tinybvh trees built from each pose. The cloth's static instance must not merge; the rock's does.",
+    "timeoutMs": 360000
 }

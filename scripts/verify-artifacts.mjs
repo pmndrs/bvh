@@ -37,6 +37,10 @@ const requiredLicenseText = {
     'query/debug.js': ['three-mesh-bvh', 'Copyright (c) 2018 Garrett Johnson', 'Permission is hereby granted, free of charge'],
     'query/three-mesh-bvh-format.js': ['three-mesh-bvh', 'Copyright (c) 2018 Garrett Johnson', 'Permission is hereby granted, free of charge'],
     'trace/wgsl.js': ['three.js', 'three.js authors', 'Permission is hereby granted, free of charge'],
+    'wide-nodes.js': ['tinybvh', 'Jacco Bikker', 'Permission is hereby granted, free of charge'],
+    'trace/wgsl-wide.js': ['tinybvh', 'Jacco Bikker', 'Permission is hereby granted, free of charge'],
+    'gpu-wide-collapse-wgsl.js': ['tinybvh', 'Jacco Bikker', 'Permission is hereby granted, free of charge'],
+    'gpu-wide-refit.js': ['tinybvh', 'Jacco Bikker', 'Permission is hereby granted, free of charge'],
 };
 for (const [name, lines] of Object.entries(requiredLicenseText)) {
     const file = resolve(dist, name);

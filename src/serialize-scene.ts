@@ -84,6 +84,8 @@ function groupJson(group: TraceSceneMergedGroup): TraceSceneMergedGroup {
 /** Writes an assembled scene as one `ArrayBuffer` (see the file comment for the format). */
 export function serializeTraceScene(scene: TraceSceneData): ArrayBuffer {
     const where = 'serializeTraceScene';
+    const nodeFormat = scene.nodeFormat;
+    if (nodeFormat === 'bvh4' || nodeFormat === 'cwbvh8') throw new RangeError(`${where}: the experimental ${nodeFormat} scenes have no file format; assemble with nodeFormat 'quantized' or 'f32' to save the scene`);
     const leaves = scene.triangleLeaves ?? 'records';
     const indexed = leaves === 'indexed';
     const positionLayout = scene.positionLayout ?? 'vec4';
@@ -120,7 +122,7 @@ export function serializeTraceScene(scene: TraceSceneData): ArrayBuffer {
     set(at.magic, SCENE_MAGIC);
     set(at.formatVersion, SERIALIZED_SCENE_FORMAT_VERSION);
     set(at.layoutVersion, GPU_LAYOUT_VERSION);
-    set(at.formats, (encodeSerializedFormats(leaves, scene.nodeFormat) | (SCENE_POSITION_LAYOUT[positionLayout] << SCENE_POSITION_LAYOUT_SHIFT)) >>> 0);
+    set(at.formats, (encodeSerializedFormats(leaves, nodeFormat) | (SCENE_POSITION_LAYOUT[positionLayout] << SCENE_POSITION_LAYOUT_SHIFT)) >>> 0);
     set(at.meshCount, scene.meshes.length);
     set(at.mergedGroupCount, scene.mergedGroups.length);
     set(at.instanceCount, topLevel.instanceCount);

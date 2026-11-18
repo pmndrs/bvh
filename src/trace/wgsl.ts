@@ -103,6 +103,10 @@ import { closestPointBatchEntryWgsl, queriesWgsl } from './query-wgsl.ts';
 import { countedWalkWgsl, walkCountsTypesWgsl, WALK_COUNTS_BYTES, WALK_COUNTS_WORD } from './walk-counters.ts';
 
 export { WALK_COUNTS_BYTES, WALK_COUNTS_WORD };
+import { wideWalkWgsl, type WideDecode, type WideStack, type WideWalk } from './wgsl-wide.ts';
+import { isWideNodeFormat } from '../wide-nodes.ts';
+
+export type { WideDecode, WideStack, WideWalk } from './wgsl-wide.ts';
 
 /** Where the trace module's bindings land inside a kernel (structurally the same as ddgi's `BindingSlot`). */
 export interface BindingSlot {
@@ -1074,8 +1078,35 @@ export interface TraceModuleOptions {
      * `SceneTrees.nodeFormat` or `TraceSceneData.nodeFormat` to be sure.
      * Only `bvhLoadMeshNode` and the instance entry's frame read differ; it is
      * the same walk, with the same bindings.
+     *
+     * Experimental: `'bvh4'` and `'cwbvh8'` (docs/internals/design/wide-nodes.md)
+     * compile the wide walks instead (wgsl-wide.ts): the same top level and
+     * hit, a mesh walk per instance. `anyHitOrder: 'larger'` has no wide form.
      */
     readonly nodeFormat?: NodeFormat;
+    /**
+     * `nodeFormat: 'cwbvh8'` only: where the mesh walk keeps its stack of node
+     * groups. `'private'` (the default): a private array. `'workgroup'`: the
+     * first `WIDE_SHARED_STACK_ENTRIES` entries per lane in workgroup memory,
+     * the rest in a private array; the kernel must call
+     * `bvhSetStackLane(local_invocation_index)` before tracing, with a
+     * workgroup of at most `WIDE_SHARED_STACK_LANES` lanes (the batch kernel does).
+     */
+    readonly wideStack?: WideStack;
+    /**
+     * `nodeFormat: 'bvh4'` only: `'nested'` (the default; a mesh loop per
+     * instance, its own stack) or `'single'` (one loop and one stack for both
+     * levels with the instance marker, as the binary walk; lever L7 in
+     * docs/internals/design/wide-nodes.md). Same hits either way.
+     */
+    readonly wideWalk?: WideWalk;
+    /**
+     * Wide formats: how child planes are decoded. `'exact'` (the default):
+     * `p + q * 2^e`, then the binary walk's slab test. `'folded'` (lever L1,
+     * Ylitie's form): one FMA per plane, padded by its error bound. Same hits
+     * either way (docs/internals/design/wide-nodes.md).
+     */
+    readonly wideDecode?: WideDecode;
     /**
      * Which child any-hit enters first when the ray hits both, compiled in
      * like `rayMasks` (see {@link AnyHitOrder}). Default `'far'`. Closest-hit
@@ -1192,19 +1223,35 @@ export function traceModuleWgsl(options: TraceModuleOptions = {}): string {
     }
     const packed = options.positionLayout === 'packed';
     const nodeFormat = options.nodeFormat ?? DEFAULT_NODE_FORMAT;
-    if (nodeFormat !== 'f32' && nodeFormat !== 'quantized') throw new RangeError(`traceModuleWgsl: nodeFormat must be 'f32' or 'quantized', got ${String(nodeFormat)}`);
+    const wide = isWideNodeFormat(nodeFormat);
+    if (nodeFormat !== 'f32' && nodeFormat !== 'quantized' && !wide) {
+        throw new RangeError(`traceModuleWgsl: nodeFormat must be 'f32', 'quantized', 'bvh4' or 'cwbvh8', got ${String(nodeFormat)}`);
+    }
     const quantized = nodeFormat === 'quantized';
     const anyHitOrder = options.anyHitOrder ?? 'far';
     if (anyHitOrder !== 'far' && anyHitOrder !== 'near' && anyHitOrder !== 'larger') {
         throw new RangeError(`traceModuleWgsl: anyHitOrder must be 'far', 'near' or 'larger', got ${String(anyHitOrder)}`);
     }
     const folded = checkQuantizedDecode(options.quantizedDecode, nodeFormat, anyHitOrder, 'traceModuleWgsl') === 'folded';
+    if (wide && anyHitOrder === 'larger') throw new RangeError(`traceModuleWgsl: anyHitOrder 'larger' has no ${nodeFormat} walk`);
+    // The GPU queries and the counted walk read binary nodes; the wide formats are a ray-walk experiment (docs/internals/design/wide-nodes.md).
+    if (wide && (options.queries || options.shapecast !== undefined)) throw new RangeError(`traceModuleWgsl: the GPU queries (queries, shapecast) have no ${nodeFormat} walk; use 'f32' or 'quantized' nodes`);
+    if (wide && options.counters) throw new RangeError(`traceModuleWgsl: the counted walk (counters) has no ${nodeFormat} walk`);
+    const wideStack = options.wideStack ?? 'private';
+    if (wideStack !== 'private' && wideStack !== 'workgroup') throw new RangeError(`traceModuleWgsl: wideStack must be 'private' or 'workgroup', got ${String(wideStack)}`);
+    if (wideStack === 'workgroup' && nodeFormat !== 'cwbvh8') throw new RangeError("traceModuleWgsl: wideStack 'workgroup' is for nodeFormat 'cwbvh8'");
+    const wideWalk = options.wideWalk ?? 'nested';
+    if (wideWalk !== 'nested' && wideWalk !== 'single') throw new RangeError(`traceModuleWgsl: wideWalk must be 'nested' or 'single', got ${String(wideWalk)}`);
+    if (wideWalk === 'single' && nodeFormat !== 'bvh4') throw new RangeError("traceModuleWgsl: wideWalk 'single' is for nodeFormat 'bvh4'");
+    const wideDecode = options.wideDecode ?? 'exact';
+    if (wideDecode !== 'exact' && wideDecode !== 'folded') throw new RangeError(`traceModuleWgsl: wideDecode must be 'exact' or 'folded', got ${String(wideDecode)}`);
+    if (wideDecode === 'folded' && !wide) throw new RangeError("traceModuleWgsl: wideDecode 'folded' is for nodeFormat 'bvh4' or 'cwbvh8' (quantized nodes: quantizedDecode)");
     return /* wgsl */ `${COMMON_WGSL}
 ${GEOMETRY_WGSL}
 // Nodes and triangles are read as plain vec4s, so every load is one 16-byte
 // read whatever the backend makes of a struct with vec3 members. Quantized
 // nodes are read as vec4u, so no packed plane passes through a float register.
-@group(${group}) @binding(${nodes}) var<storage, read> bvhTraceNodes: array<${quantized ? 'vec4u' : 'vec4f'}>;
+@group(${group}) @binding(${nodes}) var<storage, read> bvhTraceNodes: array<${quantized || wide ? 'vec4u' : 'vec4f'}>;
 @group(${group}) @binding(${triangles}) var<storage, read> bvhTraceTriangles: array<${indexed ? 'vec4u' : 'vec4f'}>;
 @group(${group}) @binding(${topLevel}) var<storage, read> bvhTraceTopLevel: array<vec4u>;${
         indexed ? `\n@group(${group}) @binding(${slot.firstBinding + 3}) var<storage, read> bvhTracePositions: array<${packed ? 'f32' : 'vec4f'}>;` : ''
@@ -1225,7 +1272,7 @@ const BVH_TRIANGLE_FLAG_FLIP_FRONT_FACE: u32 = ${TRIANGLE_FLAG_FLIP_FRONT_FACE}u
 // Instance flags bit 3: a merged mesh; the hit's instance is the triangle's padding word.
 const BVH_INSTANCE_FLAG_MERGED: u32 = ${INSTANCE_FLAG.merged}u;
 
-${quantized ? QUANTIZED_NODE_LOADERS_WGSL : F32_NODE_LOADERS_WGSL}${folded ? FOLDED_NODE_LOADERS_WGSL : ''}
+${wide ? '// Wide mesh nodes are read by the mesh walks below.' : quantized ? QUANTIZED_NODE_LOADERS_WGSL : F32_NODE_LOADERS_WGSL}${folded ? FOLDED_NODE_LOADERS_WGSL : ''}
 
 ${indexed ? indexedLoadersWgsl(packed) : RECORD_LOADERS_WGSL}
 
@@ -1334,8 +1381,8 @@ fn bvhBoxEntry(boxMin: vec3f, boxMax: vec3f, setup: BvhRaySetup, tMin: f32, tMax
 
 ${rayMasks ? INSTANCE_MASK_WGSL : ''}
 ${anyHitOrder === 'larger' ? BOX_HALF_AREA_WGSL : ''}
-${walkWgsl('closest', rayMasks, 'far', folded)}
-${walkWgsl('any', rayMasks, anyHitOrder, folded)}
+${wide ? wideWalkWgsl({ format: nodeFormat, rayMasks, anyHitOrder: anyHitOrder === 'near' ? 'near' : 'far', stack: wideStack, walk: wideWalk, decode: wideDecode }) : `${walkWgsl('closest', rayMasks, 'far', folded)}
+${walkWgsl('any', rayMasks, anyHitOrder, folded)}`}
 ${rayMasks ? MASKED_TRACE_WGSL : UNMASKED_TRACE_WGSL}
 ${triangleFilter ?? '// bvhTrianglePasses is supplied by the kernel.'}
 ${queriesWgsl({ rayMasks, queries: options.queries ?? false, shapecast: options.shapecast })}${options.counters ? countersWgsl(rayMasks, anyHitOrder, folded) : ''}`;
@@ -1500,7 +1547,7 @@ export const BATCH_WORKGROUP_SIZE = 64;
  * with material and normal) or, with `hitNormal: false`,
  * `BvhHitRecordCompact` ({@link HIT_RECORD_COMPACT_BYTES}, 24 bytes).
  */
-export function batchEntryWgsl(mode: 'closest' | 'any', group: number, rayMasks = true, hitNormal = true, counters = false): string {
+export function batchEntryWgsl(mode: 'closest' | 'any', group: number, rayMasks = true, hitNormal = true, counters = false, setsStackLane = false): string {
     if (counters) return countedBatchEntryWgsl(mode, group, rayMasks);
     const recordType = hitNormal ? 'BvhHitRecord' : 'BvhHitRecordCompact';
     const recordStruct = hitNormal
@@ -1565,7 +1612,7 @@ fn bvhBatch(
     if (rayIndex >= arrayLength(&bvhBatchRays)) {
         return;
     }
-    ${body}
+    ${setsStackLane ? 'bvhSetStackLane(localIndex);\n    ' : ''}${body}
 }
 `;
 }
@@ -1645,6 +1692,12 @@ export interface BatchKernelOptions {
      * blocked word. Default false.
      */
     readonly counters?: boolean;
+    /** The CWBVH mesh walk's stack (`TraceModuleOptions.wideStack`). Default `'private'`. */
+    readonly wideStack?: WideStack;
+    /** The BVH4 walk's shape (`TraceModuleOptions.wideWalk`). Default `'nested'`. */
+    readonly wideWalk?: WideWalk;
+    /** The wide walks' plane decode (`TraceModuleOptions.wideDecode`). Default `'exact'`. */
+    readonly wideDecode?: WideDecode;
 }
 
 /** Bytes of the batch kernel's uniform (`BvhBatchParams`, group 1 binding 2, only with ray masks). Padded to 16. */
@@ -1667,8 +1720,8 @@ export function batchKernelWgsl(mode: 'closest' | 'any', options: BatchKernelOpt
     rejectOldPositionalCall('batchKernelWgsl', options);
     const rayMasks = options.rayMasks ?? true;
     const counters = options.counters ?? false;
-    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat, anyHitOrder: options.anyHitOrder, quantizedDecode: options.quantizedDecode, counters })}
-${batchEntryWgsl(mode, 1, rayMasks, options.hitNormal ?? true, counters)}`;
+    return `${traceModuleWgsl({ traceSlot: options.traceSlot, triangleFilter: options.triangleFilter ?? DEFAULT_TRIANGLE_FILTER_WGSL, rayMasks, triangleLeaves: options.triangleLeaves, positionLayout: options.positionLayout, nodeFormat: options.nodeFormat, anyHitOrder: options.anyHitOrder, quantizedDecode: options.quantizedDecode, counters, wideStack: options.wideStack, wideWalk: options.wideWalk, wideDecode: options.wideDecode })}
+${batchEntryWgsl(mode, 1, rayMasks, options.hitNormal ?? true, counters, options.wideStack === 'workgroup')}`;
 }
 
 /** Options of {@link closestPointKernelWgsl}: the trace module's format options and `rayMasks`. */

@@ -8,6 +8,7 @@
  */
 
 export { countTriangles } from './triangle-packing.ts';
+import { wideMeshTreeTransferables, type WideMeshTree, type WideNodeFormat } from '../wide-nodes.ts';
 
 /** Triangle geometry in object space. */
 export interface MeshGeometry {
@@ -47,11 +48,20 @@ export interface MeshBvh {
     readonly leafCount: number;
     /** Object-space box around the mesh: `[minX, minY, minZ, maxX, maxY, maxZ]`. */
     readonly bounds: Float32Array;
+    /**
+     * Experimental (docs/internals/design/wide-nodes.md): the tree collapsed
+     * into wide nodes, when built with `wideNodes` (the tinybvh workers do it
+     * for `SceneTrees({ nodeFormat: 'bvh4' | 'cwbvh8' })`). The rest of the
+     * tree stays the binary one it was collapsed from.
+     */
+    readonly wide?: WideMeshTree;
 }
 
 /** Buffers to hand to `postMessage` so a built tree moves out of a worker without a copy. */
 export function meshBvhTransferables(bvh: MeshBvh): ArrayBuffer[] {
-    return [bvh.nodes, bvh.triangles, bvh.parents.buffer as ArrayBuffer, bvh.bounds.buffer as ArrayBuffer];
+    const buffers = [bvh.nodes, bvh.triangles, bvh.parents.buffer as ArrayBuffer, bvh.bounds.buffer as ArrayBuffer];
+    if (bvh.wide) buffers.push(...wideMeshTreeTransferables(bvh.wide));
+    return buffers;
 }
 
 /** Options for building a mesh tree. */
@@ -68,4 +78,10 @@ export interface MeshBvhBuildOptions {
      * (a scene's static meshes); such a tree can't be refit or made a `CpuMeshBvh`.
      */
     readonly parents?: boolean;
+    /**
+     * Experimental: also collapse the `f32` tree into this wide format
+     * (`MeshBvh.wide`, `convertToWide`), where the tree is built (in a worker,
+     * off the main thread). Needs `nodeFormat` `'f32'`.
+     */
+    readonly wideNodes?: WideNodeFormat;
 }

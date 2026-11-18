@@ -71,6 +71,29 @@ Same pages as 2a (leave `skip=hit-record` out). Rows `surface-rays/paired/hit_re
 
 Ratios are taken within each round, order reversed every other round; the median of rounds is the result. The M5 drifted by up to about 30%, so compare ratios, not Mrays/s.
 
+### 2d. Wide nodes: `nodeFormat: 'bvh4'` and `'cwbvh8'` (the traversal experiment, 2026-11-13)
+
+Section 8 of the same surface-ray pages (`docs/internals/design/wide-nodes.md`): `f32`, `bvh4`, `cwbvh8` and `cwbvh8` with the workgroup stack, on `primary` (camera rays, coherent), `surface` and `air-grid` (incoherent) rays, closest and any, instanced and merged, in paired rounds. **This decides the gate:** at least 1.3x closest-hit on incoherent rays (`surface`, `air-grid`) on both the M5 and the RTX 3060 Laptop, or BVH2 stays the default (pathtracer `research/notes/05-gpu-architecture.md` §4.2-4.3).
+
+First the correctness pages that cover the wide walks (they are the gate on NVIDIA: 0 shared-edge slips, no mismatches, and `trace-wide-compile` gives the DXC compile time per kernel against the binary ones in the same run):
+```
+pnpm test:gpu:page trace-oracle --gpu nvidia
+pnpm test:gpu:page trace-wide-compile,scene-trees-mid-swap --gpu nvidia
+```
+Then, three runs per scene, one page at a time with nothing else on the GPU:
+```
+$env:BVH_PAGE_QUERY = 'skip=hit-record,leaves,nodes,any-order'
+pnpm test:gpu:page trace-bench-surface-sponza --gpu nvidia --json wide-sponza-nv-1.json
+pnpm test:gpu:page trace-bench-surface-sponza --gpu nvidia --json wide-sponza-nv-2.json
+pnpm test:gpu:page trace-bench-surface-sponza --gpu nvidia --json wide-sponza-nv-3.json
+pnpm test:gpu:page trace-bench-surface-bistro-interior --gpu nvidia --json wide-bistro-nv-1.json
+pnpm test:gpu:page trace-bench-surface-bistro-interior --gpu nvidia --json wide-bistro-nv-2.json
+pnpm test:gpu:page trace-bench-surface-bistro-interior --gpu nvidia --json wide-bistro-nv-3.json
+$env:BVH_PAGE_QUERY = ''
+node tests/gpu/pages/trace-bench/surface-to-csv.ts wide-sponza-nv-1.json wide-sponza-nv-2.json wide-sponza-nv-3.json wide-bistro-nv-1.json wide-bistro-nv-2.json wide-bistro-nv-3.json --append
+```
+Read `surface-rays/paired/wide_<format>_over_f32/<tree>/<set>/closest/median_of_rounds` (median of the three runs' medians). The page fails if a wide answer differs from `f32` other than a tie. Each run takes about 20 minutes (the 30-minute page limit). The runner takes the GPU lock and records the load (`tests/gpu/README.md`, "Timed pages"); Windows reports no load average, so set `$env:BVH_MACHINE_QUIET = '1'` only when nothing else runs on the laptop; without it the rows are marked provisional (`machine/quiet` 0).
+
 ## 3. `scene-trees-sponza` memory
 
 ```

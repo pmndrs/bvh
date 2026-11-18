@@ -47,10 +47,20 @@
  *   within a round (above 1: that order is faster); `surface-rays/paired/any_hit_order/<tree>/<set>/any/<order>_mrays_per_s_*`
  *   the rates, `.../<order>/agreement_with_far` the share of identical answers, and
  *   `surface-rays/any_hit_order/<tree>/<set>/any/<order>/{steps,mesh_nodes,triangle_tests}` the counted walk per ray;
+ * - `surface-rays/paired/wide_<format>_over_f32/<tree>/<set>/<mode>/{median,min,max}_of_rounds`
+ *   (and `.../round<k>`; `<format>` is `bvh4`, `cwbvh8` or `cwbvh8-workgroup`, `<set>` also
+ *   `primary`): wide nodes over f32 nodes, the same trees, within a round (above 1: wide is faster;
+ *   docs/internals/design/wide-nodes.md); `surface-rays/paired/wide_nodes/<tree>/<set>/<mode>/<format>_mrays_per_s_*`
+ *   the rates; `surface-rays/wide_nodes/<tree>/<set>/<mode>/<format>/{same,ties,different}` the answers
+ *   against f32 (different must be 0); `surface-rays/wide_nodes/<format>/<tree>/bytes_{nodes,triangles,topLevel,total}`;
+ *   `surface-rays/wide_nodes/collapse/<format>/<tree>/{ms,trees,binary_nodes,wide_nodes,children_per_node,triangles_per_leaf,max_stack_need}`
+ *   (the collapse time is timed, the rest counted);
  * - `surface-rays/<tree>/<set>/<mode>/{steps,instances_entered,instances_entered_without_hit,...}`:
  *   the counted walk's mean work per ray;
  * - `surface-rays/<tree>/<set>/<mode>/agreement_with_instanced`: merged tree only;
- * - `surface-rays/<tree>/top_level_instances` and the tree's sizes.
+ * - `surface-rays/<tree>/top_level_instances` and the tree's sizes;
+ * - `machine/{load_1m_before,load_1m_after,chrome_gpu_processes_before,quiet}`: how loaded the machine was
+ *   around the page (tests/gpu/run.ts holds the GPU lock and records it); `quiet` 0 marks the run's timings provisional.
  *
  * Without --append or --out the rows are printed.
  */
@@ -275,6 +285,47 @@ export function surfaceRaysRows(data: SurfaceRaysData): { timed: MetricRow[]; co
             counted.push({ scene, metric: `${prefix}/same`, value: entry.same }, { scene, metric: `${prefix}/ties`, value: entry.ties }, { scene, metric: `${prefix}/different`, value: entry.different });
         }
     }
+    const wide = data.wideNodes;
+    if (wide) {
+        for (const entry of wide.entries) {
+            const prefix = `surface-rays/paired/wide_nodes/${entry.tree}/${entry.set}/${entry.mode}/${entry.layout}`;
+            const loaded = [...entry.mraysPerRound].sort((a, b) => a - b);
+            timed.push(
+                { scene, metric: `${prefix}_mrays_per_s_median_of_rounds`, value: middle(loaded) },
+                { scene, metric: `${prefix}_mrays_per_s_min_of_rounds`, value: loaded[0] },
+                { scene, metric: `${prefix}_mrays_per_s_max_of_rounds`, value: loaded[loaded.length - 1] },
+            );
+        }
+        for (const ratio of wide.ratios) {
+            const prefix = `surface-rays/paired/${ratio.name}`;
+            timed.push(
+                { scene, metric: `${prefix}/median_of_rounds`, value: ratio.median },
+                { scene, metric: `${prefix}/min_of_rounds`, value: ratio.min },
+                { scene, metric: `${prefix}/max_of_rounds`, value: ratio.max },
+            );
+            ratio.perRound.forEach((value, round) => timed.push({ scene, metric: `${prefix}/round${round + 1}`, value }));
+        }
+        for (const entry of wide.agreement) {
+            const prefix = `surface-rays/wide_nodes/${entry.tree}/${entry.set}/${entry.mode}/${entry.layout}`;
+            counted.push({ scene, metric: `${prefix}/same`, value: entry.same }, { scene, metric: `${prefix}/ties`, value: entry.ties }, { scene, metric: `${prefix}/different`, value: entry.different });
+        }
+        for (const [name, bytes] of Object.entries(wide.bytes)) {
+            for (const [part, value] of Object.entries(bytes)) counted.push({ scene, metric: `surface-rays/wide_nodes/${name}/bytes_${part}`, value });
+        }
+        for (const [name, entry] of Object.entries(wide.collapse)) {
+            const prefix = `surface-rays/wide_nodes/collapse/${name}`;
+            timed.push({ scene, metric: `${prefix}/ms`, value: entry.ms });
+            counted.push(
+                { scene, metric: `${prefix}/trees`, value: entry.trees },
+                { scene, metric: `${prefix}/binary_nodes`, value: entry.binaryNodes },
+                { scene, metric: `${prefix}/wide_nodes`, value: entry.wideNodes },
+                { scene, metric: `${prefix}/children_per_node`, value: entry.childrenPerNode },
+                { scene, metric: `${prefix}/triangles_per_leaf`, value: entry.trianglesPerLeaf },
+                { scene, metric: `${prefix}/max_stack_need`, value: entry.maxStackNeed },
+            );
+        }
+        for (const [set, count] of Object.entries(wide.rays)) counted.push({ scene, metric: `surface-rays/wide_nodes/rays/${set}`, value: count });
+    }
     const orders = data.anyHitOrder;
     if (orders) {
         for (const entry of orders.entries) {
@@ -333,6 +384,19 @@ async function main(): Promise<void> {
             const prefix = [summary.startedAt.slice(0, 10), commit, device, browserFromUserAgent(data.userAgent, data.browserVersion)];
             const key = `${device}|${data.scene}`;
             const rows = surfaceRaysRows(data);
+            // How loaded the machine was (run.ts, under the GPU lock): timings from a loaded machine are provisional.
+            const load = page.machineLoad;
+            if (load) {
+                const scene = data.scene;
+                rows.timed.push(
+                    { scene, metric: 'machine/load_1m_before', value: load.before.loadAverage[0] },
+                    { scene, metric: 'machine/load_1m_after', value: load.after.loadAverage[0] },
+                    { scene, metric: 'machine/chrome_gpu_processes_before', value: load.before.chromeGpuProcesses },
+                    { scene, metric: 'machine/quiet', value: load.quiet ? 1 : 0 },
+                );
+            } else {
+                console.error(`${page.name} in ${file}: no machine load recorded (a run from before the GPU lock); its timings count as provisional`);
+            }
             const group = groups.get(key) ?? { prefix, runs: [], counted: rows.counted };
             group.runs.push(rows.timed);
             groups.set(key, group);
