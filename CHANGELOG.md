@@ -3,6 +3,28 @@
 The release workflow uses the section for the version it publishes as that GitHub Release's notes. A version with no
 section here gets GitHub's generated notes instead. The longer story, by date, is in [HISTORY.md](HISTORY.md).
 
+## 0.1.1
+
+Fixes from pmndrs/gi's and the path tracer's move onto 0.1.0.
+
+- **Faster walk inside big kernels on Chrome D3D12** ([#3](https://github.com/pmndrs/bvh/issues/3)): the walk's
+  loops (binary, wide and the spatial queries) are now `for` loops with a literal bound, the one shape Tint's
+  `PreventInfiniteLoops` doesn't give a 64-bit counter. With those counters, a path tracer's megakernel that inlines
+  the walk ran 3.3-3.7x slower on an RTX 3060 under DXC's Shader Model 6.6+. Same traversal, same hits; each kernel
+  grows by about 130 bytes. The path tracer's `rtBoundWalkLoops` post-process is no longer needed (it leaves this
+  walk alone).
+- **Hits at exactly `tMax`** ([#4](https://github.com/pmndrs/bvh/issues/4)): a ray traced with `tMax` set to a hit's
+  own `t` now finds that hit again, in both walks. Before, a box's entry distance could round past `tMax`: on the
+  RTX 3060, 18% of the thin-box oracle's hits and 5% of the random instanced scene's were lost that way, by closest
+  hit and any hit alike. The box tests now take the caller's `tMax` grown by 1 + 2^-12 until the walk finds a hit
+  of its own (the triangle test's `t` can be off from the box planes by many ulps when the triangle is big and the
+  hit close, so the box exit's 3-ulp padding was not enough); the triangle test still keeps `[tMin, tMax]` exact,
+  and boxes cost no extra work. The trace oracle now re-traces every hit this way, in every variant.
+- **`SceneTreesOptions.onTrianglesWritten`** ([#5](https://github.com/pmndrs/bvh/issues/5)): once per update that
+  wrote triangle records (a tree placed, a swap, a drift rebuild, a CPU pose of a records mesh), with the update's
+  encoder and each mesh's or merged group's range, so an app can write per-triangle flags of its own (alpha-tested
+  or see-through triangles) in the same frame. The twin of ddgi's `requestTriangleFlags`.
+
 ## 0.1.0
 
 The first release on `latest`. A BVH for WebGPU that doesn't depend on any engine. GPU and CPU builders write one

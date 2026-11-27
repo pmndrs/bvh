@@ -122,6 +122,8 @@ export interface CpuTracer {
 const BOX_MISS = Infinity;
 const MIN_DIRECTION = 1e-30;
 const BOX_EXIT_PADDING = 1.0000004;
+/** As the WGSL's BVH_RAY_TMAX_PADDING (pmndrs/bvh#4): the box tests take the caller's tMax padded until the walk has a hit. */
+const RAY_TMAX_PADDING = 1.000244140625;
 
 function safeInverse(component: number): number {
     const magnitude = Math.max(Math.abs(component), MIN_DIRECTION);
@@ -341,6 +343,8 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
         let instanceRecord = 0;
 
         let closestT = ray.tMax;
+        // The box tests' far bound: the caller's tMax padded, then each hit's t (as the WGSL).
+        let boxFar = ray.tMax * RAY_TMAX_PADDING;
         let result: CpuHit | null = null;
         // As the WGSL: where the closest hit came from, for its normal and material after the walk.
         let hitRecord = 0;
@@ -359,7 +363,7 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
                 if (stats) stats.nodesVisited++;
                 const entered: { entry: number; reference: number }[] = [];
                 for (const child of decodeWideNode(wideFormat, scene.nodes, rootNodeOffset + index)) {
-                    const entry = boxEntryOf(child.box, setup, ray.tMin, closestT);
+                    const entry = boxEntryOf(child.box, setup, ray.tMin, boxFar);
                     if (entry < BOX_MISS) entered.push({ entry, reference: child.node >= 0 ? makeReference(child.node, 0) : makeReference(child.firstTriangle, child.triangleCount) });
                 }
                 const farOnTop = stopAtFirstHit && anyHitOrder === 'far';
@@ -376,12 +380,12 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
                     ? (rootNodeOffset + index) * BVH_NODE_WORDS
                     : firstTopLevelNodeWord + index * BVH_NODE_WORDS;
 
-                const leftEntry = boxEntry(floats, nodeWord + NODE_WORD.leftMin, nodeWord + NODE_WORD.leftMax, setup, ray.tMin, closestT);
+                const leftEntry = boxEntry(floats, nodeWord + NODE_WORD.leftMin, nodeWord + NODE_WORD.leftMax, setup, ray.tMin, boxFar);
                 const rightIndex = words[nodeWord + NODE_WORD.rightIndex];
                 const rightEntry =
                     rightIndex === EMPTY_CHILD_INDEX
                         ? BOX_MISS
-                        : boxEntry(floats, nodeWord + NODE_WORD.rightMin, nodeWord + NODE_WORD.rightMax, setup, ray.tMin, closestT);
+                        : boxEntry(floats, nodeWord + NODE_WORD.rightMin, nodeWord + NODE_WORD.rightMax, setup, ray.tMin, boxFar);
                 const leftReference = makeReference(words[nodeWord + NODE_WORD.leftIndex], words[nodeWord + NODE_WORD.leftCount]);
                 const rightReference = makeReference(rightIndex, words[nodeWord + NODE_WORD.rightCount]);
                 const hitLeft = leftEntry < BOX_MISS;
@@ -487,6 +491,7 @@ export function createCpuTracer(scene: CpuTraceScene, options: CpuTracerOptions 
                     hitRecord = instanceRecord;
                     hitSlot = slot;
                     closestT = hit.t;
+                    boxFar = hit.t;
                     if (stopAtFirstHit) return result;
                 }
             }

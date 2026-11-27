@@ -59,6 +59,7 @@
  * this port keeps the exact planes (see the design note's lever list).
  */
 
+import { boundedLoopWgsl } from './bounded-loop.ts';
 import {
     BVH4_CHILD,
     BVH4_NODE_WORDS,
@@ -138,7 +139,7 @@ function triangleGroupWgsl(kind: 'closest' | 'any', rayMasks: boolean): string {
     return /* wgsl */ `
 fn ${closest ? 'bvhTrianglesClosest' : 'bvhTrianglesAny'}(instance: BvhInstance, setup: BvhRaySetup, tMin: f32, ${closest ? 'best: ptr<function, BvhMeshHit>' : 'tMax: f32'}, meshVertexBase: u32, firstSlot: u32, group: u32${maskParameter}) ${closest ? '' : '-> bool '}{
     var bits = group;
-    loop {
+    ${boundedLoopWgsl('bvhBit')}
         if (bits == 0u) {
             break;
         }
@@ -300,14 +301,15 @@ function bvh4MeshWalkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrde
     const stackName = closest ? 'bvhMeshStackClosest' : 'bvhMeshStackAny';
     const maskParameter = rayMasks ? ', rayMask: u32' : '';
     const maskArgument = rayMasks ? ', rayMask' : '';
-    const step = bvh4NodeStepWgsl(closest, anyHitOrder, closest ? 'best.t' : 'tMax', bvh4LeafCall(closest, maskArgument, 'tMax'), (info) => `${stackName}[stackSize] = ${info};
+    // The box tests take tMax padded until the walk has a hit (BVH_RAY_TMAX_PADDING, wgsl.ts).
+    const step = bvh4NodeStepWgsl(closest, anyHitOrder, closest ? 'select(best.t, tMax * BVH_RAY_TMAX_PADDING, !best.found)' : 'tMax * BVH_RAY_TMAX_PADDING', bvh4LeafCall(closest, maskArgument, 'tMax'), (info) => `${stackName}[stackSize] = ${info};
                 stackSize += 1u;`);
     return /* wgsl */ `
 fn ${closest ? 'bvhMeshClosest' : 'bvhMeshAny'}(instance: BvhInstance, setup: BvhRaySetup, tMin: f32, tMax: f32, meshVertexBase: u32${maskParameter}) -> ${closest ? 'BvhMeshHit' : 'bool'} {
     ${closest ? 'var best = BvhMeshHit(false, tMax, 0u, vec2f(0.0), true, 0u, 0u);' : ''}
     var stackSize = 0u;
     var node = 0u;
-    loop {
+    ${boundedLoopWgsl('bvhStep')}
         ${step}
         if (stackSize == 0u) {
             break;
@@ -344,7 +346,9 @@ function bvh4SingleWalkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOr
                     }
                 }`
         : leaf;
-    const step = bvh4NodeStepWgsl(closest, anyHitOrder, closest ? 'best.t' : 'farthest', leafCall, (info) => `stack[stackSize] = ${info};
+    // The box tests take tMax padded until the walk has a hit (BVH_RAY_TMAX_PADDING, wgsl.ts).
+    const boxFar = closest ? 'select(best.t, ray.tMax * BVH_RAY_TMAX_PADDING, !best.found)' : 'farthest * BVH_RAY_TMAX_PADDING';
+    const step = bvh4NodeStepWgsl(closest, anyHitOrder, boxFar, leafCall, (info) => `stack[stackSize] = ${info};
                 stackSize += 1u;`);
     return /* wgsl */ `
 fn ${name}(ray: BvhRay${maskParameter}) -> ${closest ? 'BvhHit' : 'bool'} {
@@ -369,7 +373,7 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${closest ? 'BvhHit' : 'bool'} {
     var stackSize = 0u;
     var current = bvhMakeReference(0u, 0u);   // the top level's root; inside an instance, a mesh node
 
-    loop {
+    ${boundedLoopWgsl('bvhStep')}
         if (insideInstance) {
             let node = current;
             ${step}
@@ -378,7 +382,7 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${closest ? 'BvhHit' : 'bool'} {
             let index = current & BVH_REF_INDEX_MASK;
             if (count == 0u) {
                 let topNode = bvhLoadTopLevelNode(firstTopLevelNode, index);
-                let tTop = ${closest ? 'best.t' : 'farthest'};
+                let tTop = ${boxFar};
                 let leftEntry = bvhBoxEntry(topNode.leftMin, topNode.leftMax, setup, tMin, tTop);
                 var rightEntry = BVH_BOX_MISS;
                 if (topNode.rightIndex != BVH_EMPTY_CHILD) {
@@ -423,7 +427,7 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${closest ? 'BvhHit' : 'bool'} {
             }
         }
         // Take the next entry off the stack; the marker ends an instance's tree.
-        loop {
+        ${boundedLoopWgsl('bvhPop')}
             if (stackSize == 0u) {
                 ${closest ? `if (!best.found) {
                     return BvhHit(-1.0, 0u, 0u, vec2f(0.0), true, BVH_NO_MATERIAL, vec3f(0.0));
@@ -441,6 +445,8 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${closest ? 'BvhHit' : 'bool'} {
             break;
         }
     }
+    // Never reached: the loop leaves through the returns above, long before its bound (bounded-loop.ts).
+    return ${closest ? 'BvhHit(-1.0, 0u, 0u, vec2f(0.0), true, BVH_NO_MATERIAL, vec3f(0.0))' : 'false'};
 }
 `;
 }
@@ -474,7 +480,7 @@ fn ${closest ? 'bvhMeshClosest' : 'bvhMeshAny'}(instance: BvhInstance, setup: Bv
     let octantInverse4 = octantInverse * 0x01010101u;
     // The root as a group of one (tinybvh): child base 0, hit bit 31 and no inner mask, so it is child 0.
     var ngroup = vec2u(0u, 0x80000000u);
-    loop {
+    ${boundedLoopWgsl('bvhStep')}
         // Take the next inner child of the group: the highest hit bit.
         let hits = ngroup.y;
         let childBit = firstLeadingBit(hits);
@@ -496,7 +502,8 @@ fn ${closest ? 'bvhMeshClosest' : 'bvhMeshAny'}(instance: BvhInstance, setup: Bv
         let e4 = n0.w;
         // 2^e from the biased exponent bytes: the bytes are the f32 exponent field.
         let scale = bitcast<vec3f>(vec3u(extractBits(e4, 0u, 8u), extractBits(e4, 8u, 8u), extractBits(e4, 16u, 8u)) << vec3u(23u));
-        let tFar = ${closest ? 'best.t' : 'tMax'};
+        // Padded until the walk has a hit (BVH_RAY_TMAX_PADDING, wgsl.ts).
+        let tFar = ${closest ? 'select(best.t, tMax * BVH_RAY_TMAX_PADDING, !best.found)' : 'tMax * BVH_RAY_TMAX_PADDING'};
         // Slots 0-3, then 4-7. Plane words: lo x n2.x|y, lo y n2.z|w, lo z n3.x|y, hi x n3.z|w, hi y n4.x|y, hi z n4.z|w.
         let entryA = bvhWideEntryWords(p, scale, n2.x, n3.z, n2.z, n4.x, n3.x, n4.z, setup, tMin, tFar);
         let entryB = bvhWideEntryWords(p, scale, n2.y, n3.w, n2.w, n4.y, n3.y, n4.w, setup, tMin, tFar);
@@ -602,6 +609,7 @@ function topLevelWalkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrde
                     hitRecord = index;
                     hitSlot = meshHit.slot;
                     farthest = meshHit.t;
+                    boxFarthest = meshHit.t;
                 }`
         : `if (bvhMeshAny(instance, setup, ray.tMin, farthest, meshVertexBase${maskArgument})) {
                     return true;
@@ -619,21 +627,22 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${closest ? 'BvhHit' : 'bool'} {
     }
     let firstTopLevelNode = BVH_TOP_HEADER_VEC4S + instanceCount * BVH_TOP_VEC4_PER_RECORD;
     let worldSetup = bvhMakeRaySetup(ray.origin, ray.direction);
-    ${closest ? 'var farthest = ray.tMax;' : 'let farthest = ray.tMax;'}
+    ${closest ? 'var' : 'let'} farthest = ray.tMax;
+    ${closest ? 'var' : 'let'} boxFarthest = ray.tMax * BVH_RAY_TMAX_PADDING;   // the box tests' farthest (BVH_RAY_TMAX_PADDING, wgsl.ts)
 
     var stack: array<u32, BVH_STACK_SIZE>;
     var stackSize = 0u;
     var current = bvhMakeReference(0u, 0u);
 
-    loop {
+    ${boundedLoopWgsl('bvhStep')}
         let count = current >> BVH_REF_COUNT_SHIFT;
         let index = current & BVH_REF_INDEX_MASK;
         if (count == 0u) {
             let node = bvhLoadTopLevelNode(firstTopLevelNode, index);
-            let leftEntry = bvhBoxEntry(node.leftMin, node.leftMax, worldSetup, ray.tMin, farthest);
+            let leftEntry = bvhBoxEntry(node.leftMin, node.leftMax, worldSetup, ray.tMin, boxFarthest);
             var rightEntry = BVH_BOX_MISS;
             if (node.rightIndex != BVH_EMPTY_CHILD) {
-                rightEntry = bvhBoxEntry(node.rightMin, node.rightMax, worldSetup, ray.tMin, farthest);
+                rightEntry = bvhBoxEntry(node.rightMin, node.rightMax, worldSetup, ray.tMin, boxFarthest);
             }
             let leftReference = bvhMakeReference(node.leftIndex, node.leftCount);
             let rightReference = bvhMakeReference(node.rightIndex, node.rightCount);
@@ -673,6 +682,8 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${closest ? 'BvhHit' : 'bool'} {
         stackSize -= 1u;
         current = stack[stackSize];
     }
+    // Never reached: the loop leaves through the return above, long before its bound (bounded-loop.ts).
+    return ${closest ? 'bvhFinishClosest(result, hitRecord, hitSlot)' : 'false'};
 }
 `;
 }

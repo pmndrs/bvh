@@ -173,7 +173,7 @@ On by default since 2026-11-13 in `SceneTrees` and `buildTraceScene`, but it onl
 | `module.resources()`, `module.version` | `buffers`, `version` (or `traceBuffers` for `TraceBatchKernel`) |
 | `meshTreeCounts`, `memory`, `holdRefinements`, `releaseRefinements` | `counts`, `memory`, `holdRefinements`, `releaseRefinements`, plus `onTree` events and `meshStatus` (`builtBy`, `fallbackReason`) |
 
-The GPU top level's gather reads its own instance table, not the scene copy: hits name `instanceIndex` (ddgi passes its scene slot). ddgi's install hook for triangle flags (`requestTriangleFlags`) has no twin yet: write flags before the build (`MeshInput.triangleFlags`) or after placement on `meshStatus(mesh).placement`.
+The GPU top level's gather reads its own instance table, not the scene copy: hits name `instanceIndex` (ddgi passes its scene slot). ddgi's install hook for triangle flags (`requestTriangleFlags`) has its twin since 0.1.1: `SceneTreesOptions.onTrianglesWritten` names, once per update and with its encoder, every mesh or merged group whose records the update wrote (placements, and CPU poses of records meshes); record `gi/triangle-flags`' write pass there (docs/scenes/scene-trees.mdx, "Your own triangle flags"). Material changes still ask for a rewrite on ddgi's side, over `meshStatus(mesh).placement`.
 
 
 These rules differ from ddgi's:

@@ -513,14 +513,62 @@ async function traceCase(
     builder: MeshBvhBuilder,
     oracleCase: OracleCase,
     variant: OracleVariant,
-): Promise<{ answers: GpuAnswers; built: BuiltScene }> {
+    exactTMax = true,
+): Promise<{ answers: GpuAnswers; built: BuiltScene; exactTMax: ExactTMaxReport | null }> {
     const built = await buildScene(builder, oracleCase, variant);
     const buffers = uploadTraceScene(device, built.data, oracleCase.name);
     try {
-        return { answers: await traceOnGpu(device, (encoder, batch) => kernel.encode(encoder, buffers, batch), oracleCase.rays, variant.hitNormal ?? true), built };
+        const encode: EncodeBatch = (encoder, batch) => kernel.encode(encoder, buffers, batch);
+        const answers = await traceOnGpu(device, encode, oracleCase.rays, variant.hitNormal ?? true);
+        return { answers, built, exactTMax: exactTMax ? await traceAtExactTMax(device, encode, oracleCase.rays, answers) : null };
     } finally {
         buffers.destroy();
     }
+}
+
+/** What the exact-tMax pass found: rays re-traced, and those that lost their hit. */
+interface ExactTMaxReport {
+    rays: number;
+    closestLost: number;
+    anyLost: number;
+    /** Closest hits found again at another distance (must be none). */
+    closestMoved: number;
+    firstLost: number[];
+}
+
+/**
+ * Issue pmndrs/bvh#4: every ray that hit is traced again with `tMax` set to the f32 `t`
+ * the walk returned. The range is inclusive, so both walks must find that hit again, the
+ * closest at the same `t`. A slab test whose entry distance rounds a few ulps past `tMax`
+ * loses it.
+ */
+async function traceAtExactTMax(device: GPUDevice, encode: EncodeBatch, packedRays: Float32Array, answers: GpuAnswers): Promise<ExactTMaxReport> {
+    const indices: number[] = [];
+    const distances: number[] = [];
+    for (let index = 0; index < packedRays.length / 8; index++) {
+        const hit = hitAt(answers, index);
+        if (!hit || !(hit.t > 0)) continue;
+        indices.push(index);
+        distances.push(hit.t);
+    }
+    const report: ExactTMaxReport = { rays: indices.length, closestLost: 0, anyLost: 0, closestMoved: 0, firstLost: [] };
+    if (indices.length === 0) return report;
+    const rays = new Float32Array(indices.length * 8);
+    indices.forEach((index, at) => {
+        rays.set(packedRays.subarray(index * 8, index * 8 + 8), at * 8);
+        rays[at * 8 + 7] = distances[at];
+    });
+    const again = await traceOnGpu(device, encode, rays, answers.hitNormal);
+    indices.forEach((index, at) => {
+        const hit = hitAt(again, at);
+        const lostClosest = hit === null;
+        const lostAny = again.blocked[at] === 0;
+        if (lostClosest) report.closestLost++;
+        else if (hit.t !== Math.fround(distances[at])) report.closestMoved++;
+        if (lostAny) report.anyLost++;
+        if ((lostClosest || lostAny) && report.firstLost.length < 8) report.firstLost.push(index);
+    });
+    return report;
 }
 
 async function runSharedEdgeCase(
@@ -530,7 +578,8 @@ async function runSharedEdgeCase(
     oracleCase: SharedEdgeCase,
     variant: OracleVariant,
 ): Promise<SharedEdgeReport> {
-    const { answers } = await traceCase(device, kernel, builder, oracleCase, variant);
+    // The exact-tMax pass runs on the ordinary cases; these scenes are a million rays each.
+    const { answers } = await traceCase(device, kernel, builder, oracleCase, variant, false);
     return evaluateSharedEdgeCase(oracleCase, tracerAnswers(answers), SHARED_EDGE_REFERENCE_RAYS);
 }
 
@@ -609,6 +658,8 @@ await runGpuTest(async ({ device, log }) => {
     const ownMaterialHitsByVariant = new Map<string, number>();
     const seamReports = new Map<string, SharedEdgeReport[]>();
     const seamLeaks: Record<string, { slipped: number; slippedAny: number; referenceMisses: number }> = {};
+    /** Issue #4: hits re-traced with tMax at their own t, over every variant and case. */
+    const exactTMaxTotals = { rays: 0, closestLost: 0, anyLost: 0, closestMoved: 0 };
     endPhase('references');
     for (const variant of VARIANTS) {
         const gpuBuilder = variant.treeSource === 'gpu-lbvh' || variant.treeSource === 'gpu-hploc' ? gpuBuilders.get(variant.treeSource) : undefined;
@@ -638,7 +689,19 @@ await runGpuTest(async ({ device, log }) => {
             const reference = variant.triangleMaterials
                 ? (triangleMaterialReference(oracleCase, references[caseIndex]) ?? (await computeReferenceAnswersYielding(oracleCase)))
                 : references[caseIndex];
-            const { answers, built } = await traceCase(device, kernel, builder, oracleCase, variant);
+            const traced = await traceCase(device, kernel, builder, oracleCase, variant);
+            const { answers, built } = traced;
+            const exactTMax = traced.exactTMax!;
+            exactTMaxTotals.rays += exactTMax.rays;
+            exactTMaxTotals.closestLost += exactTMax.closestLost;
+            exactTMaxTotals.anyLost += exactTMax.anyLost;
+            exactTMaxTotals.closestMoved += exactTMax.closestMoved;
+            if (exactTMax.closestLost + exactTMax.anyLost + exactTMax.closestMoved > 0) {
+                failures.push(
+                    `[${variant.name}] ${oracleCase.name}: at tMax = the hit's own t, ${exactTMax.closestLost} closest and ${exactTMax.anyLost} any hits of ${exactTMax.rays} were lost, ` +
+                        `${exactTMax.closestMoved} closest moved (rays ${exactTMax.firstLost.join(', ')})`,
+                );
+            }
 
             const result = evaluateCase(oracleCase, tracerAnswers(answers), reference);
             // The CPU port walks binary trees only; a wide scene reports its mesh stack need instead.
@@ -795,6 +858,7 @@ await runGpuTest(async ({ device, log }) => {
         byTest,
         hooks,
         oneUlpSeamLeaks: seamLeaks,
+        exactTMax: exactTMaxTotals,
         materialHits: Object.fromEntries(materialHitsByVariant),
         ownMaterialHits: Object.fromEntries(ownMaterialHitsByVariant),
         traceStorageBuffers: TRACE_MODULE_ENTRIES.length,

@@ -308,6 +308,19 @@ export interface SceneTreesOptions {
      * finished tree is placed.
      */
     readonly onBuild?: (event: SceneBuildEvent) => void;
+    /**
+     * The hook for per-triangle data of the app's own (pmndrs/bvh#5): called
+     * once at the end of each update that wrote triangle records, with the
+     * update's encoder and every mesh (or merged group) whose records it wrote,
+     * where they are now (see {@link SceneTrianglesWrittenEvent}). Those
+     * records hold the flags the mesh was added with (`MeshInput.triangleFlags`,
+     * the merged groups' identity), so an app that keeps flags of its own
+     * (alpha-tested or see-through triangles, worked out from its materials)
+     * records its pass that rewrites them into `event.encoder` here: it runs
+     * after every write of the update and before anything the frame traces.
+     * Not called on an update that wrote no triangle record.
+     */
+    readonly onTrianglesWritten?: (event: SceneTrianglesWrittenEvent) => void;
     /** Builds the first trees instead of the GPU H-PLOC, whatever the device's features: for unit tests in Node. */
     readonly firstTreeBuilder?: FirstTreeBuilder;
     /**
@@ -413,6 +426,41 @@ export interface SceneTreeEvent {
     readonly triangleCount: number;
     /** Milliseconds from the update that started the mesh's builds to this placement. */
     readonly ms: number;
+}
+
+/** One mesh's (or merged group's) triangle records that an update wrote ({@link SceneTrianglesWrittenEvent}). */
+export interface SceneWrittenTriangles {
+    /** The mesh handle, or null for a merged group. */
+    readonly mesh: number | null;
+    /** The merged group's index, or null. */
+    readonly group: number | null;
+    /**
+     * `'placed'`: a tree was placed (a first tree, a swap to a refined one, a
+     * drift rebuild, the app's own tree), and every record of the range is new.
+     * `'pose'`: a CPU pose ({@link SceneTrees.setPoseCpu}) rewrote the records
+     * in place (records format only: indexed meshes' poses move positions, not
+     * records). GPU refits keep each record's flags word and are not named.
+     */
+    readonly reason: 'placed' | 'pose';
+    /** The range in {@link SceneTrianglesWrittenEvent.triangles}, in triangles, in tree order. */
+    readonly triangleOffset: number;
+    readonly triangleCount: number;
+}
+
+/**
+ * What an update wrote into the triangle buffer ({@link SceneTreesOptions.onTrianglesWritten}).
+ * Each record names its triangle (`originalIndex`, and a merged record its
+ * source instance), so a pass over a range can find each triangle's own data.
+ */
+export interface SceneTrianglesWrittenEvent {
+    /** The update's encoder: a pass recorded here runs after every write of the update. */
+    readonly encoder: GPUCommandEncoder;
+    /** The triangle buffer as of this update ({@link SceneTrees.buffers}`.triangles`; it may have grown). */
+    readonly triangles: GPUBuffer;
+    /** The records' format: 48-byte records (flags at word 7) or 16-byte indexed triangles (flags in the top bits of word 3). */
+    readonly triangleLeaves: TriangleLeaves;
+    /** Each written mesh or group once, in no particular order. */
+    readonly written: readonly SceneWrittenTriangles[];
 }
 
 /**
@@ -844,6 +892,9 @@ export class SceneTrees {
     private readonly warn: (message: string) => void;
     private readonly onTree: ((event: SceneTreeEvent) => void) | null;
     private readonly onBuild: ((event: SceneBuildEvent) => void) | null;
+    private readonly onTrianglesWritten: ((event: SceneTrianglesWrittenEvent) => void) | null;
+    /** Mesh slots whose triangle records this update wrote, and why (`onTrianglesWritten`); a placement wins over a pose. */
+    private readonly trianglesWritten = new Map<number, 'placed' | 'pose'>();
     private readonly pool: BvhWorkerPool;
     private readonly ownsPool: boolean;
     private readonly transferGeometry: boolean;
@@ -981,6 +1032,7 @@ export class SceneTrees {
         this.warn = options.warn ?? ((message) => console.warn(message));
         this.onTree = options.onTree ?? null;
         this.onBuild = options.onBuild ?? null;
+        this.onTrianglesWritten = options.onTrianglesWritten ?? null;
         this.gpuTreeOutputs = options.gpuTreeOutputs ?? 'copy';
         const maxBatchBytes = options.gpuMaxBatchBytes ?? DEFAULT_GPU_MAX_BATCH_BYTES;
         if (!(maxBatchBytes > 0)) throw new RangeError(`gpuMaxBatchBytes must be a positive number of bytes (Infinity: no cap), got ${maxBatchBytes}`);
@@ -1881,6 +1933,8 @@ export class SceneTrees {
         // Poses and trees placed above, refit before anything traces; then a drift rebuild if one is due.
         if (this.deforming?.encode(encoder, { nodes: this.nodes.buffer, triangles: this.triangles.buffer, positions: this.positions?.buffer ?? null }, this.updates)) this.encoderWritesStorage = true;
         this.startDriftRebuild();
+        // Every write into the triangle records is in the encoder now: the app's pass goes after them.
+        this.reportTrianglesWritten(encoder);
         this.syncInstances();
         try {
             this.updateTopLevel(encoder);
@@ -3120,6 +3174,8 @@ export class SceneTrees {
             if (posed.triangles) {
                 // Records: the posed corners, in the placed tree's order (CWBVH reorders them).
                 this.stagedCopy(encoder, this.triangles, placed.triangleOffset, reorderTriangles(posed.triangles, TRIANGLE_BYTES, pose.wide?.triangleOrder ?? pose.wideMap?.triangleOrder ?? null));
+                // Whole records, flags as built: the app's own flags go back on (onTrianglesWritten).
+                if (!this.trianglesWritten.has(state.slot)) this.trianglesWritten.set(state.slot, 'pose');
             } else if (this.positions && state.vertices) {
                 // Indexed: deforming meshes are never welded, so pose vertex v is scene vertex base + v.
                 const stride = positionStrideFloats(this.positionLayout);
@@ -3176,6 +3232,28 @@ export class SceneTrees {
         this.cpuTopLevelStale = true;
     }
 
+    /** Calls `onTrianglesWritten` with the meshes whose records this update wrote, where they are now. */
+    private reportTrianglesWritten(encoder: GPUCommandEncoder): void {
+        if (this.trianglesWritten.size === 0) return;
+        const written: SceneWrittenTriangles[] = [];
+        for (const [slot, reason] of this.trianglesWritten) {
+            const state = this.meshes.get(slot);
+            const placed = this.placed.get(slot);
+            // Removed since: nothing to name.
+            if (!state || !placed) continue;
+            written.push({
+                mesh: state.group >= 0 ? null : slot,
+                group: state.group >= 0 ? state.group : null,
+                reason,
+                triangleOffset: placed.triangleOffset,
+                triangleCount: placed.triangleCount,
+            });
+        }
+        this.trianglesWritten.clear();
+        if (written.length === 0 || !this.onTrianglesWritten) return;
+        this.onTrianglesWritten({ encoder, triangles: this.triangles.buffer, triangleLeaves: this.triangleLeaves, written });
+    }
+
     /** Copies `data` into `storage` at unit `offset` through a staging buffer, in `encoder`. */
     private stagedCopy(encoder: GPUCommandEncoder, storage: GrowableStorage, offset: number, data: ArrayBuffer): void {
         const size = Math.ceil(data.byteLength / 4) * 4;
@@ -3203,6 +3281,7 @@ export class SceneTrees {
             generation: tree.generation,
         };
         this.placed.set(tree.slot, placed);
+        this.trianglesWritten.set(tree.slot, 'placed');
         this.deepestMeshStale = true;
         this.gpuTopLevel?.setMeshTree(tree.slot, placed);
         // Wide scenes: the refit runs on the binary tree (tinybvh's before the collapse; a GPU tree's read back), through the wide tree's map.
