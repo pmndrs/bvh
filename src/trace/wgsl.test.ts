@@ -132,6 +132,48 @@ describe('the spatial queries (queries, shapecast) and the triangle helpers', ()
     });
 });
 
+describe('the walk loops (pmndrs/bvh#3)', () => {
+    /** Every walk the module can be built with: binary in each node format and decode, the wide walks, the queries and the counted walk. */
+    const variants: Parameters<typeof traceModuleWgsl>[0][] = [
+        {},
+        { rayMasks: false, anyHitOrder: 'near' },
+        { anyHitOrder: 'larger' },
+        { nodeFormat: 'quantized' },
+        { nodeFormat: 'quantized', quantizedDecode: 'folded' },
+        { triangleLeaves: 'indexed' },
+        { nodeFormat: 'bvh4' },
+        { nodeFormat: 'bvh4', wideWalk: 'single' },
+        { nodeFormat: 'bvh4', wideWalk: 'single', rayMasks: false, wideDecode: 'folded' },
+        { nodeFormat: 'cwbvh8' },
+        { nodeFormat: 'cwbvh8', wideStack: 'workgroup', wideDecode: 'folded' },
+        { queries: true },
+        { queries: true, nodeFormat: 'f32', rayMasks: false },
+        { counters: true },
+        { counters: true, rayMasks: false, nodeFormat: 'quantized', quantizedDecode: 'folded' },
+    ];
+
+    it('has no loop Tint must count: every loop is a for loop with a literal bound', () => {
+        for (const options of variants) {
+            const wgsl = traceModuleWgsl(options).replace(/\/\/[^\n]*/g, '');
+            expect(wgsl, JSON.stringify(options)).not.toMatch(/\bloop\s*\{/);
+            expect(wgsl, JSON.stringify(options)).not.toMatch(/\bwhile\b/);
+            // Each for loop declares its index, tests it against the literal first and steps it by ++ (bounded-loop.ts).
+            for (const match of wgsl.matchAll(/\bfor\s*\(([^)]*)\)/g)) {
+                const head = match[1];
+                if (/^var (\w+) = 0u; \1 < 0xffffffffu; \1\+\+$/.test(head)) continue;
+                // The leaf loops over a runtime triangle count are left counted (they cost nothing measurable).
+                expect(head, `${JSON.stringify(options)}: ${head}`).toMatch(/^var i = 0u; i < (count|\w+); i \+= 1u$/);
+            }
+        }
+    });
+
+    it('ends each walk function that used to end in its loop with a return', () => {
+        const wgsl = traceModuleWgsl({});
+        expect(wgsl).not.toContain("No return here: the loop above only exits through 'return'.");
+        expect(wgsl).toContain('    return bvhFinishClosest(result, hitRecord, hitSlot);\n}');
+    });
+});
+
 describe('the GPU layout version', () => {
     it("is the one the tracer's WGSL was written against", () => {
         // If this fails, @pmndrs/bvh changed its layout: review gpu-layout.ts and the walk in wgsl.ts, then bump TRACER_GPU_LAYOUT_VERSION.

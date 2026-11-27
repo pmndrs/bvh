@@ -18,6 +18,7 @@
  * bench times the production kernel.
  */
 
+import { boundedLoopWgsl } from '../../../../src/trace/bounded-loop.ts';
 import { traceModuleWgsl, type AnyHitOrder } from '../../../../src/trace/wgsl.ts';
 
 /** Words per ray the counted kernel writes, in the order of {@link COUNTED_WORD}. */
@@ -87,7 +88,8 @@ export function countedWalkWgsl(options: CountedWalkOptions): string {
         `fn ${productionName}(ray: BvhRay, rayMask: u32) -> ${returnType} {`,
         `fn ${name}(ray: BvhRay, rayMask: u32) -> BenchCounts {\n    var counts = BenchCounts();\n    var hitInThisInstance = false;`,
     );
-    text = replaceAnchor(text, '    loop {\n        let count = current >> BVH_REF_COUNT_SHIFT;', '    loop {\n        counts.steps += 1u;\n        let count = current >> BVH_REF_COUNT_SHIFT;');
+    const descent = `    ${boundedLoopWgsl('bvhStep')}\n        let count = current >> BVH_REF_COUNT_SHIFT;`;
+    text = replaceAnchor(text, descent, descent.replace('\n', '\n        counts.steps += 1u;\n'));
     text = replaceAnchor(text, 'node = bvhLoadMeshNode(instance.rootNodeOffset + index);', 'node = bvhLoadMeshNode(instance.rootNodeOffset + index);\n                counts.meshNodes += 1u;');
     text = replaceAnchor(text, 'node = bvhLoadTopLevelNode(firstTopLevelNode, index);', 'node = bvhLoadTopLevelNode(firstTopLevelNode, index);\n                counts.topLevelNodes += 1u;');
     text = replaceAnchor(text, 'stack[stackSize] = BVH_REF_INSTANCE_MARKER;', 'stack[stackSize] = BVH_REF_INSTANCE_MARKER;\n                counts.instanceEntries += 1u;\n                hitInThisInstance = false;');
@@ -99,10 +101,10 @@ export function countedWalkWgsl(options: CountedWalkOptions): string {
     if (closest) {
         text = replaceAnchor(text, 'result = BvhHit(triangleHit.t', 'if (!hitInThisInstance) { counts.instancesWithHit += 1u; hitInThisInstance = true; }\n                    result = BvhHit(triangleHit.t');
         text = replaceAnchor(text, 'return result;', 'return benchFinishClosest(counts, result);');
-        text = replaceAnchor(text, 'return bvhFinishClosest(result, hitRecord, hitSlot);', 'return benchFinishClosest(counts, bvhFinishClosest(result, hitRecord, hitSlot));');
+        text = replaceAnchor(text, 'return bvhFinishClosest(result, hitRecord, hitSlot);', 'return benchFinishClosest(counts, bvhFinishClosest(result, hitRecord, hitSlot));', 2);
     } else {
         text = replaceAnchor(text, 'return true;', 'counts.instancesWithHit += 1u;\n                return benchFinishAny(counts, true);');
-        text = replaceAnchor(text, 'return false;', 'return benchFinishAny(counts, false);', 2);
+        text = replaceAnchor(text, 'return false;', 'return benchFinishAny(counts, false);', 3);
     }
     return text;
 }

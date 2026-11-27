@@ -52,6 +52,8 @@
  * second stack of the pushed boxes' scores beside it.
  */
 
+import { boundedLoopWgsl } from './bounded-loop.ts';
+
 /**
  * How much a moved mesh box is grown, as a share of the magnitudes the f32
  * transform adds up (the moved box centre's terms, the translation and the
@@ -142,7 +144,7 @@ fn ${name}(${rayMasks ? 'mask: u32' : ''}) -> bool {
     var stackSize = 0u;
     var current = bvhMakeReference(0u, 0u);   // the root of the top level
 
-    loop {
+    ${boundedLoopWgsl('bvhStep')}
         let count = current >> BVH_REF_COUNT_SHIFT;
         let index = current & BVH_REF_INDEX_MASK;
 
@@ -228,7 +230,7 @@ fn ${name}(${rayMasks ? 'mask: u32' : ''}) -> bool {
         }
 
         // Take the next entry off the stack that the query still wants.
-        loop {
+        ${boundedLoopWgsl('bvhPop')}
             if (stackSize == 0u) {
                 return false;
             }
@@ -245,7 +247,8 @@ fn ${name}(${rayMasks ? 'mask: u32' : ''}) -> bool {
             break;
         }
     }
-    // No return here: the loop above only exits through 'return'.
+    // Never reached: the loop leaves through the returns above, long before its bound (bounded-loop.ts).
+    return false;
 }
 `;
 }

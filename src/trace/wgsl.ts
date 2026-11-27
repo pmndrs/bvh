@@ -98,6 +98,7 @@ import {
     type PositionLayout,
     type TriangleLeaves,
 } from '../gpu-layout.ts';
+import { boundedLoopWgsl } from './bounded-loop.ts';
 import { DEFAULT_TRIANGLE_FILTER_WGSL } from './triangle-filter.ts';
 import { closestPointBatchEntryWgsl, queriesWgsl } from './query-wgsl.ts';
 import { countedWalkWgsl, walkCountsTypesWgsl, WALK_COUNTS_BYTES, WALK_COUNTS_WORD } from './walk-counters.ts';
@@ -238,6 +239,15 @@ const BVH_BOX_MISS: f32 = 3.0e38;
 // box a few ulps outside its slab interval. Growing the exit distance by this
 // much keeps such rays (Ize, "Robust BVH Ray Traversal"). About 3 f32 steps.
 const BVH_BOX_EXIT_PADDING: f32 = 1.0000004;
+
+// The caller's tMax as the box tests take it, before the walk has a hit of its own
+// (pmndrs/bvh#4): 1 + 2^-12. A ray traced again with tMax at a hit's t must find that
+// hit, but the triangle test's t is off from the planes of the boxes around it by up to
+// a few ulps times (the depth of the triangle's corners / t): a big wall hit close by
+// rounds well past BVH_BOX_EXIT_PADDING. Only boxes the ray enters within 0.025% past
+// tMax cost a visit, and the triangle test keeps [tMin, tMax] exact. A hit of the
+// walk's own narrows the boxes to its t unpadded (what lies there is only a tie).
+const BVH_RAY_TMAX_PADDING: f32 = 1.000244140625;
 `;
 
 /**
@@ -550,10 +560,10 @@ const EXACT_NODE_TEST_WGSL = `            var node: BvhNode;
             }
 
             // Only a tree with a single primitive has an empty child, and it is the right one.
-            let leftEntry = bvhBoxEntry(node.leftMin, node.leftMax, setup, ray.tMin, farthest);
+            let leftEntry = bvhBoxEntry(node.leftMin, node.leftMax, setup, ray.tMin, boxFarthest);
             var rightEntry = BVH_BOX_MISS;
             if (node.rightIndex != BVH_EMPTY_CHILD) {
-                rightEntry = bvhBoxEntry(node.rightMin, node.rightMax, setup, ray.tMin, farthest);
+                rightEntry = bvhBoxEntry(node.rightMin, node.rightMax, setup, ray.tMin, boxFarthest);
             }
 `;
 
@@ -570,15 +580,15 @@ const FOLDED_NODE_TEST_WGSL = `            var node: BvhNode;
             // Only a tree with a single primitive has an empty child, and it is the right one.
             if (insideInstance) {
                 node = bvhLoadMeshNodeFolded(instance.rootNodeOffset + index);
-                leftEntry = bvhFoldedEntry(node.leftMin, node.leftMax, ray.tMin, farthest);
+                leftEntry = bvhFoldedEntry(node.leftMin, node.leftMax, ray.tMin, boxFarthest);
                 if (node.rightIndex != BVH_EMPTY_CHILD) {
-                    rightEntry = bvhFoldedEntry(node.rightMin, node.rightMax, ray.tMin, farthest);
+                    rightEntry = bvhFoldedEntry(node.rightMin, node.rightMax, ray.tMin, boxFarthest);
                 }
             } else {
                 node = bvhLoadTopLevelNode(firstTopLevelNode, index);
-                leftEntry = bvhBoxEntry(node.leftMin, node.leftMax, setup, ray.tMin, farthest);
+                leftEntry = bvhBoxEntry(node.leftMin, node.leftMax, setup, ray.tMin, boxFarthest);
                 if (node.rightIndex != BVH_EMPTY_CHILD) {
-                    rightEntry = bvhBoxEntry(node.rightMin, node.rightMax, setup, ray.tMin, farthest);
+                    rightEntry = bvhBoxEntry(node.rightMin, node.rightMax, setup, ray.tMin, boxFarthest);
                 }
             }
 `;
@@ -712,7 +722,11 @@ function walkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrder: AnyHi
     const recordDeclaration = closest ? 'var instanceRecord = 0u;   // the record of the instance being walked' : '';
     const recordAssignment = closest ? 'instanceRecord = index;' : '';
     // Closest-hit narrows the ray after every hit; any-hit never needs to.
-    const farDeclaration = closest ? 'var farthest = ray.tMax;   // hits beyond this are not interesting any more' : 'let farthest = ray.tMax;';
+    const farDeclaration = closest
+        ? `var farthest = ray.tMax;   // hits beyond this are not interesting any more
+    var boxFarthest = ray.tMax * BVH_RAY_TMAX_PADDING;   // the box tests' farthest (BVH_RAY_TMAX_PADDING)`
+        : `let farthest = ray.tMax;
+    let boxFarthest = ray.tMax * BVH_RAY_TMAX_PADDING;   // the box tests' farthest (BVH_RAY_TMAX_PADDING)`;
     const onTriangleHit = closest
         ? `// The test ran in object space, where the winding is the one the mesh was
                     // authored with, so frontFacing is the authored side even for a mirrored
@@ -721,7 +735,8 @@ function walkWgsl(kind: 'closest' | 'any', rayMasks: boolean, anyHitOrder: AnyHi
                     result = BvhHit(triangleHit.t, hitInstance, triangle.originalIndex, triangleHit.barycentrics, frontFace, BVH_NO_MATERIAL, vec3f(0.0));
                     hitRecord = instanceRecord;
                     hitSlot = slot;
-                    farthest = triangleHit.t;`
+                    farthest = triangleHit.t;
+                    boxFarthest = triangleHit.t;`
         : 'return true;';
     return /* wgsl */ `
 fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
@@ -747,7 +762,7 @@ fn ${name}(ray: BvhRay${maskParameter}) -> ${returnType} {
     var stackSize = 0u;
     var current = bvhMakeReference(0u, 0u);   // the root of the top level
 
-    loop {
+    ${boundedLoopWgsl('bvhStep')}
         let count = current >> BVH_REF_COUNT_SHIFT;
         let index = current & BVH_REF_INDEX_MASK;
 
@@ -833,7 +848,7 @@ ${folded ? FOLDED_NODE_TEST_WGSL : EXACT_NODE_TEST_WGSL}            let leftRefe
         }
 
         // Nothing left to descend into here: take the next entry off the stack.
-        loop {
+        ${boundedLoopWgsl('bvhPop')}
             if (stackSize == 0u) {
                 return ${noHitAfterWalk};
             }
@@ -849,7 +864,8 @@ ${folded ? FOLDED_NODE_TEST_WGSL : EXACT_NODE_TEST_WGSL}            let leftRefe
             break;
         }
     }
-    // No return here: the loop above only exits through 'return'.
+    // Never reached: the loop leaves through the return above, long before its bound (bounded-loop.ts).
+    return ${noHitAfterWalk};
 }
 `;
 }

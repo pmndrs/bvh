@@ -20,6 +20,8 @@
  * writes more per ray); time the production walk.
  */
 
+import { boundedLoopWgsl } from './bounded-loop.ts';
+
 /** Bytes of one `BvhWalkCounts` record (nine 4-byte words). */
 export const WALK_COUNTS_BYTES = 36;
 
@@ -125,7 +127,9 @@ export function countedWalkWgsl(walk: string, kind: 'closest' | 'any', rayMasks:
         `fn ${name}(${parameters}) -> ${returnType} {`,
         `fn ${name}Counted(${parameters}) -> BvhWalkCounts {\n    var counts = BvhWalkCounts();\n    var hitInThisInstance = false;`,
     );
-    text = replaceAnchor(text, '    loop {\n        let count = current >> BVH_REF_COUNT_SHIFT;', '    loop {\n        counts.steps += 1u;\n        let count = current >> BVH_REF_COUNT_SHIFT;');
+    // The descent loop's head is bounded-loop.ts's, counter bvhStep.
+    const descent = `    ${boundedLoopWgsl('bvhStep')}\n        let count = current >> BVH_REF_COUNT_SHIFT;`;
+    text = replaceAnchor(text, descent, descent.replace('\n', '\n        counts.steps += 1u;\n'));
     // The folded decode (quantizedDecode: 'folded') loads mesh nodes with bvhLoadMeshNodeFolded.
     const meshLoad = walk.includes('node = bvhLoadMeshNodeFolded(') ? 'node = bvhLoadMeshNodeFolded(instance.rootNodeOffset + index);' : 'node = bvhLoadMeshNode(instance.rootNodeOffset + index);';
     text = replaceAnchor(text, meshLoad, `${meshLoad}\n                counts.meshNodes += 1u;`);
@@ -135,10 +139,12 @@ export function countedWalkWgsl(walk: string, kind: 'closest' | 'any', rayMasks:
     if (closest) {
         text = replaceAnchor(text, 'result = BvhHit(triangleHit.t', 'if (!hitInThisInstance) { counts.instancesWithHit += 1u; hitInThisInstance = true; }\n                    result = BvhHit(triangleHit.t');
         text = replaceAnchor(text, 'return result;', 'return bvhCountedFinishClosest(counts, result);');
-        text = replaceAnchor(text, 'return bvhFinishClosest(result, hitRecord, hitSlot);', 'return bvhCountedFinishClosest(counts, bvhFinishClosest(result, hitRecord, hitSlot));');
+        // Twice: at the empty stack, and the final return after the bounded loop (never taken).
+        text = replaceAnchor(text, 'return bvhFinishClosest(result, hitRecord, hitSlot);', 'return bvhCountedFinishClosest(counts, bvhFinishClosest(result, hitRecord, hitSlot));', 2);
     } else {
         text = replaceAnchor(text, 'return true;', 'counts.instancesWithHit += 1u;\n                return bvhCountedFinishAny(counts, true);');
-        text = replaceAnchor(text, 'return false;', 'return bvhCountedFinishAny(counts, false);', 2);
+        // An empty top level, the empty stack, and the final return after the bounded loop (never taken).
+        text = replaceAnchor(text, 'return false;', 'return bvhCountedFinishAny(counts, false);', 3);
     }
     return text;
 }

@@ -36,7 +36,7 @@ function withoutCounters(counted: string): string {
         .replace(/\n +counts\.\w+ \+= 1u;/g, '')
         .replace(/\n +hitInThisInstance = false;/g, '')
         .replace(/\n +if \(!hitInThisInstance\) \{ counts\.instancesWithHit \+= 1u; hitInThisInstance = true; \}/g, '')
-        .replace(/bvhCountedFinishClosest\(counts, (bvhFinishClosest\(result, hitRecord, hitSlot\))\)/, '$1')
+        .replace(/bvhCountedFinishClosest\(counts, (bvhFinishClosest\(result, hitRecord, hitSlot\))\)/g, '$1')
         .replace('bvhCountedFinishClosest(counts, result)', 'result')
         .replace(/bvhCountedFinishAny\(counts, (true|false)\)/g, '$1');
 }
