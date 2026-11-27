@@ -69,6 +69,7 @@ fn bvhTraceAnyMasked(ray: BvhRay, mask: u32) -> bool         // unless rayMasks:
 
 - **Closest hit** returns the nearest hit in `[tMin, tMax]`. `hit.t < 0` is a miss.
 - **Any hit** returns at the first triangle hit in `[tMin, tMax]`. Use it for shadows and visibility.
+- Both ends are inclusive: a ray traced again with `tMax` set to a hit's own `t` finds that hit again, in either mode.
 - `hit.instance` is the instance's `instanceIndex`; `hit.triangle` the triangle's original index in its mesh;
   `hit.barycentrics` the weights of corners 1 and 2 (corner 0 is `1 - u - v`).
 - `hit.frontFace` is true when the ray hit the side the mesh was authored as front, through mirrored transforms too.

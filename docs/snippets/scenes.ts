@@ -56,6 +56,24 @@ export async function buildEvents(device: GPUDevice): Promise<SceneTrees> {
     return trees;
 }
 
+/** The app's pass that writes its own flags into a range of triangle records (in a real app, a compute pass). */
+declare function encodeMyTriangleFlags(encoder: GPUCommandEncoder, triangles: GPUBuffer, mesh: number, triangleOffset: number, triangleCount: number): void;
+
+export async function trianglesWritten(device: GPUDevice): Promise<SceneTrees> {
+    // #region triangles-written
+    const trees = await SceneTrees.create(device, {
+        // Once per update that wrote triangle records: put the app's flags back on them, in the same encoder.
+        onTrianglesWritten: ({ encoder, triangles, written }) => {
+            for (const range of written) {
+                if (range.mesh === null) continue; // a merged group: its records name their source instance
+                encodeMyTriangleFlags(encoder, triangles, range.mesh, range.triangleOffset, range.triangleCount);
+            }
+        },
+    });
+    // #endregion
+    return trees;
+}
+
 export async function timing(device: GPUDevice): Promise<void> {
     // #region timing
     // timestamps: each GPU build batch's pass, summed in counts.gpuBuildTimestampMs (needs timestamp-query).

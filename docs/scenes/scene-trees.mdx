@@ -95,6 +95,34 @@ const trees = await SceneTrees.create(device, {
 });
 ```
 
+## Your own triangle flags
+
+A mesh's triangle records carry the flags it was added with (`MeshInput.triangleFlags`: the filter bit that sends a
+triangle to `bvhTrianglePasses`). When the flags come from something that changes at run time, such as which
+materials are alpha-tested or see-through, write them yourself, and write them again whenever the scene rewrites the
+records: every placement (a first tree, the swap to tinybvh's, a drift rebuild, a tree of yours) and every CPU pose of
+a records mesh. `onTrianglesWritten` names those, once per update that wrote any, with the update's encoder: a pass
+you record there runs after all of the update's writes and before anything the frame traces. GPU refits keep each
+record's flags word, so they are not named.
+
+Each entry is a mesh (or a merged group, `mesh: null`), `reason` (`'placed'` or `'pose'`) and the range in
+`triangles`, in tree order. A record says which triangle it is (`originalIndex`; a merged record also its source
+instance), so a pass over the range finds each triangle's own data. Flags sit at word 7 of a 48-byte record, or in
+the top bits of word 3 of an indexed triangle (`event.triangleLeaves`).
+
+{/* snippet: triangles-written */}
+```ts
+const trees = await SceneTrees.create(device, {
+    // Once per update that wrote triangle records: put the app's flags back on them, in the same encoder.
+    onTrianglesWritten: ({ encoder, triangles, written }) => {
+        for (const range of written) {
+            if (range.mesh === null) continue; // a merged group: its records name their source instance
+            encodeMyTriangleFlags(encoder, triangles, range.mesh, range.triangleOffset, range.triangleCount);
+        }
+    },
+});
+```
+
 ## GPU time
 
 Two numbers, both from timestamp queries (the device needs `timestamp-query`):
@@ -222,6 +250,7 @@ const trees = await SceneTrees.create(device, {
 | `diagnostics` | `false` | Read the top level's refit stats back. |
 | `timestamps` | `false` | Time each GPU build batch with timestamp queries (`counts.gpuBuildTimestampMs`; see [GPU time](#gpu-time)). |
 | `onTree`, `onBuild`, `warn`, `label` | | Events (trees placed; [builds](#build-events)), where problems are reported, GPU object labels. |
+| `onTrianglesWritten` | | The meshes whose triangle records an update wrote, with its encoder ([your own triangle flags](#your-own-triangle-flags)). |
 
 ## Your own positions buffer
 
