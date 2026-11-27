@@ -303,6 +303,8 @@ export {
     type SceneMeshStatus,
     type SceneTreeCounts,
     type SceneTreeEvent,
+    type SceneTrianglesWrittenEvent,
+    type SceneWrittenTriangles,
     type SceneTreesMemory,
     type SceneTreesOptions,
     type SceneTreesTimeline,
